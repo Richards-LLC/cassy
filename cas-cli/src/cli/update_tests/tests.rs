@@ -1339,3 +1339,39 @@ fn store_schema_gate_names_a_failed_migration_cas_91a3() {
         None
     );
 }
+
+/// cas-49c0: a factory worker's `cas update` refreshes only its own worktree.
+#[test]
+fn worker_update_is_scoped_to_its_own_worktree_cas_49c0() {
+    use super::{UpdateMode, WorkerUpdatePlan, worker_update_plan};
+    let worktree = std::path::Path::new("/repo/.cas/worktrees/quick-bear-33");
+    assert_eq!(
+        worker_update_plan(Some("worker"), Some(worktree), UpdateMode::Sync),
+        WorkerUpdatePlan::SyncWorktree(worktree.to_path_buf()),
+        "a worker's --sync writes its own worktree, not the main checkout"
+    );
+    for mode in [UpdateMode::AllProjects, UpdateMode::Register, UpdateMode::User, UpdateMode::Full, UpdateMode::SchemaOnly] {
+        match worker_update_plan(Some("worker"), Some(worktree), mode) {
+            WorkerUpdatePlan::Refuse(message) => assert!(
+                message.contains("cas update --sync") && message.contains(&worktree.display().to_string()),
+                "{mode:?}: {message}"
+            ),
+            other => panic!("{mode:?} must be refused for a worker: {other:?}"),
+        }
+    }
+    // Read-only and post-swap runs stay available.
+    for mode in [UpdateMode::Check, UpdateMode::PostSwap] {
+        assert_eq!(worker_update_plan(Some("worker"), Some(worktree), mode), WorkerUpdatePlan::Unrestricted);
+    }
+    // A worker with no bound worktree cannot be scoped: refuse --sync too.
+    assert!(matches!(
+        worker_update_plan(Some("worker"), None, UpdateMode::Sync),
+        WorkerUpdatePlan::Refuse(_)
+    ));
+    // The supervisor and an operator shell are unaffected.
+    for role in [None, Some("supervisor"), Some("")] {
+        for mode in [UpdateMode::Sync, UpdateMode::AllProjects, UpdateMode::Full] {
+            assert_eq!(worker_update_plan(role, Some(worktree), mode), WorkerUpdatePlan::Unrestricted);
+        }
+    }
+}

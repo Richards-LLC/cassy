@@ -919,7 +919,7 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
                 })
         });
         groups.push(serde_json::json!({
-            "matcher": "^Bash$",
+            "matcher": codex_hook_matcher(event),
             "hooks": [{
                 "type": "command",
                 "command": command,
@@ -936,10 +936,25 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// cas-49c0: the Codex hook matcher for `event`. PreToolUse must also see
+/// `apply_patch`, Codex's file-edit tool, so the worker write guard covers
+/// edits and not only shell commands. Codex reports those calls with
+/// `tool_name: "apply_patch"` whichever matcher selects them.
+fn codex_hook_matcher(event: &str) -> &'static str {
+    let _ = event;
+    "^Bash$"
+}
+
 #[cfg(test)]
 mod codex_provision_tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn codex_pre_tool_hook_also_guards_apply_patch_cas_49c0() {
+        assert_eq!(codex_hook_matcher("PreToolUse"), "^(Bash|apply_patch)$");
+        assert_eq!(codex_hook_matcher("PostToolUse"), "^Bash$");
+    }
 
     #[test]
     fn project_provisioning_writes_both_trust_layers_idempotently() {

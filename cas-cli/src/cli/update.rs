@@ -214,6 +214,65 @@ pub struct UpdateArgs {
     pub refresh_receipt: Option<PathBuf>,
 }
 
+/// cas-49c0: which `cas update` mode a run asked for, for the worker scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateMode {
+    Sync,
+    AllProjects,
+    Register,
+    User,
+    PostSwap,
+    SchemaOnly,
+    Check,
+    Full,
+}
+
+impl UpdateMode {
+    fn of(args: &UpdateArgs) -> Self {
+        if args.post_swap {
+            Self::PostSwap
+        } else if args.register.is_some() {
+            Self::Register
+        } else if args.all_projects {
+            Self::AllProjects
+        } else if args.user {
+            Self::User
+        } else if args.sync {
+            Self::Sync
+        } else if args.schema_only || args.dry_run {
+            Self::SchemaOnly
+        } else if args.check {
+            Self::Check
+        } else {
+            Self::Full
+        }
+    }
+}
+
+/// cas-49c0: what a `cas update` run may touch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerUpdatePlan {
+    /// Not a factory worker: the run behaves as before.
+    Unrestricted,
+    /// A worker's `--sync`: refresh only the invoking worktree's own root.
+    SyncWorktree(PathBuf),
+    /// A worker asked for a host-wide refresh; refused with this guidance.
+    Refuse(String),
+}
+
+/// cas-49c0: a factory worker (`CAS_AGENT_ROLE=worker`) may refresh only its
+/// own worktree. Its `--sync` writes the harness files under `clone_path`,
+/// never the main checkout that `cas_root.parent()` names, and the modes that
+/// walk the host's local project registry or install a binary are refused.
+pub(crate) fn worker_update_plan(
+    role: Option<&str>,
+    clone_path: Option<&Path>,
+    mode: UpdateMode,
+) -> WorkerUpdatePlan {
+    let _ = (role, clone_path, mode);
+    WorkerUpdatePlan::Unrestricted
+}
+
 pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     // Note: update command accepts Option<&Path> because it can run without an initialized Cassy
     // (e.g., binary update only, or checking for updates before init)

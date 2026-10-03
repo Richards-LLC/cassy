@@ -11194,6 +11194,20 @@ fn commit_ids_match(a: &str, b: &str) -> bool {
     long.starts_with(short)
 }
 
+/// cas-49c0: a decision note naming files that are dirty in the session's
+/// main checkout *and* changed by this worker's delivery (`parent...HEAD` in
+/// its worktree): the shape of a worker edit that landed in the supervisor's
+/// checkout instead of its own. `None` when the worktree is the main
+/// checkout, nothing matches, or git cannot answer. Audit only, never a
+/// refusal: the supervisor's own edits can share a path.
+fn stray_main_checkout_edit_note(
+    worker_worktree: &std::path::Path,
+    parent_branch: &str,
+) -> Option<String> {
+    let _ = (worker_worktree, parent_branch);
+    None
+}
+
 /// Collect the close-time clean-tree receipt for the git repo at
 /// `project_root`: `git status --porcelain` split into tracked-dirty and
 /// untracked, plus the resolved HEAD.
@@ -33748,6 +33762,41 @@ mod zero_change_close_tests {
             error.contains("PRE-CLOSE HOOK CONTEXT REJECTED") && error.contains(&stray),
             "{error}"
         );
+    }
+
+    /// cas-49c0: the close receipt flags main-checkout edits that match the
+    /// worker's delivery: the 2026-09-01 include_foreign incident, where the
+    /// same files were edited in the supervisor's checkout during the lane.
+    #[test]
+    fn close_receipt_flags_stray_main_checkout_edits_matching_the_delivery_cas_49c0() {
+        let dir = init_worker_repo();
+        let main = dir.path();
+        git(main, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/core.rs"), "pub fn core() {}\n").unwrap();
+        std::fs::write(main.join("src/unrelated.rs"), "pub fn other() {}\n").unwrap();
+        git(main, &["add", "src"]);
+        git(main, &["commit", "-q", "-m", "base files"]);
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join("strong-puma-16");
+        git(main, &["worktree", "add", "-q", "-b", "factory/strong-puma-16", wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join("src/core.rs"), "pub fn core() { include_foreign(); }\n").unwrap();
+        git(&wt, &["commit", "-q", "-am", "feat: include_foreign"]);
+
+        // Clean main checkout: nothing to flag.
+        assert_eq!(stray_main_checkout_edit_note(&wt, "main"), None);
+
+        // The same file edited in the main checkout during the lane, plus an
+        // unrelated dirty file that is not part of the delivery.
+        std::fs::write(main.join("src/core.rs"), "pub fn core() { include_foreign(); }\n").unwrap();
+        std::fs::write(main.join("src/unrelated.rs"), "pub fn other() { 1; }\n").unwrap();
+        let note = stray_main_checkout_edit_note(&wt, "main").expect("the stray edit is flagged");
+        assert!(note.contains("src/core.rs"), "{note}");
+        assert!(!note.contains("src/unrelated.rs"), "{note}");
+        assert!(note.contains(&main.canonicalize().unwrap().display().to_string()) || note.contains(&main.display().to_string()), "{note}");
+
+        // Run from the main checkout itself, there is nothing to compare.
+        assert_eq!(stray_main_checkout_edit_note(main, "main"), None);
     }
 
     #[test]

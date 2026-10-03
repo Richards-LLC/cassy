@@ -2214,6 +2214,8 @@ fn lane_fast_rows_uses_committed_target_runner_and_preserves_root_wip_cas_6029()
         } else {
             let error = result.unwrap_err().to_string();
             assert!(error.contains("FAIL test-env: target row"), "{error}");
+            assert!(error.contains("target policy"), "{error}");
+            assert!(error.contains("authenticated worktree_merge"), "{error}");
             assert_eq!(manager.git.resolve_commit(&epic).unwrap(), target_before);
         }
         assert_eq!(

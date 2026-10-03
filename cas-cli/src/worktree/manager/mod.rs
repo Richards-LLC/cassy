@@ -625,7 +625,9 @@ impl WorktreeManager {
         self.require_lane_refs(worktree, &target_sha, &source_sha)?;
         if !output.status.success() {
             return Err(WorktreeError::Git(GitError::CommandFailed(format!(
-                "LANE FAST ROWS FAILED (merge refused; {policy_origin} policy {policy_sha}):\n{}{}",
+                "LANE FAST ROWS FAILED (merge refused; {policy_origin} policy {policy_sha}):\n{}{}\n\
+                 The runner copy is temporary. Correct the named row, then retry the authenticated \
+                 worktree_merge action; a manual preflight does not merge or waive admission.",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             ))));

@@ -1071,16 +1071,62 @@ fn parent_epic_prefers_the_open_epic_over_a_closed_one_cas_1980() {
             .unwrap();
     }
     assert_eq!(
-        store.get_parent_epic(&child.id).unwrap().map(|epic| epic.id),
+        store
+            .get_parent_epic(&child.id)
+            .unwrap()
+            .map(|epic| epic.id),
         Some(live.id.clone())
     );
 
     // With only the closed parent left, it is still reported (callers refuse it).
-    store
-        .remove_dependency(&child.id, &live.id)
-        .unwrap();
+    store.remove_dependency(&child.id, &live.id).unwrap();
     assert_eq!(
-        store.get_parent_epic(&child.id).unwrap().map(|epic| epic.id),
+        store
+            .get_parent_epic(&child.id)
+            .unwrap()
+            .map(|epic| epic.id),
         Some(closed.id.clone())
     );
+}
+
+#[test]
+fn parent_epic_orders_nonterminal_parents_and_retains_terminal_only_cas_1980() {
+    for terminal in [TaskStatus::Closed, TaskStatus::Cancelled] {
+        let (_temp, store) = create_test_store();
+        let child = Task::new("cas-child".into(), "Child".into());
+        store.add(&child).unwrap();
+        for (id, status, age) in [
+            ("cas-terminal", terminal, 0),
+            ("cas-new", TaskStatus::Blocked, 1),
+            ("cas-old", TaskStatus::InProgress, 2),
+        ] {
+            let mut epic = Task::new(id.into(), "Epic".into());
+            epic.task_type = TaskType::Epic;
+            epic.status = status;
+            store.add(&epic).unwrap();
+            let mut dependency =
+                Dependency::new(child.id.clone(), id.into(), DependencyType::ParentChild);
+            dependency.created_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+                - chrono::Duration::seconds(age);
+            store.add_dependency(&dependency).unwrap();
+        }
+        assert_eq!(
+            store.get_parent_epic(&child.id).unwrap().unwrap().id,
+            "cas-new"
+        );
+        store.remove_dependency(&child.id, "cas-new").unwrap();
+        assert_eq!(
+            store.get_parent_epic(&child.id).unwrap().unwrap().id,
+            "cas-old"
+        );
+        store.remove_dependency(&child.id, "cas-old").unwrap();
+        assert_eq!(
+            store.get_parent_epic(&child.id).unwrap().unwrap().status,
+            terminal
+        );
+        store.remove_dependency(&child.id, "cas-terminal").unwrap();
+        assert!(store.get_parent_epic(&child.id).unwrap().is_none());
+    }
 }

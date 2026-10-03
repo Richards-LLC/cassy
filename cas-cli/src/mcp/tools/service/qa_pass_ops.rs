@@ -408,7 +408,15 @@ impl CasService {
         let mut failed = Vec::new();
         // cas-1980: follow-ups join the delivery's epic, so their closes
         // target its branch instead of main.
-        let epic = crate::qa_pass::follow_up_epic(store.as_ref(), &delivery.id);
+        let epic = match crate::qa_pass::follow_up_epic(store.as_ref(), &delivery.id) {
+            Ok(epic) => epic,
+            Err(error) => {
+                return format!(
+                    "\n{} pre-existing issue(s) were not filed as follow-ups (parent epic lookup failed: {error}); they are in {ledger_path}.",
+                    issues.len()
+                );
+            }
+        };
         for issue in issues {
             let id = match store.generate_id() {
                 Ok(id) => id,

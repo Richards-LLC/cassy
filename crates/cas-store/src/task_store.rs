@@ -1643,6 +1643,7 @@ impl TaskStore for SqliteTaskStore {
              FROM tasks t
              JOIN dependencies d ON d.to_id = t.id
              WHERE d.from_id = ? AND d.dep_type = 'parent-child' AND t.task_type = 'epic'
+             ORDER BY (t.status IN ('closed', 'cancelled')), d.created_at DESC, t.id ASC
              LIMIT 1",
         )?;
 

@@ -3966,7 +3966,7 @@ async fn operations_request_merge_reuses_message_send() {
     let (status, body) = fixture
         .operate(serde_json::json!({
             "op_id": "6f1c2d3e-0000-4000-8000-0000000000ff",
-            "op": {"kind": "spawn_workers", "count": 1},
+            "op": {"kind": "assign_task", "task_id": OPS_TASK, "assignee": null},
             "expected": {},
         }))
         .await;
@@ -4098,6 +4098,17 @@ impl OpsFixture {
         crate::store::open_task_store(&self.cas_dir).unwrap().add(&epic).unwrap();
     }
 
+    /// Pin the project's workers to a harness with no account probe, so
+    /// the spawn body's login preflight does not depend on which CLIs this
+    /// machine has logged in (`probe_account_auth` runs the real CLI).
+    fn pin_worker_harness(&self) {
+        let path = self.cas_dir.join("config.toml");
+        let mut config = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(!config.contains("[llm.worker]"), "fixture config already pins a worker harness");
+        config.push_str("\n[llm.worker]\nharness = \"grok\"\n");
+        std::fs::write(&path, config).unwrap();
+    }
+
     fn spawn_queue(&self) -> Vec<cas_store::SpawnRequest> {
         crate::store::open_spawn_queue_store(&self.cas_dir)
             .unwrap()
@@ -4114,6 +4125,7 @@ async fn operations_spawn_uses_factory_spawn_workers_queue() {
     let _home = crate::test_env_guard::TestEnvGuard::temp_home();
     let fixture = ops_fixture(operate_scopes());
     fixture.add_open_epic();
+    fixture.pin_worker_harness();
     let mut events = fixture.events.subscribe();
 
     let (status, body) = fixture

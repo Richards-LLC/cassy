@@ -1,9 +1,9 @@
 use super::data::{AgentSummary, DirectorData, TaskSummary};
 use super::events::{
     DeliveryHold, MergedCloseBlockedTask, SupervisorActionableState, SupervisorStallTracker,
-    blocker_note_after_park, supervisor_actionable_state,
+    blocker_note_after_park, hold_decision_after_park, supervisor_actionable_state,
     supervisor_actionable_state_with_classifiers,
-    supervisor_actionable_state_with_merge_classifier,
+    supervisor_actionable_state_with_merge_classifier, task_delivery_ref,
 };
 use cas_types::{AgentStatus, Priority, TaskStatus, TaskType};
 use chrono::{Duration, TimeZone, Utc};
@@ -27,6 +27,13 @@ fn task(
         updated_at: None,
         epic_verification_owner: None,
     }
+}
+
+/// The legacy `factory/<worker>` delivery with a `<branch>-tip` commit.
+fn worker_branch_tip(_: &TaskSummary, worker: &str) -> (String, Option<String>) {
+    let branch = format!("factory/{worker}");
+    let tip = format!("{branch}-tip");
+    (branch, Some(tip))
 }
 
 fn epic(id: &str) -> TaskSummary {
@@ -644,7 +651,7 @@ fn blocker_note_and_open_qa_pass_hold_a_delivery_but_not_its_siblings_gh896() {
         &HashSet::new(),
         now,
         600,
-        |branch| Some(format!("{branch}-tip")),
+        worker_branch_tip,
         |_, _, _, _| None,
         |task, worker| match (task.id.as_str(), worker) {
             ("cas-held", "gold-fox") => Some(DeliveryHold::BlockerNote),
@@ -672,7 +679,7 @@ fn blocker_note_and_open_qa_pass_hold_a_delivery_but_not_its_siblings_gh896() {
         &HashSet::new(),
         now,
         600,
-        |branch| Some(format!("{branch}-tip")),
+        worker_branch_tip,
         |_, _, _, _| None,
         |_, _| Some(DeliveryHold::QaPassOpen),
     );
@@ -693,7 +700,7 @@ fn held_delivery_is_not_reclassified_as_merged_close_blocked_gh896() {
         &HashSet::new(),
         now,
         600,
-        |_| Some("tip".to_string()),
+        |_, worker| (format!("factory/{worker}"), Some("tip".to_string())),
         |_, _, _, _| panic!("a held delivery must not be classified"),
         |_, _| Some(DeliveryHold::BlockerNote),
     );
@@ -732,3 +739,190 @@ fn legacy_merge_classifier_entry_point_still_names_unheld_deliveries() {
     assert!(matches!(state, Some(SupervisorActionableState::MergeBranches { .. })));
 }
 
+
+/// cas-58d3: the notes cas-247a carried when the relay kept nagging. The
+/// supervisor's decision after the park holds the merge until after the cut.
+const CAS_247A_PARK: &str = "[2026-10-02 15:02] Close rejected: MERGE REQUIRED. Task parked as awaiting_merge; worker lease released until supervisor merge completes.";
+const CAS_247A_HOLD: &str = "[2026-10-02 15:02] ✅ DECISION Supervisor decision 2026-10-02 at about 15:03Z: the merge of 942a65e1 is held until after the release cut. The delivery touches scripts/release-gate.sh.";
+
+#[test]
+fn supervisor_hold_decision_counts_only_after_the_latest_park_cas_58d3() {
+    let progress = "[2026-10-02 15:01] 📝 PROGRESS PASS clean pushed, ready to park";
+    let other_decision = "[2026-10-02 15:04] ✅ DECISION merge order: cas-a before cas-b";
+    let lift = "[2026-10-02 19:00] ✅ DECISION hold lifted: the cut is published, merge now";
+    let multi_line = "[2026-10-02 15:02] ✅ DECISION Supervisor decision:\nthe merge stays on hold until the cut.";
+
+    assert!(!hold_decision_after_park(""));
+    assert!(!hold_decision_after_park(&format!("{progress}\n{CAS_247A_PARK}")));
+    assert!(hold_decision_after_park(&format!(
+        "{progress}\n\n{CAS_247A_PARK}\n\n{CAS_247A_HOLD}"
+    )));
+    // A later unrelated decision does not lift the hold.
+    assert!(hold_decision_after_park(&format!(
+        "{CAS_247A_PARK}\n{CAS_247A_HOLD}\n{other_decision}"
+    )));
+    // A decision with no hold language is not a hold.
+    assert!(!hold_decision_after_park(&format!("{CAS_247A_PARK}\n{other_decision}")));
+    // An explicit lift clears it, and so does a re-park.
+    assert!(!hold_decision_after_park(&format!("{CAS_247A_PARK}\n{CAS_247A_HOLD}\n{lift}")));
+    assert!(!hold_decision_after_park(&format!(
+        "{CAS_247A_PARK}\n{CAS_247A_HOLD}\n{CAS_247A_PARK}"
+    )));
+    // The hold wording may sit on a continuation line of the entry.
+    assert!(hold_decision_after_park(&format!("{CAS_247A_PARK}\n{multi_line}")));
+    // Hold wording in a progress note is not a supervisor decision.
+    assert!(!hold_decision_after_park(&format!(
+        "{CAS_247A_PARK}\n[2026-10-02 15:05] 📝 PROGRESS holding for review"
+    )));
+}
+
+#[test]
+fn supervisor_decision_hold_silences_merge_now_cas_58d3() {
+    let now = Utc.with_ymd_and_hms(2026, 10, 2, 15, 50, 0).unwrap();
+    let mut snapshot = held_delivery_snapshot();
+    snapshot.in_progress_tasks.push(task(
+        "cas-ready",
+        TaskStatus::AwaitingMerge,
+        Some("red-kite"),
+        Some("cas-epic"),
+    ));
+    let notes: HashMap<&str, String> = HashMap::from([
+        ("cas-held", format!("{CAS_247A_PARK}\n{CAS_247A_HOLD}")),
+        ("cas-ready", CAS_247A_PARK.to_string()),
+    ]);
+    // The production classifier's decision branch, over the task notes.
+    let classify = |task: &TaskSummary, _: &str| {
+        notes
+            .get(task.id.as_str())
+            .filter(|notes| hold_decision_after_park(notes))
+            .map(|_| DeliveryHold::SupervisorDecision)
+    };
+    let state = supervisor_actionable_state_with_classifiers(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        worker_branch_tip,
+        |_, _, _, _| None,
+        classify,
+    );
+    assert_eq!(
+        state,
+        Some(SupervisorActionableState::MergeBranches {
+            branches: vec![(
+                "cas-ready".into(),
+                "factory/red-kite".into(),
+                "factory/red-kite-tip".into(),
+            )],
+        }),
+        "the held delivery is left out; its sibling is still named"
+    );
+
+    snapshot.in_progress_tasks.retain(|task| task.id != "cas-ready");
+    let all_held = supervisor_actionable_state_with_classifiers(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        worker_branch_tip,
+        |_, _, _, _| None,
+        classify,
+    );
+    assert_eq!(all_held, None);
+    assert!(!wake_for(all_held, now));
+}
+
+#[test]
+fn merge_alert_names_the_per_task_branch_and_anchor_not_the_worker_base_cas_58d3() {
+    // cas-247a parked on factory/loyal-owl-66-cas-247a @ 942a65e1 while
+    // factory/loyal-owl-66 had moved on to cas-9069's commit 4a74016c.
+    let tips: HashMap<&str, &str> = HashMap::from([
+        ("factory/loyal-owl-66", "4a74016c"),
+        ("factory/loyal-owl-66-cas-247a", "942a65e1"),
+    ]);
+    let resolve = |branch: &str| tips.get(branch).map(|tip| tip.to_string());
+    let contains = |anchor: &str, tip: &str| anchor == tip;
+
+    assert_eq!(
+        task_delivery_ref("cas-247a", "loyal-owl-66", None, Some("942a65e1"), resolve, contains),
+        ("factory/loyal-owl-66-cas-247a".into(), Some("942a65e1".into())),
+    );
+    // A stale recorded parked branch does not win over the branch that
+    // actually contains the delivery anchor.
+    assert_eq!(
+        task_delivery_ref(
+            "cas-247a",
+            "loyal-owl-66",
+            Some("factory/loyal-owl-66"),
+            Some("942a65e1"),
+            resolve,
+            contains,
+        ),
+        ("factory/loyal-owl-66-cas-247a".into(), Some("942a65e1".into())),
+    );
+    // A recorded parked branch is used when there is no per-task branch.
+    let parked_tips: HashMap<&str, &str> = HashMap::from([
+        ("factory/loyal-owl-66", "4a74016c"),
+        ("factory/handoff-branch", "942a65e1"),
+    ]);
+    assert_eq!(
+        task_delivery_ref(
+            "cas-247a",
+            "loyal-owl-66",
+            Some("factory/handoff-branch"),
+            None,
+            |branch: &str| parked_tips.get(branch).map(|tip| tip.to_string()),
+            contains,
+        ),
+        ("factory/handoff-branch".into(), Some("942a65e1".into())),
+    );
+    // Without a per-task branch, record or anchor it is the worker branch.
+    assert_eq!(
+        task_delivery_ref("cas-9069", "loyal-owl-66", None, None, resolve, contains),
+        ("factory/loyal-owl-66".into(), Some("4a74016c".into())),
+    );
+    // Nothing resolves: the worker branch is named with the anchor, if any.
+    assert_eq!(
+        task_delivery_ref("cas-x", "gone", None, Some("abc"), |_: &str| None, contains),
+        ("factory/gone".into(), Some("abc".into())),
+    );
+
+    // End to end: the merge-now alert names the task's delivery, not the
+    // worker's base branch.
+    let now = Utc.with_ymd_and_hms(2026, 10, 2, 15, 50, 0).unwrap();
+    let mut snapshot = held_delivery_snapshot();
+    snapshot.in_progress_tasks.clear();
+    snapshot.in_progress_tasks.push(task(
+        "cas-247a",
+        TaskStatus::AwaitingMerge,
+        Some("loyal-owl-66"),
+        Some("cas-epic"),
+    ));
+    let state = supervisor_actionable_state_with_classifiers(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |task, worker| {
+            task_delivery_ref(&task.id, worker, None, Some("942a65e1"), resolve, contains)
+        },
+        |_, _, _, _| None,
+        |_, _| None,
+    );
+    assert_eq!(
+        state,
+        Some(SupervisorActionableState::MergeBranches {
+            branches: vec![(
+                "cas-247a".into(),
+                "factory/loyal-owl-66-cas-247a".into(),
+                "942a65e1".into(),
+            )],
+        }),
+    );
+}

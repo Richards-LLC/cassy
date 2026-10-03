@@ -93,8 +93,8 @@ fn write_private(destination: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let result = (|| {
         let mut file = options.open(&temporary)?;
         file.write_all(bytes)?;
-        // Rename replaces the directory entry, never writes through an old
-        // worktree symlink into the supervisor's source configuration.
+        // Rename replaces the private directory entry, never writes through
+        // an old symlink into the supervisor's source configuration.
         std::fs::rename(&temporary, destination)
     })();
     if result.is_err() {
@@ -105,43 +105,36 @@ fn write_private(destination: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Provisioning seam shared by worktree creation and worker launch.
 /// With no configured denials the existing project-link policy remains.
-pub fn provision_project_mcp(repo: &Path, worktree: &Path) -> std::io::Result<bool> {
+pub fn provision_project_mcp(repo: &Path, worker_name: &str) -> std::io::Result<bool> {
     let cas_root = repo.join(".cas");
     let policy = load_worker_policy(Some(&cas_root))?;
     if policy.is_empty() {
         return Ok(false);
     }
-    let bytes = filtered_project_mcp(repo, &cas_root, &policy)?;
-    write_private(&worktree.join(".mcp.json"), &bytes)?;
+    prepare_worker_mcp(&cas_root, worker_name, &policy)?;
     Ok(true)
 }
 
-/// Prepare an explicit worker config. Shared-cwd mode writes a separate file
-/// in the Cassy store rather than replacing the supervisor's `.mcp.json`.
+/// Prepare an explicit private config for every worker. Existing worktree
+/// `.mcp.json` files may be tracked, so no worker mode writes into the checkout.
 pub(crate) fn prepare_worker_mcp(
     cas_root: &Path,
-    cwd: &Path,
     name: &str,
     policy: &FactoryWorkerPolicy,
 ) -> std::io::Result<PathBuf> {
     let repo = cas_root
         .parent()
         .ok_or_else(|| std::io::Error::other("Cassy store has no project root"))?;
-    let shared_cwd = cwd.canonicalize()? == repo.canonicalize()?;
-    let destination = if shared_cwd {
-        if !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            || name.is_empty()
-        {
-            return Err(std::io::Error::other(
-                "invalid worker name for MCP configuration",
-            ));
-        }
-        cas_root.join("worker-mcp").join(format!("{name}.json"))
-    } else {
-        cwd.join(".mcp.json")
-    };
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || name.is_empty()
+    {
+        return Err(std::io::Error::other(
+            "invalid worker name for MCP configuration",
+        ));
+    }
+    let destination = cas_root.join("worker-mcp").join(format!("{name}.json"));
     write_private(&destination, &filtered_project_mcp(repo, cas_root, policy)?)?;
     Ok(destination)
 }

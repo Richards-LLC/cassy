@@ -105,11 +105,14 @@ exact. These denials override project proxy credential grants and read-only
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
 
-Configured workers get a private, materialized project `.mcp.json`. Claude
+Configured workers get a private, materialized MCP configuration under
+`<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`
+files stay unchanged, so provisioning keeps the tree clean and cannot commit
+supervisor-only removals into the project. Claude
 uses `--strict-mcp-config` so local and user scopes cannot add servers; allowed
 direct servers must be declared in the project file. Cassy remains available
-even if it was registered only in local scope. Shared-cwd workers use a separate
-file under `.cas/worker-mcp/`. Codex disables the named native MCP servers, and
+even if it was registered only in local scope. Every worker uses the same private
+store path, including shared-cwd workers. Codex disables the named native MCP servers, and
 its Cassy proxy filters those upstreams before startup and reload.
 Codex overrides require server names containing letters, digits, hyphens or
 underscores; ambiguous names refuse launch rather than bypass isolation.

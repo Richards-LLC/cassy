@@ -147,8 +147,8 @@ pub(super) fn finish_worker_config(
             supervisor_only_env = ?policy.supervisor_only_env,
             "factory worker resource denials; tasks needing these resources route to supervisor");
         let worker = config.env.iter().rev().find_map(|(key, value)| (key == "CAS_AGENT_NAME").then_some(value.clone())).unwrap_or_else(|| "worker".into());
-        if let (Some(root), Some(cwd)) = (cas_root, config.cwd.as_deref()) {
-            match crate::worker_resources::prepare_worker_mcp(root, cwd, &worker, &policy) {
+        if let Some(root) = cas_root {
+            match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy) {
                 Ok(path) => {
                     let cli = if config.command == "nice" { config.args.get(2).map(String::as_str).unwrap_or("") } else { &config.command };
                     if cli == "claude" {
@@ -167,7 +167,7 @@ pub(super) fn finish_worker_config(
                         }
                     }
                 }
-                Err(_) => config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Worker MCP isolation could not be provisioned; fix the project .mcp.json and worker directory before spawning".into())),
+                Err(_) => config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Worker MCP isolation could not be provisioned; fix the project .mcp.json and private worker-mcp directory before spawning".into())),
             }
         }
     }

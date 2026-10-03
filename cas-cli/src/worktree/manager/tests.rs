@@ -183,7 +183,7 @@ fn worker_tracked_mcp_stays_git_clean_after_provisioning_gh_1047() {
     std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\n").unwrap();
     let worker = cas_root.join("worktrees/worker-1");
     git(&["worktree", "add", "-b", "worker-fixture", worker.to_str().unwrap()]);
-    provision_worker_project_config(&repo, &worker);
+    provision_worker_project_config(&repo, &worker, "worker-1");
     let status = Command::new("git").args(["status", "--porcelain"])
         .current_dir(&worker).output().unwrap();
     assert!(status.status.success());
@@ -214,8 +214,9 @@ fn worker_project_mcp_is_private_and_filtered_without_mutating_supervisor_gh_104
     let worker = temp.path().join("worker");
     std::fs::create_dir_all(&worker).unwrap();
     std::os::unix::fs::symlink(&source, worker.join(".mcp.json")).unwrap();
-    provision_worker_project_config(&repo, &worker);
-    let path = worker.join(".mcp.json");
+    provision_worker_project_config(&repo, &worker, "worker-1");
+    assert!(std::fs::symlink_metadata(worker.join(".mcp.json")).unwrap().file_type().is_symlink(), "existing project links must remain untouched");
+    let path = repo.join(".cas/worker-mcp/worker-1.json");
     let metadata = std::fs::symlink_metadata(&path).unwrap();
     assert!(!metadata.file_type().is_symlink());
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);

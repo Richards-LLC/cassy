@@ -932,6 +932,32 @@ pub fn project_factory_artifacts_root(
     artifacts_base.join(format!("{label}-{hash:x}"))
 }
 
+/// Resolve the artifact base and its writable project namespace together.
+/// The workspace hook and close gate use this same configuration boundary.
+pub(crate) struct FactoryArtifactPaths {
+    pub base: std::path::PathBuf,
+    pub project_root: std::path::PathBuf,
+}
+
+impl FactoryArtifactPaths {
+    fn from_base(cas_root: &std::path::Path, base: std::path::PathBuf) -> Self {
+        let project_root = project_factory_artifacts_root(cas_root, &base);
+        Self { base, project_root }
+    }
+
+    /// Writable scoped directory first, historical read-only directory second.
+    pub fn task_dirs(&self, task_id: &str) -> [std::path::PathBuf; 2] {
+        [self.project_root.join(task_id), self.base.join(task_id)]
+    }
+}
+
+pub(crate) fn resolved_factory_artifact_paths(
+    cas_root: &std::path::Path,
+    configured: Option<&str>,
+) -> FactoryArtifactPaths {
+    FactoryArtifactPaths::from_base(cas_root, resolved_factory_artifacts_root(configured))
+}
+
 /// Scoped directory first, historical flat directory second. Legacy evidence
 /// remains readable; new writers and cleanup use only the scoped directory.
 pub fn factory_task_artifact_dirs(
@@ -939,10 +965,7 @@ pub fn factory_task_artifact_dirs(
     artifacts_base: &std::path::Path,
     task_id: &str,
 ) -> [std::path::PathBuf; 2] {
-    [
-        project_factory_artifacts_root(cas_root, artifacts_base).join(task_id),
-        artifacts_base.join(task_id),
-    ]
+    FactoryArtifactPaths::from_base(cas_root, artifacts_base.to_path_buf()).task_dirs(task_id)
 }
 
 /// A task directory must resolve to exactly its expected location beneath the

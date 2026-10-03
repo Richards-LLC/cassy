@@ -129,9 +129,10 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     // Explicit historical citations remain valid. Otherwise prefer new QA
     // evidence; a namespace created only for issue attachments must not hide
     // an existing legacy ledger or terminal receipt.
-    let legacy_cited = cited
-        .as_deref()
-        .is_some_and(|path| Path::new(path).starts_with(&legacy));
+    let legacy_cited = cited.as_deref().is_some_and(|path| {
+        let path = crate::qa_evidence::expand_home(path);
+        path.starts_with(&legacy) && std::fs::symlink_metadata(path).is_ok()
+    });
     let scoped_evidence = scoped.join("LEDGER.md").exists()
         || scoped.join("qa").exists()
         || scoped.join("terminal-qa").exists();
@@ -142,6 +143,41 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     } else {
         scoped
     }
+}
+
+/// A missing flat citation can outlive the namespace migration in a running
+/// service. Read its corresponding scoped file without rewriting task history.
+/// Existing historical files, unsafe relative paths and unrelated citations
+/// keep their original validation; all mapped bundles still undergo the full
+/// containment, freshness, task/head binding and trace checks.
+fn task_qa_notes<'a>(
+    paths: &crate::config::FactoryArtifactPaths,
+    task: &'a Task,
+    read_dir: &Path,
+) -> std::borrow::Cow<'a, str> {
+    let original = std::borrow::Cow::Borrowed(task.notes.as_str());
+    let [scoped, legacy] = paths.task_dirs(&task.id);
+    if read_dir != scoped {
+        return original;
+    }
+    let Some(cited) = crate::qa_evidence::cited_bundle_path(&task.notes) else {
+        return original;
+    };
+    let cited = crate::qa_evidence::expand_home(&cited);
+    let Ok(relative) = cited.strip_prefix(&legacy) else {
+        return original;
+    };
+    if relative.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || !std::fs::symlink_metadata(&cited)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return original;
+    }
+    let replacement = scoped.join(relative);
+    if !replacement.is_file() {
+        return original;
+    }
+    std::borrow::Cow::Owned(format!("{}\nqa-bundle: {}", task.notes, replacement.display()))
 }
 
 /// The target a delivery is diffed against: `origin/<target>` when that ref
@@ -213,17 +249,18 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let artifacts_dir = task_qa_artifacts_dir(cas_root, &base, task);
-    if artifacts_dir.exists() && crate::config::canonical_factory_task_artifact_dir(&base, &artifacts_dir).is_none() {
+    let paths = crate::config::resolved_factory_artifact_paths(cas_root, config.factory().artifacts_root.as_deref());
+    let artifacts_dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
+    if artifacts_dir.exists() && crate::config::canonical_factory_task_artifact_dir(&paths.base, &artifacts_dir).is_none() {
         return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
     }
+    let notes = task_qa_notes(&paths, task, &artifacts_dir);
     let ctx = EvidenceContext {
         task_id: &task.id,
         task_artifacts_dir: &artifacts_dir,
         repo,
         delivered_head: &head,
-        notes: &task.notes,
+        notes: &notes,
         deployed_origins: &qa.deployed_origins,
     };
     run_close_gate_with_write_dir(
@@ -231,7 +268,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         evidence_tier(&reasons, terminal_render),
         &reasons,
         &markers,
-        &crate::config::project_factory_artifacts_root(cas_root, &base).join(&task.id),
+        &paths.task_dirs(&task.id)[0],
     )
     .map(|pass| pass.notes)
 }
@@ -296,6 +333,8 @@ mod tests {
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
         std::fs::write(scoped.join("LEDGER.md"), "new evidence").unwrap();
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        std::fs::create_dir_all(legacy.join("qa")).unwrap();
+        std::fs::write(legacy.join("qa/bundle.json"), "historical bundle").unwrap();
         task.notes = format!("qa-bundle: {}", legacy.join("qa/bundle.json").display());
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
         task.notes = format!("qa-bundle: {}", scoped.join("qa/bundle.json").display());

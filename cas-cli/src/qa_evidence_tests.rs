@@ -213,12 +213,7 @@ fn valid_bundle_passes() {
     assert_eq!(receipt.passed_expects, 1);
 }
 
-/// GH #1061: a long-running close service can retain a flat-path citation
-/// after PreToolUse has switched new writes to the project namespace.
-#[test]
-fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
-    let mut env = crate::test_support::TestEnvGuard::new();
-    env.set("CAS_AGENT_ROLE", "worker");
+fn scoped_factory_fixture() -> (Fixture, PathBuf, PathBuf) {
     let mut fx = Fixture::new();
     let cas_root = fx.repo.join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
@@ -230,7 +225,10 @@ fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
     let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, TASK);
     std::fs::remove_dir(&fx.task_dir).unwrap();
     fx.task_dir = scoped.clone();
-    let bundle = scoped.join("qa/bundle.json");
+    (fx, cas_root, legacy)
+}
+
+fn hook_bundle_write(fx: &Fixture, cas_root: &Path, bundle: &Path) -> serde_json::Value {
     let input = cas_core::hooks::types::HookInput {
         session_id: "qa-path-contract".into(),
         cwd: fx.repo.display().to_string(),
@@ -240,18 +238,104 @@ fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
         ..Default::default()
     };
     let out = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
-    let decision = serde_json::to_value(out.hook_specific_output.unwrap()).unwrap();
+    serde_json::to_value(out.hook_specific_output.unwrap()).unwrap()
+}
+
+fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String>, String> {
+    let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
+    task.notes = notes.into();
+    crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()])
+    )
+}
+
+/// GH #1061: a long-running close service can retain a flat-path citation
+/// after PreToolUse has switched new writes to the project namespace.
+#[test]
+fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let (fx, cas_root, legacy) = scoped_factory_fixture();
+    let bundle = fx.task_dir.join("qa/bundle.json");
+    let decision = hook_bundle_write(&fx, &cas_root, &bundle);
     assert_eq!(decision["permissionDecision"], "allow", "{decision}");
     fx.write_bundle(|_| {});
     assert!(!legacy.exists(), "no flat directory exists in the reported incident");
-    let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
-    for citation in [bundle.clone(), legacy.join("qa/bundle.json")] {
-        task.notes = format!("qa-bundle: {}", citation.display());
-        let notes = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
-            &cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()])
-        ).unwrap_or_else(|error| panic!("citation {}: {error}", citation.display()));
-        assert!(notes.iter().any(|note| note.contains(bundle.to_str().unwrap())
-            && note.contains("1 passing Expect")), "{notes:?}");
+    for legacy_directory_exists in [false, true] {
+        if legacy_directory_exists {
+            std::fs::create_dir_all(&legacy).unwrap();
+            std::fs::write(legacy.join("LEDGER.md"), "historical ledger").unwrap();
+        }
+        for citation in [bundle.clone(), legacy.join("qa/bundle.json")] {
+            let notes = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display()))
+                .unwrap_or_else(|error| panic!("citation {}: {error}", citation.display()));
+            assert!(notes.iter().any(|note| note.contains(bundle.to_str().unwrap())
+                && note.contains("1 passing Expect")), "{notes:?}");
+        }
+    }
+}
+
+#[test]
+fn missing_bundle_refusal_requests_hook_writable_path_gh_1061() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let (fx, cas_root, legacy) = scoped_factory_fixture();
+    let bundle = fx.task_dir.join("qa/bundle.json");
+    for notes in [String::new(), format!("qa-bundle: {}", legacy.join("qa/bundle.json").display())] {
+        let error = scoped_close(&fx, &cas_root, &notes).unwrap_err();
+        let (_, next) = error.split_once("Next: ").unwrap();
+        assert!(next.contains(bundle.to_str().unwrap()), "{error}");
+        assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
+        assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
+    }
+    let denied = hook_bundle_write(&fx, &cas_root, &legacy.join("qa/bundle.json"));
+    assert_eq!(denied["permissionDecision"], "deny", "{denied}");
+    assert!(denied["permissionDecisionReason"].as_str().unwrap()
+        .contains(fx.task_dir.parent().unwrap().to_str().unwrap()), "{denied}");
+}
+
+#[test]
+fn citation_migration_preserves_validation_boundaries_gh_1061() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let (fx, cas_root, legacy) = scoped_factory_fixture();
+    let bundle = fx.write_bundle(|_| {});
+    let historical = legacy.join("qa/bundle.json");
+    std::fs::create_dir_all(historical.parent().unwrap()).unwrap();
+    std::fs::write(&historical, "invalid historical manifest").unwrap();
+    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+    assert!(error.contains("malformed") && error.contains(historical.to_str().unwrap()), "{error}");
+    assert!(error.split_once("Next: ").unwrap().1.contains("rewrite bundle.json"), "{error}");
+    let next = error.split_once("Next: ").unwrap().1;
+    assert!(next.contains(bundle.to_str().unwrap()), "{error}");
+    assert!(!next.contains(historical.to_str().unwrap()), "{error}");
+    assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
+
+    // A valid bundle elsewhere cannot be substituted for a cited task file.
+    let unrelated = legacy.parent().unwrap().join("other-project/qa/bundle.json");
+    std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    std::fs::copy(&bundle, &unrelated).unwrap();
+    for citation in [unrelated.clone(), legacy.join("../other-project/qa/bundle.json")] {
+        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display())).unwrap_err();
+        assert!(error.contains("outside the task"), "{error}");
+    }
+    // Remapping still enforces the delivered commit, rather than trusting the
+    // presence of a scoped manifest alone.
+    std::fs::remove_file(&historical).unwrap();
+    fx.write_bundle(|manifest| manifest["head_sha"] = serde_json::json!("0".repeat(40)));
+    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+    assert!(error.contains("stale"), "{error}");
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(&bundle).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &bundle).unwrap();
+        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+        assert!(error.contains("outside the task"), "{error}");
+        // A dangling historical symlink is an existing unsafe citation,
+        // never permission to switch to a different bundle.
+        std::os::unix::fs::symlink(legacy.join("absent.json"), &historical).unwrap();
+        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+        assert!(error.contains("does not exist") && error.contains(historical.to_str().unwrap()), "{error}");
     }
 }
 

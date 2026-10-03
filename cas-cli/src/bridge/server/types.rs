@@ -186,6 +186,9 @@ pub(crate) struct StatusJson {
     pub(crate) tasks_ready: Vec<TaskSummaryJson>,
     pub(crate) tasks_in_progress: Vec<TaskSummaryJson>,
     pub(crate) epics: Vec<TaskSummaryJson>,
+    /// The epic this session is pinned to, `null` when unpinned (cas-9b08):
+    /// what a Commander `focus_epic` operation names as its precondition.
+    pub(crate) focused_epic: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,6 +229,11 @@ pub(crate) struct AgentSummaryJson {
     pub(crate) latest_activity: Option<AgentLatestActivityJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_heartbeat_rfc3339: Option<String>,
+    /// A live worker's spawn generation (cas-9b08): the id of its current
+    /// registration, which a restart replaces. Worker operations name it as
+    /// their precondition, so a stop aimed at an old generation is stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) generation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

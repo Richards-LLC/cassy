@@ -230,7 +230,12 @@ export class ConversationList {
   /** Group headings and End session controls, keyed beside the rows (cas-55a4). */
   private extras = new Map<string, HTMLElement>();
   /** Rows whose End session is asking for confirmation, or ending. */
-  private ending = new Map<string, "confirm" | "ending" | { error: string }>();
+  /**
+   * A failed end carries its sentence, and whether it must be announced
+   * (cas-9ae6): only when focus is not brought back to End session, which
+   * reads the sentence as its description; otherwise it would be said twice.
+   */
+  private ending = new Map<string, "confirm" | "ending" | { error: string; announce: boolean }>();
   /**
    * The newest render's arguments (cas-d6bf). An End session control is kept
    * across renders, so its own repaint must use these, never the container and
@@ -410,7 +415,17 @@ export class ConversationList {
       ask.innerHTML = `${END_ICON}<span class="conversation-end-label">End session</span>`;
       ask.setAttribute("aria-label", `End session ${row.supervisor} on ${machineName(row.host)}`);
       const children: Node[] = [ask];
-      if (typeof state === "object") { const error = document.createElement("span"); error.className = "conversation-end-error"; error.setAttribute("role", "alert"); error.textContent = state.error; children.push(error); }
+      if (typeof state === "object") {
+        const error = document.createElement("span");
+        error.id = `conversation-end-error:${row.key}`;
+        error.className = "conversation-end-error";
+        // Said once (cas-9ae6): an alert when focus stays where the operator
+        // went; as End session's description when focus is brought back to it.
+        if (state.announce) error.setAttribute("role", "alert");
+        error.textContent = state.error;
+        ask.setAttribute("aria-describedby", error.id);
+        children.push(error);
+      }
       control.replaceChildren(...children);
       return;
     }
@@ -440,9 +455,17 @@ export class ConversationList {
         this.ending.delete(row.key);
         this.announceEnded(row, neighbours);
         this.landAfterEnd(control, neighbours);
-      }, (error: unknown) => {
-        this.ending.set(row.key, { error: `Could not end ${row.supervisor}: ${error instanceof Error ? error.message : String(error)}` });
+      }, () => {
+        // Keep the failed row actionable, but leave focus alone if the operator
+        // moved elsewhere while the request was in flight (cas-a549).
+        const heldFocus = control.contains(document.activeElement);
+        this.ending.set(row.key, { error: `Could not end ${row.supervisor} on ${machineName(row.host)}. Try End session again. If it still fails, check the session on ${machineName(row.host)}.`, announce: !heldFocus });
         rerender();
+        if (heldFocus) {
+          control.scrollIntoView?.({ block: "nearest" });
+          revealWhole(control);
+          control.querySelector<HTMLButtonElement>(".conversation-end-ask")?.focus({ preventScroll: true });
+        }
       });
     });
     const cancel = button("Cancel", "conversation-end-cancel", (event) => {

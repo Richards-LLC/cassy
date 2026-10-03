@@ -98,6 +98,30 @@ export interface HubCallbacks {
   onSocketError(session: string, detail: string): void;
 }
 
+/**
+ * A hub request the hub refused, with what it said (cas-d382, fleet-operations
+ * brief): `code` is the hub's `error` field and `detail` its `detail` (or
+ * `reason`), so a control can say what the hub said instead of only
+ * "failed (409)". The message keeps the old wording for anything that logs it.
+ */
+export class HubRequestError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string, readonly detail?: string) { super(message); }
+}
+
+/** Read a refused response's `{error, detail}` body; a body that is not JSON leaves both unset. */
+export async function hubRequestError(method: string, path: string, response: Response): Promise<HubRequestError> {
+  let body: Record<string, unknown> | undefined;
+  try { body = await response.json() as Record<string, unknown>; } catch { body = undefined; }
+  const code = typeof body?.error === "string" ? body.error : undefined;
+  const detail = typeof body?.detail === "string" ? body.detail : typeof body?.reason === "string" ? body.reason : undefined;
+  return new HubRequestError(`${method} ${path} failed (${response.status})`, response.status, code, detail);
+}
+
+/** A refused scope self-grant, keeping its status so a 403 can offer a pairing command instead. */
+export class ScopeGrantError extends HubRequestError {
+  constructor(status: number, message: string, code?: string, detail?: string) { super(message, status, code, detail); }
+}
+
 class AuthenticationError extends Error {
   constructor(readonly kind: AuthFailureKind, message: string) { super(message); }
 }
@@ -512,7 +536,7 @@ export class HubConnectionSupervisor {
       const kind = authFailureKind(response.status, refusal, this.machine.expiresAt);
       throw new AuthenticationError(kind, authFailureMessage(kind, refusal));
     }
-    if (!response.ok) throw new Error(`${method} ${path} failed (${response.status})`);
+    if (!response.ok) throw await hubRequestError(method, path, response);
     this.callbacks.onLatency?.(Math.max(0, Math.round(performance.now() - startedAt)));
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
@@ -593,6 +617,28 @@ export class HubConnectionSupervisor {
       ...(typeof body?.error === "string" ? { code: body.error } : {}),
       ...(typeof body?.detail === "string" ? { detail: body.detail } : typeof body?.reason === "string" ? { detail: body.reason } : {}),
     };
+  }
+
+  /**
+   * The one-time "Allow managing workers" grant (cas-d382): add factory-operate
+   * to this paired device, as session launch is added. The hub allows it only
+   * to a device that already holds the control scopes; a 403 says the pairing
+   * itself must change.
+   */
+  async enableFactoryOperate(): Promise<void> {
+    const { response } = await this.authorizedFetch("POST", "/v1/auth/scopes", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ add: ["factory-operate"] }),
+    });
+    if (!response.ok) {
+      const error = await hubRequestError("POST", "/v1/auth/scopes", response);
+      throw new ScopeGrantError(response.status, response.status === 403
+        ? "This pairing can't allow managing workers. Pair with a control invitation, then try again."
+        : `Could not allow managing workers (${response.status}). Try again.`, error.code, error.detail);
+    }
+    const body = await response.json() as { scopes: StoredMachine["scopes"] };
+    this.machine.scopes = body.scopes;
+    await this.callbacks.onCredentialRefreshed?.(this.machine);
   }
 
   /** Add session launch to this paired device; keep the live and stored scope sets in sync. */

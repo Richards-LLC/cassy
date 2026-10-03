@@ -849,36 +849,18 @@ struct OperationReplay {
 #[derive(Debug, Deserialize)]
 struct OperationRequest {
     op_id: String,
-    /// Parsed by [`parse_fleet_operation`] so an unknown or not-yet-built
-    /// kind gets a JSON error, not the extractor's plain-text 422.
+    /// Parsed by [`parse_fleet_operation`] so an unknown or malformed kind
+    /// gets a JSON error, not the extractor's plain-text 422.
     op: serde_json::Value,
     #[serde(default)]
     expected: serde_json::Value,
 }
 
-/// Operation kinds the wire contract names for later slices (S2, S3).
-const LATER_FLEET_OPERATIONS: &[&str] = &[
-    "spawn_workers",
-    "set_worker_hold",
-    "recycle_worker",
-    "shutdown_workers",
-];
-
-enum ParsedOperation {
-    Ready(FleetOperation),
-    NotYet(String),
-    Invalid(String),
-}
-
-fn parse_fleet_operation(op: serde_json::Value) -> ParsedOperation {
-    let kind = op.get("kind").and_then(serde_json::Value::as_str).map(str::to_owned);
-    match serde_json::from_value::<FleetOperation>(op) {
-        Ok(operation) => ParsedOperation::Ready(operation),
-        Err(_) if kind.as_deref().is_some_and(|kind| LATER_FLEET_OPERATIONS.contains(&kind)) => {
-            ParsedOperation::NotYet(kind.unwrap_or_default())
-        }
-        Err(error) => ParsedOperation::Invalid(error.to_string()),
-    }
+/// Parse `op` by hand so a malformed or unknown kind gets a JSON error, not
+/// the extractor's plain-text 422. Every kind the wire contract names is
+/// implemented (S1-S3).
+fn parse_fleet_operation(op: serde_json::Value) -> Result<FleetOperation, String> {
+    serde_json::from_value::<FleetOperation>(op).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -892,6 +874,22 @@ enum FleetOperation {
         epic_id: Option<String>,
         #[serde(default)]
         clear: bool,
+    },
+    /// O3: add 1-4 workers, optionally starting one on a ready task.
+    SpawnWorkers {
+        count: u8,
+        #[serde(default)]
+        task_id: Option<String>,
+    },
+    /// O4: pause (hold) or resume (release) a worker.
+    SetWorkerHold { worker: String, hold: bool },
+    /// O6: restart a worker in place; it loses its in-flight context.
+    RecycleWorker { worker: String },
+    /// O7: stop a worker. One worker per operation, so `expected` names it.
+    ShutdownWorkers {
+        workers: Vec<String>,
+        #[serde(default)]
+        force: bool,
     },
     /// O5: assign a task to a worker, or unassign it (null), through the
     /// supervisor's task_update (S3, cas-31f0).
@@ -907,16 +905,25 @@ impl FleetOperation {
         match self {
             Self::RequestMerge { .. } => "operation:request_merge",
             Self::FocusEpic { .. } => "operation:focus_epic",
+            Self::SpawnWorkers { .. } => "operation:spawn_workers",
+            Self::SetWorkerHold { .. } => "operation:set_worker_hold",
+            Self::RecycleWorker { .. } => "operation:recycle_worker",
+            Self::ShutdownWorkers { .. } => "operation:shutdown_workers",
             Self::AssignTask { .. } => "operation:assign_task",
         }
     }
 
-    /// O1 is an explicit supervisor message. O2 needs `factory:manage` until
-    /// S2 adds `factory:operate`.
+    /// O1 is an explicit supervisor message. Reversible and additive
+    /// operations need `factory:operate`; destructive ones (restart, stop)
+    /// need `factory:manage` (brief: distinct scopes for destructive actions).
     fn scope(&self) -> Scope {
         match self {
             Self::RequestMerge { .. } => Scope::MessageSend,
-            Self::FocusEpic { .. } | Self::AssignTask { .. } => Scope::FactoryManage,
+            Self::FocusEpic { .. }
+            | Self::SpawnWorkers { .. }
+            | Self::SetWorkerHold { .. }
+            | Self::AssignTask { .. } => Scope::FactoryOperate,
+            Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } => Scope::FactoryManage,
         }
     }
 
@@ -928,6 +935,15 @@ impl FleetOperation {
                 (Some(epic_id), false) => format!("epic={epic_id}"),
                 (None, false) => "epic=<none>".to_string(),
             },
+            Self::SpawnWorkers { count, task_id } => match task_id {
+                Some(task_id) => format!("count={count} task={task_id}"),
+                None => format!("count={count}"),
+            },
+            Self::SetWorkerHold { worker, hold } => format!("worker={worker} hold={hold}"),
+            Self::RecycleWorker { worker } => format!("worker={worker}"),
+            Self::ShutdownWorkers { workers, force } => {
+                format!("workers={} force={force}", workers.join(","))
+            }
             Self::AssignTask { task_id, assignee } => format!(
                 "task={task_id} assignee={}",
                 assignee.as_deref().unwrap_or("<none>")
@@ -949,24 +965,8 @@ async fn session_operation<R: SessionReadModel>(
 ) -> Response {
     let uri = format!("/v1/sessions/{session}/operations");
     let operation = match parse_fleet_operation(request.op) {
-        ParsedOperation::Ready(operation) => operation,
-        ParsedOperation::NotYet(kind) => {
-            // Authenticated first, so the reply discloses nothing to a stranger.
-            if let Err(error) =
-                authorize(&state, HubAction::Mutation, Scope::SessionRead, &headers, "POST", &uri)
-            {
-                return with_cors(unauthorized_for(&error), &headers);
-            }
-            return with_cors(
-                launch_error(
-                    StatusCode::NOT_IMPLEMENTED,
-                    "not_implemented",
-                    &format!("{kind} arrives with a later fleet-operations slice"),
-                ),
-                &headers,
-            );
-        }
-        ParsedOperation::Invalid(detail) => {
+        Ok(operation) => operation,
+        Err(detail) => {
             return with_cors(
                 launch_error(StatusCode::BAD_REQUEST, "invalid_operation", &detail),
                 &headers,
@@ -1041,17 +1041,8 @@ async fn session_operation<R: SessionReadModel>(
     let attribution = verified_attribution(&context);
     let operation_session = session.clone();
     let expected = request.expected;
-    let outcome = match operation {
-        // O5 runs the supervisor's async task_update on the hub's runtime.
-        FleetOperation::AssignTask { task_id, assignee } => {
-            run_assign_task(&cas_dir, &task_id, assignee.as_deref(), expected, &attribution).await
-        }
-        operation => tokio::task::spawn_blocking(move || {
-            run_fleet_operation(&cas_dir, &operation_session, operation, expected, &attribution)
-        })
-        .await
-        .unwrap_or_else(|error| Err(crate::ops::fleet::OperationError::Failed(error.to_string()))),
-    };
+    let outcome =
+        run_fleet_operation(cas_dir, operation_session, operation, expected, attribution).await;
 
     use crate::ops::fleet::OperationError;
     let (status, body, audit_outcome, detail) = match outcome {
@@ -1107,7 +1098,79 @@ async fn session_operation<R: SessionReadModel>(
 }
 
 /// Run one operation through the shared facade, checking `expected` first.
-fn run_fleet_operation(
+/// Store work runs on a blocking thread; worker operations then await the
+/// same `CasService` body their MCP action runs.
+async fn run_fleet_operation(
+    cas_dir: std::path::PathBuf,
+    session: String,
+    operation: FleetOperation,
+    expected: serde_json::Value,
+    attribution: MessageAttribution,
+) -> Result<serde_json::Value, crate::ops::fleet::OperationError> {
+    use crate::ops::fleet::{self, OperationError, WorkerExpected, WorkerOperation};
+    let (kind, worker, operation) = match operation {
+        FleetOperation::SpawnWorkers { count, task_id } => {
+            if !(1..=4).contains(&count) {
+                return Err(OperationError::Invalid(
+                    "count must be between 1 and 4".to_string(),
+                ));
+            }
+            ("spawn_workers", None, WorkerOperation::Spawn { count, task_id })
+        }
+        FleetOperation::SetWorkerHold { worker, hold } => (
+            "set_worker_hold",
+            Some(worker.clone()),
+            WorkerOperation::Hold { worker, hold },
+        ),
+        FleetOperation::RecycleWorker { worker } => (
+            "recycle_worker",
+            Some(worker.clone()),
+            WorkerOperation::Recycle { worker },
+        ),
+        FleetOperation::ShutdownWorkers { workers, force } => {
+            let [worker] = <[String; 1]>::try_from(workers).map_err(|_| {
+                OperationError::Invalid(
+                    "shutdown_workers stops exactly one worker per operation".to_string(),
+                )
+            })?;
+            (
+                "shutdown_workers",
+                Some(worker.clone()),
+                WorkerOperation::Shutdown { worker, force },
+            )
+        }
+        // O5 runs the supervisor's async task_update on the hub's runtime.
+        FleetOperation::AssignTask { task_id, assignee } => {
+            return run_assign_task(&cas_dir, &task_id, assignee.as_deref(), expected, &attribution)
+                .await;
+        }
+        other => {
+            return tokio::task::spawn_blocking(move || {
+                run_store_operation(&cas_dir, &session, other, expected, &attribution)
+            })
+            .await
+            .unwrap_or_else(|error| Err(OperationError::Failed(error.to_string())));
+        }
+    };
+    if let Some(worker) = worker {
+        let expected: WorkerExpected = serde_json::from_value(expected).map_err(|error| {
+            OperationError::Invalid(format!(
+                "expected must name the worker and the generation you saw: {error}"
+            ))
+        })?;
+        let (dir, name) = (cas_dir.clone(), session.clone());
+        tokio::task::spawn_blocking(move || {
+            fleet::check_worker_generation(&dir, &name, &worker, &expected)
+        })
+        .await
+        .unwrap_or_else(|error| Err(OperationError::Failed(error.to_string())))?;
+    }
+    let detail = fleet::run_worker_operation(&cas_dir, &session, operation).await?;
+    Ok(serde_json::json!({"kind": kind, "detail": detail}))
+}
+
+/// O1 and O2: operations that only touch the session's stores.
+fn run_store_operation(
     cas_dir: &std::path::Path,
     session: &str,
     operation: FleetOperation,
@@ -1169,9 +1232,10 @@ fn run_fleet_operation(
                 "inverse": fleet::focus_epic_inverse(current.as_deref(), now.as_deref()),
             }))
         }
-        FleetOperation::AssignTask { .. } => Err(OperationError::Failed(
-            "assign_task runs on the async path".to_string(),
-        )),
+        worker => Err(OperationError::Failed(format!(
+            "{} is a worker operation, not a store operation",
+            worker.action()
+        ))),
     }
 }
 
@@ -2470,14 +2534,20 @@ async fn grant_own_scopes<R: SessionReadModel>(
         Ok(context) => context,
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
-    if request.add.len() != 1 || request.add[0] != "session-launch" {
-        return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_scope", "detail":"Only session-launch may be added"}))).into_response(), &headers);
-    }
-    match auth.grant_own_session_launch(&context, chrono::Utc::now()) {
+    // cas-9b08: session launch and factory:operate are the only scopes a
+    // device may add itself; factory:manage and hub:admin need an invitation.
+    let scope = match request.add.as_slice() {
+        [one] if one == "session-launch" => Scope::SessionLaunch,
+        [one] if one == "factory-operate" => Scope::FactoryOperate,
+        _ => {
+            return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_scope", "detail":"Only session-launch or factory-operate may be added"}))).into_response(), &headers);
+        }
+    };
+    match auth.grant_own_scope(&context, scope, chrono::Utc::now()) {
         Ok(scopes) => with_cors(Json(serde_json::json!({"scopes":scopes})).into_response(), &headers),
-        Err(error) if error.to_string() == "scope denied" => with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "detail":"Pair with a control invitation to allow starting sessions"}))).into_response(), &headers),
+        Err(error) if error.to_string() == "scope denied" => with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "detail": if scope == Scope::FactoryOperate { "Pair with a control invitation to allow managing workers" } else { "Pair with a control invitation to allow starting sessions" }}))).into_response(), &headers),
         Err(error) => {
-            tracing::error!(%error, "session launch self-grant failed");
+            tracing::error!(%error, scope = scope.as_str(), "self-grant failed");
             with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"grant_failed"}))).into_response(), &headers)
         }
     }

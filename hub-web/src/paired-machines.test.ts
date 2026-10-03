@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, renderPairedMachines, type PairedMachineRow } from './paired-machines';
 import { UNSTEADY } from './connection-state';
+import { fleetControlGate } from './fleet-permissions';
+import type { Scope } from './types';
 
 const atlas: PairedMachineRow = {
   id: 'atlas', label: 'Atlas', address: 'atlas.test', connection: 'Needs pairing',
@@ -147,5 +149,65 @@ describe('an overlong machine label on the phone footer (cas-c19d)', () => {
     expect(state).toContain('flex: 1 1000 auto');
     // ...but never below a 4em stub, so an overlong name cannot hide it entirely.
     expect(state).toContain('min-width: 4em');
+  });
+});
+
+describe('fleet permissions on a paired machine (cas-d382)', () => {
+  const ORIGIN = 'https://commander.example';
+  const CONTROL: Scope[] = ['machine-read', 'session-read', 'pane-read', 'pane-input', 'message-send', 'pane-interrupt'];
+  const row = (scopes: Scope[]): PairedMachineRow => ({
+    ...atlas, connection: 'Connected', connected: true,
+    fleet: { operate: fleetControlGate(scopes, 'add-workers', ORIGIN), manage: fleetControlGate(scopes, 'stop-worker', ORIGIN) },
+  });
+
+  it('labels a missing permission in words, with the command beside it, never only a disabled control', async () => {
+    const container = document.createElement('div'); document.body.replaceChildren(container);
+    const copy = vi.fn();
+    const allow = vi.fn(async () => undefined);
+    renderPairedMachines(container, [row(CONTROL)], async () => undefined, { copy, allowManagingWorkers: allow });
+    const block = container.querySelector<HTMLElement>('.paired-machine-fleet')!;
+    expect(block.hidden).toBe(false);
+    expect(block.getAttribute('aria-label')).toBe('Fleet permissions on Atlas');
+    const manage = block.querySelector<HTMLElement>('[data-permission="manage"]')!;
+    expect(manage.querySelector('.fleet-permission-name')?.textContent).toBe('Stop and restart workers and sessions');
+    expect(manage.querySelector('.fleet-permission-state')?.textContent).toBe('Not allowed on this pairing');
+    const stop = manage.querySelector<HTMLButtonElement>('.fleet-permission-control')!;
+    expect(stop.getAttribute('aria-disabled')).toBe('true');
+    expect(stop.disabled).toBe(false); // focusable, so its description is reachable
+    expect(stop.getAttribute('aria-describedby')?.split(' ').map((id) => document.getElementById(id)?.textContent)).toEqual([
+      'Not allowed on this pairing', 'Needs the Stop and restart workers and sessions permission (factory:manage).',
+    ]);
+    const command = 'cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage';
+    expect(manage.querySelector('code')?.textContent).toBe(command);
+    manage.querySelector<HTMLButtonElement>('.fleet-permission-copy')!.click();
+    expect(copy).toHaveBeenCalledWith(command);
+    // A control pairing may allow managing workers itself: two presses, then the grant.
+    const operate = block.querySelector<HTMLElement>('[data-permission="operate"]')!;
+    expect(operate.querySelector('.fleet-permission-state')?.textContent).toBe('Not allowed on this pairing');
+    const button = operate.querySelector<HTMLButtonElement>('.fleet-permission-allow')!;
+    expect(operate.querySelector('code')).toBeNull();
+    await button.onclick!(new MouseEvent('click') as PointerEvent);
+    expect(button.textContent).toBe('Confirm: allow managing workers on Atlas');
+    expect(allow).not.toHaveBeenCalled();
+    await button.onclick!(new MouseEvent('click') as PointerEvent);
+    expect(allow).toHaveBeenCalledWith('atlas');
+  });
+
+  it('says Allowed when the pairing holds it, and keeps focus across a status tick', () => {
+    const container = document.createElement('div'); document.body.replaceChildren(container);
+    renderPairedMachines(container, [row([...CONTROL, 'factory-operate', 'factory-manage'])], async () => undefined);
+    const states = [...container.querySelectorAll('.fleet-permission-state')].map((node) => node.textContent);
+    expect(states).toEqual(['Allowed', 'Allowed']);
+    expect(container.querySelector('.fleet-permission-control, .fleet-permission-allow, .fleet-permission-copy')).toBeNull();
+    renderPairedMachines(container, [row(CONTROL)], async () => undefined);
+    const copy = container.querySelector<HTMLButtonElement>('.fleet-permission-copy')!;
+    copy.focus();
+    renderPairedMachines(container, [{ ...row(CONTROL), lastSeen: 'Last seen now' }], async () => undefined);
+    expect(document.activeElement).toBe(copy);
+    // A read-only pairing cannot allow it itself: the command instead.
+    renderPairedMachines(container, [row(['machine-read', 'session-read', 'pane-read'])], async () => undefined);
+    const operate = container.querySelector<HTMLElement>('[data-permission="operate"]')!;
+    expect(operate.querySelector('.fleet-permission-allow')).toBeNull();
+    expect(operate.querySelector('code')?.textContent).toBe('cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,factory:operate');
   });
 });

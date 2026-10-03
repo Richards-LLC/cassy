@@ -1049,35 +1049,31 @@ fn factory_pane_configs_codex_worker_inherits_supervisor_cli_in_cs_env_cas_1544(
 // Tests the MuxConfig.resolved_worker_specs → factory_pane_configs per-worker
 // CLI selection path, and the Mux::add_worker explicit spec override path.
 
-/// Return the effective binary name from a PtyConfig, stripping any `nice`
-/// wrapper that `CAS_FACTORY_NICE_WORKER=1` injects in the test environment.
-fn effective_command(pty: &crate::pty::PtyConfig) -> &str {
-    if pty.command == "nice" {
-        // nice -n <level> <binary> [args...] → binary is at index 2
-        pty.args.get(2).map(String::as_str).unwrap_or("nice")
-    } else {
-        &pty.command
-    }
-}
-
 #[test]
 fn effective_command_parses_nice_layouts_cas_046c() {
     for (command, args, expected) in [
         ("codex", vec!["--model", "large", "--effort", "high"], "codex"),
         ("nice", vec!["-n", "10", "codex", "--model", "large", "--effort", "high"], "codex"),
         ("nice", vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex"),
+        ("nice", vec!["--adjustment", "-5", "claude", "--effort", "high", "--model", "codex"], "claude"),
         ("nice", vec!["-n10", "claude", "--model", "codex"], "claude"),
         ("nice", vec!["--", "codex", "--model", "large"], "codex"),
         ("nice", vec!["claude", "--model", "codex"], "claude"),
+        ("nice", vec![], "nice"),
+        ("nice", vec!["--"], "nice"),
+        ("nice", vec!["-n", "10"], "nice"),
         ("nice", vec!["-n"], "nice"),
         ("nice", vec!["-n", "not-a-number", "codex"], "nice"),
+        ("nice", vec!["--adjustment=bad", "codex"], "nice"),
+        ("nice", vec!["-nbad", "codex"], "nice"),
+        ("nice", vec!["-n", "2147483648", "codex"], "nice"),
         ("nice", vec!["--unknown", "codex"], "nice"),
     ] {
         let config = crate::pty::PtyConfig {
             command: command.into(), args: args.into_iter().map(str::to_string).collect(),
             ..Default::default()
         };
-        assert_eq!(effective_command(&config), expected, "command={command}, args={:?}", config.args);
+        assert_eq!(config.effective_command(), expected, "command={command}, args={:?}", config.args);
     }
 }
 
@@ -1126,12 +1122,12 @@ fn factory_pane_configs_uses_per_worker_specs() {
         .expect("worker-2 must be present");
 
     assert_eq!(
-        effective_command(w1),
+        w1.effective_command(),
         "codex",
         "worker-1 with Codex spec must use codex binary"
     );
     assert_eq!(
-        effective_command(w2),
+        w2.effective_command(),
         "claude",
         "worker-2 with Claude spec must use claude binary"
     );
@@ -1174,13 +1170,13 @@ fn factory_pane_configs_falls_back_to_singular_when_specs_empty() {
     for (name, pty_config) in &configs {
         if name == &config.supervisor_name {
             assert_eq!(
-                effective_command(pty_config),
+                pty_config.effective_command(),
                 "claude",
                 "supervisor must use claude binary"
             );
         } else {
             assert_eq!(
-                effective_command(pty_config),
+                pty_config.effective_command(),
                 "codex",
                 "worker {name} with empty resolved_worker_specs must fall back to worker_cli=Codex"
             );
@@ -1220,7 +1216,7 @@ fn add_worker_uses_explicit_spec() {
     );
 
     assert_eq!(
-        effective_command(&pty_config),
+        pty_config.effective_command(),
         "codex",
         "explicit Codex spec must override Claude default in dynamic add_worker path"
     );
@@ -1235,7 +1231,7 @@ fn add_worker_uses_explicit_spec() {
         None,
     );
     assert_eq!(
-        effective_command(&claude_config),
+        claude_config.effective_command(),
         "claude",
         "no explicit spec must fall back to Mux default (Claude)"
     );

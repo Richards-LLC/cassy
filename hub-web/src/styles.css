@@ -3823,11 +3823,17 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle { position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
   .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
-  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: none; overflow-wrap: normal; white-space: nowrap; }
+  /* cas-c19d: the label shrinks too, ellipsised, once the state has given
+     all its room: a 691px name used to run past the button and over its
+     state. The button's 8px gap then always separates the two. */
+  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
   /* cas-0739 QA F01: on the one-line phone footer the state yields to the
      label, ellipsised; the full words are its title, the button's spoken
-     name, and the open dialog's first row. */
-  .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+     name, and the open dialog's first row. Its shrink weight makes it give
+     way first (cas-c19d), so an ordinary long name still reads whole; it
+     keeps a 4em stub ("Conne…", its full words in the title), so an
+     overlong name never hides it entirely. */
+  .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1000 auto; min-width: 4em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
   .conversation-sidebar .hub-footer-badges > #paired-machines-toggle { flex: 1 1 auto; }
   .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }

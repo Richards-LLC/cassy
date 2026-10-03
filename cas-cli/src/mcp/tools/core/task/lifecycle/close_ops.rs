@@ -24240,6 +24240,8 @@ mod merge_state_gate_tests {
         task.task_type = TaskType::Bug;
         task.risk = vec![TaskRisk::None];
         task.deliverables.factory_branch_anchor = Some(anchor_a.clone());
+        // User-facing, so the park dispatches an independent QA round.
+        task.demo_statement = "Open the composer and the stacked card renders".into();
         task.deliverables.work_target = Some(WorkTarget {
             repo_selector: "project:cas-f1f4-fixture".into(),
             target_branch: "main".into(),
@@ -24271,6 +24273,10 @@ mod merge_state_gate_tests {
             Some(anchor_a.as_str()),
             "the parked anchor stays task A's commit, not B's tip"
         );
+        // QA dispatch ran for the park, bound to A's anchor.
+        let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
+        assert_eq!(rounds.len(), 1, "{text}");
+        assert_eq!(rounds[0].bound_head, anchor_a, "{text}");
     }
 
     /// What one cas-74cb handler close of a fixture epic produced.
@@ -33647,10 +33653,12 @@ mod zero_change_close_tests {
         let mut task = Task::new("cas-f1f4-a".to_string(), "stacked A".to_string());
         task.assignee = Some("stack-worker".to_string());
         task.deliverables.factory_branch_anchor = Some(anchor_a.clone());
-        assert_eq!(
-            parked_anchor_delivery_ref(p, &task, &anchor_a).as_deref(),
-            Some(format!("worker worktree {} HEAD", wt.display()).as_str()),
-            "the only carrier is the worker worktree HEAD"
+        // The only carrier is the worker worktree HEAD (git may report the
+        // checkout under its resolved path, e.g. /private/var on macOS).
+        let carrier = parked_anchor_delivery_ref(p, &task, &anchor_a).unwrap_or_default();
+        assert!(
+            carrier.starts_with("worker worktree ") && carrier.ends_with("/stack-worker HEAD"),
+            "{carrier}"
         );
         let evidence =
             run_declared_pre_close_hook(&task, &declared_main_context(p), None, None, true)

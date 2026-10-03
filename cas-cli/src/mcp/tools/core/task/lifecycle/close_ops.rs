@@ -2329,6 +2329,32 @@ fn close_delivered_tip(
         .or_else(|| resolve_branch_sha(repo, "HEAD"))
 }
 
+/// Select one tip for the path, proof-base and snapshot consumers of close.
+fn close_task_delivery_tip(
+    task: &Task,
+    repo: &std::path::Path,
+    receipt: Option<&str>,
+    merged_anchor: Option<&str>,
+) -> Result<Option<String>, String> {
+    if task.task_type == TaskType::Epic {
+        return epic_close_tip(task, receipt, repo)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "EPIC DELIVERY TIP REQUIRED: cannot resolve the delivery of {} from commit_receipt={} or epic branch {} (local or origin). Restore the epic branch or supply a resolvable commit_receipt. Checkout HEAD is not epic delivery evidence.",
+                    task.id,
+                    receipt.unwrap_or("<none>"),
+                    task.branch.as_deref().unwrap_or("<none>"),
+                )
+            });
+    }
+    Ok(close_delivered_tip(repo, receipt, merged_anchor))
+}
+
+#[cfg(test)]
+#[path = "close_ops/epic_delivery_window_tests.rs"]
+mod epic_delivery_window_tests;
+
 /// Whether a close must carry its own Rust build proofs (cas-4cbb).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuildProofs {
@@ -8719,19 +8745,34 @@ impl CasCore {
             let proof_repo = worker_worktree_path
                 .as_deref()
                 .unwrap_or(close_project_root.as_path());
-            // cas-f0a6: a supervisor closing an already merged anchor has no
-            // worker checkout, so attribution would otherwise walk the
-            // supervisor's own HEAD. The merged anchor is the delivery, exactly
-            // as if the supervisor had passed it as commit_receipt.
-            let attribution_receipt = req
-                .commit_receipt
-                .as_deref()
-                .or_else(|| {
-                    supervisor_closing_merged_anchor
-                        .then_some(task.deliverables.factory_branch_anchor.as_deref())
-                        .flatten()
-                })
-                .or(parked_head.as_deref());
+            let delivered_tip = match close_task_delivery_tip(
+                &task,
+                proof_repo,
+                req.commit_receipt.as_deref(),
+                if supervisor_closing_merged_anchor {
+                    task.deliverables.factory_branch_anchor.as_deref()
+                } else {
+                    parked_head.as_deref()
+                },
+            ) {
+                Ok(tip) => tip,
+                Err(message) => return Ok(Self::tool_error(message)),
+            };
+            // cas-b36b: an epic answers for its own resolved tip even when
+            // the supervisor checkout holds an unrelated branch. cas-f0a6:
+            // a merged child's anchor similarly replaces the checkout HEAD.
+            let attribution_receipt = if task.task_type == TaskType::Epic {
+                delivered_tip.as_deref()
+            } else {
+                req.commit_receipt
+                    .as_deref()
+                    .or_else(|| {
+                        supervisor_closing_merged_anchor
+                            .then_some(task.deliverables.factory_branch_anchor.as_deref())
+                            .flatten()
+                    })
+                    .or(parked_head.as_deref())
+            };
             let delivered_paths = commit_receipt_window
                 .as_ref()
                 .and_then(|window| {
@@ -8766,6 +8807,17 @@ impl CasCore {
                 attributed_delivery_base
                     .clone()
                     .or_else(|| {
+                        if task.task_type == TaskType::Epic {
+                            return snapshot_gate_range(
+                                proof_repo,
+                                &context.target_branch,
+                                None,
+                                delivered_tip.as_deref(),
+                                false,
+                                true,
+                            )
+                            .and_then(|range| range.base);
+                        }
                         scoped_proof_base_for_work_target(
                             proof_repo,
                             &context.repo_root,
@@ -8790,19 +8842,8 @@ impl CasCore {
                 )));
             }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
-            // The tip this close delivers: the named commit receipt, else the
-            // already merged parked anchor, else the proof checkout's HEAD.
-            let delivered_tip = close_delivered_tip(
-                proof_repo,
-                req.commit_receipt.as_deref(),
-                if supervisor_closing_merged_anchor {
-                    task.deliverables.factory_branch_anchor.as_deref()
-                } else {
-                    // cas-ba4a: the parked delivery, never the worktree HEAD.
-                    parked_head.as_deref()
-                },
-            );
-            let tip_is_task_delivery = req.commit_receipt.is_some()
+            let tip_is_task_delivery = (task.task_type == TaskType::Epic && delivered_tip.is_some())
+                || req.commit_receipt.is_some()
                 || (supervisor_closing_merged_anchor
                     && task.deliverables.factory_branch_anchor.is_some())
                 || parked_head.is_some()

@@ -396,7 +396,8 @@ PY
     def test_release_notes_and_journey_report_rebase_together(self):
         files = {"CHANGELOG.md": "release prose\n",
                  "docs/release-notes/2099-01-01-v9.99.7-slack.md": "draft\n",
-                 "docs/qa/journey-evaluations/2099-01-01-hub-web-fixture.md": "journey passed\n"}
+                 "docs/qa/journey-evaluations/2099-01-01-hub-web-fixture.md": "journey passed\n",
+                 "docs/qa/journey-evaluations/2099-01-01-évaluation.md": "journey metadata\n"}
         for name, content in files.items():
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)

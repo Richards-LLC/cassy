@@ -242,7 +242,8 @@ def rebase_docs_only_release(root, main_tip, integration_tip):
     branch = git(root, "branch", "--show-current")
     if not branch.startswith("release/") or not is_ancestor(root, main_tip, current):
         return
-    changed = git(root, "diff", "--name-only", "--no-renames", f"{main_tip}..{current}").splitlines()
+    changed = [path for path in git(root, "diff", "--name-only", "-z", "--no-renames",
+                                   f"{main_tip}..{current}").split("\0") if path]
     allowed = lambda path: (path == "CHANGELOG.md" or path.startswith("docs/release-notes/")
                             or (path.startswith("docs/qa/journey-evaluations/") and path.endswith(".md")))
     offending = [path for path in changed if not allowed(path)]

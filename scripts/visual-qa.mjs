@@ -260,6 +260,17 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       }
       return false;
     };
+    // A closed <details> keeps a layout box for its content without drawing
+    // it, so that content can sit past a scroller's range; it is folded, not
+    // clipped. Only its summary is on screen, and opening it brings the rest
+    // into the page's flow.
+    const collapsedDisclosure = (element) => {
+      for (let details = element.closest('details:not([open])'); details; details = details.parentElement?.closest('details:not([open])') ?? null) {
+        const summary = details.querySelector(':scope > summary');
+        if (!summary || !summary.contains(element)) return true;
+      }
+      return false;
+    };
     const nonVisualReason = (element) => {
       if (!element) return null;
       if (ariaHidden(element)) return 'aria-hidden';
@@ -267,6 +278,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       if (element.closest('.skip, .sr, .sr-only, .visually-hidden, .visuallyHidden, .nuxt-route-announcer, [data-visual-qa-hidden]')) return 'accessibility-helper';
       if (ancestors(element).some(visuallyHiddenBox)) return 'visually-hidden';
       if (closedOffCanvas(element)) return 'closed-off-canvas';
+      if (collapsedDisclosure(element)) return 'collapsed-disclosure';
       return null;
     };
     const visibility = (element) => {

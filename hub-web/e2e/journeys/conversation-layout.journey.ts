@@ -42,6 +42,22 @@ for (const colorScheme of ["light", "dark"] as const) {
         expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewport);
         expect(geometry.before.mount.scrollWidth, "hidden terminal descendants do not widen the conversation mount").toBeLessThanOrEqual(geometry.before.mount.clientWidth + 1);
       });
+      await journey.stage("Visit Terminal view and return to the same readable conversation", async () => {
+        await page.locator("#conversation-terminal").click();
+        await expect(page.locator("#conversation-return")).toBeVisible();
+        const toggle = page.getByRole("button", { name: "Show terminal", exact: true });
+        if (await toggle.isVisible()) await toggle.click();
+        const canvas = page.locator(".terminal-mount canvas").filter({ visible: true }).first();
+        await expect(canvas).toBeVisible();
+        const terminal = await canvas.evaluate((node) => ({ width: node.getBoundingClientRect().width, mountWidth: node.parentElement!.clientWidth, scrollWidth: node.parentElement!.scrollWidth }));
+        expect(terminal.width, "Terminal view retains the full grid, rather than squeezing it to the phone").toBeGreaterThan(terminal.mountWidth);
+        expect(terminal.scrollWidth).toBeGreaterThan(terminal.mountWidth);
+        await page.locator("#conversation-return").click();
+        await expect(page.getByRole("log").getByText("The phone conversation stays readable.")).toBeVisible();
+        await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
+        const mount = page.locator(".terminal-mount.conversation-active");
+        expect(await mount.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      });
     });
   });
 }

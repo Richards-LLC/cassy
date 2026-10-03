@@ -1,4 +1,5 @@
 import { escapeHtml, projectTitle } from "./cloud-brand";
+import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 
@@ -165,6 +166,28 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
   return rows.filter((row) => { const text = conversationSearchText(row); return words.every((word) => text.includes(word)); });
 }
 
+/**
+ * The row's spoken name (cas-d8a5, journey F32), set as its aria-label so the
+ * parts never run together ("calm-puma-34Most recent") or leave a stray
+ * " , " before the time: project on machine, codename, Most recent, preview,
+ * time in words, unread and waiting.
+ */
+export function conversationRowSpokenName(row: ConversationRow): string {
+  const project = projectTitle(row.projectDir);
+  const fallback = row.group ? row.activityLine || row.connection : row.connection;
+  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || fallback));
+  const unread = row.unread ?? 0;
+  return joinSpoken([
+    `${project ?? row.supervisor} on ${machineName(row.host)}`,
+    project ? row.supervisor : undefined,
+    row.group?.active ? "most recent" : undefined,
+    preview,
+    row.when ? row.whenSpoken ?? row.when : undefined,
+    unread > 0 ? `${unread} unread` : undefined,
+    row.attention > 0 ? (row.attention === 1 ? "waiting for you" : `${row.attention} waiting for you`) : undefined,
+  ]);
+}
+
 /** One Pebble row: `avatar · project machine · codename · preview · time`, with
  * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
  * count pill). Users think in projects (journey F7): the project is the title,
@@ -294,6 +317,8 @@ export class ConversationList {
       node.onclick = (event) => open(row, event);
       const markup = conversationRowMarkup(row);
       if (node.innerHTML !== markup) node.innerHTML = markup;
+      const spoken = conversationRowSpokenName(row);
+      if (node.getAttribute("aria-label") !== spoken) node.setAttribute("aria-label", spoken);
       ordered.push(node);
       if (row.canEnd && end) {
         const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });

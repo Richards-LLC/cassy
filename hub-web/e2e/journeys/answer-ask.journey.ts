@@ -115,7 +115,8 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     // no "session … started" line opens below it, and it is labelled by this
     // session's supervisor.
     const order = await threadOrder(page);
-    const blockerAt = order.findIndex((label) => label.startsWith(`${PELICAN}, `) && label.endsWith(", machine clock ahead"));
+    // cas-d8a5 (journey F32): groups are spoken "cas-src supervisor, …", the codename their description.
+    const blockerAt = order.findIndex((label) => label.startsWith("cas-src supervisor, ") && label.endsWith(", machine clock ahead"));
     expect(blockerAt, `blocker marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
     expect(order.filter((label) => label.startsWith("session ")), "the thread is this session's: no session line").toEqual([]);
     await expect(page.getByRole("log").getByRole("group", { name: `Blocker from ${PELICAN}` }).filter({ hasText: "The release gate went red" })).toHaveCount(1);
@@ -277,7 +278,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     expect(reply.day).toBe("Today");
     await expect(page.getByRole("log").locator(".day")).toHaveText(["Today"]);
     const order = await threadOrder(page);
-    const machineTurn = order.findIndex((label) => label.startsWith(`${OTTER}, `) && label.endsWith(", machine clock ahead"));
+    const machineTurn = order.findIndex((label) => label.startsWith("gabber-studio supervisor, ") && label.endsWith(", machine clock ahead"));
     expect(machineTurn, `machine turn marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
     expect(order.lastIndexOf(reply.label), "the send sits below the machine's turn").toBeGreaterThan(machineTurn);
     // cas-8d52 (journey F13): the machine's sessionless turn is this session's; no line splits it from the send.

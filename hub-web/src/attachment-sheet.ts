@@ -1,4 +1,5 @@
 import { registerTurnRenderer, type TurnRenderContext } from "./conversation-view";
+import { joinSpoken } from "./spoken-names";
 import type { ArtifactRef, OperatorReply } from "./types";
 
 /**
@@ -167,7 +168,8 @@ export function renderAttachmentSheet(document: Document, attachment: ArtifactRe
   sheet.dataset.mime = attachment.mime;
   const mark = attachmentTypeMark(attachment.mime, attachment.name);
   const size = attachmentSize(attachment.size_bytes);
-  const label = `${attachment.name}, ${mark}${size ? `, ${size}` : ""}${supervisor ? `, from ${supervisor}` : ""}. Open`;
+  // cas-d8a5 (journey F32): from "the cas-src supervisor", not its codename.
+  const label = `${joinSpoken([attachment.name, mark, size, supervisor && `from ${supervisor}`])}. Open`;
   sheet.dataset.label = label;
   sheet.setAttribute("aria-label", label);
   sheet.title = `${attachment.mime} · ${attachment.size_bytes} bytes · sha256 ${attachment.sha256.slice(0, 12)}…`;
@@ -187,7 +189,8 @@ export function renderAttachmentSheet(document: Document, attachment: ArtifactRe
 export const attachmentSheetRenderer = (_reply: OperatorReply, context: TurnRenderContext): HTMLElement => {
   const attachment = context.attachment;
   if (!attachment) throw new Error("attachment renderer called without an attachment");
-  return renderAttachmentSheet(context.document, attachment, context.supervisor);
+  // cas-d8a5 (journey F32): "from the cas-src supervisor" when the project is known.
+  return renderAttachmentSheet(context.document, attachment, context.spokenSupervisor ? `the ${context.spokenSupervisor}` : context.supervisor);
 };
 
 /** Register the sheet with the thread; returns the unregister function. */

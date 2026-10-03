@@ -25,6 +25,20 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(dialog.getByText("This browser will be able to:")).toBeVisible();
     await expect(dialog.getByText("Technical details")).toBeVisible();
     await everyFieldAboveTheFold(dialog);
+    // cas-d8a5 (journey F31): every value the countdown shows, from the code
+    // to the machine's claim, so it can be checked to only go down.
+    await page.evaluate(() => {
+      const w = window as unknown as { __countdown: number[] };
+      w.__countdown = [];
+      const read = () => {
+        const text = document.querySelector("#pair-countdown")?.textContent?.trim();
+        const match = text ? /^(\d+):(\d{2})$/.exec(text) : null;
+        if (!match) return;
+        const seconds = Number(match[1]) * 60 + Number(match[2]);
+        if (w.__countdown.at(-1) !== seconds) w.__countdown.push(seconds);
+      };
+      new MutationObserver(read).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
     await dialog.getByRole("button", { name: "Create pairing code" }).click();
     await expect(dialog.getByText("cas hub authorize KQ7M-4XTR")).toBeVisible();
   });
@@ -39,6 +53,11 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await expect(dialog.getByText(/device credential/)).toHaveCount(0);
     await everyFieldAboveTheFold(dialog);
+    // The claim rebuilt the dialog; its countdown carried on from where it
+    // was, never back up to 10:00.
+    const shown = await page.evaluate(() => (window as unknown as { __countdown: number[] }).__countdown);
+    expect(shown.length, "the countdown was seen").toBeGreaterThan(0);
+    expect(shown.every((seconds, index) => index === 0 || seconds <= shown[index - 1]!), `countdown only goes down: ${shown.join(" → ")}`).toBe(true);
   });
 
   await journey.stage("Confirm and pair this browser", async () => {
@@ -56,6 +75,11 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(page.getByRole("status").filter({ hasText: "Atlas · Linux connected" })).toBeVisible({ timeout: 15_000 });
     const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
     await expect(row).toBeVisible();
+    // cas-d8a5 (journey F32): the row's spoken name reads as words: no run-on
+    // badge, no empty part, no stray " , " before its time.
+    const spoken = await row.getAttribute("aria-label");
+    expect(spoken).toMatch(/^cas-src on Atlas/);
+    expect(spoken).not.toMatch(/ , |,,|\.,/);
     await row.click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // cas-010f: a supervisor that has not written yet reads plainly, with

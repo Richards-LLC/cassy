@@ -975,20 +975,45 @@ pub(crate) fn resolve_target_branch_tip(repo_path: &Path, target_branch: &str) -
     resolve_live_branch_tip(repo_path, target_branch, None)
 }
 
-/// The git decision for a queued merge request at delivery time: the live tip
-/// of the task's merge-request branch, judged against the envelope's target.
-/// Falls back to the envelope's tip only when the branch no longer resolves.
+/// The tip a merge request is judged by (cas-afa9): the live branch tip only
+/// when it is, or descends from, the tip the request names; otherwise the
+/// requested tip itself.
+///
+/// The live tip exists to see commits pushed after the request (GH #703).
+/// A live tip that does not contain the requested delivery is another
+/// delivery: the cas-3508 request named 26d56299 on its new per-task branch,
+/// but the task still recorded the previous cycle's `parked_branch`, whose
+/// already-merged tip read as "merge already landed" on an unchanged target.
+pub(crate) fn merge_request_judged_tip(
+    repo_root: &Path,
+    live_tip: Option<String>,
+    requested_tip: &str,
+) -> String {
+    match live_tip {
+        Some(live)
+            if live == requested_tip
+                || crate::git_evidence::git_commit_is_ancestor(repo_root, requested_tip, &live) =>
+        {
+            live
+        }
+        _ => requested_tip.to_string(),
+    }
+}
+
+/// The git decision for a queued merge request at delivery time: the tip
+/// [`merge_request_judged_tip`] picks, judged against the envelope's target.
+/// "Already landed" therefore always means the requested delivery is on the
+/// target; an unchanged target keeps the request live.
 pub(crate) fn queued_merge_request_decision(
     repo_root: &Path,
     task: Option<&Task>,
     envelope: &MergeRequestEnvelope,
 ) -> MergeRequestDecision {
-    let live_branch_tip = merge_request_branch(task)
-        .and_then(|branch| {
-            resolve_live_branch_tip(repo_root, &branch, Some(envelope.branch_tip.as_str()))
-        })
-        .unwrap_or_else(|| envelope.branch_tip.clone());
-    revalidate_merge_request(repo_root, &live_branch_tip, &envelope.target_branch)
+    let live_branch_tip = merge_request_branch(task).and_then(|branch| {
+        resolve_live_branch_tip(repo_root, &branch, Some(envelope.branch_tip.as_str()))
+    });
+    let judged = merge_request_judged_tip(repo_root, live_branch_tip, &envelope.branch_tip);
+    revalidate_merge_request(repo_root, &judged, &envelope.target_branch)
 }
 
 pub(crate) fn revalidate_merge_request(

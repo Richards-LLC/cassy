@@ -519,10 +519,19 @@ fn materialize_accepted_proposal(
         title.to_string(),
     ))
     .map_err(|error| format!("Could not initialize accepted task: {error}"))?;
+    let defaults = encoded.clone();
     let encoded_object = encoded
         .as_object_mut()
         .expect("Task serializes as a JSON object");
     for (key, value) in object {
+        // cas-2b9f (GH #1043): clients 3.4.2 and 3.15.7 sent explicit nulls
+        // (`delivery_mode: null`) and the cloud stores and echoes the task
+        // verbatim. A null where Task accepts one (an Option) still means
+        // "none"; a null for a defaulted, non-optional field means "not
+        // given", so the default stays instead of failing the whole accept.
+        if value.is_null() && !task_field_accepts_null(&defaults, key) {
+            continue;
+        }
         encoded_object.insert(key.clone(), value.clone());
     }
     if let Some(raw_id) = encoded_object.get("id").and_then(serde_json::Value::as_str)
@@ -568,6 +577,17 @@ fn materialize_accepted_proposal(
     crate::cloud::syncer::render_task_proposal_provenance(&mut encoded);
     serde_json::from_value(encoded)
         .map_err(|error| format!("Cloud accepted response task was invalid: {error}"))
+}
+
+/// Whether `Task` decodes with `key` set to null, probed against a valid
+/// default task (cas-2b9f). True for `Option` fields and keys `Task` ignores;
+/// false for a non-optional field, where a null would fail the whole decode.
+fn task_field_accepts_null(defaults: &serde_json::Value, key: &str) -> bool {
+    let mut probe = defaults.clone();
+    if let Some(object) = probe.as_object_mut() {
+        object.insert(key.to_string(), serde_json::Value::Null);
+    }
+    serde_json::from_value::<cas_types::Task>(probe).is_ok()
 }
 
 fn validate_proposal_attempt_id(value: Option<&str>) -> Result<String, McpError> {
@@ -821,5 +841,146 @@ mod tests {
         let stored = store.get(&task.id).unwrap();
         assert_eq!(stored.title, "Accepted work");
         assert_eq!(stored.door, Some(cas_types::TaskDoor::TwoWay));
+    }
+
+    fn accepted_proposal_with_task(task: serde_json::Value) -> TaskProposal {
+        serde_json::from_value(serde_json::json!({
+            "proposal_id": "proposal-null-1",
+            "target_task_id": "cas-0123456789abcdef",
+            "state": "accepted",
+            "task": task,
+            "provenance": {
+                "server_attested": {
+                    "proposal_id": "proposal-null-1",
+                    "target_task_id": "cas-0123456789abcdef",
+                    "creator_user_id": "user-1",
+                    "team_id": "team-1",
+                    "origin_project_canonical_id": "origin-project",
+                    "target_project_canonical_id": "target-project",
+                    "received_at": "2026-09-28T12:00:00Z",
+                    "client_request_id": "request-1"
+                },
+                "client_asserted": {}
+            }
+        }))
+        .unwrap()
+    }
+
+    /// cas-2b9f (GH #1043): the stored task_payload shape from clients 3.4.2
+    /// and 3.15.7, explicit nulls included. Before the fix the accept failed
+    /// "invalid type: null, expected string or map" on delivery_mode, after
+    /// the cloud had already accepted and materialized the team row; a retry
+    /// echoed the same row and failed the same way.
+    #[test]
+    fn accepted_proposal_from_an_older_client_with_null_fields_materializes() {
+        let proposal = accepted_proposal_with_task(serde_json::json!({
+            "title": "Wire the relay retry",
+            "description": "Older client create payload",
+            "priority": 2,
+            "task_type": "task",
+            "labels": [],
+            "delivery_mode": null,
+            "design": null,
+            "acceptance_criteria": null,
+            "demo_statement": null,
+            "execution_note": null,
+            "external_ref": null,
+            "assignee": null,
+            "door": null,
+            "notes": null,
+            "deliverables": null,
+            "target_repo": null,
+            "target_branch": null
+        }));
+        let task = materialize_accepted_proposal(&proposal, "target-project")
+            .expect("an older client's null fields decode");
+        assert_eq!(task.title, "Wire the relay retry");
+        assert_eq!(
+            task.delivery_mode,
+            cas_types::Task::new(String::new(), String::new()).delivery_mode
+        );
+        assert_eq!(task.door, None);
+        assert_eq!(task.status, TaskStatus::Open);
+        assert!(task.notes.contains("proposal_id: \"proposal-null-1\""));
+
+        // The retry: the accept route echoes the already-materialized row,
+        // nulls and all, and it decodes the same way and stores locally.
+        let again = materialize_accepted_proposal(&proposal, "target-project").unwrap();
+        assert_eq!(again.id, task.id);
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store_local(&cas_root).unwrap();
+        store.add(&again).unwrap();
+        assert_eq!(store.get(&task.id).unwrap().title, "Wire the relay retry");
+    }
+
+    /// Every field name `Task` deserializes, read from serde itself, so the
+    /// test below covers fields added later and the `Option`s that a default
+    /// task skips when it serializes.
+    fn task_field_names() -> &'static [&'static str] {
+        struct Fields(Option<&'static [&'static str]>);
+        #[derive(Debug)]
+        struct Stop;
+        impl std::fmt::Display for Stop {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("stop")
+            }
+        }
+        impl std::error::Error for Stop {}
+        impl serde::de::Error for Stop {
+            fn custom<T: std::fmt::Display>(_: T) -> Self {
+                Stop
+            }
+        }
+        impl<'de> serde::Deserializer<'de> for &mut Fields {
+            type Error = Stop;
+            fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Stop> {
+                Err(Stop)
+            }
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Stop> {
+                self.0 = Some(fields);
+                Err(Stop)
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map enum identifier ignored_any
+            }
+        }
+        let mut fields = Fields(None);
+        let _ = <cas_types::Task as serde::Deserialize>::deserialize(&mut fields);
+        fields.0.expect("Task deserializes as a struct")
+    }
+
+    /// cas-2b9f: every field Task deserializes, sent as null, still decodes:
+    /// Options read as none and defaulted fields keep their defaults.
+    #[test]
+    fn accepted_proposal_with_null_for_every_task_field_materializes() {
+        let mut all_null = serde_json::Map::new();
+        for key in task_field_names() {
+            all_null.insert((*key).to_string(), serde_json::Value::Null);
+        }
+        all_null.insert("title".to_string(), serde_json::json!("Every field null"));
+        assert!(
+            all_null.len() > 30,
+            "the probe covers Task's fields: {}",
+            all_null.len()
+        );
+        let proposal = accepted_proposal_with_task(serde_json::Value::Object(all_null));
+        let task = materialize_accepted_proposal(&proposal, "target-project")
+            .expect("nulls for every Option or defaulted field decode");
+        let base = cas_types::Task::new(String::new(), String::new());
+        assert_eq!(task.id, "cas-0123456789abcdef");
+        assert_eq!(task.title, "Every field null");
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.delivery_mode, base.delivery_mode);
+        assert_eq!(task.priority, base.priority);
+        assert_eq!(task.labels, base.labels);
+        assert_eq!(task.origin_project.as_deref(), Some("origin-project"));
     }
 }

@@ -572,7 +572,7 @@ pub(super) fn commander_control_from_message(
 
 // cas-566b: the Commander lane lives in `ops::fleet`, where the hub's
 // structured operations share it; the daemon keeps calling it by these names.
-pub(super) use crate::ops::fleet::{commander_reply_text, enqueue_commander_message, operator_stamp};
+pub(super) use crate::ops::fleet::{enqueue_commander_message, operator_stamp};
 
 /// cas-c73d (GH #177): which Claude config dir does this worker's harness run
 /// under, if not the daemon's?

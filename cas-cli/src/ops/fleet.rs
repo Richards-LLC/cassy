@@ -197,7 +197,7 @@ const OPERATOR_TARGET: &str = "operator";
 
 /// The explicit reply reference a supervisor's inbox renders — byte-identical
 /// to the one the coordination `message` tool prefixes on a worker reply.
-pub(crate) fn commander_reply_text(notification_id: i64, text: &str) -> String {
+fn commander_reply_text(notification_id: i64, text: &str) -> String {
     format!("[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{text}")
 }
 

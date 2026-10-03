@@ -4802,10 +4802,11 @@ async fn test_supervisor_force_transfer_live_worker_task() {
         task_after.notes
     );
 
-    // Task assignee must be updated to the target worker.
+    // Task assignee must be updated to the target worker's registered name,
+    // not the id `to_agent` gave (cas-1638: close builds factory/<assignee>).
     assert_eq!(
         task_after.assignee.as_deref(),
-        Some("target-worker-id"),
+        Some("target-worker"),
         "task assignee must be updated to target worker"
     );
     // cas-e33f (GH #1004): the prior holder's branch is recorded so the new
@@ -5054,6 +5055,223 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
     let task = task_store.get(&task_id).expect("task after transfer");
     assert_eq!(task.assignee.as_deref(), Some("steady-wren-3"));
     assert_eq!(task.status, cas::types::TaskStatus::Blocked);
+}
+
+/// cas-1638: a transfer addressed by session id must store the worker's
+/// registered name. Observed: `task transfer id=cas-ed87
+/// to_agent=60502d01-… supervisor_override=true` stored the raw id as the
+/// assignee, so bold-lark-15's close looked for `factory/60502d01-…`, which
+/// does not exist, and the delivery never parked. Close builds every branch
+/// candidate from the assignee (`factory/<assignee>-<task>`,
+/// `factory/<assignee>`), so the assignee has to be the name.
+#[tokio::test]
+async fn transfer_by_session_id_stores_the_worker_name_cas_1638() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, worker_core) = setup_cas(&mut test_env);
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    // The registration id is the session id (the observed case) ...
+    register_live_worker(&agent_store, "60502d01-90f8-4b86-99be-e7ca2cf14bc6", "bold-lark-15");
+    // ... or the harness session moved on after a context reset, so only
+    // `cc_session_id` carries the id the supervisor sees.
+    let mut reset = cas::types::Agent::new("calm-heron-agent".to_string(), "calm-heron-2".to_string());
+    reset.role = cas::types::AgentRole::Worker;
+    reset.cc_session_id = Some("11112222-3333-4444-5555-666677778888".to_string());
+    reset.heartbeat();
+    agent_store.register(&reset).expect("register reset worker");
+
+    let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing("supervisor-session-id".to_string());
+    let _role_guard = ScopedSupervisorRole::enter(&mut test_env);
+    let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
+
+    for (to_agent, name) in [
+        ("60502d01-90f8-4b86-99be-e7ca2cf14bc6", "bold-lark-15"),
+        ("11112222-3333-4444-5555-666677778888", "calm-heron-2"),
+    ] {
+        let task_id = create_task_for_transfer(&worker_core, &format!("Transfer to {name}")).await;
+        supervisor_core
+            .cas_task_transfer(Parameters(TaskTransferRequest {
+                task_id: task_id.clone(),
+                to_agent: to_agent.to_string(),
+                note: None,
+                supervisor_override: Some(true),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("transfer to {to_agent}: {}", error.message));
+
+        let task = task_store.get(&task_id).expect("task after transfer");
+        assert_eq!(
+            task.assignee.as_deref(),
+            Some(name),
+            "to_agent={to_agent} must be stored as the worker's registered name, the name \
+             close builds factory/{name}-{task_id} and factory/{name} from"
+        );
+    }
+}
+
+/// Real transfer→start→close must park the registered worker's delivery,
+/// both for a registration id and a reset harness session id.
+#[tokio::test]
+async fn transfer_then_close_parks_the_named_factory_branch_cas_1638() {
+    for (token, reset_session, per_task) in [
+        ("transfer-registration-id", false, false),
+        ("reset-harness-session-id", true, true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, supervisor) = setup_cas(&mut env);
+        let cas_dir = temp.path().join(".cas");
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled = true\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args([
+                    "-c",
+                    "user.name=Transfer Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("git fixture");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(temp.path().join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-qm", "fixture base"]);
+        git(&["branch", "epic/transfer-fixture"]);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let epic_id = extract_task_id(&extract_text(
+            supervisor
+                .cas_task_create(Parameters(TaskCreateRequest {
+                    task_type: "epic".to_string(),
+                    ..make_task_create_req("Transfer epic")
+                }))
+                .await
+                .unwrap(),
+        ))
+        .unwrap()
+        .to_string();
+        let mut epic = tasks.get(&epic_id).unwrap();
+        epic.branch = Some("epic/transfer-fixture".to_string());
+        tasks.update(&epic).unwrap();
+        let task_id = extract_task_id(&extract_text(
+            supervisor
+                .cas_task_create(Parameters(TaskCreateRequest {
+                    epic: Some(epic_id),
+                    ..make_task_create_req("Transfer then park")
+                }))
+                .await
+                .unwrap(),
+        ))
+        .unwrap()
+        .to_string();
+        let registration = if reset_session {
+            "reset-registration-id"
+        } else {
+            token
+        };
+        let mut worker = Agent::new(registration.to_string(), "recipient-worker".to_string());
+        worker.role = AgentRole::Worker;
+        if reset_session {
+            worker.cc_session_id = Some(token.to_string());
+        }
+        worker.heartbeat();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.register(&worker).unwrap();
+        let transfer = {
+            let _role = ScopedSupervisorRole::enter(&mut env);
+            extract_text(
+                supervisor
+                    .cas_task_transfer(Parameters(TaskTransferRequest {
+                        task_id: task_id.clone(),
+                        to_agent: token.to_string(),
+                        note: None,
+                        supervisor_override: Some(true),
+                    }))
+                    .await
+                    .expect("transfer to registered id"),
+            )
+        };
+        assert!(
+            transfer.contains(&format!("recipient-worker (given as {token})")),
+            "{transfer}"
+        );
+        assert_eq!(
+            tasks.get(&task_id).unwrap().assignee.as_deref(),
+            Some(worker.name.as_str())
+        );
+        assert_eq!(
+            agents.get_lease(&task_id).unwrap().unwrap().agent_id,
+            worker.id
+        );
+        let branch = if per_task {
+            format!("factory/recipient-worker-{task_id}")
+        } else {
+            "factory/recipient-worker".to_string()
+        };
+        git(&["checkout", "-qb", &branch]);
+        std::fs::write(temp.path().join("delivery.txt"), "transferred delivery\n").unwrap();
+        git(&["add", "delivery.txt"]);
+        git(&[
+            "commit",
+            "-qm",
+            &format!("fix({task_id}): transferred delivery"),
+        ]);
+        let delivery = git(&["rev-parse", "HEAD"]);
+        let recipient = CasCore::with_daemon(cas_dir.clone(), None, None);
+        recipient.set_agent_id_for_testing(worker.id.clone());
+        let _role = ScopedFactoryEnv::apply(&mut env, &[("CAS_AGENT_ROLE", Some("worker"))]);
+        recipient
+            .cas_task_start(Parameters(IdRequest {
+                id: task_id.clone(),
+            }))
+            .await
+            .expect("recipient starts transfer");
+        let close = extract_text(
+            recipient
+                .cas_task_close(Parameters(TaskCloseRequest {
+                    id: task_id.clone(),
+                    reason: Some("delivery ready".to_string()),
+                    supervisor_override: None,
+                    legacy_bypass_code_review: None,
+                    search_manifest: None,
+                    stranded_branch_override: None,
+                    commit_receipt: Some(delivery.clone()),
+                }))
+                .await
+                .expect("close returns merge refusal after park"),
+        );
+        assert!(close.contains("MERGE REQUIRED"), "{close}");
+        let parked = tasks.get(&task_id).unwrap();
+        assert_eq!(parked.status, cas::types::TaskStatus::AwaitingMerge);
+        assert_eq!(
+            parked.deliverables.parked_branch.as_deref(),
+            Some(branch.as_str())
+        );
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(delivery.as_str())
+        );
+        assert!(
+            agents.get_lease(&task_id).unwrap().is_none(),
+            "park releases lease"
+        );
+    }
 }
 
 // =============================================================================

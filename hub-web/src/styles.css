@@ -4032,7 +4032,11 @@ button.chip:disabled { cursor: default; }
 .launch-cli-option.is-checked { background: var(--bg-active); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 .launch-cli-option:has(input:focus-visible) { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
 .launch-cli-option input:focus-visible { outline: none; }
-.launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
+/* cas-c107: one "Default" treatment, a plain sub-label under the name, for
+   the supervisor CLI and the account alike (it was a filled pill on accounts). */
+.launch-cli-default,
+.launch-account-tag { color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
+.launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); }
 .launch-cli-default[hidden] { display: none; }
 .launch-workers input { width: 100%; max-width: 12rem; box-sizing: border-box; }
 .launch-optional { color: var(--text-mid); }
@@ -4044,7 +4048,6 @@ button.chip:disabled { cursor: default; }
 .launch-account[hidden] { display: none; }
 /* The account list never scrolls on its own: a logged-out row's command and Copy stay whole. */
 .launch-list.launch-accounts { max-height: none; overflow: visible; }
-.launch-account-tag { justify-self: start; padding: 0 var(--space-2); color: var(--text-hi); background: var(--bg-raised); border-radius: var(--radius-pill); font-size: var(--fs-xs); font-weight: var(--weight-semibold); }
 .launch-account-out { flex-wrap: wrap; row-gap: var(--space-2); cursor: default; color: var(--text-mid); }
 .launch-account-out:hover { background: var(--panel); }
 .launch-account-label { display: flex; align-items: center; gap: var(--space-3); min-width: 0; flex: 1 1 100%; }
@@ -4052,7 +4055,7 @@ button.chip:disabled { cursor: default; }
 .launch-account-state { color: var(--text-mid); font-size: var(--fs-xs); }
 .launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
 .launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
-.launch-login button { min-height: 36px; font-size: var(--fs-meta); }
+.launch-login button { min-height: 36px; font-size: var(--fs-meta); border: var(--line-width) solid var(--color-transparent); }
 .launch-account-note { padding-inline: 0; }
 .launch-retry { justify-self: start; width: auto; min-height: 36px; font-size: var(--fs-meta); }
 .launch-account-body { display: grid; gap: var(--space-2); }
@@ -4132,6 +4135,9 @@ button.chip:disabled { cursor: default; }
 }
 @media (forced-colors: active) {
   .launch-choice.is-checked, .launch-cli-option.is-checked { border: 2px solid Highlight; }
+  /* cas-c107: Copy keeps a visible boundary, like Attach and Start, where the
+     system palette drops its fill. */
+  .launch-login button { border-color: ButtonBorder; }
 }
 /* == End New session == */
 

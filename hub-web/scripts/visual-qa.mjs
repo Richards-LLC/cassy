@@ -48,6 +48,7 @@ export const FIXTURE_NAMES = [
   "launch-offline",
   "launch-account",
   "launch-account-unavailable",
+  "launch-account-default-out",
 ];
 
 export const REQUIRED_SCHEMES = ["light", "dark"];

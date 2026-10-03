@@ -168,6 +168,19 @@ impl Default for PostToolUseHookConfig {
     }
 }
 
+impl PostToolUseHookConfig {
+    /// Old saved defaults limited this hook to observation tools. Context
+    /// recovery (cas-b8f6) needs the first result, including Read and MCP.
+    /// Upgrade that exact old set; genuinely custom matchers remain intact.
+    pub(crate) fn claude_matcher(&self) -> String {
+        if same_matcher_set(&self.matcher, &default_capture_tools()) {
+            default_post_tool_use_matcher().join("|")
+        } else {
+            self.matcher.join("|")
+        }
+    }
+}
+
 /// Protection configuration for PreToolUse
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreToolUseProtectionConfig {
@@ -254,6 +267,50 @@ pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
         "AskUserQuestion".into(), // Blocked in factory mode → ask in plain text / coordination
         "Agent".into(),           // Current Claude Code spelling of the subagent tool.
     ]
+}
+
+fn same_matcher_set(left: &[String], right: &[String]) -> bool {
+    left.iter().all(|entry| right.contains(entry)) && right.iter().all(|entry| left.contains(entry))
+}
+
+impl PreToolUseHookConfig {
+    /// Project old saved default sets onto the canonical defaults above.
+    /// AskUserQuestion/Agent intercepts and Slack policy were added after
+    /// those defaults were persisted; their omission is not an opt-out.
+    /// Other custom sets keep their order, with the independent Slack policy.
+    pub(crate) fn claude_matcher(&self) -> String {
+        let canonical = default_pre_tool_use_matcher();
+        let added_later = |entry: &&String| {
+            matches!(
+                entry.as_str(),
+                "AskUserQuestion" | "Agent" | SLACK_POLICY_MATCHER
+            )
+        };
+        let legacy: Vec<_> = canonical
+            .iter()
+            .filter(|entry| !added_later(entry))
+            .cloned()
+            .collect();
+        let configured_legacy: Vec<_> = self
+            .matcher
+            .iter()
+            .filter(|entry| !added_later(entry))
+            .cloned()
+            .collect();
+        let is_saved_default = same_matcher_set(&configured_legacy, &legacy)
+            && self.matcher.iter().all(|entry| canonical.contains(entry));
+        let mut matchers = if !self.enabled {
+            Vec::new()
+        } else if is_saved_default {
+            canonical
+        } else {
+            self.matcher.clone()
+        };
+        if !matchers.iter().any(|entry| entry == SLACK_POLICY_MATCHER) {
+            matchers.push(SLACK_POLICY_MATCHER.into());
+        }
+        matchers.join("|")
+    }
 }
 
 impl Default for PreToolUseHookConfig {
@@ -695,6 +752,30 @@ mod tests {
                 "PreToolUse matcher must include factory intercept tool {tool}: {matcher:?}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_matcher_versions_converge_to_one_canonical_projection() {
+        let canonical = default_pre_tool_use_matcher();
+        for omitted in [
+            vec![SLACK_POLICY_MATCHER, "AskUserQuestion", "Agent"],
+            vec![SLACK_POLICY_MATCHER, "Agent"],
+            vec!["Agent"],
+            Vec::new(),
+        ] {
+            let mut config = PreToolUseHookConfig::default();
+            config
+                .matcher
+                .retain(|entry| !omitted.contains(&entry.as_str()));
+            config.matcher.reverse();
+            assert_eq!(config.claude_matcher(), canonical.join("|"));
+        }
+        let mut post = PostToolUseHookConfig::default();
+        post.matcher = vec!["Bash".into(), "Write".into(), "Edit".into()];
+        assert_eq!(
+            post.claude_matcher(),
+            default_post_tool_use_matcher().join("|")
+        );
     }
 
     #[test]

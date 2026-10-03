@@ -382,17 +382,36 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       }
     }
 
+    // Each axis is judged on its own (GH #1073). A vertical scroller
+    // (`overflow-x: hidden; overflow-y: auto`) clips sideways but scrolls
+    // down: text below its fold is reachable, so it ends the vertical walk
+    // instead of counting as a clip boundary on both axes. Only text outside
+    // the scroller's scrollable range is unreachable. The horizontal axis is
+    // unchanged: a horizontal scroller above the text's own parent ends it.
     for (const item of textNodes) {
       if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
       const svgBoundary = item.node.parentElement?.closest('svg');
       let ancestor = item.node.parentElement;
-      while (ancestor) {
+      let checkX = true;
+      let checkY = true;
+      while (ancestor && (checkX || checkY)) {
         if (ancestor === svgBoundary) break;
-        if (ancestor !== item.node.parentElement && ['auto', 'scroll'].includes(getComputedStyle(ancestor).overflowX)) break;
         const style = getComputedStyle(ancestor);
-        if (style.overflowX === 'hidden' || style.overflowX === 'clip' || style.overflowY === 'hidden' || style.overflowY === 'clip') {
+        if (ancestor !== item.node.parentElement && ['auto', 'scroll'].includes(style.overflowX)) checkX = false;
+        const clipsX = checkX && (style.overflowX === 'hidden' || style.overflowX === 'clip');
+        const clipsY = checkY && (style.overflowY === 'hidden' || style.overflowY === 'clip');
+        const scrollsY = checkY && (style.overflowY === 'auto' || style.overflowY === 'scroll');
+        if (clipsX || clipsY || scrollsY) {
           const ancestorBox = ancestor.getBoundingClientRect();
-          if (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance || item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
+          const outsideX = clipsX && (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance);
+          const outsideY = clipsY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
+          if (outsideX || outsideY) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
+          if (scrollsY) {
+            const contentTop = ancestorBox.y + ancestor.clientTop - ancestor.scrollTop;
+            const contentBottom = contentTop + ancestor.scrollHeight;
+            if (item.box.y < contentTop - boxTolerance || item.box.bottom > contentBottom + boxTolerance) add('clipped-content', item, { reason: 'text-outside-scroll-range', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox), scrollTop: ancestor.scrollTop, scrollHeight: ancestor.scrollHeight });
+            checkY = false;
+          }
         }
         ancestor = ancestor.parentElement;
       }

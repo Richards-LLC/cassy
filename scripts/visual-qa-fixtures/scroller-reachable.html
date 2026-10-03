@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      /* cas-0d16: a vertical scroller nested in a panel. It clips sideways and
+         scrolls down, so every key below its fold is reachable. */
+      .panel { overflow: hidden; }
+      .brief { height: 120px; overflow-x: hidden; overflow-y: auto; margin: 0; padding: 0 0 0 20px; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Brief</h1>
+      <section class="panel">
+        <ul class="brief" id="brief">
+          <li>Brief key 1: the scroller reaches this line</li>
+          <li>Brief key 2: the scroller reaches this line</li>
+          <li>Brief key 3: the scroller reaches this line</li>
+          <li>Brief key 4: the scroller reaches this line</li>
+          <li>Brief key 5: the scroller reaches this line</li>
+          <li>Brief key 6: the scroller reaches this line</li>
+          <li>Brief key 7: the scroller reaches this line</li>
+          <li>Brief key 8: the scroller reaches this line</li>
+          <li>Brief key 9: the scroller reaches this line</li>
+          <li>Brief key 10: the scroller reaches this line</li>
+          <li>Brief key 11: the scroller reaches this line</li>
+          <li>Brief key 12: the scroller reaches this line</li>
+          <li>Brief key 13: the scroller reaches this line</li>
+          <li>Brief key 14: the scroller reaches this line</li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

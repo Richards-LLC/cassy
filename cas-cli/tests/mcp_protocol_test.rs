@@ -500,6 +500,8 @@ impl McpTestClient {
 
     /// A stand-in server that runs `script` under `sh` — which may write to
     /// stderr or a log under `server_log_dir` — and never answers on stdout.
+    /// The script must keep stdout open (e.g. `exec 3>&1` before redirecting
+    /// a final command), or the client sees `Closed` rather than a timeout.
     #[cfg(unix)]
     fn spawn_hung_stub(
         script: &str,
@@ -1056,7 +1058,7 @@ fn test_timeout_diagnostic_carries_bounded_stderr_and_server_log_tails() {
          head -c {flood} /dev/zero | tr '\\000' x >&2; \
          printf 'INFO MCP call_tool START method=\"tools/call\" tool=nonexistent_tool id=1\\n' > '{log}'; \
          printf '\\nstub-last-words-cas-5eb9\\n' >&2; \
-         exec cat >/dev/null",
+         exec 3>&1; cat >/dev/null",
         flood = DIAGNOSTIC_TAIL_BYTES * 5,
         log = log_file.display(),
     );

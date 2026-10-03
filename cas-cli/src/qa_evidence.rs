@@ -189,7 +189,7 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
         .last()
 }
 
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => dirs::home_dir()
             .map(|home| home.join(rest))
@@ -1882,15 +1882,25 @@ pub fn run_close_gate_with_write_dir(
     }
     let why = reasons.join("; ");
     let reject = |refusal: EvidenceRefusal, what: &str| {
+        let mut command = refusal.command.replace(
+            ctx.task_artifacts_dir.to_string_lossy().as_ref(),
+            write_dir.to_string_lossy().as_ref(),
+        );
+        // Generic repair hints (for example malformed manifests) do not name
+        // a path. Historical evidence is read-only to factory workers, so
+        // make the writable replacement and its citation explicit as well.
+        if ctx.task_artifacts_dir != write_dir
+            && !command.contains(write_dir.to_string_lossy().as_ref())
+        {
+            let write_ctx = EvidenceContext { task_artifacts_dir: write_dir, ..*ctx };
+            command.push_str(&format!("; {}", cite_command(&write_ctx)));
+        }
         format!(
             "TASK CLOSE REJECTED: {task} is user-facing ({why}) and its {what} is {problem}. \
              Next: {command}. Then retry close. Contract: {CONTRACT_REFERENCE}.",
             task = ctx.task_id,
             problem = refusal.problem,
-            command = refusal.command.replace(
-                ctx.task_artifacts_dir.to_string_lossy().as_ref(),
-                write_dir.to_string_lossy().as_ref(),
-            ),
+            command = command,
         )
     };
     match tier {

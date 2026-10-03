@@ -175,6 +175,42 @@ fn missing_evidence_never_claims_execution_or_death() {
     assert_eq!(got.state, Liveness::Stalled);
     assert!(got.evidence.contains("unavailable"));
 }
+/// cas-5129 (GH #1054): a live Claude harness with no transcript has never
+/// received a prompt. worker_status says so instead of `executing` (a booting
+/// TUI's CPU) or `stalled`; a dead one is still dead, and other harnesses
+/// keep their existing reading.
+#[test]
+fn claude_without_a_transcript_awaits_its_first_prompt_cas_5129() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("never-written.jsonl");
+    let busy = |alive: Option<bool>| ProcessEvidence {
+        alive,
+        cpu_busy: Some(true),
+        detail: "pid 42 R, cpu busy".into(),
+    };
+    for path in [None, Some(missing.as_path())] {
+        let got = observe(SupervisorCli::Claude, path, busy(Some(true)), now(), 300);
+        assert_eq!(got.state, Liveness::AwaitingFirstPrompt, "{path:?}");
+        assert_eq!(got.state.as_str(), "awaiting_first_prompt");
+        assert_eq!(
+            observe(SupervisorCli::Claude, path, busy(Some(false)), now(), 300).state,
+            Liveness::Dead
+        );
+    }
+    // A transcript that exists is read as before, even with no turn yet.
+    let empty = dir.path().join("empty.jsonl");
+    std::fs::write(&empty, "").unwrap();
+    assert_eq!(
+        observe(SupervisorCli::Claude, Some(&empty), busy(Some(true)), now(), 300).state,
+        Liveness::Executing
+    );
+    // Codex rollouts are resolved by cwd; a missing one is unchanged.
+    assert_eq!(
+        observe(SupervisorCli::Codex, None, busy(Some(true)), now(), 300).state,
+        Liveness::Executing
+    );
+}
+
 #[test]
 fn unresolved_codex_process_keeps_recent_execution_evidence() {
     let started = "{\"timestamp\":\"2026-09-10T19:00:59Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";

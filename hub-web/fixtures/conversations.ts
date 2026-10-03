@@ -92,7 +92,7 @@ export function fixtureManySessionRows(): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
   const supervisor = sessions ? 'calm-puma-34' : FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long'].includes(state);
+  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long', 'conversations-machine-label-overlong'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
   // First run: the catalog is loaded and empty, so the welcome offers pairing.
@@ -137,6 +137,10 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       // cas-0739 QA round 1: a long machine name down; the footer state must
       // not collide with the label (phone) or squeeze it (desktop).
       ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'bench-1' ? { ...machine, label: 'Build Server Rack Seven Downstairs · Windows', connection: "Can't reach · retrying", connected: false, lastSeen: 'Not yet seen in this visit' } : machine))
+      : state === 'conversations-machine-label-overlong'
+        // cas-c19d: one connected machine whose name is about 691px wide at
+        // 390, so the phone footer shows the label itself beside its state.
+        ? [{ ...FIXTURE_MACHINES[0]!, label: 'soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap' }]
       : needsPairing
         ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'atlas-linux' ? { ...machine, connection: 'Needs pairing', connected: false } : machine))
         : FIXTURE_MACHINES;
@@ -282,6 +286,21 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // cas-adfc: a draft over the store's 64k bound; the composer says it will not survive a reload.
     reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
     draft = 'Release notes for 3.26.0, pasted whole. '.repeat(1_800);
+  } else if (state === 'conversation-unconfirmed-dismissed') {
+    // cas-6a96 (journey F36): three not confirmed and dismissed, then a run of
+    // two still in the thread. The thread notice counts its two; the chip
+    // counts the three dismissed and says so.
+    for (const [id, text, mm] of [['a', 'Is the gate green?', 30], ['b', 'Did the Mac tests start?', 31], ['c', 'Ship it if both are green', 32]] as const) {
+      history.submit(id, supervisor, text, at(9, mm));
+      history.unconfirmSilent(at(9, mm) + 20_000);
+    }
+    for (const id of ['a', 'b', 'c']) history.dismissSend(id);
+    history.submit('d', supervisor, 'Status, please', at(9, 34));
+    history.acknowledge({ client_ref: 'd', notification_id: 90, target: supervisor, stamped: true });
+    for (const [id, text, mm] of [['e', 'Gate still red?', 36], ['f', 'Hold the train', 37]] as const) {
+      history.submit(id, supervisor, text, at(9, mm));
+      history.unconfirmSilent(at(9, mm) + 20_000);
+    }
   } else if (state === 'conversation-opening') {
     // cas-813a: the one opening line, while the first history page is on its way.
   } else if (state !== 'conversation') {
@@ -308,6 +327,8 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
   applyDraftNote(slot, state === 'conversation-draft-too-long');
+  // The dismissed-messages chip sits at the top of the composer region, as main.ts places it.
+  if (!view.unsent.hidden) slot.prepend(view.unsent);
   if (state === 'conversation-keyboard') {
     // A phone keyboard on a browser that ignores interactive-widget: the visual
     // viewport is 300px shorter than the layout one; the shell follows it and

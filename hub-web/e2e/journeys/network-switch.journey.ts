@@ -805,6 +805,20 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
     // The dismissed-messages chip takes the caution tone for messages only not confirmed.
     for (let index = 0; index < 3; index += 1) await log.getByRole("button", { name: "Dismiss this notice", exact: true }).first().click();
     await expect(page.locator(".conversation-unsent")).toHaveAttribute("data-tone", "caution");
+    // cas-6a96 (journey F36): the thread's notice said "2 messages not
+    // confirmed" over a chip saying "Show 3 messages not confirmed". The chip
+    // counts what was dismissed, and now says so; no two counts of the same
+    // thing disagree, on screen or to a screen reader.
+    const chip = page.getByRole("button", { name: "Show 3 dismissed messages, not confirmed", exact: true });
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("3 dismissed");
+    await expect(log.locator('.conversation-unconfirmed[role="status"] b')).toHaveText("2 messages not confirmed");
+    const counts = await page.evaluate(() => {
+      const said = [document.body.innerText, ...[...document.querySelectorAll("[aria-label]")].map((node) => node.getAttribute("aria-label") ?? "")].join("\n");
+      return [...said.matchAll(/(\d+) (?:messages?|dismissed)[^\n]*?not (?:sent or not )?confirmed/g)].map((match) => `${match[0].includes("dismissed") ? "dismissed" : "thread"}:${match[1]}`);
+    });
+    expect([...new Set(counts.filter((said) => said.startsWith("thread:")))], "every count of the thread's not-confirmed messages agrees").toEqual(["thread:2"]);
+    expect([...new Set(counts.filter((said) => said.startsWith("dismissed:")))], "every count of the dismissed ones agrees").toEqual(["dismissed:3"]);
   });
 });
 

@@ -10,7 +10,7 @@ import { build } from "vite";
 import { runVisualQa } from "../../scripts/visual-qa.mjs";
 
 export const FIXTURE_NAMES = [
-  "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-machine-label-overlong", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
   "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
@@ -38,6 +38,7 @@ export const FIXTURE_NAMES = [
   "conversation-mic-listening",
   "conversation-mic-unavailable",
   "conversation-draft-too-long",
+  "conversation-unconfirmed-dismissed",
   "conversations-loading",
   "conversations-unpaired",
   "launch-form",

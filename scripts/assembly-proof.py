@@ -23,12 +23,20 @@ import tomllib
 
 FORMAT = 2
 MAX_AGE = 86400
+# Exact harness/session names: scrub these from the environment passed to every
+# test row as well as its fingerprint. Do not ignore CAS_FACTORY_* wholesale;
+# build controls and unknown future variables remain test inputs.
 IDENTITY = {"CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
-            "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT"}
+            "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT",
+            "AI_AGENT", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CAS_CLONE_PATH",
+            "CAS_FACTORY_MODE", "CAS_FACTORY_SUPERVISOR_CLI", "CAS_FACTORY_WORKER_CLI"}
 VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR",
             "VERIFIED_TEST_LOG",
             # Train output locations do not change the compiled/tested candidate.
-            "CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR"}
+            "CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR",
+            # Publishing sources this file after assembly; any loaded build or
+            # test variables are still included by their own names.
+            "CAS_RELEASE_ENV_FILE"}
 
 
 def digest(value):
@@ -192,6 +200,12 @@ def inputs(root):
 
 
 def environment_material(root, env):
+    """Hash the scrubbed test environment conservatively.
+
+    Include every remaining variable, even unknown CAS_* names, except the
+    explicit output/shell controls above and release gate/train orchestration.
+    Local config bytes and resolved Zig bytes are additional inputs.
+    """
     material = {}
     for key, value in env.items():
         if (key in VOLATILE or key.startswith("CAS_RELEASE_GATE_")

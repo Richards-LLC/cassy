@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FLEET_TWIN_TAG_MAX, FleetBoardRenderer, fleetBoardSignature, fleetPlotLabels, fleetProvenance, type FleetBoardModel } from "./fleet-board";
+import { FleetBoardRenderer, fittingTwinTag, fleetBoardSignature, fleetPlotLabels, fleetProvenance, twinTagCandidates, type FleetBoardModel } from "./fleet-board";
 import type { SessionPickerEntry } from "./session-selection";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -154,6 +154,8 @@ describe("fleet board region lifecycle", () => {
       entry({ ...forge, session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
     ]);
     expect([...mixed.values()].map((label) => label.tag)).toEqual(["pelican-9 · AT", "pelican-9 · FO", "otter-5"]);
+    // A twin carries its parts, so the tag can be fitted to the column it lands in.
+    expect([...mixed.values()].map((label) => [label.tail, label.mark])).toEqual([["pelican-9", "AT"], ["pelican-9", "FO"], [undefined, undefined]]);
     // cas-ae5e QA F01: initials that collide (Atlas, Attic: both AT) use the
     // shortest differing prefix of the machine's name, never the full label.
     const sameInitials = fleetPlotLabels([
@@ -162,22 +164,19 @@ describe("fleet board region lifecycle", () => {
       entry({ machineId: "m-c", machineLabel: "Studio Mac · macOS", session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
       entry({ machineId: "m-a", machineLabel: "Atlas · Linux", session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
     ]);
-    expect([...sameInitials.values()].map((label) => label.tag)).toEqual(["…ter-5 · Atl", "…ter-5 · Att", "otter-5 · SM", "pelican-9"]);
+    expect([...sameInitials.values()].map((label) => label.tag)).toEqual(["otter-5 · Atl", "otter-5 · Att", "otter-5 · SM", "pelican-9"]);
     // Names that share four letters fall back to the initials and an ordinal, in label order.
     const numbered = fleetPlotLabels([
       entry({ machineId: "b2", machineLabel: "Build Server 2", session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" }),
       entry({ machineId: "b1", machineLabel: "Build Server 1", session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" }),
     ]);
     expect([...numbered.values()].map((label) => label.tag)).toEqual(["lynx-1 · BS2", "lynx-1 · BS1"]);
-    // Every twin tag fits the narrow column: long tails are trimmed from the left, keeping the distinguishing end.
+    // Long tails stay whole in the data; fitting to the column happens at render (below).
     const long = fleetPlotLabels([
       entry({ machineId: "x1", machineLabel: "Atlas · Linux", session: "extraordinarily-patient-pelican-19", supervisor: "extraordinarily-patient-pelican-19", project: "p" }),
       entry({ machineId: "x2", machineLabel: "Attic · Linux", session: "extraordinarily-patient-pelican-19", supervisor: "extraordinarily-patient-pelican-19", project: "p" }),
     ]);
-    expect([...long.values()].map((label) => label.tag)).toEqual(["…an-19 · Atl", "…an-19 · Att"]);
-    for (const labels of [twins, mixed, sameInitials, numbered, long]) {
-      for (const label of labels.values()) if (label.tag?.includes(" · ")) expect(label.tag.length, label.tag).toBeLessThanOrEqual(FLEET_TWIN_TAG_MAX);
-    }
+    expect([...long.values()].map((label) => label.tag)).toEqual(["pelican-19 · Atl", "pelican-19 · Att"]);
     // Rendered: the tag is its own span, after the project, so the project gives way first.
     const board = freshBoard();
     new FleetBoardRenderer().render(board, model({ sessions }), { open: vi.fn() });
@@ -187,6 +186,61 @@ describe("fleet board region lifecycle", () => {
     expect(css).toMatch(/\.fleet-plot-name\.tagged\s*\{[^}]*display: flex;/);
     expect(css).toMatch(/\.fleet-plot-project\s*\{[^}]*min-width: 2ch;[^}]*text-overflow: ellipsis;/);
     expect(css).toMatch(/\.fleet-plot-tag\s*\{[^}]*flex: none;/);
+  });
+
+  it("fits a twin tag to the measured column: the codename gives way from the left, the machine mark never (cas-ae5e QA round 2)", () => {
+    // The 390px label column: 132px, 124px of content, less the project's 2ch
+    // minimum (14.4px) and the 4px gap. Monospace at 7.2px a glyph, counting
+    // the "· " the tag draws before itself.
+    const room = 124 - 14.4 - 4;
+    const measure = (text: string) => Array.from(`· ${text}`).length * 7.2;
+    expect(twinTagCandidates("pelican-9", "AT")).toEqual(["pelican-9 · AT", "…elican-9 · AT", "…lican-9 · AT", "…ican-9 · AT", "…can-9 · AT", "…an-9 · AT", "…n-9 · AT", "…-9 · AT", "…9 · AT", "AT"]);
+    // pelican-19 on Atlas and Attic: both rows read differently and the mark is whole.
+    const [atlas, attic] = [fittingTwinTag("pelican-19", "Atl", room, measure), fittingTwinTag("pelican-19", "Att", room, measure)];
+    expect([atlas, attic]).toEqual(["…an-19 · Atl", "…an-19 · Att"]);
+    expect(measure(atlas)).toBeLessThanOrEqual(room);
+    // pelican-9 on machines numbered by initials (AT1 / AT2).
+    const [first, second] = [fittingTwinTag("pelican-9", "AT1", room, measure), fittingTwinTag("pelican-9", "AT2", room, measure)];
+    expect([first, second]).toEqual(["…can-9 · AT1", "…can-9 · AT2"]);
+    for (const tag of [atlas, attic, first, second]) {
+      expect(tag).toMatch(/ · (Atl|Att|AT1|AT2)$/);
+      expect(measure(tag)).toBeLessThanOrEqual(room);
+    }
+    // Wide enough: the whole tag. Too narrow even for "…9 · AT1": the mark alone.
+    expect(fittingTwinTag("pelican-9", "AT1", 400, measure)).toBe("pelican-9 · AT1");
+    expect(fittingTwinTag("pelican-9", "AT1", 60, measure)).toBe("AT1");
+    expect(fittingTwinTag("pelican-9", "AT1", 10, measure)).toBe("AT1");
+  });
+
+  it("renders a twin tag with its parts and full title for the fitter", () => {
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, model({ sessions: [
+      entry({ machineId: "m-a", machineLabel: "Atlas · Linux", session: "patient-pelican-19", supervisor: "patient-pelican-19", project: "cas-src" }),
+      entry({ machineId: "m-b", machineLabel: "Attic · Linux", session: "patient-pelican-19", supervisor: "patient-pelican-19", project: "cas-src" }),
+    ] }), { open: vi.fn() });
+    const tags = [...board.querySelectorAll<HTMLElement>(".fleet-plot-name.tagged > .fleet-plot-tag")];
+    expect(tags.map((tag) => [tag.dataset.tail, tag.dataset.mark, tag.title])).toEqual([["pelican-19", "Atl", "pelican-19 · Atl"], ["pelican-19", "Att", "pelican-19 · Att"]]);
+  });
+
+  it("disconnects the fit observer on a shell replacement and when the board leaves", () => {
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const Resize = vi.fn(function () { return { observe, disconnect }; });
+    vi.stubGlobal("ResizeObserver", Resize);
+    try {
+      const renderer = new FleetBoardRenderer();
+      const first = freshBoard();
+      renderer.render(first, model(), { open: vi.fn() });
+      renderer.render(first, model(), { open: vi.fn() });
+      expect(observe).toHaveBeenCalledTimes(1);
+      first.remove();
+      const second = freshBoard();
+      renderer.render(second, model(), { open: vi.fn() });
+      expect(disconnect).toHaveBeenCalledTimes(1);
+      expect(observe).toHaveBeenLastCalledWith(second);
+      renderer.render(null, model(), { open: vi.fn() });
+      expect(disconnect).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("keys on phase words, never on latency or counts", () => {

@@ -14389,11 +14389,17 @@ mod declined_wake_retry_tests_cas_913c {
                 );
             }
         }
-        // An idle, settled recipient is offered at once whatever its history.
+        // Evidence never holds an idle, settled recipient: inside the bound it
+        // is offered at once, past it the cadence offers it (no Wait).
+        let within = declined + Chrono::seconds(5 * 60);
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, Some(false), true, Some(declined), within, active),
+            TurnAwareRetry::OfferNow
+        );
         let later = declined + Chrono::seconds(40 * 60);
         assert_eq!(
             claude_turn_aware_retry_with_evidence(1, Some(false), true, Some(declined), later, active),
-            TurnAwareRetry::OfferNow
+            TurnAwareRetry::UseCadence
         );
 
         // No transcript yet: a worker inside its boot grace keeps its budget;

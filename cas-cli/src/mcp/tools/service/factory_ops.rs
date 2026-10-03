@@ -11519,15 +11519,15 @@ mod tests {
         use cas_store::{AgentStore, PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore};
         use cas_types::AgentStatus;
 
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
-            ("CAS_FACTORY_SESSION", "shutdown-c653"),
-            ("CAS_AGENT_ROLE", "supervisor"),
-            ("CAS_FACTORY_WORKER_NAMES", "live-worker"),
-        ]);
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-c653");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "live-worker");
         let project = tempfile::tempdir().expect("temp project");
         let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
         let agents = SqliteAgentStore::open(&cas_root).expect("agents");
         let queue = SqlitePromptQueueStore::open(&cas_root).expect("queue");
+        queue.init().expect("initialize queue");
         let mut cancelled = Vec::new();
         for (name, status) in [
             ("proud-newt-45", AgentStatus::Stale),

@@ -187,12 +187,15 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
                 assert!(rewritten.ends_with("2>&1 &"));
             }
             // cas-980d: Codex applies updatedInput only with an allow
-            // decision; Claude keeps the decision-free rewrite.
-            let decision = value.pointer("/hookSpecificOutput/permissionDecision");
+            // decision; without it Codex runs the original command.
             if harness == "codex" {
-                assert_eq!(decision.and_then(|v| v.as_str()), Some("allow"), "{value}");
-            } else {
-                assert!(decision.is_none(), "{value}");
+                assert_eq!(
+                    value
+                        .pointer("/hookSpecificOutput/permissionDecision")
+                        .and_then(|v| v.as_str()),
+                    Some("allow"),
+                    "{value}"
+                );
             }
         }
         // Rewriting through the capped runner must preserve the workspace

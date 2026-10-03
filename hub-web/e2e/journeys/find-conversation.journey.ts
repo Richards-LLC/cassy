@@ -477,7 +477,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const headerHost = () => page.locator(".conversation-identity .host-where").evaluate((line) => {
       const machine = line.querySelector<HTMLElement>(".host-machine")!;
       const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
-      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0 && machine.scrollWidth > machine.clientWidth + 1 };
+      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector<HTMLElement>(".host-os")?.getBoundingClientRect().width ?? 0) > 1 && machine.scrollWidth > machine.clientWidth + 1 };
     });
     for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 1280").toBeGreaterThanOrEqual(15.5); expect(header.osCut, "OS word cut at 1280").toBe(false); }
     await page.setViewportSize({ width: 390, height: 844 });
@@ -486,7 +486,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const fitted = await meta.evaluate((line) => {
       const machine = line.querySelector<HTMLElement>(".proj2-machine")!;
       const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
-      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0, title: line.getAttribute("title") };
+      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector<HTMLElement>(".host-os")?.getBoundingClientRect().width ?? 0) > 1, title: line.getAttribute("title") };
     });
     expect(fitted.machineChars, "the machine keeps 16ch at 390px").toBeGreaterThanOrEqual(15.5);
     expect(fitted.os, "the OS word goes before the name is cut").toBe(false);

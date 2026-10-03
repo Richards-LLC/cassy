@@ -63,14 +63,21 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       return {
         machineChars: host.getBoundingClientRect().width / ch,
         machineCut: host.scrollWidth > host.clientWidth + 1,
-        osShown: os !== null && os.getClientRects().length > 0,
-        codenameShown: name !== null && name.getClientRects().length > 0,
+        // cas-8526: a part that steps aside is clipped to 1px, not removed,
+        // so "shown" means drawn wider than that.
+        osShown: os !== null && os.getBoundingClientRect().width > 1,
+        codenameShown: name !== null && name.getBoundingClientRect().width > 1,
       };
     });
     expect(shown.machineChars, `some of ${machine} is on the line`).toBeGreaterThanOrEqual(4);
     expect(shown.osShown && shown.machineCut, "the OS word is never cut mid-word").toBe(false);
     if (shown.machineCut) expect(shown.codenameShown, `${codename} steps aside before ${machine} is cut`).toBe(false);
     await expect(page.locator("#conversation-connection")).toBeVisible();
+    // cas-8526: whatever the line shows, it is heard whole: the machine, its
+    // OS word and the codename, not only the parts that fit.
+    const heard = (await page.locator(".conversation-identity .conversation-host").ariaSnapshot()).replace(/^\s*- text:\s*/gm, " ").replace(/\s+/g, " ");
+    expect(heard, "the host line is heard whole").toContain(machine);
+    expect(heard, "the host line is heard whole").toContain(codename);
   };
 
   /**

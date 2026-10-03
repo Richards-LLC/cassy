@@ -3829,7 +3829,9 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
   /* cas-0739 QA F01: on the one-line phone footer the state yields to the
      label, ellipsised; the full words are its title, the button's spoken
-     name, and the open dialog's first row. Its shrink weight makes it give
+     name, and the open dialog's first row. Its outage words lead ("Can't
+     reach Build Server…", cas-cae9), so the ellipsis cuts the name, not the
+     verb. Its shrink weight makes it give
      way first (cas-c19d), so an ordinary long name still reads whole; it
      keeps a 4em stub ("Conne…", its full words in the title), so an
      overlong name never hides it entirely. */

@@ -162,10 +162,16 @@ describe("a note about the connection follows it (journey F28)", () => {
     expect(line()?.textContent).toBe("Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.");
     // The banner announces the outage; the card's rewrite is not a second announcement (journey F42).
     expect(line()?.hasAttribute("role")).toBe(false);
+    // The card lives in the thread's role=log, a polite live region of its
+    // own: the restated note opts out of it too (cas-c945 QA F01).
+    expect(line()?.getAttribute("aria-live")).toBe("off");
     // Its name carries the new words on focus.
     expect(document.querySelector(`a.sheet[data-artifact-id="${brief.artifact_id}"]`)?.getAttribute("aria-label")).toBe("3.26.0 release brief.pdf, PDF, 1.4 MB. Open. Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.");
     // A rebuilt card shows the current words, not the click-time ones.
-    expect(renderAttachmentSheet(document, brief).querySelector(".fnote")?.textContent).toContain("Reconnecting");
+    const rebuilt = renderAttachmentSheet(document, brief).querySelector(".fnote");
+    expect(rebuilt?.textContent).toContain("Reconnecting");
+    expect(rebuilt?.getAttribute("aria-live")).toBe("off");
+    expect(rebuilt?.hasAttribute("role")).toBe(false);
     // A note about the file itself is not restated.
     expect(document.querySelector(`a.sheet[data-artifact-id="${card.artifact_id}"] .fnote`)?.textContent).toContain("only saved on Atlas · Linux");
     // Back to Live: the reconnect clears it, as before (cas-c808 QA F01).

@@ -73,6 +73,8 @@ interface AttachmentNote {
    * saying Connected while the header says Reconnecting (journey F28).
    */
   readonly restate?: () => string;
+  /** Last written quietly by a restate, so a rebuilt card keeps it quiet too. */
+  readonly quiet?: boolean;
 }
 const attachmentNotes = new Map<string, AttachmentNote>();
 
@@ -87,9 +89,14 @@ function applyAttachmentNote(sheet: HTMLAnchorElement, note: string | undefined,
   if (note === undefined) {
     line?.remove();
   } else if (text) {
-    if (!line) { line = sheet.ownerDocument.createElement("span"); line.className = "fnote"; text.append(line); }
-    if (announce) line.setAttribute("role", "status");
-    else line.removeAttribute("role");
+    const created = !line;
+    if (!line) { line = sheet.ownerDocument.createElement("span"); line.className = "fnote"; }
+    // The card sits in the thread's role=log, which is itself a polite live
+    // region, so dropping role=status alone still let the log speak the new
+    // words (cas-c945 QA F01). aria-live=off takes the note out of both.
+    if (announce) { line.setAttribute("role", "status"); line.removeAttribute("aria-live"); }
+    else { line.removeAttribute("role"); line.setAttribute("aria-live", "off"); }
+    if (created) text.append(line);
     if (line.textContent !== note) line.textContent = note;
   }
   // The link's own name is what a screen reader reads on focus, so the note is part of it.
@@ -138,7 +145,7 @@ export function restateAttachmentNotes(root: ParentNode, machineId: string): num
     if (!note.restate || note.machineId !== machineId) continue;
     const text = note.restate();
     if (text === note.text) continue;
-    attachmentNotes.set(artifactId, { ...note, text });
+    attachmentNotes.set(artifactId, { ...note, text, quiet: true });
     for (const sheet of root.querySelectorAll<HTMLAnchorElement>("a.sheet[data-artifact-id]")) {
       if (sheet.dataset.artifactId === artifactId) applyAttachmentNote(sheet, text, false);
     }
@@ -172,7 +179,7 @@ export function renderAttachmentSheet(document: Document, attachment: ArtifactRe
   text.append(name, sub);
   sheet.append(plate, text);
   const note = attachmentNotes.get(attachment.artifact_id);
-  if (note !== undefined) applyAttachmentNote(sheet, note.text);
+  if (note !== undefined) applyAttachmentNote(sheet, note.text, !note.quiet);
   return sheet;
 }
 

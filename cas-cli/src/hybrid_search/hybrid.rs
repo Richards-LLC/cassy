@@ -539,9 +539,14 @@ impl HybridSearch {
         let mut bm25_opts = opts.base.clone();
         bm25_opts.query = search_query.clone();
         let bm25_results = self.bm25_index.search(&bm25_opts, entries)?;
+        // cas-e7ae: fuse the score the index sorted by (calibrated, and any
+        // later post-scoring adjustment), not the raw `bm25_score`. Both fusion
+        // paths are invariant to the calibration's rescale, so today's
+        // rankings do not move; an adjustment that is not a pure rescale is
+        // no longer discarded here, as cas-e979's boosts were.
         let bm25_scores: Vec<(String, f64)> = bm25_results
             .iter()
-            .map(|r| (r.id.clone(), r.bm25_score))
+            .map(|r| (r.id.clone(), r.score))
             .collect();
 
         // 2. Semantic search (if enabled)

@@ -122,6 +122,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Nothing live: "No live supervisors listed", with a route to dormant sessions.
 - A machine becomes unreachable while a message is pending: the row stays with "Unreachable · message pending".
 - Many rows: the list is not sorted by attention.
+- On a Mac, every surface names the palette chord "⌘K", never "Ctrl K", and ⌘K reaches the search and then the palette. This runs as a separate HUB-J3 part; the journeys declare a Linux keyboard platform by default, so they read the same on any host (cas-2a33).
 
 ### HUB-J4 · Read the conversation history
 

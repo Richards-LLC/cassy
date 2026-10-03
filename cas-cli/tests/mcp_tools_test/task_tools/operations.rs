@@ -5110,6 +5110,170 @@ async fn transfer_by_session_id_stores_the_worker_name_cas_1638() {
     }
 }
 
+/// Real transfer→start→close must park the registered worker's delivery,
+/// both for a registration id and a reset harness session id.
+#[tokio::test]
+async fn transfer_then_close_parks_the_named_factory_branch_cas_1638() {
+    for (token, reset_session, per_task) in [
+        ("transfer-registration-id", false, false),
+        ("reset-harness-session-id", true, true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, supervisor) = setup_cas(&mut env);
+        let cas_dir = temp.path().join(".cas");
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled = true\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args([
+                    "-c",
+                    "user.name=Transfer Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("git fixture");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(temp.path().join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-qm", "fixture base"]);
+        git(&["branch", "epic/transfer-fixture"]);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let epic_id = extract_task_id(&extract_text(
+            supervisor
+                .cas_task_create(Parameters(TaskCreateRequest {
+                    task_type: "epic".to_string(),
+                    ..make_task_create_req("Transfer epic")
+                }))
+                .await
+                .unwrap(),
+        ))
+        .unwrap()
+        .to_string();
+        let mut epic = tasks.get(&epic_id).unwrap();
+        epic.branch = Some("epic/transfer-fixture".to_string());
+        tasks.update(&epic).unwrap();
+        let task_id = extract_task_id(&extract_text(
+            supervisor
+                .cas_task_create(Parameters(TaskCreateRequest {
+                    epic: Some(epic_id),
+                    ..make_task_create_req("Transfer then park")
+                }))
+                .await
+                .unwrap(),
+        ))
+        .unwrap()
+        .to_string();
+        let registration = if reset_session {
+            "reset-registration-id"
+        } else {
+            token
+        };
+        let mut worker = Agent::new(registration.to_string(), "recipient-worker".to_string());
+        worker.role = AgentRole::Worker;
+        if reset_session {
+            worker.cc_session_id = Some(token.to_string());
+        }
+        worker.heartbeat();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.register(&worker).unwrap();
+        let transfer = {
+            let _role = ScopedSupervisorRole::enter(&mut env);
+            extract_text(
+                supervisor
+                    .cas_task_transfer(Parameters(TaskTransferRequest {
+                        task_id: task_id.clone(),
+                        to_agent: token.to_string(),
+                        note: None,
+                        supervisor_override: Some(true),
+                    }))
+                    .await
+                    .expect("transfer to registered id"),
+            )
+        };
+        assert!(
+            transfer.contains(&format!("recipient-worker (given as {token})")),
+            "{transfer}"
+        );
+        assert_eq!(
+            tasks.get(&task_id).unwrap().assignee.as_deref(),
+            Some(worker.name.as_str())
+        );
+        assert_eq!(
+            agents.get_lease(&task_id).unwrap().unwrap().agent_id,
+            worker.id
+        );
+        let branch = if per_task {
+            format!("factory/recipient-worker-{task_id}")
+        } else {
+            "factory/recipient-worker".to_string()
+        };
+        git(&["checkout", "-qb", &branch]);
+        std::fs::write(temp.path().join("delivery.txt"), "transferred delivery\n").unwrap();
+        git(&["add", "delivery.txt"]);
+        git(&[
+            "commit",
+            "-qm",
+            &format!("fix({task_id}): transferred delivery"),
+        ]);
+        let delivery = git(&["rev-parse", "HEAD"]);
+        let recipient = CasCore::with_daemon(cas_dir.clone(), None, None);
+        recipient.set_agent_id_for_testing(worker.id.clone());
+        let _role = ScopedFactoryEnv::apply(&mut env, &[("CAS_AGENT_ROLE", Some("worker"))]);
+        recipient
+            .cas_task_start(Parameters(IdRequest {
+                id: task_id.clone(),
+            }))
+            .await
+            .expect("recipient starts transfer");
+        let close = extract_text(
+            recipient
+                .cas_task_close(Parameters(TaskCloseRequest {
+                    id: task_id.clone(),
+                    reason: Some("delivery ready".to_string()),
+                    supervisor_override: None,
+                    legacy_bypass_code_review: None,
+                    search_manifest: None,
+                    stranded_branch_override: None,
+                    commit_receipt: Some(delivery.clone()),
+                }))
+                .await
+                .expect("close returns merge refusal after park"),
+        );
+        assert!(close.contains("MERGE REQUIRED"), "{close}");
+        let parked = tasks.get(&task_id).unwrap();
+        assert_eq!(parked.status, cas::types::TaskStatus::AwaitingMerge);
+        assert_eq!(
+            parked.deliverables.parked_branch.as_deref(),
+            Some(branch.as_str())
+        );
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(delivery.as_str())
+        );
+        assert!(
+            agents.get_lease(&task_id).unwrap().is_none(),
+            "park releases lease"
+        );
+    }
+}
+
 // =============================================================================
 // cas-6009: dep_remove honors dep_type — does not silently remove the wrong dep
 // =============================================================================

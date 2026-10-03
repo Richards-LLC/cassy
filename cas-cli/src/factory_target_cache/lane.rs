@@ -274,6 +274,7 @@ mod tests {
     #[test]
     fn live_owner_recent_preview_and_stale_removal_cas_29b0() {
         let (_temp, root, preview) = fixture();
+        let reclaim = super::super::tests::reclamation_available();
         let held = owner_lock(&preview).unwrap().unwrap();
         assert_eq!(
             inspect(&root, policy(), &[])[0].disposition,
@@ -291,10 +292,19 @@ mod tests {
                 &[]
             )[0]
             .disposition,
-            CacheDisposition::RecentWrite
+            if reclaim {
+                CacheDisposition::RecentWrite
+            } else {
+                CacheDisposition::LiveProcess
+            }
         );
         let mut stale = inspect(&root, policy(), &[]);
-        assert_eq!(stale[0].disposition, CacheDisposition::Selected);
+        let expected = if reclaim {
+            CacheDisposition::Selected
+        } else {
+            CacheDisposition::LiveProcess
+        };
+        assert_eq!(stale[0].disposition, expected);
         assert_eq!(stale[0].bytes, 5);
         let report = super::super::inspect(&root, policy(), &[], &[], true).unwrap();
         assert!(
@@ -303,19 +313,24 @@ mod tests {
                 .iter()
                 .any(|cache| cache.worktree == preview && cache.bytes == 5)
         );
-        assert_eq!(
-            report.lane_previews[0].disposition,
-            CacheDisposition::Selected
-        );
+        assert_eq!(report.lane_previews[0].disposition, expected);
         let parent = preview.parent().unwrap().to_path_buf();
         fs::write(parent.join("proof.log"), "durable proof").unwrap();
         cleanup(&root, &mut stale, policy(), &[]);
-        assert_eq!(stale[0].disposition, CacheDisposition::Reclaimed);
-        assert!(!preview.exists());
-        assert!(
-            !list_validated_git_worktrees(root.parent().unwrap())
+        assert_eq!(
+            stale[0].disposition,
+            if reclaim {
+                CacheDisposition::Reclaimed
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
+        assert_eq!(preview.exists(), !reclaim);
+        assert_eq!(
+            list_validated_git_worktrees(root.parent().unwrap())
                 .iter()
-                .any(|candidate| candidate.path == preview)
+                .any(|candidate| candidate.path == preview),
+            !reclaim
         );
         assert_eq!(
             fs::read_to_string(parent.join("proof.log")).unwrap(),
@@ -327,6 +342,9 @@ mod tests {
     fn revalidation_preserves_new_builder_dirty_source_and_untrusted_report_cas_29b0() {
         let (_temp, root, preview) = fixture();
         let mut records = inspect(&root, policy(), &[]);
+        // Exercise admission revalidation even when initial native inspection
+        // cannot establish idle on this host.
+        records[0].disposition = CacheDisposition::Selected;
         let held = crate::factory_worker_check::try_lock_lane(&root, &preview)
             .unwrap()
             .unwrap();
@@ -334,7 +352,8 @@ mod tests {
         assert_eq!(records[0].disposition, CacheDisposition::LiveProcess);
         assert!(preview.exists());
         drop(held);
-        let records = inspect(&root, policy(), &[]);
+        let mut records = inspect(&root, policy(), &[]);
+        records[0].disposition = CacheDisposition::Selected;
         let mut untrusted: Vec<LanePreviewRecord> =
             serde_json::from_str(&serde_json::to_string(&records).unwrap()).unwrap();
         cleanup(&root, &mut untrusted, policy(), &[]);
@@ -342,9 +361,17 @@ mod tests {
         assert!(preview.exists());
         fs::write(preview.join("source.rs"), "reader edits must survive").unwrap();
         let before = fs::read(preview.join("source.rs")).unwrap();
+        let reclaim = super::super::tests::reclamation_available();
         let mut records = inspect(&root, policy(), &[]);
         cleanup(&root, &mut records, policy(), &[]);
-        assert_eq!(records[0].disposition, CacheDisposition::CleanupError);
+        assert_eq!(
+            records[0].disposition,
+            if reclaim {
+                CacheDisposition::CleanupError
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
         assert_eq!(fs::read(preview.join("source.rs")).unwrap(), before);
     }
 

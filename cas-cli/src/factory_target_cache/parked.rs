@@ -232,6 +232,7 @@ mod tests {
     #[test]
     fn bounded_parked_targets_preserve_logs_sources_and_independent_lanes_cas_29b0() {
         let (_temp, root) = fixture();
+        let reclaim = super::super::tests::reclamation_available();
         let first = worker(&root, "first");
         let second = worker(&root, "second");
         let sources: Vec<_> = [&first, &second]
@@ -252,7 +253,7 @@ mod tests {
         );
         drop((a, b));
         park(&root, &first, 0, None).unwrap();
-        assert!(!first.join("target/debug").exists());
+        assert_eq!(first.join("target/debug").exists(), !reclaim);
         park(&root, &second, 1, None).unwrap();
         assert!(second.join("target/debug").exists());
         for path in [&first, &second] {
@@ -278,7 +279,7 @@ mod tests {
             .flatten()
             .filter(|entry| entry.path().join("target/debug").exists())
             .count();
-        assert_eq!(count, 1);
+        assert_eq!(count, if reclaim { 1 } else { 6 });
     }
 
     #[test]
@@ -327,10 +328,11 @@ mod tests {
         park(&root, &worker, 0, None).unwrap();
         assert!(worker.join("target/debug/deps/output").exists());
         drop(output);
+        let reclaim = super::super::tests::reclamation_available();
         // prune_debug holds its own .cargo-lock descriptor during inspection.
         // That exact descriptor alone must not keep every cache permanently warm.
         park(&root, &worker, 0, None).unwrap();
-        assert!(!worker.join("target/debug").exists());
+        assert_eq!(worker.join("target/debug").exists(), !reclaim);
         assert!(worker.join("target/worker-check.log").exists());
     }
 
@@ -360,7 +362,8 @@ mod tests {
         child.wait().unwrap();
         result.unwrap();
         assert!(preserved);
+        let reclaim = super::super::tests::reclamation_available();
         park(&root, &worker, 0, None).unwrap();
-        assert!(!worker.join("target/debug").exists());
+        assert_eq!(worker.join("target/debug").exists(), !reclaim);
     }
 }

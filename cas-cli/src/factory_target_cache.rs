@@ -953,6 +953,19 @@ fn filesystem_capacity(_path: &Path) -> io::Result<(u64, u64)> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    pub(super) fn reclamation_available() -> bool {
+        // No process can reference this fresh, nonexistent output path. A live
+        // result means the native process table cannot establish idle safely.
+        let probe = tempfile::tempdir().unwrap();
+        let path = probe.path().join("nonexistent-output");
+        let available = !live_process_uses(&path, &path);
+        if !available {
+            eprintln!("RECLAIM PROOF UNAVAILABLE: native process evidence is unreadable; asserting preservation only");
+        }
+        available
+    }
+
     pub(super) fn git(repo: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .args(args)

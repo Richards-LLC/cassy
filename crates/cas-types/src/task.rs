@@ -846,6 +846,30 @@ impl TaskDeliverables {
         }
     }
 
+    /// Record the delivery a fresh park (InProgress -> AwaitingMerge) is
+    /// about: the branch the merge gate measured and its tip.
+    ///
+    /// cas-4b3f/cas-3d37: a commit-time anchor already recorded for this
+    /// cycle is kept; otherwise the measured tip becomes the anchor.
+    /// cas-a844: the parked branch name is recorded once so a lost worker's
+    /// commits stay linked to the task after reassignment.
+    pub fn record_park(
+        &mut self,
+        measured_branch: Option<&str>,
+        measured_tip: Option<&str>,
+        assignee: Option<&str>,
+    ) {
+        let branch = measured_branch
+            .map(|branch| branch.strip_prefix("origin/").unwrap_or(branch).to_string())
+            .or_else(|| assignee.map(|assignee| format!("factory/{assignee}")));
+        if self.factory_branch_anchor.is_none() {
+            self.factory_branch_anchor = measured_tip.map(str::to_string);
+        }
+        if self.parked_branch.is_none() {
+            self.parked_branch = branch;
+        }
+    }
+
     /// Move the active factory anchor out of close authority while retaining
     /// it as task-owned commit identity for later merge-gate attribution.
     ///

@@ -127,6 +127,27 @@ Rules that keep that boundary honest:
 
 **Team scope resolution chain** (`cas-cli/src/cloud/config.rs::active_team_id`, cas-ea2f5): When a write is dual-enqueued to the team push queue, the team UUID is resolved at `open_store` time via a four-step chain. (0) Kill-switch: if `team_auto_promote = Some(false)` in the project `.cas/cloud.json`, the result is always `None` — no team dual-enqueue regardless of other config. (1) Project-level explicit override: `team_id` in the project `.cas/cloud.json` wins unconditionally; set via `cas cloud team set <uuid>`. (2) User default: `default_team_id` in `~/.cas/cloud.json`, populated by `cas cloud team default <slug>` or automatically by `fetch_and_cache_teams` (`cloud/me.rs`) on `cas login`. (3) Implicit single-team auto-pick: if `teams[]` has exactly one entry and no `default_team_id` is set, that team is used automatically — no configuration needed. (4) `None` — ambiguous (0 or ≥2 teams without a nominated default) or not logged in. The testable inner `active_team_id_with_user_config(user_cfg: Option<&CloudConfig>)` accepts an injected user config for unit tests without disk I/O; the production `active_team_id()` reads from `user_level_cloud_json_path()` (honours the `CAS_USER_CLOUD_JSON` test-seam env var).
 
+### Shutdown ownership and dead registrations
+
+`factory action=shutdown_workers` uses each worker registration's factory
+session as the shutdown boundary. A dead or already-shutdown worker remains
+addressable even after its pane disappears or the launch-time
+`CAS_FACTORY_WORKER_NAMES` roster stops naming it. Other sessions and non-worker
+roles stay outside that boundary; non-factory callers retain legacy roster
+filtering. Task/worktree safety and `force` validation run before cleanup.
+
+Accepted shutdown requests re-read all same-name registrations and retire them
+only if none is supervision-live (fresh Active/Idle heartbeat or live process).
+Dead registrations need no pane. Outstanding direct notifications to their name,
+agent IDs and harness session IDs are cancelled with a shutdown reason; shared
+broadcasts, other sessions and recipient-read/acknowledged messages remain intact.
+Cancellation preserves prior transport evidence and never fabricates an ack.
+This explicit withdrawal can move a transported-but-unread row to `suppressed`;
+the generic monotonic delivery-stage API keeps its existing transition rules.
+The daemon uses the same retirement path if a pane disappeared before consuming
+the queued request. This path preserves worktrees and uses existing orphan
+recovery for any held tasks; live worker termination stays with the daemon.
+
 ### Factory context when a prompt hook is silent
 
 Claude's `UserPromptSubmit` remains the primary context channel. If it does

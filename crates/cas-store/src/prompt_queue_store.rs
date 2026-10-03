@@ -2200,6 +2200,16 @@ pub trait PromptQueueStore: Send + Sync {
     /// Dead-source drop: marks processed for queue drainage without transport success.
     fn mark_dropped(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
 
+    /// Cancel direct pending or transported-but-unread mail when a worker is
+    /// explicitly shut down. Preserve transport evidence and stamp a reason;
+    /// never forge recipient acknowledgement or cancel shared broadcasts.
+    fn cancel_unread_for_shutdown(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        detail: &str,
+    ) -> Result<usize>;
+
     /// Idle-message suppression: processed without transport success.
     ///
     /// Reserved for genuine noise reduction — a duplicate "standing by" the
@@ -5298,6 +5308,62 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn cancel_unread_for_shutdown(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        detail: &str,
+    ) -> Result<usize> {
+        if recipient.trim().is_empty() || recipient == "all_workers" || detail.trim().is_empty() {
+            return Err(crate::error::StoreError::Other(
+                "shutdown cancellation requires a direct recipient and a reason".into(),
+            ));
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // No age or display cap: shutdown ends every outstanding direct
+            // delivery, including old rows outside the normal inbox TTL.
+            let ids = {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT q.id FROM prompt_queue q
+                     WHERE q.target = ?1
+                       AND (q.factory_session = ?2 OR q.factory_session IS NULL)
+                       AND q.acked_at IS NULL
+                       AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+                       AND NOT EXISTS (
+                           SELECT 1 FROM prompt_queue_recipient_seen seen
+                           WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                             AND COALESCE(seen.source, 'inbox_poll') <> 'transport_delivered'
+                       )",
+                )?;
+                stmt.query_map(params![recipient, factory_session], |row| {
+                    row.get::<_, i64>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let now = Utc::now().to_rfc3339();
+            for id in &ids {
+                // Validate before writing; malformed stage data aborts the
+                // entire transaction instead of silently discarding evidence.
+                Self::read_highest_stage(&tx, *id)?;
+                // Explicit shutdown is a withdrawal after transport as well
+                // as before it. Generic stage stamps disallow terminal sibling
+                // rewrites; this scoped cancellation intentionally records the
+                // withdrawal while retaining the original transport receipts.
+                tx.execute(
+                    "UPDATE prompt_queue SET highest_stage = 'suppressed',
+                         processed_at = COALESCE(processed_at, ?1),
+                         last_pending_reason = ?2, last_pending_detail = ?3
+                     WHERE id = ?4",
+                    params![now, PendingReason::SupersededStale.as_str(), detail, id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(ids.len())
+        })
+    }
+
     fn mark_suppressed(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -6045,6 +6111,130 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn shutdown_cancellation_preserves_read_and_transport_evidence_cas_c653() {
+        let (_temp, store) = create_test_store();
+        let session = "shutdown-session";
+        let read = store
+            .enqueue_with_session("sup", "worker", "read", session)
+            .unwrap();
+        store
+            .record_recipient_surfaced(read, "worker", SurfacingSource::InboxPoll)
+            .unwrap();
+        let acked = store
+            .enqueue_with_session("sup", "worker", "acked", session)
+            .unwrap();
+        store.ack(acked).unwrap();
+        let unread = store
+            .enqueue_with_session("sup", "worker", "unread handoff", session)
+            .unwrap();
+        store
+            .record_recipient_surfaced(unread, "worker", SurfacingSource::TransportDelivered)
+            .unwrap();
+        store.mark_transport_delivered(unread).unwrap();
+        let transport = store.message_delivery_report(unread).unwrap().unwrap();
+        let legacy = store.enqueue("sup", "worker", "legacy pending").unwrap();
+        let old = store
+            .enqueue_with_session("sup", "worker", "outside inbox TTL", session)
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![(Utc::now() - chrono::Duration::days(100)).to_rfc3339(), old],
+            )
+            .unwrap();
+        }
+        let other = store
+            .enqueue_with_session("sup", "worker", "other session", "foreign")
+            .unwrap();
+        let broadcast = store
+            .enqueue_with_session("sup", "all_workers", "broadcast", session)
+            .unwrap();
+        let detail = "cancelled by explicit worker shutdown";
+        assert_eq!(
+            store
+                .cancel_unread_for_shutdown("worker", Some(session), detail)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store
+                .cancel_unread_for_shutdown("worker", Some(session), detail)
+                .unwrap(),
+            0
+        );
+        for id in [unread, legacy, old] {
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.stage, DeliveryStage::Suppressed);
+            assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale));
+            assert_eq!(report.pending_detail.as_deref(), Some(detail));
+            assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
+        }
+        let after = store.message_delivery_report(unread).unwrap().unwrap();
+        assert_eq!(after.delivered_at, transport.delivered_at);
+        assert_eq!(
+            after.recipient_transport_at,
+            transport.recipient_transport_at
+        );
+        for id in [read, other, broadcast] {
+            assert_eq!(
+                store.message_delivery_report(id).unwrap().unwrap().stage,
+                DeliveryStage::Enqueued
+            );
+        }
+        assert_eq!(
+            store.message_delivery_report(acked).unwrap().unwrap().stage,
+            DeliveryStage::Confirmed
+        );
+        assert!(
+            store
+                .cancel_unread_for_shutdown("all_workers", Some(session), detail)
+                .is_err()
+        );
+        assert!(
+            store
+                .cancel_unread_for_shutdown("worker", Some(session), "")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn shutdown_cancellation_decode_failure_rolls_back_cas_c653() {
+        let (_temp, store) = create_test_store();
+        let good = store
+            .enqueue_with_session("sup", "worker", "good", "session")
+            .unwrap();
+        let bad = store
+            .enqueue_with_session("sup", "worker", "bad", "session")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET highest_stage = 'corrupt-stage' WHERE id = ?",
+                params![bad],
+            )
+            .unwrap();
+        }
+        assert!(
+            store
+                .cancel_unread_for_shutdown("worker", Some("session"), "shutdown")
+                .is_err()
+        );
+        assert_eq!(
+            store.message_delivery_report(good).unwrap().unwrap().stage,
+            DeliveryStage::Enqueued
+        );
+        assert!(
+            store
+                .queued_prompt(good)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none()
+        );
     }
 
     /// cas-b5e4 (GH #989): at a tool boundary, a row handed off after the

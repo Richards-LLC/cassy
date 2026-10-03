@@ -551,10 +551,6 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M o
     await page.locator("#conversation-terminal").click();
     await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
     await input.focus();
-    await expect(leave).toBeVisible();
-    await expect(leave).toHaveAttribute("aria-keyshortcuts", "Control+Alt+M");
-    await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
-    await expect(input).toHaveAccessibleDescription(hintText);
     // QA round 1 F09: nothing is drawn over the terminal. Along its last
     // program row the topmost element is the terminal's own canvas.
     const covered = await input.evaluate((field) => {
@@ -565,6 +561,10 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M o
         .filter((element) => element !== canvas).map((element) => `${element?.tagName}.${element?.className}`);
     });
     expect(covered, "no element covers the terminal's last row").toEqual([]);
+    await expect(leave).toBeVisible();
+    await expect(leave).toHaveAttribute("aria-keyshortcuts", "Control+Alt+M");
+    await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
+    await expect(input).toHaveAccessibleDescription(hintText);
   });
   await journey.stage("Tab stays in the terminal; Ctrl+Alt+M leaves it for the next control", async () => {
     await input.focus();

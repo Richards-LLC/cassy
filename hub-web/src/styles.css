@@ -3012,6 +3012,13 @@ dialog form > *,
     padding: 0;
     font-size: 0;
   }
+  /* cas-7d25: Leave keeps its key beside the glyph on one line. */
+  .pane-grid.pane-layout .pane-layout-controls .pane-leave:not([hidden]) {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 var(--space-1);
+    white-space: nowrap;
+  }
 
   /* A compact viewport holds the PTY at 80 columns, so the true grid is wider
      than the mount and pans instead of being redrawn at half its width. */

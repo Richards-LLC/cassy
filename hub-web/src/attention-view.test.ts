@@ -113,22 +113,22 @@ describe("heartbeat redraws (cas-a5c6 QA F03)", () => {
   it("leaves an unchanged panel, its focus and an opened Details alone, and redraws when something changes", () => {
     const root = document.createElement("div"); document.body.replaceChildren(root);
     renderAttentionPanel(root, [event("1")], callbacks(), { now });
-    const dismiss = root.querySelector<HTMLButtonElement>(".attention-dismiss-group")!;
+    const dismiss = root.querySelector<HTMLButtonElement>("[data-role='dismiss']")!;
     const details = root.querySelector<HTMLDetailsElement>("details")!;
     details.open = true;
     dismiss.focus();
     // The 5 s heartbeat: same items, same minute.
     renderAttentionPanel(root, [event("1")], callbacks(), { now: now + 5_000 });
-    expect(root.querySelector(".attention-dismiss-group")).toBe(dismiss);
+    expect(root.querySelector("[data-role='dismiss']")).toBe(dismiss);
     expect(document.activeElement).toBe(dismiss);
     expect(details.open).toBe(true);
     // A new item is a real change.
     renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 10_000 });
-    expect(root.querySelector(".attention-dismiss-group")).not.toBe(dismiss);
+    expect(root.querySelector("[data-role='dismiss']")).not.toBe(dismiss);
     // The next minute is not a redraw: the ages move on in place (round 3).
-    const before = root.querySelector(".attention-dismiss-group");
+    const before = root.querySelector("[data-role='dismiss']");
     renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 70_000 });
-    expect(root.querySelector(".attention-dismiss-group")).toBe(before);
+    expect(root.querySelector("[data-role='dismiss']")).toBe(before);
   });
 });
 
@@ -198,5 +198,27 @@ describe("a rebuilt page keeps the Attention panel as the operator left it (cas-
     const second = panel(); document.body.replaceChildren(second);
     renderAttentionPanel(second, [warn("b")], callbacks(), { now });
     expect(document.activeElement).toBe(document.body);
+  });
+});
+
+describe("Attention notice labels (cas-7cb3)", () => {
+  it("uses catalog project/supervisor names and refreshes them without a notice change", () => {
+    const root = document.createElement("div"); const item = { ...event("label"), session: "Accounting-rapid-gazelle-52" };
+    let label = "Accounting · happy-cheetah-1";
+    const options = { now, sessionLabel: () => label };
+    renderAttentionPanel(root, [item], callbacks(), options);
+    expect(root.querySelector(".attention-group-label")?.textContent).toBe(label);
+    expect(root.textContent).not.toContain(item.session);
+    expect(root.querySelector(".attention-dismiss-group")).toBeNull();
+    label = "Ledger · happy-cheetah-1";
+    renderAttentionPanel(root, [item], callbacks(), options);
+    expect(root.querySelector(".attention-group-label")?.textContent).toBe(label);
+    renderAttentionPanel(root, [item, { ...item, id: "other", message: "Another failure" }], callbacks(), options);
+    expect(root.querySelector(".attention-dismiss-group")).not.toBeNull();
+  });
+  it("does not show an opaque id when catalog metadata is unavailable", () => {
+    const root = document.createElement("div");
+    renderAttentionPanel(root, [{ ...event("fallback"), session: "f98e41d1-c544-443a-8256-22360ddf3701" }], callbacks(), { now });
+    expect(root.querySelector(".attention-group-label")?.textContent).toBe("Workstation · Session unavailable");
   });
 });

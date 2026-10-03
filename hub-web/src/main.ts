@@ -4409,7 +4409,13 @@ function renderAttention(): void {
       await navigator.clipboard.writeText(payload);
       toast("Event payload copied");
     },
-  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text });
+  }, {
+    animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,
+    sessionLabel: (item) => {
+      const session = sessions.get(item.machineId)?.find((session) => session.name === item.session);
+      return session ? [projectTitle(session.project_dir), session.supervisor].filter(Boolean).join(" · ") || undefined : undefined;
+    },
+  });
   // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
   syncConversationAttention(hubPresentation === "conversation" && selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }

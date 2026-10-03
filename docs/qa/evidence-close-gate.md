@@ -28,7 +28,7 @@ user-facing change they never ran.
 
 | Question | Decision |
 | --- | --- |
-| What is required | The cas-c3b8 bundle, contract v1 (`~/.cas/artifacts/cas-c3b8/bundle-contract.md`). This is a `bundle.json` manifest plus its files, under `<artifacts_root>/<task-id>/`, cited by a `platform_proof` note `qa-bundle: <abs>/bundle.json`. |
+| What is required | The cas-c3b8 bundle, contract v1 (`~/.cas/artifacts/cas-c3b8/bundle-contract.md`). This is a `bundle.json` manifest plus its files, under `<artifacts_root>/<project-key>/<task-id>/`, cited by a `platform_proof` note `qa-bundle: <abs>/bundle.json`. |
 | Who must produce it | The implementer, for a delivery that is **web user-facing** (see Eligibility). |
 | Where it is enforced | **Before the merge gate** in `cas_task_close_with_completion`, after repo and branch resolution (`~4745`). It runs on every close attempt until the task closes, so the first close cannot park and the re-close cannot finish without a valid bundle for the delivered head. |
 | Staleness | Every listed file's mtime and `created_at` must be later than the delivered head's committer time. `head_sha` must equal the delivered head, or be a descendant of it. |
@@ -93,11 +93,21 @@ The gate finds the citation first. The newest task note containing
 `qa-bundle: <path>` gives the path, but citations under `independent-qa/` are
 skipped. cas-619f cites each reviewer round on the same delivery task, and a
 later round must never shadow the implementer's bundle. That path must canonicalise inside
-`<artifacts_root>/<task-id>/`; a symlink escape fails, using the
+`<artifacts_root>/<project-key>/<task-id>/`; a symlink escape fails, using the
 `artifacts::paths` resolution. It must not be under `independent-qa/`,
 because a reviewer's bundle is not the implementer's evidence. The check
 does not look for a `platform_proof` token, because the existing
 risk=platform check owns that token.
+
+The close gate and PreToolUse workspace contract resolve the configured
+artifact base and project namespace together. New evidence and repair hints
+always use that writable namespace. Existing flat `<artifacts_root>/<task-id>/`
+evidence remains readable. If an old flat citation names a missing file and
+the same relative file exists in the scoped task directory, the gate validates
+that scoped file without changing the task's historical notes. It still checks
+containment, task and commit identity, freshness, and trace results. Existing
+historical files, another project's citations and paths containing `..` are
+never substituted.
 
 Checks, in order. Each rejection names the failing key and the command
 that produces it:

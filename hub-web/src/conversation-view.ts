@@ -361,6 +361,24 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
   return details;
 }
 
+/**
+ * The dismissed-messages chip's words (cas-6a96, journey F36). It counts the
+ * messages the operator dismissed, so it says "dismissed": a thread notice
+ * beside it counts the not-confirmed messages still in the thread, and the
+ * two used to read as contradicting counts of the same thing ("2 messages
+ * not confirmed" over "Show 3 messages not confirmed"). Messages known not to
+ * have gone keep their plain "unsent" name.
+ */
+export function unsentChipCopy(count: number, unconfirmed: number): { text: string; label: string } {
+  if (unconfirmed === 0) {
+    const noun = count === 1 ? "1 unsent message" : `${count} unsent messages`;
+    return { text: noun, label: `Show ${noun}` };
+  }
+  const messages = count === 1 ? "message" : "messages";
+  const status = unconfirmed === count ? "not confirmed" : "not sent or not confirmed";
+  return { text: `${count} dismissed`, label: `Show ${count} dismissed ${messages}, ${status}` };
+}
+
 export class ConversationView {
   readonly element: HTMLElement;
   /**
@@ -823,15 +841,13 @@ export class ConversationView {
     // caution tone the thread gives them; any message known not to be sent
     // keeps the critical tone, because that one certainly needs the operator.
     this.unsent.dataset.tone = unconfirmed === count ? "caution" : "critical";
-    const noun = unconfirmed === 0 ? (count === 1 ? "1 unsent message" : `${count} unsent messages`)
-      : unconfirmed === count ? (count === 1 ? "1 message not confirmed" : `${count} messages not confirmed`)
-      : `${count} messages not sent or not confirmed`;
+    const copy = unsentChipCopy(count, unconfirmed);
     const document = this.element.ownerDocument;
     const glyph = document.createElement("template"); glyph.innerHTML = WARN;
-    const text = document.createElement("span"); text.textContent = noun;
+    const text = document.createElement("span"); text.textContent = copy.text;
     const action = document.createElement("span"); action.className = "conversation-unsent-show"; action.setAttribute("aria-hidden", "true"); action.textContent = "Show";
     this.unsent.replaceChildren(glyph.content.firstElementChild!, text, action);
-    this.unsent.setAttribute("aria-label", `Show ${noun}`);
+    this.unsent.setAttribute("aria-label", copy.label);
   }
 
   /**

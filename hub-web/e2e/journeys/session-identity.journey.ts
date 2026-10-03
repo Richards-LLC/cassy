@@ -198,13 +198,18 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
 test.describe("on a phone", () => {
   test.use({ viewport: { width: 390, height: 600 }, hasTouch: true, isMobile: true });
   test("HUB-J14 Back from a lower grouped row returns the list to that row (cas-f50f)", journeyPart, async ({ page, journey }) => {
-    await journey.hub({ machines: [atlas()], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage"] } });
+    // Enough live sessions in one project that a phone's list scrolls.
+    const crowded = atlas();
+    for (const [index, name] of ["amber-heron-11", "brisk-lynx-22", "copper-wren-33", "dusky-otter-44", "eager-finch-55", "fable-moth-66"].entries()) {
+      crowded.sessions!.push(session(`gabber-studio-${name}`, name, journeyStamp(-(5 + index) * 60_000), "supervisor → Commander"));
+    }
+    await journey.hub({ machines: [crowded], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage"] } });
     const list = page.getByRole("navigation", { name: "Choose a supervisor" });
     const scroller = page.locator("#conversation-list");
     const row = (codename: string) => list.locator(".conversation-row", { hasText: codename });
     await journey.stage("Open the lowest grouped row from a list scrolled down to it", async () => {
       await journey.open();
-      await expect(list.locator(".conversation-row")).toHaveCount(3);
+      await expect(list.locator(".conversation-row")).toHaveCount(9);
       await row("noble-cheetah-84").scrollIntoViewIfNeeded();
       const scrolled = await scroller.evaluate((node) => node.scrollTop);
       expect(scrolled, "the list scrolls on a phone, so its place matters").toBeGreaterThan(0);

@@ -4407,7 +4407,8 @@ function renderAttention(): void {
     act: performAttentionAction,
     copy: async (payload) => {
       await navigator.clipboard.writeText(payload);
-      toast("Event payload copied");
+      // cas-177c: Copy copies the Details text (readable since cas-ed87), so say so.
+      toast("Details copied");
     },
   }, {
     animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,

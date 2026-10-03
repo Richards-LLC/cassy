@@ -823,6 +823,52 @@ mod tests {
     }
 
     #[test]
+    fn init_cas_dir_creates_the_store_in_a_config_only_cas_and_keeps_its_config() {
+        // cas-563f: a .cas holding only an intentional config.toml (no
+        // cas.db) used to be returned untouched, so `cas init --force`
+        // reported success with no store.
+        let temp = TempDir::new().unwrap();
+        let cas = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let config = "[sync]\nenabled = false\ntarget = \".claude/rules/custom\"\n";
+        std::fs::write(cas.join("config.toml"), config).unwrap();
+
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+
+        assert!(cas_dir.join("cas.db").exists(), "the store must be created");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('entries', 'tasks', 'rules')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 3, "the store must be initialized, not just touched");
+        assert_eq!(
+            std::fs::read_to_string(cas_dir.join("config.toml")).unwrap(),
+            config,
+            "an intentional config.toml must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn init_cas_dir_leaves_an_initialized_cas_alone() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "# operator edits\n").unwrap();
+        let db_before = std::fs::read(cas_dir.join("cas.db")).unwrap();
+
+        init_cas_dir(temp.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cas_dir.join("config.toml")).unwrap(),
+            "# operator edits\n"
+        );
+        assert_eq!(std::fs::read(cas_dir.join("cas.db")).unwrap(), db_before);
+    }
+
+    #[test]
     fn logged_in_task_store_open_reconciles_a_committed_task_sync_intent() {
         let temp = TempDir::new().unwrap();
         let cas_dir = init_cas_dir(temp.path()).unwrap();

@@ -614,6 +614,61 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M o
   });
 });
 
+// cas-2072 (found in cas-7d25 QA, F01): at 1280 the Leave key chip trimmed the
+// pane's name to "patient-pelican…" and left an "Ea…" activity stub. The tail
+// digits are what tell twin codenames apart (cas-d141), so the name stays whole
+// and the activity line shows whole or not at all.
+test("HUB-J12 network switch: in control, the pane's whole name shows beside Leave and its key, at 1280 and on a phone (cas-2072)", journeyPart, async ({ page, journey }) => {
+  const input = terminalInput(page);
+  const leave = page.getByRole("button", { name: "Leave terminal", exact: true });
+  const header = page.locator(".pane-header").filter({ has: leave });
+  const drawer = page.locator("#machine-drawer-toggle");
+  /**
+   * What the in-control header paints, measured from the laid-out text rather
+   * than rounded scroll widths: F01's trim was a fraction of a pixel.
+   */
+  const painted = () => header.evaluate((head) => {
+    const text = (element: Element) => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect(); };
+    const title = head.querySelector<HTMLElement>(".pane-title")!;
+    const activity = head.querySelector<HTMLElement>(".pane-last-activity")!;
+    const key = head.querySelector<HTMLElement>(".pane-leave kbd")!;
+    const name = title.getBoundingClientRect(), nameText = text(title);
+    const box = activity.getBoundingClientRect(), words = text(activity);
+    const inside = words.left >= box.left - 0.02 && words.right <= box.right + 0.02 && words.top >= box.top - 0.02 && words.bottom <= box.bottom + 0.02;
+    const outside = words.top >= box.bottom - 0.02 || words.right <= box.left + 0.02 || box.width < 1 || !activity.checkVisibility();
+    const bounds = head.getBoundingClientRect();
+    return {
+      name: title.textContent,
+      nameWhole: nameText.left >= name.left - 0.02 && nameText.right <= name.right + 0.02,
+      activity: inside ? "whole" : outside ? "whole or hidden" : "cut",
+      key: key.checkVisibility() && key.getBoundingClientRect().width > 20,
+      controlsInside: [...head.querySelectorAll<HTMLElement>(".pane-layout-controls button")].filter((button) => button.checkVisibility()).every((button) => button.getBoundingClientRect().right <= bounds.right + 0.02),
+    };
+  }).then((shown) => ({ ...shown, activity: shown.activity === "cut" ? "cut" : "whole or hidden" }));
+  const whole = { name: "patient-pelican-9", nameWhole: true, activity: "whole or hidden", key: true, controlsInside: true };
+  await journey.stage("In control at 1280 with the drawer closed, the name and the key show whole, and the activity line whole or not at all", async () => {
+    await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await input.focus();
+    await expect(leave).toBeVisible();
+    expect.soft(await painted(), "drawer closed at 1280").toEqual(whole);
+  });
+  await journey.stage("With the drawer open, the name, the key and every control still fit", async () => {
+    await drawer.click();
+    await expect(drawer).toHaveAttribute("aria-expanded", "true");
+    await input.focus();
+    expect.soft(await painted(), "drawer open at 1280").toEqual(whole);
+    await page.locator("#machine-drawer-close").click();
+  });
+  await journey.stage("On a phone, the name and the key stay whole", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await input.focus();
+    expect.soft(await painted(), "on a phone").toEqual(whole);
+  });
+});
+
 // cas-f698: the old two-machine journey hid this behind the healthy STUDIO.
 // Exact failure: footer .machine-badge-state still says "Reconnecting" after
 // ATLAS alone reaches Needs pairing; the footer must use the same machine words.

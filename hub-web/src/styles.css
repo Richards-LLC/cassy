@@ -825,13 +825,6 @@ main {
 }
 
 .mode-badge.observer { color: var(--text-mid); }
-/* cas-d1fa: while this browser is in control the terminal keeps Tab, so the
-   header says how the keyboard leaves it, outside the terminal's drawing
-   area, where it never covers a program row. */
-.session-header .actions kbd { margin-left: var(--space-1); padding: 0 var(--space-1); color: var(--text-mid); font: inherit; font-size: var(--fs-xs); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
-@container session-header (max-width: 360px) {
-  .session-header .actions kbd { display: none; }
-}
 /* No control to claim while the session is reconnecting (cas-edcd, cas-4a93). */
 .mode-badge[hidden] { display: none; }
 
@@ -990,6 +983,21 @@ main {
   white-space: nowrap;
 }
 
+/* cas-d1fa: while this browser is in control the terminal keeps Tab; its
+   header says how the keyboard leaves it, outside the drawing area. */
+.pane-layout-controls .pane-leave[hidden] { display: none; }
+.pane-layout-controls .pane-leave kbd { margin-left: var(--space-1); padding: 0 var(--space-1); color: var(--text-mid); font: inherit; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+/* The key shows where the pane header has room for it; narrower, the pane's
+   own name keeps that room and the key is in the control's tooltip, its
+   aria-keyshortcuts and the terminal input's description. */
+.pane-header { container: pane-header / inline-size; }
+@container pane-header (max-width: 1040px) {
+  .pane-layout-controls .pane-leave kbd { display: none; }
+}
+@container pane-header (max-width: 960px) {
+  .pane-layout-controls .pane-leave { font-size: 0; }
+  .pane-layout-controls .pane-leave::after { content: "⇥"; font-size: var(--fs-md); }
+}
 .pane-layout-controls button:hover:not(:disabled),
 .pane-layout-controls button:focus-visible { color: var(--text-hi); background: var(--bg-hover); }
 
@@ -3004,6 +3012,7 @@ dialog form > *,
   .pane-grid.pane-layout .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
+  .pane-grid.pane-layout .pane-leave::after { content: "⇥"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .make-primary::after { content: "★"; font-size: var(--fs-meta); }
   .pane-grid.pane-layout .move-earlier::after { content: "←"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .move-later::after { content: "→"; font-size: var(--fs-md); }

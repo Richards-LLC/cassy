@@ -345,9 +345,10 @@ jobs:
             comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
           fi
           changed=false
-          if [[ -n "$(git diff --name-only "$comparison_base" HEAD -- \
+          changed_paths="$(git diff --name-only "$comparison_base" HEAD -- \
             'scripts/cassy-actions-*' 'scripts/test-cassy-actions-*' \
-            'scripts/install-cassy-actions-runner.sh')" ]]; then
+            'scripts/install-cassy-actions-runner.sh')"
+          if [[ -n "$changed_paths" ]]; then
             changed=true
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
@@ -540,9 +541,10 @@ jobs:
             comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
           fi
           changed=false
-          if [[ -n "$(git diff --name-only "$comparison_base" HEAD -- \
+          changed_paths="$(git diff --name-only "$comparison_base" HEAD -- \
             'scripts/cassy-actions-*' 'scripts/test-cassy-actions-*' \
-            'scripts/install-cassy-actions-runner.sh')" ]]; then
+            'scripts/install-cassy-actions-runner.sh')"
+          if [[ -n "$changed_paths" ]]; then
             changed=true
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"

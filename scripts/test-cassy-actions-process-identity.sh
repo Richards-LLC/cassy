@@ -16,6 +16,7 @@ check live 'same PID and start identity is live' 42 123 42 123 S
 check dead 'reused PID with different start identity is dead' 42 123 42 124 S
 check dead 'different PID with same start identity is dead' 42 123 43 123 S
 check dead 'missing process is dead' 42 123 '' '' ''
+check dead 'missing observed state cannot own a job' 42 123 42 123 ''
 check dead 'zombie cannot own a job' 42 123 42 123 Z
 check dead 'exited process cannot own a job' 42 123 42 123 X
 check dead 'invalid PID fails comparison' invalid 123 invalid 123 S

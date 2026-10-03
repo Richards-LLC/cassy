@@ -11,9 +11,12 @@
 ## Read-only queue diagnostics (cas-d6b9)
 
 The `supervisor relay` and `delivery retries` checks inspect an existing SQLite
-queue through a dedicated read-only connection. Missing queue tables or columns
-produce the existing warning findings with the exact missing schema named; they
-do not initialize or migrate the database, or report an absent queue as healthy.
+queue through a dedicated read-only connection, and never initialize or migrate
+the database. A project that has never queued anything has no `prompt_queue`
+table; that is healthy: `[OK] supervisor relay  no relays yet` and
+`[OK] delivery retries  none queued` (cas-5b0b). A queue that exists but can't be
+read warns in plain words with no SQL text: in use by another process, from an
+older cas (run `cas update --schema-only`), damaged, or not openable.
 Populated and empty queues retain their existing health messages and JSON shape.
 No renderer, palette, grouping or output flag changes. The assembled binary owns
 the attributed `doctor_snapshot` regeneration and terminal captures; worker

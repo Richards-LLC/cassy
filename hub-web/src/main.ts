@@ -46,6 +46,7 @@ import { firstAttachRetry, machineConnection, sessionConnection } from "./sessio
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { relativeTimestamp } from "./time";
 import { paneActivityLabel, paneShowsOutput } from "./pane-activity";
+import { fleetControlGate } from "./fleet-permissions";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -2526,16 +2527,18 @@ function persistArrivals(): void {
 }
 
 /**
- * cas-adfc: conversations whose draft is over the store's bound, so it lives
- * only in this page; the composer says so while it shows that conversation.
+ * cas-adfc, cas-f657: conversations whose draft lives only in this page, and
+ * why: over the store's bound, or refused by a full localStorage. The draft
+ * stays in memory (conversationDrafts); the composer says so while it shows
+ * that conversation.
  */
-const draftsTooLongToKeep = new Set<string>();
+const draftsNotKept = new Map<string, "too-long" | "not-saved">();
 
-/** The composer's too-long note, for the conversation it is showing. */
+/** The composer's draft note, for the conversation it is showing. */
 function paintDraftNote(): void {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   const key = composer?.dataset.threadKey;
-  applyDraftNote(document, !!key && draftsTooLongToKeep.has(key));
+  applyDraftNote(document, (key && draftsNotKept.get(key)) || false);
 }
 
 /** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
@@ -2543,7 +2546,7 @@ function rememberDraft(key: string, draft: Draft | undefined): void {
   if (draft) conversationDrafts.set(key, draft); else conversationDrafts.delete(key);
   const machineId = key.slice(0, key.indexOf(":"));
   const saved = drafts.save(key, conversationPersistenceBlocked.has(machineId) ? undefined : draft);
-  if (saved === "too-long") draftsTooLongToKeep.add(key); else draftsTooLongToKeep.delete(key);
+  if (saved === "too-long" || saved === "not-saved") draftsNotKept.set(key, saved); else draftsNotKept.delete(key);
   paintDraftNote();
 }
 
@@ -2559,7 +2562,7 @@ function purgeMachineConversations(machineId: string, options: { forgetInMemory:
   for (const key of [...storedArrivals.keys()]) if (key.startsWith(`${machineId}:`)) storedArrivals.delete(key);
   if (options.forgetInMemory) {
     for (const key of [...conversationDrafts.keys()]) if (key.startsWith(`${machineId}:`)) conversationDrafts.delete(key);
-    for (const key of [...draftsTooLongToKeep]) if (key.startsWith(`${machineId}:`)) draftsTooLongToKeep.delete(key);
+    for (const key of [...draftsNotKept.keys()]) if (key.startsWith(`${machineId}:`)) draftsNotKept.delete(key);
   }
 }
 
@@ -4106,7 +4109,7 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4459,7 +4462,8 @@ function renderAttention(): void {
     act: performAttentionAction,
     copy: async (payload) => {
       await navigator.clipboard.writeText(payload);
-      toast("Event payload copied");
+      // cas-177c: Copy copies the Details text (readable since cas-ed87), so say so.
+      toast("Details copied");
     },
   }, {
     animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,
@@ -5324,8 +5328,26 @@ function pairedMachineRows(): PairedMachineRow[] {
       everConnected: lastLiveAt.has(machine.id),
       connectionState: state,
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
-      runtime: machineInfo.get(machine.id)?.version };
+      runtime: machineInfo.get(machine.id)?.version,
+      // cas-d382: what this pairing may do to the fleet, and how to get the rest.
+      fleet: { operate: fleetControlGate(machine.scopes, "add-workers", location.origin), manage: fleetControlGate(machine.scopes, "stop-worker", location.origin) } };
   }));
+}
+
+/**
+ * The one-time "Allow managing workers" grant (cas-d382), as session launch
+ * is allowed: the hub adds factory-operate to this device's credential.
+ * A refusal is said in the register, beside the machine.
+ */
+async function allowManagingWorkers(machineId: string): Promise<void> {
+  const error = document.querySelector<HTMLElement>("#paired-machines-error");
+  try {
+    await launchConnection(machineId).enableFactoryOperate();
+    if (error) { error.hidden = true; error.textContent = ""; }
+  } catch (failure) {
+    if (error) { error.textContent = failure instanceof Error ? failure.message : "Could not allow managing workers."; error.hidden = false; }
+  }
+  renderMachineRegister();
 }
 
 function renderMachineRegister(): void {
@@ -5351,7 +5373,11 @@ function renderMachineRegister(): void {
   // cas-0739: a closed register is kept in order (not connected first) and
   // scrolled to its top, so it opens on the machine the footer names; an open
   // one keeps its order so a status tick never moves a row under the operator.
-  renderPairedMachines(list, rows, forgetPairedMachine, { reorder: !dialog.open });
+  renderPairedMachines(list, rows, forgetPairedMachine, {
+    reorder: !dialog.open,
+    copy: (text) => navigator.clipboard.writeText(text),
+    allowManagingWorkers: allowManagingWorkers,
+  });
   if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).

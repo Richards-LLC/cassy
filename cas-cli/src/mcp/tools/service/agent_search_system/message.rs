@@ -1648,11 +1648,24 @@ impl CasService {
                     frozen_anchor.is_some() && anchor_integrated && !other_task_active;
                 if let Some(branch) = branch
                     && let Some(branch_tip) = frozen_anchor.or_else(|| {
-                        crate::prompt_revalidation::resolve_live_branch_tip(
+                        let live = crate::prompt_revalidation::resolve_live_branch_tip(
                             &repo.repo_root,
                             &branch,
                             recorded_anchor.as_deref(),
-                        )
+                        )?;
+                        // cas-afa9: a parked delivery is judged by a live tip
+                        // only when that tip contains it; a recorded branch
+                        // from an earlier cycle is not this delivery.
+                        Some(match recorded_anchor.as_deref() {
+                            Some(anchor) if task.status == cas_types::TaskStatus::AwaitingMerge => {
+                                crate::prompt_revalidation::merge_request_judged_tip(
+                                    &repo.repo_root,
+                                    Some(live),
+                                    anchor,
+                                )
+                            }
+                            _ => live,
+                        })
                     })
                 {
                     if task.status != cas_types::TaskStatus::AwaitingMerge

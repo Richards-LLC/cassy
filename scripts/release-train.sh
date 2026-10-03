@@ -98,11 +98,14 @@ if [[ -d "$stage_dir" ]]; then
     shopt -u nullglob
 fi
 pid_file="$run_dir/gate.pid"
+# Every row release-gate.sh accepts, in its order. test-release-train.sh pins
+# this list to the gate's gate_check_ids, so a new gate row cannot be refused
+# by `--gate --only` again (cas-704a: hub-web-tests and eight more were).
 readonly -a gate_rows=(
-    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
-    version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
-    snapshot-portability builtin-projections changelog-and-versions release-script
-    procedure-guardrails working-tree
+    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
+    version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
+    procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
 
 # Cross-cutting audit hook. The --cut dispatcher marks nested calls with

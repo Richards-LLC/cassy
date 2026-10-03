@@ -362,3 +362,38 @@ describe("turn times store (cas-8d52)", () => {
     expect(arrivalStore(storage).load().size).toBe(0);
   });
 });
+
+describe("a draft the browser refuses to store says so (cas-f657)", () => {
+  /** A Storage with a byte quota, as a browser's localStorage is: setItem past it throws QuotaExceededError. */
+  function quotaStorage(quotaChars: number) {
+    const data = new Map<string, string>();
+    const used = () => [...data].reduce((sum, [key, value]) => sum + key.length + value.length, 0);
+    return {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        const before = data.get(key);
+        const next = used() - (before === undefined ? 0 : key.length + before.length) + key.length + value.length;
+        if (next > quotaChars) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+        data.set(key, value);
+      },
+      removeItem: (key: string) => { data.delete(key); },
+    };
+  }
+
+  it("reports not-saved when a full localStorage throws on the draft's write, and keeps nothing stale", () => {
+    const storage = quotaStorage(8_000);
+    // Another page's data fills the quota first.
+    storage.setItem("other-app:cache", "x".repeat(7_900));
+    const drafts = draftStore(storage);
+    expect(drafts.save("atlas:pelican", { text: "a reply that will not fit on disk", caret: 0 })).toBe("not-saved");
+    expect(draftStore(storage).load().size).toBe(0);
+    // Room again (the other page cleared its cache): the same draft is kept.
+    storage.removeItem("other-app:cache");
+    expect(drafts.save("atlas:pelican", { text: "a reply that will not fit on disk", caret: 0 })).toBe("kept");
+    expect(draftStore(storage).load().get("atlas:pelican")?.text).toBe("a reply that will not fit on disk");
+  });
+
+  it("still reports too-long, not not-saved, for a draft over the store's own bound", () => {
+    expect(draftStore(quotaStorage(8_000)).save("atlas:pelican", { text: "z".repeat(70_000), caret: 0 })).toBe("too-long");
+  });
+});

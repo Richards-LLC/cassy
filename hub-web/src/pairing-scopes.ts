@@ -11,8 +11,21 @@ export const PAIRING_SCOPES: Scope[] = ["machine-read", "session-read", "pane-re
  */
 export const LAUNCH_SCOPE: Scope = "session-launch";
 
+/**
+ * Fleet operations (cas-d382, fleet-operations brief S4). factory-operate
+ * covers the non-destructive ones (focus an epic, add workers, pause and
+ * resume, assign a task) and may be allowed once from this browser, like
+ * session launch; factory-manage covers Stop, Restart and End session and
+ * is granted only by a pairing invitation the machine's owner mints.
+ */
+export const FACTORY_OPERATE_SCOPE: Scope = "factory-operate";
+export const FACTORY_MANAGE_SCOPE: Scope = "factory-manage";
+
+/** Scopes outside the default pairing that a form offers only when an invitation grants them. */
+const OPTIONAL_INVITATION_SCOPES: readonly Scope[] = [LAUNCH_SCOPE, FACTORY_OPERATE_SCOPE, FACTORY_MANAGE_SCOPE];
+
 /** Every scope an invitation link may declare that this build understands. */
-const KNOWN_INVITATION_SCOPES: readonly Scope[] = [...PAIRING_SCOPES, LAUNCH_SCOPE];
+const KNOWN_INVITATION_SCOPES: readonly Scope[] = [...PAIRING_SCOPES, ...OPTIONAL_INVITATION_SCOPES];
 
 /** What `cas hub pair` grants when its `--scopes` flag is left at its default. */
 export const READ_ONLY_PAIRING_SCOPES: Scope[] = ["machine-read", "session-read", "pane-read"];
@@ -54,6 +67,14 @@ export function canEnableSessionLaunch(scopes: readonly Scope[]): boolean {
   return CONTROL_SCOPES.every((scope) => scopes.includes(scope));
 }
 
+/** The one-time "Allow managing workers" grant has the session-launch rule: the device already holds the control scopes. */
+export function canEnableFactoryOperate(scopes: readonly Scope[]): boolean {
+  return CONTROL_SCOPES.every((scope) => scopes.includes(scope));
+}
+
+export const FACTORY_OPERATE_CAPABILITY = "Manage workers and tasks";
+export const FACTORY_MANAGE_CAPABILITY = "Stop and restart workers and sessions";
+
 /** One capability per scope, for a grant that is not a whole group. */
 const SCOPE_CAPABILITY: Readonly<Record<Scope, string>> = {
   "machine-read": "See this machine",
@@ -63,7 +84,8 @@ const SCOPE_CAPABILITY: Readonly<Record<Scope, string>> = {
   "message-send": "Send messages to supervisors",
   "pane-interrupt": "Interrupt panes",
   "session-launch": "Start new sessions",
-  "factory-manage": "Manage the factory",
+  "factory-operate": FACTORY_OPERATE_CAPABILITY,
+  "factory-manage": FACTORY_MANAGE_CAPABILITY,
   "hub-admin": "Administer the hub",
 };
 
@@ -100,9 +122,10 @@ export interface ScopeChoice {
 }
 
 export function scopeChoices(granted: readonly Scope[] | undefined, selected: readonly Scope[]): ScopeChoice[] {
-  // Launch is listed only when the invitation grants it: offering a box the
-  // machine never grants would only ever render disabled.
-  const offered = granted?.includes(LAUNCH_SCOPE) ? KNOWN_INVITATION_SCOPES : PAIRING_SCOPES;
+  // Launch and the fleet scopes are listed only when the invitation grants
+  // them: offering a box the machine never grants would only ever render
+  // disabled.
+  const offered = [...PAIRING_SCOPES, ...OPTIONAL_INVITATION_SCOPES.filter((scope) => granted?.includes(scope))];
   return offered.map((scope) => {
     const allowed = !granted || granted.includes(scope);
     return { scope, label: scopeLabel(scope), granted: allowed, checked: allowed && selected.includes(scope) };
@@ -125,8 +148,16 @@ export function pairCommand(controllerOrigin: string, scopes: readonly Scope[]):
  * new link must carry everything the old one granted.
  */
 export function launchGrantCommand(controllerOrigin: string, current: readonly Scope[]): string {
-  const scopes = [...current.filter((scope) => scope !== LAUNCH_SCOPE), LAUNCH_SCOPE];
-  return pairCommand(controllerOrigin, scopes);
+  return scopeGrantCommand(controllerOrigin, current, LAUNCH_SCOPE);
+}
+
+/**
+ * The command whose link re-pairs this browser with its current access plus
+ * one more scope: pairing again replaces the credential, so the link must
+ * carry everything the old one granted.
+ */
+export function scopeGrantCommand(controllerOrigin: string, current: readonly Scope[], scope: Scope): string {
+  return pairCommand(controllerOrigin, [...current.filter((held) => held !== scope), scope]);
 }
 
 /**

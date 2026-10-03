@@ -658,15 +658,72 @@ impl HookOutput {
     /// PreToolUse with a modified tool input. Claude Code applies the updated
     /// input in place of the original before the tool runs.
     pub fn with_pre_tool_updated_input(updated_input: serde_json::Value) -> Self {
-        Self {
+        Self::with_pre_tool_updated_input_for_harness(PreToolUseHarness::current(), updated_input)
+    }
+
+    /// [`Self::with_pre_tool_updated_input`] for an explicit harness.
+    ///
+    /// cas-980d: Codex applies `updatedInput` only together with
+    /// `permissionDecision: "allow"`. Without it the output is invalid and
+    /// Codex fails open, running the original command (its hook output parser,
+    /// `unsupported_pre_tool_use_hook_specific_output`). That is how a worker's
+    /// `cargo check` ran raw, with no capped runner and no slot lock. Claude
+    /// keeps the input rewrite without a decision, as before.
+    pub fn with_pre_tool_updated_input_for_harness(
+        harness: PreToolUseHarness,
+        updated_input: serde_json::Value,
+    ) -> Self {
+        let mut output = Self {
             hook_specific_output: Some(HookSpecificOutput::PreToolUse {
                 permission_decision: None,
                 permission_decision_reason: None,
-                updated_input: Some(updated_input),
+                updated_input: None,
                 additional_context: None,
             }),
             ..Default::default()
+        };
+        output.rewrite_pre_tool_input_for_harness(harness, updated_input);
+        output
+    }
+
+    /// Replace the tool input of a PreToolUse response that does not deny,
+    /// in the shape the current harness applies (see
+    /// [`Self::with_pre_tool_updated_input_for_harness`]). A response without
+    /// a PreToolUse body gets one. Returns false, changing nothing, for a deny.
+    pub fn rewrite_pre_tool_input(&mut self, updated_input: serde_json::Value) -> bool {
+        self.rewrite_pre_tool_input_for_harness(PreToolUseHarness::current(), updated_input)
+    }
+
+    /// [`Self::rewrite_pre_tool_input`] for an explicit harness.
+    pub fn rewrite_pre_tool_input_for_harness(
+        &mut self,
+        harness: PreToolUseHarness,
+        updated_input: serde_json::Value,
+    ) -> bool {
+        let body = self
+            .hook_specific_output
+            .get_or_insert(HookSpecificOutput::PreToolUse {
+                permission_decision: None,
+                permission_decision_reason: None,
+                updated_input: None,
+                additional_context: None,
+            });
+        let HookSpecificOutput::PreToolUse {
+            permission_decision,
+            updated_input: slot,
+            ..
+        } = body
+        else {
+            return false;
+        };
+        if permission_decision.as_deref() == Some("deny") {
+            return false;
         }
+        if harness == PreToolUseHarness::Codex {
+            *permission_decision = Some("allow".to_string());
+        }
+        *slot = Some(updated_input);
+        true
     }
 
     /// PermissionRequest decision — `decision` is `"allow"` / `"deny"` /

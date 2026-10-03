@@ -103,18 +103,11 @@ pub fn handle_pre_tool_use(
             // Evaluate every existing protection against the command that
             // will actually run, including early rule-based approvals.
             let mut output = handle_pre_tool_use(&rewritten_input, cas_root)?;
-            if let Some(cas_core::hooks::types::HookSpecificOutput::PreToolUse {
-                permission_decision,
-                updated_input,
-                ..
-            }) = output.hook_specific_output.as_mut()
-            {
-                if permission_decision.as_deref() != Some("deny") {
-                    *updated_input = Some(updated);
-                }
-                return Ok(output);
-            }
-            return Ok(HookOutput::with_pre_tool_updated_input(updated));
+            // cas-980d: in the shape the harness applies. Codex honours the
+            // rewrite only with permissionDecision "allow" and otherwise runs
+            // the raw command; a deny from a later guard stands.
+            output.rewrite_pre_tool_input(updated);
+            return Ok(output);
         } else if let Some(what) =
             command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd)))
         {

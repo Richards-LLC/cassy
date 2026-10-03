@@ -16,7 +16,11 @@ import { claimReceiptDirectory } from "./receipt-directory.mjs";
 
 export { expect };
 
-export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? fileURLToPath(new URL("../.results/journeys", import.meta.url)));
+// The default receipt root sits inside the Playwright output directory
+// (JOURNEY_OUTPUT or e2e/.results), which Playwright empties at the start of
+// every run, so a rerun never finds the previous run's receipt claims.
+// journey-eval.sh passes its own fresh JOURNEY_RECEIPTS directory.
+export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? join(process.env.JOURNEY_OUTPUT ?? fileURLToPath(new URL("../.results", import.meta.url)), "journeys"));
 
 type Stage = { title: string; slug: string; ms: number; screenshot: string };
 

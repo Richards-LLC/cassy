@@ -5680,7 +5680,7 @@ impl CasCore {
         };
         // Legacy multi-task ownership cannot retire another active delivery's
         // cache. Store errors fail closed; only a known parked/closed worker runs.
-        let Ok(task_store) = crate::store::open_task_store(&self.inner.cas_root) else {
+        let Ok(task_store) = crate::store::open_task_store(&self.cas_root) else {
             return;
         };
         let Ok(tasks) = task_store.list(None) else {
@@ -5719,7 +5719,7 @@ impl CasCore {
         };
         let expected_head = head.trim().to_string();
         let task_id = task.id.clone();
-        let root = self.inner.cas_root.clone();
+        let root = self.cas_root.clone();
         let retention = self.load_config().factory().target_cache_retention_count;
         // Recursive unlinking must not hold the MCP task mutation budget.
         // Failure leaves regenerable outputs for later GC; delivery is durable.

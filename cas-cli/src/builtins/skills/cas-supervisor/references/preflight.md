@@ -39,9 +39,22 @@ That invocation is itself live CAS-MCP evidence, so a missing project
 not critical by itself.
 
 Nonzero exit → do not spawn; fix the finding named by its code (each non-ready
-state carries a stable finding code and its remediation), then rerun. A stale
-Cassy binary warning → stop and ask the operator to rebuild and reconnect MCP;
-never restart `cas serve` from the active session.
+state carries a stable finding code and its remediation), then rerun. Inspect
+the binary finding before choosing a deployment:
+
+- `binary.checkout_behind` or `binary.checkout_diverged`: continue factory
+  startup. Git proved the runtime contains the checkout, or the runtime matches
+  its release tag and the diverged checkout adds only documentation. Select a
+  matching checkout for source work; do not rebuild or downgrade the runtime.
+- `binary.deployment_unverified`: retry with complete, responsive local Git
+  history or set the intended `CAS_EXPECTED_DEPLOYMENT_SHA` before choosing a
+  replacement. A different SHA alone does not prove the runtime is older.
+- A stale/dirty/unknown deployment warning: stop, resolve the intended clean
+  deployment with the operator, and reconnect MCP after installing it. An
+  explicit `CAS_EXPECTED_DEPLOYMENT_SHA` remains authoritative even when local
+  ancestry or a release tag would otherwise allow the runtime.
+
+Never restart `cas serve` from the active MCP session.
 If `repository.candidate_limit` is reported, preview safe registry-only cleanup
 with `cas known-repos prune-missing --dry-run`, then apply it without the flag.
 This removes only rows for paths that no longer exist; it never deletes repo files.

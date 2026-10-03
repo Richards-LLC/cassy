@@ -119,6 +119,34 @@ fn human_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
 }
 
 #[test]
+fn invalid_explicit_deployment_pin_keeps_its_own_diagnostic_cas_b0c5() {
+    let project = project(true);
+    let home = TempDir::new().unwrap();
+    let output = command(&project, &home)
+        .env("CAS_EXPECTED_DEPLOYMENT_SHA", "v3.45.0")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["binary"]["state"], "stale");
+    assert_eq!(report["factory_blocked"], false);
+    let finding = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "binary.expected_sha_invalid")
+        .expect("invalid explicit pin must not be interpreted as a release tag");
+    assert!(
+        finding["remediation"]
+            .as_str()
+            .unwrap()
+            .contains("7-40 character hexadecimal")
+    );
+}
+
+#[test]
 fn explicit_cas_root_for_another_repo_still_fails_critical() {
     let active = project(true);
     let other = project(true);

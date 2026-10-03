@@ -295,3 +295,77 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
     await expect(page.getByText("No earlier history")).toBeFocused();
   });
 });
+
+// cas-c2cb: right after a reconnect the thread is put back at the reader's
+// turn (cas-2093). A reader who tabs to Load earlier in that window asked to
+// see it; the pending put-back must not then scroll the focused control out of
+// the thread. Tall enough history that the two positions differ, on a desktop
+// and a phone.
+for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["phone", { width: 390, height: 844 }]] as const) {
+  test(`HUB-J4 a reader who tabs to Load earlier during a reconnect sees it, and paging goes on (cas-c2cb, ${name})`, journeyPart, async ({ page, journey }) => {
+    const turn = (id: number, text: string, day: number) => ({ notification_id: id, reply_to: null, message: text, summary: "", device_id: "journey-device", kind: "answer", attachments: [], at: journeyDay(day, 0, id % 20) });
+    await page.setViewportSize(viewport);
+    const hub = await journey.hub({
+      machines: [ATLAS],
+      paired: ["atlas"],
+      multiplex: true,
+      history: {
+        [PELICAN]: [
+          { has_earlier: true, next_before: 30, messages: [], replies: Array.from({ length: 12 }, (_, i) => turn(40 + i, `Recent turn ${i}: the release gate and a long operator history to read through.`, 0)) },
+          { has_earlier: true, next_before: 10, messages: [], replies: Array.from({ length: 8 }, (_, i) => turn(12 + i, `Earlier turn ${i}: keep the reading position.`, 1)) },
+          { has_earlier: false, messages: [], replies: [turn(1, "The oldest entry, reached by keyboard.", 2)] },
+        ],
+      },
+    });
+    await page.addInitScript(() => {
+      new MutationObserver(() => {
+        const armed = window as unknown as { __focusLoadEarlierAtLive?: boolean };
+        if (!armed.__focusLoadEarlierAtLive) return;
+        if (document.querySelector("#conversation-connection")?.textContent !== " · Live") return;
+        armed.__focusLoadEarlierAtLive = false;
+        document.querySelector<HTMLElement>(".conversation-load-earlier")?.focus();
+      }).observe(document, { subtree: true, childList: true, characterData: true });
+    });
+    const log = page.getByRole("log");
+    const header = page.locator("#conversation-connection");
+    const loadEarlier = page.getByRole("button", { name: "Load earlier" });
+    /** How much of the focused control the thread shows: its box inside the thread's scroll box. */
+    const shownInThread = () => loadEarlier.evaluate((button) => {
+      const thread = button.closest<HTMLElement>(".conversation-reading.thread")!.getBoundingClientRect();
+      const box = button.getBoundingClientRect();
+      return { top: Math.round(box.top - thread.top), bottom: Math.round(thread.bottom - box.bottom), height: Math.round(box.height) };
+    });
+
+    await journey.stage(`Read an earlier page mid-history, then move on to the composer (${name})`, async () => {
+      await journey.open();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await expect(log.getByText("Recent turn 11:")).toBeVisible();
+      await loadEarlier.scrollIntoViewIfNeeded();
+      await loadEarlier.click();
+      await expect(log.getByText("Earlier turn 0:")).toBeAttached();
+      await expect(loadEarlier).toBeEnabled();
+      await page.getByRole("textbox", { name: "Your message" }).focus();
+    });
+
+    await journey.stage(`The reader tabs to Load earlier as the machine comes back, and sees it (${name})`, async () => {
+      await page.evaluate(() => { (window as unknown as { __focusLoadEarlierAtLive?: boolean }).__focusLoadEarlierAtLive = true; });
+      await hub.down("atlas", { sockets: "close" });
+      await expect(header).toContainText("Reconnecting");
+      await hub.up("atlas");
+      await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+      // Past the rebuild and the put-back of the reading position.
+      await page.waitForTimeout(650);
+      await expect(loadEarlier).toBeFocused();
+      const shown = await shownInThread();
+      expect(shown.top, "the focused Load earlier is not above the thread").toBeGreaterThanOrEqual(0);
+      expect(shown.bottom, "the focused Load earlier is not below the thread").toBeGreaterThanOrEqual(0);
+    });
+
+    await journey.stage(`Enter still loads the start of the conversation (${name})`, async () => {
+      await page.keyboard.press("Enter");
+      await expect(log.getByText("The oldest entry, reached by keyboard.")).toBeAttached();
+      expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
+      await expect(page.getByText("No earlier history")).toBeFocused();
+    });
+  });
+}

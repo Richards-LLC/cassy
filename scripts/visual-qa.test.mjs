@@ -390,7 +390,8 @@ test('text folded inside a closed <details> is not clipped; an open disclosure t
   // A real clip inside an open disclosure still fails.
   assert.equal(result.status, 'FAIL');
   assert.ok(clipped.some((finding) => /lost below the edge/.test(finding.textSample ?? '')), JSON.stringify(result.findings, null, 2));
-  assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '')), [], JSON.stringify(clipped, null, 2));
+  // Every clip found is that real one: its lost line or the box that loses it.
+  assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '') && !finding.elementPath.endsWith('div.clip')), [], JSON.stringify(clipped, null, 2));
 });
 
 test('visually hidden helpers, an intentional ellipsis and closed drawers pass strict; real defects still fail (GH #1081)', async () => {

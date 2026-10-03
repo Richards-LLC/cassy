@@ -283,6 +283,8 @@ let commandPaletteOpen = false;
  * land to read, not in the reply box: that would keep the keyboard up over
  * the conversation. Ctrl/Cmd+K and mouse opens mean a hardware keyboard. */
 let commandPaletteOpenedByTouch = false;
+/** The control that opened Paired machines, by id, so its close can hand focus back (cas-460a). */
+let pairedMachinesOpener: string | undefined;
 let speechCapability: SpeechInputCapability | undefined;
 let speechDetectionStarted = false;
 let speechController: SpeechDictationController | undefined;
@@ -4480,8 +4482,34 @@ document.addEventListener("keydown", (event) => {
 // (machines that aren't connected first) for its next opening; while it was
 // open, status ticks left its rows where they were.
 document.addEventListener("close", (event) => {
-  if ((event.target as Element | null)?.id === "paired-machines-dialog") renderMachineRegister();
+  const dialog = event.target as HTMLDialogElement | null;
+  if (dialog?.id !== "paired-machines-dialog") return;
+  renderMachineRegister();
+  restorePairedMachinesOpener(dialog);
 }, true);
+
+/**
+ * cas-460a: a shell rebuild while Paired machines is open (a pairing revoked,
+ * a machine added) replaces the footer and re-shows the dialog, so the
+ * browser's own focus restoration has no live opener to return to and focus
+ * fell to the page. When it did, focus goes back to the control that opened
+ * the register, or the footer's Paired machines control when that one is gone
+ * (the palette's entry closes with the palette). Focus still on a control
+ * inside the closed dialog (the re-shown dialog's ×) counts as lost: the
+ * browser drops it to the page a moment later. A close that hands focus on
+ * (Pair a machine opens its own dialog) is left alone.
+ */
+function restorePairedMachinesOpener(dialog: HTMLDialogElement): void {
+  const opener = pairedMachinesOpener;
+  pairedMachinesOpener = undefined;
+  const active = document.activeElement;
+  if (active && active !== document.body && active.isConnected && !dialog.contains(active)) return;
+  if (document.querySelector("dialog[open]")) return;
+  const visible = (element: HTMLElement | null): element is HTMLElement => element !== null && element.getClientRects().length > 0;
+  const fromOpener = opener ? document.getElementById(opener) : null;
+  const target = visible(fromOpener) ? fromOpener : document.getElementById("paired-machines-toggle");
+  if (visible(target)) target.focus();
+}
 
 // A layer that was over the sheet (the palette) has closed: focus goes back
 // into the sheet, to the control it left, rather than to the page.
@@ -5266,9 +5294,9 @@ function renderMachineRegister(): void {
   if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).
-  const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
+  const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
   for (const id of ['paired-machines-toggle', 'palette-paired-machines']) {
-    const button = document.getElementById(id); if (button) button.onclick = open;
+    const button = document.getElementById(id); if (button) button.onclick = () => open(id);
   }
   document.getElementById('paired-machines-close')!.onclick = () => dialog.close();
   document.getElementById('paired-machines-add')!.onclick = () => { dialog.close(); document.querySelector<HTMLDialogElement>('#pair-dialog')?.showModal(); };

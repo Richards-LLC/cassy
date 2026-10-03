@@ -102,7 +102,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Any close of the palette settles the flag render() reopens it from.
     expect(source).toContain("palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };");
     // Paired machines replaces the palette and clears the flag itself too.
-    expect(source).toContain("const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");
+    // cas-460a: it also remembers its opener so its close can hand focus back.
+    expect(source).toContain("const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");
     // No other code closes the palette dialog behind the flag's back.
     const closes = source.match(/#command-palette['"]\)\?\.close\(\)/g) ?? [];
     expect(closes).toHaveLength(1);

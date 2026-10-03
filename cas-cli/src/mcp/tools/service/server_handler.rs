@@ -159,36 +159,21 @@ impl ServerHandler for CasService {
             info!(method = "tools/call", tool = %tool_name, id = %request_id, "MCP call_tool START");
             let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
 
-            // Timeout after 55s to prevent silent hangs (Claude Code cancels at 60s)
-            let result = match tokio::time::timeout(
-                std::time::Duration::from_secs(55),
-                self.tool_router.call(tcc),
+            let budget = std::time::Duration::from_secs(55);
+            let result = self
+                .call_with_deadline(
+                    &tool_name,
+                    timeout_arguments.as_ref(),
+                    budget,
+                    self.tool_router.call(tcc),
+                )
+                .await;
+            let remaining = budget.saturating_sub(start.elapsed());
+            self.append_factory_context_with_budget(
+                result,
+                remaining.min(std::time::Duration::from_millis(500)),
             )
             .await
-            {
-                Ok(result) => {
-                    let elapsed = start.elapsed();
-                    if elapsed.as_secs() >= 5 {
-                        info!(method = "tools/call", tool = %tool_name, id = %request_id, elapsed_ms = elapsed.as_millis() as u64, "MCP slow request");
-                    }
-                    result
-                }
-                Err(_) => {
-                    warn!(method = "tools/call", tool = %tool_name, id = %request_id, "MCP tool call TIMED OUT after 55s — handler hung");
-                    let mutation_outcome =
-                        self.mutation_timeout_outcome(&tool_name, timeout_arguments.as_ref());
-                    Err(rmcp::ErrorData {
-                        code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                        message: format!(
-                            "Tool '{}' timed out after 55s. This is a Cassy server bug — please report it. Mutation outcome: {}",
-                            tool_name, mutation_outcome
-                        ).into(),
-                        data: None,
-                    })
-                }
-            };
-
-            self.append_factory_context(result).await
         }
     }
 }
@@ -220,43 +205,115 @@ fn caller_transcript_path(agent: &crate::types::Agent) -> Option<std::path::Path
 }
 
 impl CasService {
+    async fn call_with_deadline<F>(
+        &self,
+        tool_name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        budget: std::time::Duration,
+        future: F,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData>
+    where
+        F: std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>,
+    {
+        let action = arguments
+            .and_then(|args| args.get("action"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let task_id = arguments
+            .and_then(|args| args.get("id"))
+            .and_then(serde_json::Value::as_str);
+        let receipt = super::mutation_receipt::Receipt::new(tool_name, action, task_id);
+        let start = std::time::Instant::now();
+        match tokio::time::timeout(
+            budget,
+            super::mutation_receipt::scope(receipt.clone(), future),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let elapsed = start.elapsed();
+                let commit = receipt.commit.get();
+                let outcome = self.mutation_timeout_outcome(tool_name, arguments, commit);
+                warn!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, budget_ms = budget.as_millis() as u64, mutation_outcome = %outcome, "MCP response deadline elapsed");
+                Err(rmcp::ErrorData {
+                    code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
+                    data: Some(serde_json::json!({
+                        "mutation_outcome": if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "notification_id": commit.and_then(|commit| commit.notification_id),
+                        "elapsed_ms": elapsed.as_millis() as u64,
+                        "budget_ms": budget.as_millis() as u64,
+                    })),
+                })
+            }
+        }
+    }
+
     /// Preserve the tool's result and attach recoverable factory mail/recall.
     /// Only the registered process identity may read its inbox or transcript.
     async fn append_factory_context(
         &self,
         result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        self.append_factory_context_with_budget(result, std::time::Duration::from_millis(500))
+            .await
+    }
+
+    async fn append_factory_context_with_budget(
+        &self,
+        result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+        budget: std::time::Duration,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let Ok(mut output) = result else {
             return result;
         };
-        let this = self.clone();
-        let context = tokio::task::spawn_blocking(move || {
-            if crate::internal_llm::is_internal_invocation() {
-                return None;
+        if budget.is_zero() {
+            return Ok(output);
+        }
+        // Concurrent responses never wait for another response's context lock.
+        let Ok(mut pending) = self.factory_context.try_lock() else {
+            return Ok(output);
+        };
+        if pending.is_none() {
+            let this = self.clone();
+            *pending = Some(tokio::task::spawn_blocking(move || {
+                if crate::internal_llm::is_internal_invocation() {
+                    return None;
+                }
+                let id = this.inner.get_registered_agent_id_read_only().ok()?;
+                let agent = this.inner.open_agent_store().ok()?.get(&id).ok()?;
+                let name = std::env::var("CAS_AGENT_NAME").ok()?;
+                if agent.name != name {
+                    return None;
+                }
+                let role = match agent.role {
+                    crate::types::AgentRole::Supervisor => "supervisor",
+                    crate::types::AgentRole::Worker => "worker",
+                    _ => return None,
+                };
+                let input = crate::hooks::HookInput {
+                    session_id: agent.cc_session_id.clone().unwrap_or(agent.id.clone()),
+                    agent_role: Some(role.into()),
+                    transcript_path: caller_transcript_path(&agent)
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    ..Default::default()
+                };
+                crate::hooks::turn_context::fallback_context(&this.inner.cas_root, &input)
+            }));
+        }
+        let context = match tokio::time::timeout(budget, pending.as_mut().unwrap()).await {
+            Ok(result) => {
+                pending.take();
+                result.ok().flatten()
             }
-            let id = this.inner.get_registered_agent_id_read_only().ok()?;
-            let agent = this.inner.open_agent_store().ok()?.get(&id).ok()?;
-            let name = std::env::var("CAS_AGENT_NAME").ok()?;
-            if agent.name != name {
-                return None;
+            Err(_) => {
+                // Keep the handle: fallback_context may already have consumed mail.
+                // Its completed output belongs on the next successful response.
+                tracing::warn!("factory response context deferred; primary tool result preserved");
+                None
             }
-            let role = match agent.role {
-                crate::types::AgentRole::Supervisor => "supervisor",
-                crate::types::AgentRole::Worker => "worker",
-                _ => return None,
-            };
-            let input = crate::hooks::HookInput {
-                session_id: agent.cc_session_id.clone().unwrap_or(agent.id.clone()),
-                agent_role: Some(role.into()),
-                transcript_path: caller_transcript_path(&agent)
-                    .map(|path| path.to_string_lossy().into_owned()),
-                ..Default::default()
-            };
-            crate::hooks::turn_context::fallback_context(&this.inner.cas_root, &input)
-        })
-        .await
-        .ok()
-        .flatten();
+        };
         if let Some(context) = context {
             output.content.push(rmcp::model::Content::text(context));
         }
@@ -270,7 +327,11 @@ impl CasService {
         &self,
         tool_name: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        commit: Option<&super::mutation_receipt::Commit>,
     ) -> String {
+        if let Some(commit) = commit {
+            return format!("COMMITTED ({})", commit.description);
+        }
         let action = arguments
             .and_then(|args| args.get("action"))
             .and_then(serde_json::Value::as_str)
@@ -278,24 +339,6 @@ impl CasService {
 
         if !potentially_mutating_call(tool_name, action) {
             return "not applicable (the timed-out call was read-only)".to_string();
-        }
-
-        // Task close is the dangerous retry shape: its postcondition is cheap
-        // and authoritative, so report it rather than a vague generic hint.
-        if tool_name == "task"
-            && action == "close"
-            && let Some(task_id) = arguments
-                .and_then(|args| args.get("id"))
-                .and_then(serde_json::Value::as_str)
-        {
-            if let Ok(store) = self.inner.open_task_store()
-                && let Ok(task) = store.get(task_id)
-                && task.status == crate::types::TaskStatus::Closed
-            {
-                return format!(
-                    "COMMITTED (task `{task_id}` is Closed; do not retry close, re-query task state)"
-                );
-            }
         }
 
         "UNKNOWN (the response deadline elapsed before Cassy could confirm a committed write; re-query state before retrying)".to_string()
@@ -353,7 +396,11 @@ mod tests {
         std::fs::create_dir_all(&core.cas_root).unwrap();
         core.register_agent("timeout-sender".into(), "timeout-supervisor".into(), None)
             .unwrap();
-        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
         let arguments = serde_json::json!({
             "action": "message", "target": "timeout-recipient",
             "summary": "committed before slow handoff", "message": "durable message"
@@ -363,14 +410,183 @@ mod tests {
         let call = async move {
             sender.coordination(Parameters(request)).await.unwrap();
             // Simulate post-commit work that outlives the response budget.
-            std::future::pending::<()>().await;
+            std::future::pending::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>().await;
         };
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), call).await.is_err());
-        let rows = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap().peek_all(10).unwrap();
-        let row = rows.iter().find(|row| row.target == "timeout-recipient").unwrap();
-        let outcome = service.mutation_timeout_outcome("coordination", arguments.as_object());
-        assert!(outcome.contains("COMMITTED"), "durable notification {} reported {outcome}", row.id);
-        assert!(outcome.contains(&format!("notification_id: {}", row.id)), "{outcome}");
+        let started = std::time::Instant::now();
+        let error = service
+            .call_with_deadline(
+                "coordination",
+                arguments.as_object(),
+                std::time::Duration::from_millis(50),
+                call,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "post-commit work blocked response"
+        );
+        let rows = crate::store::open_prompt_queue_store(&service.inner.cas_root)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.target == "timeout-recipient")
+            .unwrap();
+        let outcome = error.message.to_string();
+        assert_eq!(
+            error.data.as_ref().unwrap()["mutation_outcome"],
+            "COMMITTED"
+        );
+        assert_eq!(error.data.as_ref().unwrap()["notification_id"], row.id);
+        assert!(
+            outcome.contains("COMMITTED"),
+            "durable notification {} reported {outcome}",
+            row.id
+        );
+        assert!(
+            outcome.contains(&format!("notification_id: {}", row.id)),
+            "{outcome}"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_create_and_notes_timeouts_confirm_only_their_write_cas_e4a8() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        tasks
+            .add(&crate::types::Task::new(
+                "cas-note".into(),
+                "existing".into(),
+            ))
+            .unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        for arguments in [
+            serde_json::json!({"action":"create", "title":"timeout creation", "risk":"none"}),
+            serde_json::json!({"action":"notes", "id":"cas-note", "notes":"committed note"}),
+        ] {
+            let sender = service.clone();
+            let request = serde_json::from_value(arguments.clone()).unwrap();
+            let call = async move {
+                sender.task(Parameters(request)).await.unwrap();
+                std::future::pending().await
+            };
+            let error = service
+                .call_with_deadline(
+                    "task",
+                    arguments.as_object(),
+                    std::time::Duration::from_millis(100),
+                    call,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.message.contains("COMMITTED"), "{error:?}");
+            assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
+        }
+        assert_eq!(tasks.list(None).unwrap().len(), 2);
+        assert!(
+            tasks
+                .get("cas-note")
+                .unwrap()
+                .notes
+                .contains("committed note")
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_timeout_receipts_do_not_turn_unknown_into_committed_cas_e4a8() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        let temp = tempfile::tempdir().unwrap();
+        let service = CasService::new(
+            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments = serde_json::json!({"action":"message"});
+        let budget = std::time::Duration::from_millis(10);
+        let committed = async {
+            super::super::mutation_receipt::message_committed(42);
+            std::future::pending().await
+        };
+        let (committed, unknown) = tokio::join!(
+            service.call_with_deadline("coordination", arguments.as_object(), budget, committed),
+            service.call_with_deadline(
+                "coordination",
+                arguments.as_object(),
+                budget,
+                std::future::pending()
+            ),
+        );
+        let committed = committed.unwrap_err().data.unwrap();
+        assert_eq!(committed["mutation_outcome"], "COMMITTED");
+        assert_eq!(committed["notification_id"], 42);
+        let unknown = unknown.unwrap_err();
+        let data = unknown.data.unwrap();
+        assert_eq!(data["mutation_outcome"], "UNKNOWN");
+        assert!(data["notification_id"].is_null());
+        assert_eq!(data["budget_ms"], 10);
+        assert!(data["elapsed_ms"].as_u64().unwrap() >= 10);
+        assert!(
+            !unknown.message.contains("55s"),
+            "elapsed time must be measured"
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_factory_context_preserves_result_and_retains_late_mail_cas_e4a8() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        let temp = tempfile::tempdir().unwrap();
+        let service = CasService::new(
+            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *service.factory_context.lock().await = Some(tokio::spawn(async move { rx.await.ok() }));
+        let result = service
+            .append_factory_context_with_budget(
+                Ok(CasCore::success("notification_id: 42")),
+                std::time::Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.content.len(), 1);
+        assert!(
+            service.factory_context.lock().await.is_some(),
+            "late mail must remain reachable"
+        );
+        tx.send("late mail".into()).unwrap();
+        let result = service
+            .append_factory_context_with_budget(
+                Ok(CasCore::success("next result")),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.content.len(), 2);
+        assert!(
+            serde_json::to_string(&result)
+                .unwrap()
+                .contains("late mail")
+        );
+        assert!(
+            service.factory_context.lock().await.is_none(),
+            "delivered once"
+        );
     }
 
     #[tokio::test]
@@ -512,9 +728,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output.content.len(), 1);
-        assert!(!serde_json::to_string(&output)
-            .unwrap()
-            .contains("mail already injected by transport"));
+        assert!(
+            !serde_json::to_string(&output)
+                .unwrap()
+                .contains("mail already injected by transport")
+        );
     }
 
     #[test]

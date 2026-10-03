@@ -1181,6 +1181,7 @@ impl CasCore {
                 }
             })?;
 
+        crate::mcp::tools::service::mutation_receipt::task_committed(&id);
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
         // cas-3e41 (GH #993): every task create, not only an epic, pushes the

@@ -138,6 +138,9 @@ pub struct CasService {
     /// Tool router used internally by rmcp's #[tool_router] macro
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    /// Keep late context available for a later response instead of dropping mail.
+    factory_context: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
+    message_sweep_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CasService {
@@ -150,6 +153,8 @@ impl CasService {
             #[cfg(feature = "mcp-proxy")]
             proxy,
             tool_router: Self::tool_router(),
+            factory_context: Default::default(),
+            message_sweep_lock: Default::default(),
         }
     }
 
@@ -385,6 +390,7 @@ impl CasService {
                 "close" => {
                     let result = this.task_close(req).await;
                     if result.is_ok() {
+                        mutation_receipt::task_committed(&event_task_id);
                         this.db_branch_after_task_end(&event_task_id).await;
                     }
                     result
@@ -1508,7 +1514,19 @@ impl CasService {
             // cas-0033: the supervisor's calls retry queued branch deletions
             // and delete branches whose task ended or whose worktree is gone
             // (for example right after worktree_cleanup). A no-op otherwise.
-            if !action.starts_with("db_branch_") {
+            if matches!(action.as_str(), "message" | "interrupt") {
+                // A queued message must not wait for unrelated provider cleanup.
+                // The durable cleanup state is retried on subsequent calls.
+                if crate::harness_policy::is_supervisor_from_env()
+                    && let Ok(guard) = this.message_sweep_lock.clone().try_lock_owned()
+                {
+                    let sweep = this.clone();
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        sweep.db_branch_sweep().await;
+                    });
+                }
+            } else if !action.starts_with("db_branch_") {
                 this.db_branch_sweep().await;
             }
 
@@ -1627,6 +1645,7 @@ pub(crate) mod harness_observation;
 pub(crate) mod opencode_liveness;
 pub(crate) mod orphan_recovery;
 mod panic_catch;
+pub(crate) mod mutation_receipt;
 #[cfg(test)]
 mod panic_regression_test;
 

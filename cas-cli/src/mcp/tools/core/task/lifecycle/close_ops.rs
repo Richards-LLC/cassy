@@ -11842,7 +11842,8 @@ fn regenerated_artifact_drop_note(
 /// re-synced the epic). The blob must also differ from the task's delivery
 /// base: content identical to where the task started (a reverted delivery)
 /// is never proof of delivery. Epic accounting sets `include_live_tip=false`
-/// to keep the recorded child anchor authoritative after lane reuse.
+/// to keep the recorded child anchor authoritative after lane reuse. A task-attributed
+/// path effect must survive without restoring an imported baseline.
 /// Returns the decision note for the accepted
 /// paths and the paths that remain dropped; `None` when Git cannot decide.
 fn target_identical_delivered_paths(
@@ -11896,7 +11897,8 @@ fn target_identical_delivered_paths(
         let target_blob = tree_path_blob(repo_path, &target, path)?;
         let present = target_blob != tree_path_blob(repo_path, &base, path)?
             && delivered.iter().try_fold(false, |found, commit| {
-                Some(found || tree_path_blob(repo_path, commit, path)? == target_blob)
+                Some(found || tree_path_blob(repo_path, commit, path)? == target_blob
+                    && task_attribution::final_path_snapshot_proven(repo_path, parent_branch, window, commit, &target, path)?)
             })?;
         if present {
             identical.push(path.clone());
@@ -11906,7 +11908,7 @@ fn target_identical_delivered_paths(
     }
     let note = (!identical.is_empty()).then(|| {
         format!(
-            "path(s) {} are byte-identical on the delivered tree ({}) and target `{target}`, and differ from delivery base `{base}`; the line proof's missing lines were not this delivery's final content (cas-f38ca)",
+            "path(s) {} are byte-identical on the delivered tree ({}) and target `{target}`, and differ from delivery base `{base}`; a task-attributed path effect survives without restoring an imported baseline, so the line proof's missing lines were not this delivery's final content (cas-f38ca, cas-5f0b)",
             identical.join(", "),
             delivered.join(", "),
         )

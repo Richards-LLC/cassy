@@ -780,6 +780,7 @@ pub(super) fn line_content_presence_with_resolutions(
         resolutions,
         false,
         &[],
+        false,
     )
 }
 
@@ -790,7 +791,7 @@ pub(super) fn resolution_content_presence(
     target: &str,
     path: &str,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_impl(repo, parent, delivery, target, path, &[], true, &[])
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], true, &[], false)
 }
 
 /// Caller proves the final handoff's own content on this path before allowing
@@ -814,7 +815,21 @@ pub(super) fn line_content_presence_with_task_cycle(
         resolutions,
         false,
         cycle,
+        false,
     )
+}
+
+/// Only the exact-final-snapshot companion may ask whether some attributed
+/// effect survives. Use the ordinary ownership history with no draft
+/// retirement: a deleted/reverted owner cannot be resurrected by a copy.
+pub(super) fn surviving_line_content(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], true)
 }
 
 fn line_content_presence_impl(
@@ -826,6 +841,7 @@ fn line_content_presence_impl(
     resolutions: &[String],
     novel_only: bool,
     cycle: &[String],
+    allow_partial: bool,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
     let delivery_commit = super::resolve_branch_sha(repo, &format!("{delivery}^{{commit}}"))
         .ok_or("delivery line anchor does not resolve to a commit")?;
@@ -1068,7 +1084,12 @@ fn line_content_presence_impl(
     let final_owners = states
         .get(target)
         .ok_or("target delivery line state is unavailable")?;
-    if final_owners.iter().any(Option::is_none) {
+    let lost = if allow_partial {
+        !final_owners.iter().flatten().any(|owner| !owner.positions.is_empty())
+    } else {
+        final_owners.iter().any(Option::is_none)
+    };
+    if lost {
         return Ok(Some(super::DeliveryContentPresence::Dropped {
             paths: vec![path.to_string()],
         }));

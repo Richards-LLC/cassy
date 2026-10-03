@@ -366,3 +366,94 @@ fn imported_baseline_inverse_close_and_epic_reject_cas_5f0b() {
         );
     }
 }
+
+#[test]
+fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
+    for remove_all in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        commit(repo, "shared.rs", "original();\n", "seed shared helper");
+        git(repo, &["checkout", "-qb", "factory/worker"]);
+        commit(
+            repo,
+            "worker.rs",
+            "task();\n",
+            "feat(cas-test1): worker delivery",
+        );
+        git(repo, &["checkout", "-qb", "factory/other", "main"]);
+        commit(
+            repo,
+            "shared.rs",
+            "imported();\n",
+            "chore(cas-aaaa): newer baseline",
+        );
+        commit(
+            repo,
+            "shared.rs",
+            "imported();\nadded();\nremoved();\n",
+            "chore: shared helper\n\nUnblocks cas-test1.",
+        );
+        commit(
+            repo,
+            "shared.rs",
+            if remove_all {
+                "imported();\n"
+            } else {
+                "imported();\nadded();\n"
+            },
+            "chore: trim helper",
+        );
+        git(repo, &["checkout", "-q", "main"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "factory/other",
+                "-m",
+                "integrate shared helper",
+            ],
+        );
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "main", "-m", "sync epic (cas-test1)"],
+        );
+        let anchor = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "integrate worker",
+            ],
+        );
+        let mut task = Task {
+            id: "cas-test1".into(),
+            title: "shared helper delivery".into(),
+            status: TaskStatus::AwaitingMerge,
+            assignee: Some("worker".into()),
+            created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            ..Default::default()
+        };
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        match (remove_all, close_gate(repo, &task)) {
+            (false, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)) => {
+            }
+            (true, MergeStateGateOutcome::Reject(message)) => assert!(
+                message.contains("DELIVERY CONTENT DROPPED") && message.contains("shared.rs"),
+                "{message}"
+            ),
+            (_, other) => {
+                panic!("side-parent attributed effect remove_all={remove_all}: {other:?}")
+            }
+        }
+        let row = epic_row(repo, &task);
+        assert_eq!(row.blocks_epic_close(), remove_all, "{row:?}");
+    }
+}

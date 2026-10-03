@@ -644,7 +644,10 @@ to any path; it grants no exemption for minified or generated files. Child close
 and epic accounting use task-attributed history for merge deliveries rather
 than crediting only the epic changes imported by a worker's sync merge. Epic
 accounting compares the recorded child anchor, so a later task on the same lane
-cannot supply its final snapshot. Restoring the delivery base still rejects.
+cannot supply its final snapshot. Exact-file recovery also requires a
+task-attributed path effect to survive, including attributed side-parent work. Restoring any imported path baseline, even
+one newer than the task's original base, rejects both explicit and unlabeled
+inverse changes unless a supervisor records the audited supersession below.
 
 For an older runtime that falsely reports dropped historical bundle lines,
 first inspect the recorded anchor and authoritative target with `git ls-tree`

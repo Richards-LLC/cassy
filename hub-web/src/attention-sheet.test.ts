@@ -118,3 +118,19 @@ describe("phone Attention sheet (cas-a5c6)", () => {
     expect(findByFocusKey(rail, key, all)).toBeUndefined();
   });
 });
+
+
+it("gives Tasks & progress the same modal guard while letting its nested native action dialog own Escape", () => {
+  const { root, rail } = shell();
+  applySheetSemantics(root, true, "progress");
+  expect(rail.getAttribute("aria-label")).toBe("Tasks & progress");
+  expect(root.classList.contains("fleet-sheet-open")).toBe(true);
+  const dialog = document.createElement("dialog"); dialog.setAttribute("open", ""); rail.append(dialog);
+  const close = vi.fn();
+  expect(layerAboveSheet(rail)).toBe(true);
+  expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, close, all)).toBe(false);
+  expect(close).not.toHaveBeenCalled();
+  dialog.remove(); applySheetSemantics(root, false);
+  expect(root.querySelectorAll("[inert]")).toHaveLength(0);
+  expect(root.classList.contains("fleet-sheet-open")).toBe(false);
+});

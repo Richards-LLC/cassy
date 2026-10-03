@@ -320,6 +320,8 @@ export class FleetOpsState {
   confirm: { rowKey: string; action: FleetAction } | undefined;
   preview: { rowKey: string; task: FleetTask } | undefined;
   assignFor: string | undefined;
+  /** The phone picker's form value survives a status redraw, never a new picker. */
+  pickerQuery = "";
   readonly pending = new Map<string, FleetAction>();
   readonly notes = new Map<string, RowNote>();
   undo: UndoOffer | undefined;
@@ -335,6 +337,7 @@ export class FleetOpsState {
     this.menuFor = undefined;
     this.assignFor = undefined;
     this.preview = undefined;
+    this.pickerQuery = "";
   }
 
   /** Choose a menu item: a destructive one opens its confirmation; anything else runs. Returns what should run now. */

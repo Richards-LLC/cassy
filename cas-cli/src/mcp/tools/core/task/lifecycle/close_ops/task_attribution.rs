@@ -11,16 +11,7 @@ struct DeliveryRange {
     tip: String,
 }
 
-fn git_text(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
+use crate::git_evidence::git_text;
 
 fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     message

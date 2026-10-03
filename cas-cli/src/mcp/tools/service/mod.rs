@@ -580,10 +580,12 @@ impl CasService {
         // cas-8563b (D2): agent actions only. The factory actions moved to the
         // `factory` tool and stay accepted here for one release.
         let result = match action.as_str() {
-            "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
-            | "session_end" | "inbox_poll" | "message" | "interrupt" | "message_ack"
-            | "message_status" | "remind" | "remind_list" | "remind_cancel"
-            | "my_context" => self.coordination_dispatch(req).await,
+            // cas-269ab: one action registry (`cas_mcp::actions`) drives the
+            // published enum, this routing and the invalid-action message.
+            // Aliases are canonicalized above.
+            agent if cas_mcp::actions::COORDINATION_ACTIONS.contains(&agent) => {
+                self.coordination_dispatch(req).await
+            }
             moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
                 let notice = moved_to_factory_notice(moved, self.inner.guidance_prefix());
                 Self::append_notice(self.coordination_dispatch(req).await, &notice)
@@ -609,15 +611,8 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let action = req.action.clone();
         let result = match action.as_str() {
-            "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker"
-            | "release_worker" | "worker_status" | "worker_activity" | "sweep_tasks"
-            | "clear_context" | "sync_all_workers" | "gc_report" | "gc_cleanup"
-            | "epic_status" | "focus_epic" | "restart_spawn_queue" | "agent_list"
-            | "agent_cleanup" | "lease_history" | "server_start" | "server_stop"
-            | "server_list" | "db_branch_create" | "db_branch_show" | "db_branch_delete"
-            | "worktree_create" | "worktree_list" | "worktree_show" | "worktree_cleanup"
-            | "worktree_merge" | "worktree_status" | "loop_start" | "loop_cancel"
-            | "loop_status" | "queue_notify" | "queue_poll" | "queue_peek" | "queue_ack" => {
+            // cas-269ab: routed from the same registry as the published enum.
+            fleet if cas_mcp::actions::FACTORY_ACTIONS.contains(&fleet) => {
                 self.coordination_dispatch(req).await
             }
             _ => Err(Self::error(

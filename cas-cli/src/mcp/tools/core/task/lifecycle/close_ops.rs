@@ -2329,14 +2329,37 @@ fn close_delivered_tip(
         .or_else(|| resolve_branch_sha(repo, "HEAD"))
 }
 
+/// Durable code evidence survives a deleted lane or a branchless parent.
+fn has_recorded_code_delivery(task: &Task) -> bool {
+    let delivery = &task.deliverables;
+    !delivery.files_changed.is_empty()
+        || delivery.commit_hash.is_some()
+        || delivery.merge_commit.is_some()
+        || delivery.delivery_pr_merge_commit.is_some()
+        || delivery.factory_branch_anchor.is_some()
+        || !delivery.historical_factory_branch_anchors.is_empty()
+}
+
 /// Select one tip for the path, proof-base and snapshot consumers of close.
 fn close_task_delivery_tip(
     task: &Task,
     repo: &std::path::Path,
     receipt: Option<&str>,
     merged_anchor: Option<&str>,
+    epic_has_recorded_delivery: bool,
 ) -> Result<Option<String>, String> {
     if task.task_type == TaskType::Epic {
+        // cas-04c6: planning/ops epics have no Git delivery window. A
+        // declared branch, receipt or durable parent/child delivery must
+        // still resolve; absence is never permission to measure HEAD.
+        if task.branch.is_none()
+            && receipt.is_none()
+            && merged_anchor.is_none()
+            && !epic_has_recorded_delivery
+            && !has_recorded_code_delivery(task)
+        {
+            return Ok(None);
+        }
         return epic_close_tip(task, receipt, repo)
             .map(Some)
             .ok_or_else(|| {
@@ -8745,6 +8768,29 @@ impl CasCore {
             let proof_repo = worker_worktree_path
                 .as_deref()
                 .unwrap_or(close_project_root.as_path());
+            let mut epic_has_recorded_delivery = !task_commit_identity.known_commits.is_empty();
+            if task.task_type == TaskType::Epic
+                && task.branch.is_none()
+                && req.commit_receipt.is_none()
+            {
+                // The subtree is recursive. Read failures must not classify
+                // an unmeasurable code epic as a branchless planning epic.
+                let children = task_store.get_subtasks(&task.id).map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("epic delivery scope: cannot read children of {}: {error}", task.id)),
+                    data: None,
+                })?;
+                for child in &children {
+                    epic_has_recorded_delivery |= has_recorded_code_delivery(child);
+                    let receipt = cas_store::get_latest_worker_delivery(&self.cas_root, &child.id)
+                        .map_err(|error| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!("epic delivery scope: cannot read delivery of {}: {error}", child.id)),
+                            data: None,
+                        })?;
+                    epic_has_recorded_delivery |= receipt.is_some();
+                }
+            }
             let delivered_tip = match close_task_delivery_tip(
                 &task,
                 proof_repo,
@@ -8754,10 +8800,12 @@ impl CasCore {
                 } else {
                     parked_head.as_deref()
                 },
+                epic_has_recorded_delivery,
             ) {
                 Ok(tip) => tip,
                 Err(message) => return Ok(Self::tool_error(message)),
             };
+            let has_delivery_window = task.task_type != TaskType::Epic || delivered_tip.is_some();
             // cas-b36b: an epic answers for its own resolved tip even when
             // the supervisor checkout holds an unrelated branch. cas-f0a6:
             // a merged child's anchor similarly replaces the checkout HEAD.
@@ -8775,6 +8823,7 @@ impl CasCore {
             };
             let delivered_paths = commit_receipt_window
                 .as_ref()
+                .filter(|_| has_delivery_window)
                 .and_then(|window| {
                     task_attribution::paths(
                         proof_repo,
@@ -8795,7 +8844,7 @@ impl CasCore {
             // it collapses onto the delivery commit, the proof surface becomes
             // empty, and no run can satisfy both checks. Fall back to the
             // merge-base only when the delivery cannot be attributed at all.
-            let attributed_delivery_base = commit_receipt_window.as_ref().and_then(|window| {
+            let attributed_delivery_base = commit_receipt_window.as_ref().filter(|_| has_delivery_window).and_then(|window| {
                 task_attribution::delivery_base(
                     proof_repo,
                     &resolved_parent_branch,
@@ -8803,7 +8852,7 @@ impl CasCore {
                     attribution_receipt,
                 )
             });
-            let scoped_proof_base = declared_repo_context.as_ref().and_then(|context| {
+            let scoped_proof_base = declared_repo_context.as_ref().filter(|_| has_delivery_window).and_then(|context| {
                 attributed_delivery_base
                     .clone()
                     .or_else(|| {
@@ -8853,7 +8902,7 @@ impl CasCore {
                 &resolved_parent_branch,
                 attributed_delivery_base.as_deref(),
                 delivered_tip.as_deref(),
-                task.execution_note.as_deref() == Some("no-code"),
+                !has_delivery_window || task.execution_note.as_deref() == Some("no-code"),
                 tip_is_task_delivery,
             ) && let Some(error) = snapshot_approval::rejection(
                 proof_repo,

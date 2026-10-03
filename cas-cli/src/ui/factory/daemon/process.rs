@@ -121,6 +121,10 @@ pub fn fork_into_daemon(app: FactoryApp, session_name: String) -> anyhow::Result
     );
     session_manager.save_metadata(&metadata)?;
 
+    // cas-65cce: close idle pooled SQLite connections before fork(). A child
+    // that inherits an open connection shares its file descriptors and locks
+    // with the parent, which SQLite does not support across fork.
+    cas_store::shared_db::close_idle_connections();
     // Fork!
     match unsafe { fork() } {
         Ok(NixForkResult::Parent { child }) => {
@@ -468,6 +472,33 @@ pub(super) fn install_panic_hook(path: std::path::PathBuf) {
 
 #[cfg(test)]
 mod tests {
+
+    /// cas-65cce: both daemon fork paths close idle shared_db connections
+    /// immediately before fork(), so no child inherits a pooled SQLite handle.
+    #[test]
+    fn daemon_fork_paths_close_idle_db_connections_before_fork_cas_65cce() {
+        // pin: fork() cannot be exercised safely inside the test process, so the close-before-fork ordering is pinned at source level.
+        for (name, source) in [
+            ("process.rs (daemonize)", include_str!("process.rs")),
+            ("fork_first.rs (fork_first_daemon)", include_str!("fork_first.rs")),
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            let forks: Vec<usize> = production.match_indices("match unsafe { fork() }").map(|(at, _)| at).collect();
+            assert_eq!(forks.len(), 1, "{name}: one fork() call");
+            let before = &production[..forks[0]];
+            let close = before
+                .rfind("cas_store::shared_db::close_idle_connections();")
+                .unwrap_or_else(|| panic!("{name}: close_idle_connections() must precede fork()"));
+            let between = &before[close..];
+            assert!(
+                between.lines().skip(1).all(|line| {
+                    let line = line.trim();
+                    line.is_empty() || line.starts_with("//")
+                }),
+                "{name}: nothing may run between close_idle_connections() and fork():\n{between}"
+            );
+        }
+    }
     use super::*;
 
     /// Regression: `append(true) + truncate(true)` is EINVAL on every platform.

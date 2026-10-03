@@ -1028,6 +1028,10 @@ fn artifact_namespaces_distinguish_same_named_projects_and_share_store_aliases_c
     let b_dir = project_factory_artifacts_root(&b, &base);
     assert_ne!(a_dir, b_dir);
     assert_eq!(a_dir.parent().unwrap(), base);
+    let resolved = resolved_factory_artifact_paths(&a, base.to_str());
+    assert_eq!(resolved.base, base);
+    assert_eq!(resolved.project_root, a_dir);
+    assert_eq!(resolved.task_dirs("cas-a4b1"), factory_task_artifact_dirs(&a, &base, "cas-a4b1"));
     assert_eq!(
         factory_task_artifact_dirs(&a, &base, "cas-a4b1")[0],
         a_dir.join("cas-a4b1")

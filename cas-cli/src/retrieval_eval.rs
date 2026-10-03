@@ -675,7 +675,8 @@ pub fn helpful_memories_ranking(
 // The production Helpful-Memories path (cas-b06c)
 // ---------------------------------------------------------------------------
 
-/// Isolates process-global inputs for the duration of a production measurement.
+/// The neutral hook environment a production measurement runs under
+/// (cas-7cc95).
 ///
 /// `build_context_with_stores` renders an Agent Coordination section whenever
 /// `CAS_AGENT_ROLE` is set, which consumes token budget and can change which
@@ -684,20 +685,30 @@ pub fn helpful_memories_ranking(
 ///
 /// The wrapper also opens host constraints through HOME/.cas and loads cloud
 /// credentials through both CAS_ROOT and the user-level cloud path. Every
-/// CAS_* variable is scrubbed, CAS_ROOT points at the disposable corpus,
-/// HOME/XDG_CONFIG_HOME point at a disposable home, and a logged-out cloud
-/// config is installed there. This keeps the ranking independent of the
-/// worker's real ~/.cas, login state, and live cloud.
+/// CAS_* variable reads as unset, CAS_ROOT is the disposable corpus,
+/// HOME/XDG_CONFIG_HOME are a disposable home, and a logged-out cloud config
+/// is installed there. This keeps the ranking independent of the worker's
+/// real ~/.cas, login state, and live cloud.
 ///
-/// Safe under the repo's standard runner: nextest gives every test its own
-/// process, so this cannot race a sibling test.
-struct NeutralHookEnv {
-    restore: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+/// Nothing writes the process environment: the values form an injected
+/// [`HookEnvironment`] that a measurement installs for its own thread with
+/// [`HookEnvironment::scope`], so concurrent measurements stay independent.
+pub struct NeutralHookEnvironment {
+    environment: std::sync::Arc<cas_core::env_overlay::HookEnvironment>,
     _home: tempfile::TempDir,
 }
 
-impl NeutralHookEnv {
-    fn acquire(cas_dir: &Path) -> Self {
+impl NeutralHookEnvironment {
+    pub fn new(cas_dir: &Path) -> Self {
+        Self::with(cas_dir, |environment| environment)
+    }
+
+    /// The neutral environment with extra values on top, for example an
+    /// agent identity a measurement should see.
+    pub fn with(
+        cas_dir: &Path,
+        extend: impl FnOnce(cas_core::env_overlay::HookEnvironment) -> cas_core::env_overlay::HookEnvironment,
+    ) -> Self {
         let home = tempfile::tempdir().expect("temporary production-eval HOME");
         let home_path = home.path().to_path_buf();
         let home_cas = home_path.join(".cas");
@@ -709,58 +720,23 @@ impl NeutralHookEnv {
         // so an accidental call cannot reach the network.
         std::fs::write(home_cas.join("cloud.json"), r#"{"token":null}"#)
             .expect("write logged-out production-eval cloud config");
-
-        let mut env = Self {
-            restore: Vec::new(),
+        let environment = cas_core::env_overlay::HookEnvironment::new()
+            .without_prefix("CAS_")
+            .without_var("HOME")
+            .without_var("XDG_CONFIG_HOME")
+            .with_var("HOME", &home_path)
+            .with_var("XDG_CONFIG_HOME", &xdg_config)
+            .with_var("CAS_ROOT", cas_dir)
+            .with_var("CAS_USER_CLOUD_JSON", home_cas.join("cloud.json"))
+            .with_var("CAS_CLOUD_ENDPOINT", "http://127.0.0.1:9");
+        Self {
+            environment: std::sync::Arc::new(extend(environment)),
             _home: home,
-        };
-        let keys = std::env::vars_os()
-            .map(|(key, _)| key)
-            .filter(|key| {
-                key.to_str().is_some_and(|value| {
-                    value.starts_with("CAS_") || matches!(value, "HOME" | "XDG_CONFIG_HOME")
-                })
-            })
-            .collect::<Vec<_>>();
-        for key in keys {
-            env.capture(&key);
-            // SAFETY: nextest isolates each integration test process, and this
-            // guard restores every captured value before the temp home drops.
-            unsafe { std::env::remove_var(&key) };
-        }
-        env.set("HOME", &home_path);
-        env.set("XDG_CONFIG_HOME", &xdg_config);
-        env.set("CAS_ROOT", cas_dir);
-        env.set("CAS_USER_CLOUD_JSON", home_cas.join("cloud.json"));
-        env.set("CAS_CLOUD_ENDPOINT", "http://127.0.0.1:9");
-        env
-    }
-
-    fn capture(&mut self, key: &std::ffi::OsStr) {
-        if !self.restore.iter().any(|(saved, _)| saved == key) {
-            self.restore
-                .push((key.to_os_string(), std::env::var_os(key)));
         }
     }
 
-    fn set(&mut self, key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>) {
-        let key = key.as_ref();
-        self.capture(key);
-        // SAFETY: see the guard's acquire comment.
-        unsafe { std::env::set_var(key, value) };
-    }
-}
-
-impl Drop for NeutralHookEnv {
-    fn drop(&mut self) {
-        for (key, value) in self.restore.iter().rev() {
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
+    pub fn environment(&self) -> &std::sync::Arc<cas_core::env_overlay::HookEnvironment> {
+        &self.environment
     }
 }
 
@@ -957,7 +933,21 @@ pub fn helpful_memories_production_ranking(
     case: &EvalCase,
     query_mode: QueryMode,
 ) -> Result<Vec<String>, EvalError> {
-    let _env = NeutralHookEnv::acquire(corpus.cas_dir());
+    let neutral = NeutralHookEnvironment::new(corpus.cas_dir());
+    helpful_memories_production_ranking_in(corpus, case, query_mode, neutral.environment())
+}
+
+/// [`helpful_memories_production_ranking`] under an explicitly injected hook
+/// environment (cas-7cc95). The environment is installed for this thread
+/// only, for the duration of the call; the process environment is never
+/// written, so concurrent calls with different environments are independent.
+pub fn helpful_memories_production_ranking_in(
+    corpus: &EvalCorpus,
+    case: &EvalCase,
+    query_mode: QueryMode,
+    environment: &std::sync::Arc<cas_core::env_overlay::HookEnvironment>,
+) -> Result<Vec<String>, EvalError> {
+    let _scope = environment.scope();
     let _task = SeededTask::install(corpus.cas_dir(), case, query_mode)?;
     let _prompt = SeededPrompt::install(corpus.cas_dir(), case, query_mode);
 
@@ -1035,7 +1025,8 @@ impl<'a> ProductionRunner<'a> {
         use cas_core::hooks::context::{ContextStores, SurfacedItemCallback};
         use std::sync::{Arc, Mutex};
 
-        let _env = NeutralHookEnv::acquire(self.corpus.cas_dir());
+        let neutral = NeutralHookEnvironment::new(self.corpus.cas_dir());
+        let _scope = neutral.environment().scope();
         let _task = SeededTask::install(self.corpus.cas_dir(), case, query_mode)?;
         let _prompt = SeededPrompt::install(self.corpus.cas_dir(), case, query_mode);
 
@@ -1339,7 +1330,8 @@ pub fn probe_production_scorer_state(
     use cas_core::hooks::context::ContextQuery;
     use cas_types::TaskStatus;
 
-    let _env = NeutralHookEnv::acquire(corpus.cas_dir());
+    let neutral = NeutralHookEnvironment::new(corpus.cas_dir());
+    let _scope = neutral.environment().scope();
     let Ok(_task) = SeededTask::install(corpus.cas_dir(), case, query_mode) else {
         return ProductionScorerState::ScorerUnavailable;
     };

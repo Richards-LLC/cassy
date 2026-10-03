@@ -35,6 +35,76 @@ fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool
         })
 }
 
+/// cas-f38ca / cas-f2eb: the subject line names the task that owns a
+/// commit. One whose subject claims another task, and not this one, is that
+/// task's work even when its body mentions this task as context ("workers on
+/// cas-940f base on this").
+fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> bool {
+    let subject = message.trim().lines().next().unwrap_or("");
+    !identity
+        .task_id
+        .as_deref()
+        .is_some_and(|id| message_references_task(subject, id))
+        && references_foreign_task(subject, identity)
+}
+
+/// cas-f2eb: a lane merge is task delivery only when everything it brings in
+/// is this task's work. A merge that brings a commit claimed by another task,
+/// or another lane's commit already on the target, imports someone else's
+/// content: its first-parent diff is theirs. Unnamed commits off the target
+/// stay attributable (a worker's own side branch). Unknowable Git state keeps
+/// the merge, as before.
+fn merge_brings_foreign_work(
+    repo: &Path,
+    first_parent: &str,
+    merged_parents: &[String],
+    target: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    for parent in merged_parents {
+        let exclude_first = format!("^{first_parent}");
+        let exclude_target = format!("^{target}");
+        let Some(brought) = git_text(
+            repo,
+            &[
+                "log",
+                "--no-merges",
+                "--format=%H%x1f%B%x1e",
+                parent,
+                &exclude_first,
+            ],
+        ) else {
+            return false;
+        };
+        let Some(off_target) = git_text(
+            repo,
+            &["rev-list", "--no-merges", parent, &exclude_first, &exclude_target],
+        ) else {
+            return false;
+        };
+        let off_target: HashSet<&str> = off_target.lines().collect();
+        for record in brought.split('\u{1e}') {
+            let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
+                continue;
+            };
+            if identity.matches_known_commit(sha) {
+                continue;
+            }
+            if subject_claims_another_task(message, identity) {
+                return true;
+            }
+            let named = identity
+                .task_id
+                .as_deref()
+                .is_some_and(|id| message_references_task(message, id));
+            if !named && !off_target.contains(sha) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {
     !merged_parents.is_empty()
         && merged_parents.iter().all(|parent| {
@@ -76,7 +146,8 @@ fn task_delivery_ranges(
 }
 
 /// The selected delivery ranges, plus whether a target-sync merge that would
-/// otherwise have been selected was excluded (cas-2664 defect 7). Empty
+/// otherwise have been selected was excluded (cas-2664 defect 7), or a merge
+/// that brought another task's work (cas-f2eb). Empty
 /// ranges with that flag set are a positive finding, "this task only brought
 /// the target into its lane", not an attribution failure.
 struct DeliverySelection {
@@ -142,11 +213,12 @@ fn task_delivery_selection(
             let message = fields[3];
             let owned = (historical_receipt && sha == tip)
                 || window.identity.matches_known_commit(&sha)
-                || window
+                || (window
                     .identity
                     .task_id
                     .as_deref()
-                    .is_some_and(|id| message_references_task(message, id));
+                    .is_some_and(|id| message_references_task(message, id))
+                    && !subject_claims_another_task(message, &window.identity));
             let foreign = !owned
                 && message
                     .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
@@ -189,7 +261,20 @@ fn task_delivery_selection(
             // effect is other tasks' delivered content. Deselecting it also
             // splits the ranges, so no range spans the target content it
             // brought in. Only otherwise-selected merges cost a Git call.
-            if candidate && c.merge && is_target_sync_merge(repo, &c.merged_parents, &target) {
+            // cas-f2eb: likewise a merge that brings another task's work
+            // (an epic tip the target does not hold yet, or main) imports
+            // that work; only the task's own commits around it are delivery.
+            if candidate
+                && c.merge
+                && (is_target_sync_merge(repo, &c.merged_parents, &target)
+                    || merge_brings_foreign_work(
+                        repo,
+                        &c.parent,
+                        &c.merged_parents,
+                        &target,
+                        &window.identity,
+                    ))
+            {
                 excluded_target_sync = true;
                 return false;
             }
@@ -475,6 +560,15 @@ pub(super) fn merge_tip_content_presence(
             if fields.len() != 3
                 || !message_references_task(fields[2], id)
                 || delivery_evolution::is_revert_message(fields[2])
+            {
+                continue;
+            }
+            // cas-f38ca: another lane's commit can mention this task as
+            // context ("dep_add no longer strands cas-940f") and reach the
+            // tip through a merge of the epic. Its subject names the task
+            // that owns it; a body mention does not make its lines ours.
+            if !identity.matches_known_commit(fields[0])
+                && subject_claims_another_task(fields[2], identity)
             {
                 continue;
             }

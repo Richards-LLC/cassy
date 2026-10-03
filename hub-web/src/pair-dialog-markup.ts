@@ -132,10 +132,10 @@ export function pairDialogMarkup(state: PairDialogState): string {
     const leadScopes = invitationScopes ? pairingDraft.scopes.filter((scope) => invitationScopes.includes(scope)) : pairingDraft.scopes;
     const machine = relayVerified && hubUrl && origin && invitationScopes
       ? `${capabilityLead(invitationScopes)}<p>Check this is your machine.</p><dl class="pair-details pair-machine"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div></dl><p class="pair-expiry">Invitation expires in <strong id="pair-countdown">10:00</strong></p>${technicalDetails("authorized", pairingDraft, detailRow("Machine's hub address", hubUrl) + detailRow("Cassy Cloud origin", origin) + detailRow("Granted scopes", exactScopes(invitationScopes)))}`
-      : `${capabilityLead(leadScopes.length ? leadScopes : invitationScopes ?? pairingDraft.scopes)}<p>One-time invitation ready. Check the machine, then add your name.</p><label>Machine's hub address<input name="url" type="url" required${focus("url")} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine name<input name="label" required${focus("label")} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label>`;
+      : `${capabilityLead(leadScopes.length ? leadScopes : invitationScopes ?? pairingDraft.scopes)}${withheldLead(pageOrigin, invitationScopes)}<p>One-time invitation ready. Check the machine, then add your name.</p><label>Machine's hub address<input name="url" type="url" required${focus("url")} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine name<input name="label" required${focus("label")} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label>`;
     // The link form keeps its scope boxes (and the command that widens them)
     // with the other technical details, after the fields everyone fills in.
-    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(pageOrigin, invitationScopes)}`);
+    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>`);
     return `<dialog id="pair-dialog">${cloudBrand()}<form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2>${machine}<label>Your name (shown on the machine)<input name="operator" required${focus("operator")} autocomplete="name" placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label><label>Name for this browser<input name="device" required${focus("device")} value="${escapeAttr(pairingDraft.deviceLabel)}"></label>${linkTechnical}${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
@@ -157,10 +157,16 @@ function scopeChecks(selectedScopes: readonly Scope[], grantedScopes: readonly S
   return scopeChoices(grantedScopes, selectedScopes).map((choice) => `<label class="scope${choice.granted ? "" : " scope-denied"}"><input type="checkbox" name="scope" value="${choice.scope}" ${choice.checked ? "checked" : ""} ${choice.granted ? "" : "disabled"}>${choice.label}${choice.granted ? "" : '<span class="scope-note">not granted by this invitation</span>'}</label>`).join("");
 }
 
-/** Name the missing scopes and the exact command that mints them. */
-function scopeCeilingHint(pageOrigin: string, grantedScopes: readonly Scope[] | undefined): string {
+/**
+ * What a read-only (or otherwise narrowed) invitation withholds, in plain
+ * words beside what it grants, with the exact command that mints a wider link
+ * and its Copy (cas-b52d, journey F26). It used to sit under the scope boxes
+ * at the bottom of Technical details, below the dialog's fold.
+ */
+function withheldLead(pageOrigin: string, grantedScopes: readonly Scope[] | undefined): string {
   const missing = ungrantedScopes(grantedScopes);
   if (!missing.length) return "";
   const command = pairCommand(pageOrigin, PAIRING_SCOPES);
-  return `<p class="scope-hint">To also get ${missing.map((scope) => escapeHtml(scopeLabel(scope))).join(", ")}, run this on the machine and open the new link:</p><div class="pair-code-actions"><code>${escapeHtml(command)}</code><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}">Copy command</button></div>`;
+  // The scope list breaks after its commas, never inside a scope name.
+  return `<div class="pair-withheld"><p class="pair-lead">This link does not let it: <strong class="pair-summary">${scopeSummary(missing).map(escapeHtml).join(" · ")}</strong></p><div class="pair-withheld-command"><p class="scope-hint" id="pair-withheld-hint">Run this on the machine for a link that does:</p><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}" aria-describedby="pair-withheld-hint">Copy command</button><code>${escapeHtml(command).replaceAll(",", ",<wbr>")}</code></div></div>`;
 }

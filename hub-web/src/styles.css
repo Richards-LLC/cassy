@@ -2379,6 +2379,16 @@ fieldset {
   margin-top: var(--space-2);
 }
 
+/* cas-b52d (journey F26): what a narrowed link withholds sits under what it
+   grants, compact enough that the fields still open unscrolled: the hint and
+   its Copy share a row, and the command fills whole lines below them. */
+.pair-withheld { display: grid; gap: var(--space-1); }
+.pair-withheld > .pair-lead { margin: 0; }
+.pair-withheld-command { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+.pair-withheld-command .scope-hint { flex: 1 1 14rem; margin: 0; }
+.pair-withheld-command button { min-height: var(--space-8); padding: 0 var(--space-3); font-size: var(--fs-meta); }
+.pair-withheld-command code { flex: 1 1 100%; min-width: 0; color: var(--text-hi); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+
 .scope-hint + .pair-code-actions code {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -3831,7 +3841,9 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
   /* cas-0739 QA F01: on the one-line phone footer the state yields to the
      label, ellipsised; the full words are its title, the button's spoken
-     name, and the open dialog's first row. Its shrink weight makes it give
+     name, and the open dialog's first row. Its outage words lead ("Can't
+     reach Build Server…", cas-cae9), so the ellipsis cuts the name, not the
+     verb. Its shrink weight makes it give
      way first (cas-c19d), so an ordinary long name still reads whole; it
      keeps a 4em stub ("Conne…", its full words in the title), so an
      overlong name never hides it entirely. */
@@ -4080,7 +4092,12 @@ button.chip:disabled { cursor: default; }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
 .launch-grant-command[hidden], .launch-grant-invite[hidden], .launch-grant-note[hidden], .launch-grant-error[hidden], .launch-grant [data-launch-action="allow"][hidden] { display: none; }
-.launch-grant-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-meta); }
+.launch-grant-command code { min-width: 0; overflow-wrap: break-word; color: var(--text-hi); font-size: var(--fs-meta); }
+/* cas-cee5 (journey F31): it wraps between whole tokens only. */
+.launch-command-piece { white-space: nowrap; }
+/* The refusal's login command, as a logged-out account row shows it. */
+.launch-error-command { padding-inline-start: 0; margin-top: var(--space-2); }
+.launch-error-command[hidden] { display: none; }
 .launch-grant .launch-lead { color: var(--text-hi); font-size: var(--fs-md); }
 .launch-grant .launch-lead, .launch-confirm-copy { overflow-wrap: anywhere; }
 .launch-grant .dialog-actions, .launch-confirm .dialog-actions { min-width: 0; }

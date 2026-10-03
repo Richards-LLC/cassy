@@ -211,6 +211,36 @@ export function askLine(message: string): string {
   return question ?? lines[0] ?? "";
 }
 
+/**
+ * The block in a rendered ask that carries its question (the line `askLine`
+ * names), innermost and last when several match.
+ */
+export function askLineElement(body: HTMLElement, message: string): HTMLElement | undefined {
+  const question = askLine(message);
+  if (!question) return undefined;
+  const blocks = [...body.querySelectorAll<HTMLElement>("p, li, h1, h2, h3, h4, h5, h6, blockquote")];
+  return blocks.reverse().find((block) => askLine(block.textContent ?? "") === question);
+}
+
+/**
+ * cas-8674 (journey F6): an opened pinned card's body scrolls inside a
+ * quarter of the screen, and a question usually ends its message, under the
+ * preamble. Scroll the body (only the body, never the page) so the question
+ * sits in view beside its choices; one taller than the body shows its start.
+ */
+export function revealAskLine(body: HTMLElement, message: string): void {
+  if (body.scrollHeight <= body.clientHeight) return;
+  const line = askLineElement(body, message);
+  if (!line) return;
+  const style = body.ownerDocument.defaultView?.getComputedStyle(body);
+  const padTop = parseFloat(style?.paddingTop ?? "") || 0;
+  const padBottom = parseFloat(style?.paddingBottom ?? "") || 0;
+  const box = body.getBoundingClientRect();
+  const rect = line.getBoundingClientRect();
+  const offset = rect.top - box.top - body.clientTop + body.scrollTop;
+  body.scrollTop = Math.max(0, Math.min(offset - padTop, offset + rect.height + padBottom - body.clientHeight));
+}
+
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
 /**
@@ -332,6 +362,24 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
   }
   details.append(summary, list);
   return details;
+}
+
+/**
+ * The dismissed-messages chip's words (cas-6a96, journey F36). It counts the
+ * messages the operator dismissed, so it says "dismissed": a thread notice
+ * beside it counts the not-confirmed messages still in the thread, and the
+ * two used to read as contradicting counts of the same thing ("2 messages
+ * not confirmed" over "Show 3 messages not confirmed"). Messages known not to
+ * have gone keep their plain "unsent" name.
+ */
+export function unsentChipCopy(count: number, unconfirmed: number): { text: string; label: string } {
+  if (unconfirmed === 0) {
+    const noun = count === 1 ? "1 unsent message" : `${count} unsent messages`;
+    return { text: noun, label: `Show ${noun}` };
+  }
+  const messages = count === 1 ? "message" : "messages";
+  const status = unconfirmed === count ? "not confirmed" : "not sent or not confirmed";
+  return { text: `${count} dismissed`, label: `Show ${count} dismissed ${messages}, ${status}` };
 }
 
 export class ConversationView {
@@ -721,6 +769,8 @@ export class ConversationView {
       this.pinned.replaceChildren(head, object);
     }
     this.pinned.hidden = false;
+    const body = collapsed ? null : this.pinned.querySelector<HTMLElement>(".obj-body");
+    if (body) revealAskLine(body, ask.message);
     // A control rebuilt under keyboard focus hands it to its counterpart.
     if (hadFocus && !this.pinned.contains(document.activeElement)) {
       [...this.pinned.querySelectorAll<HTMLElement>("button")].find((button) => button.className === hadFocus)?.focus({ preventScroll: true });
@@ -794,15 +844,13 @@ export class ConversationView {
     // caution tone the thread gives them; any message known not to be sent
     // keeps the critical tone, because that one certainly needs the operator.
     this.unsent.dataset.tone = unconfirmed === count ? "caution" : "critical";
-    const noun = unconfirmed === 0 ? (count === 1 ? "1 unsent message" : `${count} unsent messages`)
-      : unconfirmed === count ? (count === 1 ? "1 message not confirmed" : `${count} messages not confirmed`)
-      : `${count} messages not sent or not confirmed`;
+    const copy = unsentChipCopy(count, unconfirmed);
     const document = this.element.ownerDocument;
     const glyph = document.createElement("template"); glyph.innerHTML = WARN;
-    const text = document.createElement("span"); text.textContent = noun;
+    const text = document.createElement("span"); text.textContent = copy.text;
     const action = document.createElement("span"); action.className = "conversation-unsent-show"; action.setAttribute("aria-hidden", "true"); action.textContent = "Show";
     this.unsent.replaceChildren(glyph.content.firstElementChild!, text, action);
-    this.unsent.setAttribute("aria-label", `Show ${noun}`);
+    this.unsent.setAttribute("aria-label", copy.label);
   }
 
   /**

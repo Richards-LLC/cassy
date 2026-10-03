@@ -217,7 +217,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     const footer = page.locator("#paired-machines-toggle");
     // cas-0739 (journey F10): the footer names the machine that is down,
     // not "5 connected", and the dialog opens with it on screen.
-    await expect(footer.locator(".machine-badge-state")).toHaveText("Shed NAS can't be reached");
+    await expect(footer.locator(".machine-badge-state")).toHaveText("Can't reach Shed NAS");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
     expect(await footer.evaluate((button) => button.scrollWidth <= button.clientWidth + 1), "the footer names it without overflowing").toBe(true);
     await footer.tap();

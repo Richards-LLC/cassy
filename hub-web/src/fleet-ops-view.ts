@@ -76,12 +76,22 @@ function gateDisabled(node: HTMLButtonElement, gate: FleetControlGate, reasonId:
   node.onclick = (event) => event.preventDefault();
 }
 
-function reasonLine(document: Document, gate: FleetControlGate, id: string): HTMLElement | undefined {
+function reasonLine(document: Document, gate: FleetControlGate, id: string, names?: string): HTMLElement | undefined {
   if (gate.allowed) return undefined;
   const line = document.createElement("small");
   line.className = "fleet-ops-reason";
   line.id = id;
-  line.textContent = `${gate.state}. ${gate.reason}${gate.grantable ? " Allow managing workers in Paired machines." : ` Run: ${gate.command}`}`;
+  line.append(`${names ? `${names}: ` : ""}${gate.state}. ${gate.reason}`);
+  if (gate.grantable) line.append(" Allow managing workers in Paired machines.");
+  else {
+    // The command breaks after its commas, never inside a scope (cas-b52d).
+    const code = document.createElement("code");
+    for (const [index, piece] of gate.command.split(",").entries()) {
+      if (index > 0) { code.append(","); code.append(document.createElement("wbr")); }
+      code.append(piece);
+    }
+    line.append(" Run: ", code);
+  }
   return line;
 }
 
@@ -135,16 +145,24 @@ function menu(document: Document, context: FleetOpsViewContext, rowKey: string, 
   const items = gatedItems(actions, context.scopes, context.origin);
   // Destructive items come last, after a separator.
   let separated = false;
+  // One reason per missing scope, after the items, shared by every item it disables.
+  const reasons = new Map<string, { gate: FleetControlGate; names: string[]; id: string }>();
   for (const [index, { action, gate }] of items.entries()) {
     if (action.destructive && !separated && index > 0) {
       const rule = document.createElement("div"); rule.setAttribute("role", "separator"); rule.className = "fleet-ops-separator"; list.append(rule); separated = true;
     }
     const item = button(document, action.label, `fleet-ops-item${action.destructive ? " danger" : ""}`, `${rowKey}:item:${action.id}`, () => context.on.choose(rowKey, action));
     item.setAttribute("role", "menuitem");
-    const reasonId = `fleet-reason-${safeId(rowKey)}-${safeId(action.id)}`;
-    gateDisabled(item, gate, reasonId);
+    if (!gate.allowed) {
+      const shared = reasons.get(gate.scope) ?? { gate, names: [], id: `fleet-reason-${safeId(rowKey)}-${safeId(gate.scope)}` };
+      shared.names.push(action.label.replace(/…$/, ""));
+      reasons.set(gate.scope, shared);
+      gateDisabled(item, gate, shared.id);
+    }
     list.append(item);
-    const reason = reasonLine(document, gate, reasonId);
+  }
+  for (const { gate, names, id } of reasons.values()) {
+    const reason = reasonLine(document, gate, id, names.join(" and "));
     if (reason) list.append(reason);
   }
   list.onkeydown = (event) => {

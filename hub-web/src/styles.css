@@ -3970,6 +3970,9 @@ button.chip:disabled { cursor: default; }
 
 .conversation-row-state:empty { display: none; }
 .conversation-context .status-identifier { display: none; }
+/* cas-a474: an agent row the operator can act on names its worker; the ⋯ menu
+   would otherwise be the only place the name appears. */
+.conversation-context .status-agent .status-line > .status-identifier:first-child { display: inline; }
 
 #conversation-return { flex: none; white-space: nowrap; }
 

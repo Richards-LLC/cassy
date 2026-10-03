@@ -50,7 +50,7 @@ pub fn has_project_cas() -> bool {
 pub fn find_cas_root() -> Result<PathBuf> {
     // 1. Check CAS_ROOT env var first (highest priority)
     // This enables workers in clones to use the main repo's .cas
-    if let Ok(cas_root) = std::env::var("CAS_ROOT") {
+    if let Ok(cas_root) = cas_core::env_overlay::var("CAS_ROOT") {
         let path = PathBuf::from(&cas_root);
         if path.exists() && path.is_dir() {
             // cas-b69a (GH #157): the override is legitimate but must never be
@@ -117,7 +117,7 @@ pub struct RootConflict {
 /// for this process. `None` when `CAS_ROOT` is unset or invalid, when the
 /// working directory has no store, or when both name the same store.
 pub fn root_conflict() -> Option<RootConflict> {
-    let env_root = std::env::var_os("CAS_ROOT")?;
+    let env_root = cas_core::env_overlay::var_os("CAS_ROOT")?;
     let cwd = std::env::current_dir().ok()?;
     root_conflict_for(Path::new(&env_root), &cwd)
 }
@@ -182,7 +182,7 @@ fn announce_root_override_once(env_root: &Path, start: &Path) {
 pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
     // Respect CAS_ROOT for explicit overrides (useful for workers in clones and external tooling).
     // This mirrors `find_cas_root()` behavior but applies when callers start from an explicit path.
-    if let Ok(cas_root) = std::env::var("CAS_ROOT") {
+    if let Ok(cas_root) = cas_core::env_overlay::var("CAS_ROOT") {
         let path = PathBuf::from(&cas_root);
         if path.exists() && path.is_dir() {
             // cas-b69a (GH #157): name the root that lost, before any I/O.

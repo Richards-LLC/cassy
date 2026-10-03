@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::AutoPromptConfig;
-use crate::mcp::tools::core::task::lifecycle::close_ops::{
+use crate::git_evidence::{
     KnownUnmergedCount, fetch_parent_branch_best_effort, known_unmerged_factory_commits,
     resolve_ref_commit_sha,
 };

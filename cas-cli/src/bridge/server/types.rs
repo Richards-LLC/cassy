@@ -199,6 +199,13 @@ pub(crate) struct TaskSummaryJson {
     pub(crate) task_type: String,
     pub(crate) epic: Option<String>,
     pub(crate) branch: Option<String>,
+    /// Last update, RFC 3339 (cas-566b): a fleet operation's precondition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) updated_at: Option<String>,
+    /// An awaiting-merge task's delivery tip (cas-566b): what an operator's
+    /// "ask the supervisor to merge" states it saw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tip: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

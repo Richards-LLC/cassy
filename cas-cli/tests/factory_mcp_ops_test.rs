@@ -2726,33 +2726,142 @@ async fn test_recycle_worker_preserves_name_worktree_and_recipe() {
     assert_eq!(spec.config_dir.as_deref(), Some(account_dir.to_str().unwrap()));
 }
 
-/// GH #889: recycling must not turn an in-progress task into a silent worker
-/// loss. The preflight refusal must leave both queue rows absent.
-#[tokio::test]
-async fn test_recycle_worker_refuses_in_progress_task() {
-    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle-busy")]);
-    let env = FactoryTestEnv::new();
-    let worker_id = env.register_worker_in_session("busy-worker", "session-recycle-busy");
-    let mut task = Task::new("cas-recycle-busy".to_string(), "busy task".to_string());
-    task.status = TaskStatus::InProgress;
-    task.assignee = Some("busy-worker".to_string());
-    env.task_store().add(&task).expect("add task");
-    env.agent_store()
-        .try_claim(&task.id, &worker_id, 600, Some("working"))
-        .expect("claim task")
-        .is_success();
+/// A worker checkout whose `factory/<worker>` branch is pushed to a bare
+/// `origin`, so the push-branch safety probe sees `unpushed_commits=0`
+/// (cas-a622).
+fn init_pushed_worker_repo(env: &FactoryTestEnv, worker: &str) -> PathBuf {
+    let worker_path = init_sync_repo(env, worker);
+    let origin = env.cas_root.join(format!("{worker}-origin.git"));
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(
+        env.cas_root.parent().expect("project root"),
+        &["init", "--bare", origin.to_str().unwrap()],
+    );
+    git(&worker_path, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&worker_path, &["push", "-q", "origin", &format!("factory/{worker}")]);
+    worker_path
+}
 
-    let mut req = factory_req("recycle_worker");
-    req.target = Some("busy-worker".to_string());
-    let error = env
-        .service
-        .factory_request(Parameters(req))
-        .await
-        .expect_err("in-progress worker must not be recycled");
-    assert!(error.message.contains("force=true"), "{error:?}");
+fn register_codex_worker_at(env: &FactoryTestEnv, name: &str, session: &str, path: &std::path::Path) -> String {
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), path.display().to_string());
+    metadata.insert("worker_cli".to_string(), "codex".to_string());
+    let worker_id = env.register_worker_with_metadata(name, metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some(session.to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+    worker_id
+}
+
+/// cas-a622: a clean, pushed worker holding nonterminal tasks must be
+/// refreshable. Observed: wise-raven-87 (Codex, clean, 0 unpushed) asked for a
+/// context refresh under 20% context and `clear_context` refused — with and
+/// without force=true — because it held an in-progress task. Recycling keeps
+/// every task binding and the worktree, so holding work is not a reason to
+/// refuse; the request must be queued and the tasks left exactly as they were.
+#[tokio::test]
+async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_cas_a622() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "wise-raven");
+    let worker_id = register_codex_worker_at(&env, "wise-raven", "session-a622", &worker_path);
+    let held = [
+        ("cas-e0be", TaskStatus::InProgress),
+        ("cas-7cb3", TaskStatus::AwaitingMerge),
+        ("cas-ed87", TaskStatus::Open),
+        ("cas-96c0", TaskStatus::Blocked),
+    ];
+    for (id, status) in held {
+        let mut task = Task::new(id.to_string(), format!("task {id}"));
+        task.status = status;
+        task.assignee = Some("wise-raven".to_string());
+        env.task_store().add(&task).expect("add task");
+    }
+    assert!(
+        env.agent_store()
+            .try_claim("cas-e0be", &worker_id, 600, Some("working"))
+            .expect("claim in-progress task")
+            .is_success()
+    );
+
+    for force in [None, Some(true)] {
+        let mut req = factory_req("clear_context");
+        req.target = Some("wise-raven".to_string());
+        req.force = force;
+        let text = get_text(
+            &env.service
+                .factory_request(Parameters(req))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("force={force:?}: a clean, pushed worker must be refreshable: {}", error.message)
+                }),
+        );
+        assert!(text.contains("recycle") && text.contains("wise-raven"), "{text}");
+        let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
+        assert_eq!(entries.len(), 1, "force={force:?}: one recycle request");
+        assert_eq!(entries[0].action, cas_store::SpawnAction::Recycle);
+        assert_eq!(entries[0].worker_names, vec!["wise-raven"]);
+        // Drain it so the second iteration is not refused as already queued.
+        env.spawn_queue().mark_processed(entries[0].id).expect("drain request");
+    }
+
+    for (id, status) in held {
+        let task = env.task_store().get(id).expect("task");
+        assert_eq!(task.assignee.as_deref(), Some("wise-raven"), "{id} keeps its assignee");
+        assert_eq!(task.status, status, "{id} keeps its status");
+    }
+    assert!(worker_path.join("README").is_file(), "the worktree is kept");
+}
+
+/// cas-a622: unsaved work still refuses a recycle, and the refusal names what
+/// to do instead of suggesting a `force=true` that recycling never honours.
+#[tokio::test]
+async fn test_recycle_worker_refuses_unpushed_commits_without_suggesting_force_cas_a622() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "ahead-worker");
+    std::fs::write(worker_path.join("local.txt"), "not pushed\n").expect("write");
+    for args in [&["add", "local.txt"][..], &["commit", "-qm", "local only"][..]] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&worker_path)
+            .status()
+            .expect("git");
+        assert!(status.success());
+    }
+    register_codex_worker_at(&env, "ahead-worker", "session-a622-unpushed", &worker_path);
+
+    for force in [None, Some(true)] {
+        let mut req = factory_req("recycle_worker");
+        req.target = Some("ahead-worker".to_string());
+        req.force = force;
+        let error = env
+            .service
+            .factory_request(Parameters(req))
+            .await
+            .expect_err("an unpushed worker must not be recycled");
+        assert!(error.message.contains("unpushed_commits=1"), "{error:?}");
+        assert!(
+            !error.message.contains("force=true"),
+            "the refusal must not suggest a flag that cannot work: {error:?}"
+        );
+        assert!(error.message.contains("push"), "the refusal says what to do: {error:?}");
+    }
     assert!(
         env.spawn_queue().peek(10).expect("peek queue").is_empty(),
-        "refusal must not queue shutdown or spawn"
+        "refusal must not queue a lifecycle action"
     );
 }
 
@@ -2776,7 +2885,11 @@ async fn test_recycle_worker_refuses_dirty_worktree() {
         .factory_request(Parameters(req))
         .await
         .expect_err("dirty worker must not be recycled");
-    assert!(error.message.contains("force=true"), "{error:?}");
+    assert!(error.message.contains("dirty_files=1"), "{error:?}");
+    assert!(
+        !error.message.contains("force=true"),
+        "cas-a622: the refusal must not suggest a flag that cannot work: {error:?}"
+    );
     assert!(
         env.spawn_queue().peek(10).expect("peek queue").is_empty(),
         "dirty refusal must not queue a lifecycle action"

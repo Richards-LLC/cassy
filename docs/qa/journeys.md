@@ -122,6 +122,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Nothing live: "No live supervisors listed", with a route to dormant sessions.
 - A machine becomes unreachable while a message is pending: the row stays with "Unreachable · message pending".
 - Many rows: the list is not sorted by attention.
+- On a Mac, every surface names the palette chord "⌘K", never "Ctrl K", and ⌘K reaches the search and then the palette. This runs as a separate HUB-J3 part; the journeys declare a Linux keyboard platform by default, so they read the same on any host (cas-2a33).
 
 ### HUB-J4 · Read the conversation history
 
@@ -136,7 +137,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
-4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off
+4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off; when the connection then drops, that card says it in the banner's words ("Lost connection to <machine>. Reconnecting… Open the file again when it's back") without another click and without a second announcement, never "is connected" beside Reconnecting
 5. The machine reconnects as the reader tabs back to Load earlier — a separate part on a multiplex machine: the reader has loaded one earlier page and moved on to the composer; the machine drops and comes back, and the reader tabs back to "Load earlier" the moment the header reads Live; focus stays on the button through the shell rebuild, and Enter loads the start of the conversation, landing on "No earlier history" (cas-d362)
 
 #### Expected experience
@@ -356,11 +357,11 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. Open the conversation — the thread is live
-2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree
-3. It reconnects on its own — the banner and the waiting line clear, everything says Live again, the held message goes out exactly once and is delivered, and no transport alarm is left
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
+3. It reconnects on its own — the banner and the waiting line clear, everything says Live again (the header announces the return), the held message goes out exactly once and is delivered, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own thread has no session line, and the held message stays above the ones sent after it)
-6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable, and the machine drawer's session row says Reconnecting, not live; all return when the session is back; with the drawer open at 1280 and at 390, every machine and session row is the topmost element where it is drawn, never under the Attention panel (cas-bad9)
+6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable (the line under the header says only "Control and interrupts return when it reconnects", so the banner is the one outage line on screen, announced once), the pane header never says "No output yet" above the output the pane shows, and the machine drawer's session row says Reconnecting, not live; all return when the session is back; with the drawer open at 1280 and at 390, every machine and session row is the topmost element where it is drawn, never under the Attention panel (cas-bad9)
 
 #### Expected experience
 
@@ -457,9 +458,10 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
 4. Open Terminal view from the empty session — its "Terminal view" link switches to the session's Terminal view and back; the pane header never says "No activity" for a session that was just active
-5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view; back on, the plain copy and the link return
-6. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
-7. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
+5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view, and the header's Terminal view is dimmed and says why ("Reconnecting to Atlas · Linux — Terminal view opens once it's back") instead of opening; back on, the plain copy, the link and the header's Terminal view return
+6. On a phone, Terminal view on the empty card is a full-size target — at 390 it is at least 44 px each way and opens Terminal view
+7. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
+8. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
 
 #### Expected experience
 
@@ -486,14 +488,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the session: only its conversation — the blocker and the operator's later message are in the thread, the watchdog notice is not, and yesterday's turn shows "Sep 29, 17:20"
 2. A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick, never "you replied"
-3. The delivery problem is one attention item — the notice is a single warning in Attention dated "Sep 29, 17:49" (its own time, not when the page heard of it), and a repeat of it adds nothing
+3. The delivery problem is one attention item — the notice is a single warning dated "Sep 29, 17:49", headed "The supervisor missed an update: a worker stopped", with the worker named in plain words and no baked age; the group is "Accounting · happy-cheetah-1", has no redundant Dismiss group for one item, and a repeat adds nothing
 4. On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1 sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the notice and its date
-5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss group stays there across a 5 s heartbeat; with a notice's Details open and Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
+5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss stays there across a 5 s heartbeat; with a notice's Details open, Copy occupies its own row above the full raw diagnostic at390 and1280px; with Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
 6. A palette opened over the sheet closes first — Ctrl+K opens the command palette over the sheet; Escape closes the palette, the sheet stays open and focus is back on the control it left
 7. Close it and keep reading — Escape closes the sheet even with focus dropped to the page, focus returns to the badge and stays on it when a catalog change rebuilds the page, and the thread is as it was
 8. A sheet left open on a phone is a plain rail on a desktop — reopened, then resized to 1280×800: the rail has no dialog role, aria-modal or sheet label, the badge is not expanded, nothing is inert, and the notice is in the side panel
 9. It retires once the update gets through — the resolution removes it, and a reload does not bring it back
-10. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "re: earlier session wise-lion-31", and no earlier-session section opens for it
+10. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "Reply to “Did the bank feed reconcile?” · wise-lion-31", quoting the question's first line; if its history is unavailable it explicitly says "Reply to your message in earlier session wise-lion-31"; no earlier-session section opens for it
 
 #### Expected experience
 

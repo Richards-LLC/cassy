@@ -47,15 +47,15 @@ pub(crate) fn render_factory_coordination(
             )
         } else {
             // Fallback to env vars when PID-based lookup fails
-            let role = std::env::var("CAS_AGENT_ROLE").ok().and_then(|r| {
+            let role = crate::env_overlay::var("CAS_AGENT_ROLE").ok().and_then(|r| {
                 match r.to_lowercase().as_str() {
                     "supervisor" => Some(AgentRole::Supervisor),
                     "worker" => Some(AgentRole::Worker),
                     _ => None,
                 }
             });
-            let name = std::env::var("CAS_AGENT_NAME").ok();
-            let id = std::env::var("CAS_AGENT_ID").ok();
+            let name = crate::env_overlay::var("CAS_AGENT_NAME").ok();
+            let id = crate::env_overlay::var("CAS_AGENT_ID").ok();
             (role, name, id)
         };
 
@@ -198,11 +198,11 @@ pub(crate) fn is_factory_participant(self_role: Option<AgentRole>) -> bool {
 /// Returns the set of worker names this supervisor owns, derived from `CAS_FACTORY_WORKER_NAMES`.
 /// Returns `None` when not running as a supervisor or when the variable is absent.
 fn supervisor_owned_workers() -> Option<std::collections::HashSet<String>> {
-    let role = std::env::var("CAS_AGENT_ROLE").unwrap_or_default();
+    let role = crate::env_overlay::var("CAS_AGENT_ROLE").unwrap_or_default();
     if !role.eq_ignore_ascii_case("supervisor") {
         return None;
     }
-    let csv = std::env::var("CAS_FACTORY_WORKER_NAMES").ok()?;
+    let csv = crate::env_overlay::var("CAS_FACTORY_WORKER_NAMES").ok()?;
     if csv.trim().is_empty() {
         return None;
     }
@@ -250,7 +250,7 @@ fn inject_role_guidance(
     // remaps the whole assembled text to the reader's real prefix exactly
     // once, at the end (see `remap_tool_prefix`'s doc comment).
     if role == AgentRole::Supervisor
-        && std::env::var("CAS_FACTORY_WORKER_CLI")
+        && crate::env_overlay::var("CAS_FACTORY_WORKER_CLI")
             .map(|v| v.eq_ignore_ascii_case("codex"))
             .unwrap_or(false)
     {
@@ -394,7 +394,7 @@ mod tests {
             inject_role_guidance(&mut parts, &mut tokens, role, &config);
             let emitted = parts.join("\n");
             let expects_note = role == AgentRole::Supervisor
-                && std::env::var("CAS_FACTORY_WORKER_CLI")
+                && crate::env_overlay::var("CAS_FACTORY_WORKER_CLI")
                     .unwrap()
                     .eq_ignore_ascii_case("codex");
             assert_eq!(

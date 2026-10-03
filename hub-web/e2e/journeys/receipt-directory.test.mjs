@@ -2,7 +2,7 @@
 // neither can overwrite the other's stages, receipt.webm or result.json.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { claimReceiptDirectory } from './receipt-directory.mjs';
 
@@ -37,5 +37,22 @@ test('a journeyPart test claims its own parts directory beside the main test', (
     claimReceiptDirectory(join(root, 'HUB-J13'), 'HUB-J13 start a new session from Commander');
     claimReceiptDirectory(join(root, 'HUB-J13', 'parts', 'reconnecting'), 'HUB-J13 New session says a reconnecting machine is reconnecting');
     assert.match(readFileSync(join(root, 'HUB-J13', 'parts', 'reconnecting', 'receipt-owner.json'), 'utf8'), /reconnecting/);
+  } finally { done(); }
+});
+
+test('the same test claims its directory again (a retry or --repeat-each) and its stale captures are cleared', () => {
+  const { root, done } = fresh();
+  try {
+    const directory = join(root, 'HUB-J13');
+    const title = 'HUB-J13 start a new session from Commander';
+    claimReceiptDirectory(directory, title);
+    for (const name of ['J01.png', 'J02.png', 'result.json']) writeFileSync(join(directory, name), 'earlier attempt');
+    mkdirSync(join(directory, 'parts', 'reconnecting'), { recursive: true });
+    writeFileSync(join(directory, 'parts', 'reconnecting', 'J01.png'), 'another test');
+    claimReceiptDirectory(directory, title);
+    assert.equal(existsSync(join(directory, 'J02.png')), false);
+    assert.equal(existsSync(join(directory, 'result.json')), false);
+    assert.equal(readFileSync(join(directory, 'parts', 'reconnecting', 'J01.png'), 'utf8'), 'another test');
+    assert.match(readFileSync(join(directory, 'receipt-owner.json'), 'utf8'), /start a new session/);
   } finally { done(); }
 });

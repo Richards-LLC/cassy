@@ -355,6 +355,29 @@ export function terminalLinkAtColumn(row: GhosttySnapshot["rowData"][number], co
   return terminalLinkAtPosition([row], 0, column);
 }
 
+/** The terminal's own keys, in the words its escape hint uses (cas-d1fa). */
+export const TERMINAL_ESCAPE_HINT = "Tab goes to the terminal. Ctrl+Alt+M leaves it.";
+/** The element, outside the drawing area, that says so (the session header's). */
+export const TERMINAL_ESCAPE_HINT_ID = "terminal-escape-hint";
+
+/**
+ * Ctrl+Alt+M leaves the terminal input (cas-d1fa, WCAG 2.1.2): in control,
+ * Tab and Shift+Tab are the program's (completion, mode cycling), so the
+ * keyboard needs another way out. Ctrl+M alone is Firefox's mute-tab key, and
+ * AltGraph (Ctrl+Alt on some layouts) types characters, so it never counts.
+ * The physical key is read, as Option changes the character on a Mac.
+ */
+export function isTerminalLeaveShortcut(event: Pick<KeyboardEvent, "ctrlKey" | "key" | "code" | "metaKey" | "shiftKey" | "altKey" | "getModifierState">): boolean {
+  if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return false;
+  if (event.getModifierState?.("AltGraph")) return false;
+  return event.code === "KeyM" || event.key.toLowerCase() === "m";
+}
+
+/** A plain Tab or Shift+Tab, the keys that move focus. */
+export function isTerminalFocusTab(event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "altKey">): boolean {
+  return event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey;
+}
+
 export function isTerminalCopyShortcut(
   event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "shiftKey">,
   platform = navigator.platform,
@@ -720,6 +743,7 @@ export class GhosttyTerminalSurface {
   setControlMode(enabled: boolean): void {
     if (this.disposed || this.controlMode === enabled) return;
     this.controlMode = enabled;
+    this.updateEscapeHint();
     // Lease changes are semantic mode changes. Restart from a visible phase so
     // observer mode cannot inherit the hidden half of a controller's blink.
     this.cursorOn = true;
@@ -1029,6 +1053,20 @@ export class GhosttyTerminalSurface {
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     this.updateLinkModifier(event);
+    // cas-d1fa (WCAG 2.1.2): the keyboard can always leave. Ctrl+Alt+M leaves
+    // from either mode; without control nothing reaches the program, so Tab
+    // and Shift+Tab keep their usual job of moving focus.
+    if (isTerminalLeaveShortcut(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.suppressedKeyCodes.add(event.code);
+      this.leaveFocus();
+      return;
+    }
+    if (!this.controlMode && isTerminalFocusTab(event)) {
+      this.suppressedKeyCodes.add(event.code);
+      return;
+    }
     // Presses handled outside the terminal must also swallow their release:
     // beforeKey runs side effects (keybindings, navigation sends), so it cannot
     // be consulted again on keyup, and Kitty report-event-types sessions would
@@ -1096,12 +1134,14 @@ export class GhosttyTerminalSurface {
 
   private readonly onFocus = () => {
     this.focused = true;
+    this.updateEscapeHint();
     this.cursorOn = true;
     this.requestRender();
   };
 
   private readonly onBlur = () => {
     this.focused = false;
+    this.updateEscapeHint();
     this.linkModifierActive = false;
     this.refreshHoveredLink();
     // Suppressions survive blur deliberately: a shortcut that moves focus (for
@@ -1112,6 +1152,28 @@ export class GhosttyTerminalSurface {
     this.cursorOn = true;
     this.requestRender();
   };
+
+  /**
+   * While the terminal keeps Tab, the input is described by the session
+   * header's escape hint, which sits outside the drawing area so it never
+   * covers a program row (cas-d1fa QA round 1).
+   */
+  private updateEscapeHint(): void {
+    if (this.controlMode && !this.disposed) this.input.setAttribute("aria-describedby", TERMINAL_ESCAPE_HINT_ID);
+    else this.input.removeAttribute("aria-describedby");
+  }
+
+  /** Move focus to the next control after the terminal, else the one before it. */
+  private leaveFocus(): void {
+    const tabbable = [...document.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, [tabindex]")]
+      .filter((element) => element.tabIndex >= 0 && !this.mount.contains(element)
+        && !element.matches(":disabled") && element.getClientRects().length > 0
+        && element.closest("[inert], dialog:not([open])") === null);
+    const next = tabbable.find((element) => (this.mount.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    const target = next ?? tabbable.at(-1);
+    if (target) target.focus();
+    else this.input.blur();
+  }
 
   private readonly onDevicePixelRatioChange = () => {
     this.watchDevicePixelRatio();

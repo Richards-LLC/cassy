@@ -407,6 +407,7 @@ impl Drop for LaneLock {
     }
 }
 pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Option<LaneLock>> {
+    let repo = repo.canonicalize()?;
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
     let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));

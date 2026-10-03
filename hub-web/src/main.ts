@@ -48,9 +48,9 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { relativeTimestamp } from "./time";
 import { paneActivityLabel, paneShowsOutput } from "./pane-activity";
 import { fleetControlGate } from "./fleet-permissions";
-import { FleetOpsState, UNDO_WINDOW_MS, newOperationId, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
+import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
 import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, type FleetOpsViewContext } from "./fleet-ops-view";
-import { HubRequestError } from "./connection";
+import { runFleetOperation } from "./fleet-ops-request";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -584,6 +584,7 @@ function selectionStorage(): SelectionStorage | undefined {
 function applySelection(next: SessionSelection | undefined): void {
   selectedMachineId = next?.machineId;
   selectedSession = next?.session;
+  syncFleetSelection();
 }
 
 /**
@@ -4746,40 +4747,40 @@ function fleetAnnounce(text: string): void {
   if (region.textContent !== text) region.textContent = text;
 }
 
+function syncFleetSelection(): void {
+  const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
+  if (!fleetOps.select(key)) return;
+  fleetHeaderPanel = undefined; fleetFocusNext = undefined;
+  window.clearTimeout(fleetUndoTimer);
+  document.getElementById("fleet-phone-undo")?.remove();
+  fleetAnnounce("");
+}
+
 async function runFleetAction(rowKey: string, action: FleetAction): Promise<void> {
   const machineId = selectedMachineId;
   const session = selectedSession;
   const connection = machineId ? connections.get(machineId) : undefined;
   if (!machineId || !session || !connection) return;
-  fleetOps.started(rowKey, action);
-  fleetAnnounce(action.progress);
-  fleetFocusNext = `${rowKey}:progress`;
-  renderStatus(statuses.get(sessionKey(machineId, session)));
-  try {
-    const answer = await connection.operation(session, { op_id: newOperationId(), op: { ...action.request.op }, expected: { ...action.request.expected } });
-    if (selectedMachineId !== machineId || selectedSession !== session) return;
-    fleetOps.succeeded(rowKey, action, Date.now(), answer?.outcome);
+  syncFleetSelection();
+  const epoch = fleetOps.selectionEpoch;
+  const result = await runFleetOperation(fleetOps, rowKey, action, (request) => connection.operation(session, request), () => {
+    fleetAnnounce(action.progress);
+    fleetFocusNext = `${rowKey}:progress`;
+    renderStatus(statuses.get(sessionKey(machineId, session)));
+  });
+  if (!result || fleetOps.selectionEpoch !== epoch || selectedMachineId !== machineId || selectedSession !== session) return;
+  if (result === "succeeded") {
     if (action.request.op.kind === "request_merge") fleetAsked.set(String(action.request.op.task_id), Date.now());
     fleetFocusNext = action.inverse ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
     window.clearTimeout(fleetUndoTimer);
     if (fleetOps.undo) fleetUndoTimer = window.setTimeout(() => { if (selectedMachineId && selectedSession) renderStatus(statuses.get(sessionKey(selectedMachineId, selectedSession))); }, UNDO_WINDOW_MS + 50);
-  } catch (error) {
-    if (selectedMachineId !== machineId || selectedSession !== session) return;
-    const refused = error instanceof HubRequestError ? error : undefined;
-    const current = refused?.body?.current;
-    fleetOps.failed(rowKey, action, {
-      stale: refused?.status === 409 && refused.code === "stale",
-      ...(current && typeof current === "object" ? { current: current as Record<string, unknown> } : {}),
-      detail: refused?.detail ?? (error instanceof Error ? error.message : undefined),
-    });
+  } else {
     fleetFocusNext = `${rowKey}:note`;
   }
   fleetAnnounce(fleetOps.announcement);
-  if (selectedMachineId === machineId && selectedSession === session) {
-    renderStatus(statuses.get(sessionKey(machineId, session)));
-    // The operation's own response drives the refresh; FleetChanged does for other devices.
-    void loadStatus(machineId, session);
-  }
+  renderStatus(statuses.get(sessionKey(machineId, session)));
+  // The operation's own response drives the refresh; FleetChanged does for other devices.
+  void loadStatus(machineId, session);
 }
 
 function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext | undefined {
@@ -4852,14 +4853,8 @@ function renderStatus(status?: Record<string, unknown>): void {
   const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
-  // A different conversation starts with every menu closed and no stale notes.
-  const fleetSession = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
-  if (container.dataset.fleetSession !== fleetSession) {
-    container.dataset.fleetSession = fleetSession;
-    fleetOps.closeMenus(); fleetOps.cancelConfirm(); fleetOps.notes.clear(); fleetOps.undo = undefined; fleetHeaderPanel = undefined;
-    fleetOps.pending.clear();
-    document.getElementById("fleet-phone-undo")?.remove();
-  }
+  // A shell replacement preserves this selection's in-flight request ownership.
+  syncFleetSelection();
   container.onkeydown = (event) => {
     if (event.key !== "Escape" || !container.querySelector(".fleet-ops-menu, .fleet-ops-confirm, .fleet-ops-preview, .fleet-ops-panel")) return;
     event.preventDefault(); event.stopPropagation(); dismissFleetPanel();

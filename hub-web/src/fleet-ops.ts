@@ -315,7 +315,34 @@ export interface RowNote {
  * requests in flight, an Undo offer and per-row notes. Pure: every change
  * returns nothing but mutates this object; time comes in as an argument.
  */
+export interface FleetRequestOwner {
+  readonly selection: number;
+  readonly rowKey: string;
+  readonly request: symbol;
+}
+
 export class FleetOpsState {
+  private selectionKey: string | undefined;
+  private selectionVersion = 0;
+  private readonly requests = new Map<string, symbol>();
+
+  get selectionEpoch(): number { return this.selectionVersion; }
+
+  /** Selection lifetime belongs to state, never to a replaceable DOM container. */
+  select(key: string): boolean {
+    if (this.selectionKey === key) return false;
+    this.selectionKey = key;
+    this.selectionVersion += 1;
+    this.closeMenus(); this.cancelConfirm();
+    this.pending.clear(); this.requests.clear(); this.notes.clear();
+    this.undo = undefined; this.announcement = "";
+    return true;
+  }
+
+  owns(owner: FleetRequestOwner): boolean {
+    return owner.selection === this.selectionVersion && this.requests.get(owner.rowKey) === owner.request;
+  }
+
   menuFor: string | undefined;
   confirm: { rowKey: string; action: FleetAction } | undefined;
   preview: { rowKey: string; task: FleetTask } | undefined;
@@ -359,14 +386,18 @@ export class FleetOpsState {
 
   openPreview(rowKey: string, task: FleetTask): void { this.preview = { rowKey, task }; this.menuFor = undefined; }
 
-  started(rowKey: string, action: FleetAction): void {
+  started(rowKey: string, action: FleetAction): FleetRequestOwner {
+    const request = Symbol("fleet operation");
+    this.requests.set(rowKey, request);
     this.pending.set(rowKey, action);
     this.notes.delete(rowKey);
     this.announcement = action.progress;
+    return { selection: this.selectionVersion, rowKey, request };
   }
 
   succeeded(rowKey: string, action: FleetAction, now: number, outcome?: Readonly<Record<string, unknown>>): void {
     this.pending.delete(rowKey);
+    this.requests.delete(rowKey);
     this.notes.delete(rowKey);
     this.announcement = action.done;
     const inverse = action.inverse || outcome?.inverse ? hubInverse(action, outcome) : undefined;
@@ -375,6 +406,7 @@ export class FleetOpsState {
 
   failed(rowKey: string, action: FleetAction, failure: { stale?: boolean; current?: Readonly<Record<string, unknown>>; detail?: string }): void {
     this.pending.delete(rowKey);
+    this.requests.delete(rowKey);
     const text = failure.stale ? staleMessage(action, failure.current) : `Could not ${action.label.replace(/…$/, "").toLowerCase()}: ${failure.detail ?? "the machine refused it"}.`;
     this.notes.set(rowKey, { text, tone: failure.stale ? "stale" : "error" });
     this.announcement = text;

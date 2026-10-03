@@ -12451,13 +12451,32 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
 /// audit notes — each checked locally, then as `origin/<branch>`. Returns
 /// `None` when the task has no assignee or none of them resolves.
 pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> Option<String> {
-    let assignee = task.assignee.as_deref()?;
-    // cas-73b8: the per-task branch, when the worker used one, holds exactly
-    // this task's commits.
-    let mut candidates = vec![
-        crate::factory_isolation::worker_task_branch(assignee, &task.id),
-        format!("factory/{assignee}"),
-    ];
+    task.assignee.as_deref()?;
+    let unique = task_delivery_branch_candidates(task);
+    unique
+        .iter()
+        .find(|branch| git_ref_exists(repo_path, branch))
+        .cloned()
+        .or_else(|| {
+            unique
+                .iter()
+                .map(|branch| format!("origin/{branch}"))
+                .find(|branch| git_ref_exists(repo_path, branch))
+        })
+}
+
+/// The branch names that may hold `task`'s commits, in
+/// [`task_delivery_branch`] order, deduplicated and refname-safe: the
+/// assignee's per-task and own branches, the recorded parked branch, then
+/// handoff branches and prior holders' branches.
+fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(assignee) = task.assignee.as_deref() {
+        // cas-73b8: the per-task branch, when the worker used one, holds
+        // exactly this task's commits.
+        candidates.push(crate::factory_isolation::worker_task_branch(assignee, &task.id));
+        candidates.push(format!("factory/{assignee}"));
+    }
     candidates.extend(task.deliverables.parked_branch.clone());
     candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
     candidates.extend(
@@ -12472,15 +12491,6 @@ pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> 
         }
     }
     unique
-        .iter()
-        .find(|branch| git_ref_exists(repo_path, branch))
-        .cloned()
-        .or_else(|| {
-            unique
-                .iter()
-                .map(|branch| format!("origin/{branch}"))
-                .find(|branch| git_ref_exists(repo_path, branch))
-        })
 }
 
 /// cas-e33f: the branch every close-time git probe for `task` should name —
@@ -19995,6 +20005,71 @@ fn stale_rebased_anchor_rejection(
     )
 }
 
+/// The HEAD commit of each checkout of `repo_path` whose directory is named
+/// for `assignee` (a System-B worker worktree is `<base>/<assignee>`).
+fn worker_worktree_heads(repo_path: &std::path::Path, assignee: &str) -> Vec<(String, String)> {
+    if !is_safe_path_component(assignee) {
+        return Vec::new();
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_path)
+        .measurement_output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut heads = Vec::new();
+    let mut path: Option<String> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(worktree) = line.strip_prefix("worktree ") {
+            path = Some(worktree.to_string());
+        } else if let Some(head) = line.strip_prefix("HEAD ")
+            && let Some(worktree) = path.take()
+            && std::path::Path::new(&worktree)
+                .file_name()
+                .is_some_and(|name| name == assignee)
+        {
+            heads.push((worktree, head.trim().to_string()));
+        }
+    }
+    heads
+}
+
+/// cas-f1f4 (GH #1087): where a parked anchor that the live target does not
+/// yet contain is still the task's delivery, for a close that has no
+/// validated task worktree (a supervisor close, for one). A stacked delivery
+/// — task B committed on top of task A's tip — leaves A's anchor behind the
+/// worker's HEAD, and the close must still park A for merge. The anchor
+/// counts when it is an ancestor of the assignee's worker worktree HEAD or of
+/// one of the task's delivery branches, locally or on origin. Returns the
+/// ref it was found under, or `None` when it is unreachable from all of them.
+fn parked_anchor_delivery_ref(
+    repo_path: &std::path::Path,
+    task: &Task,
+    anchor: &str,
+) -> Option<String> {
+    if let Some(assignee) = task.assignee.as_deref() {
+        for (worktree, head) in worker_worktree_heads(repo_path, assignee) {
+            if git_commit_is_ancestor(repo_path, anchor, &head) {
+                return Some(format!("worker worktree {worktree} HEAD"));
+            }
+        }
+    }
+    for branch in task_delivery_branch_candidates(task) {
+        for refname in [format!("refs/heads/{branch}"), format!("refs/remotes/origin/{branch}")] {
+            if git_ref_exists(repo_path, &refname)
+                && git_commit_is_ancestor(repo_path, anchor, &refname)
+            {
+                return Some(refname);
+            }
+        }
+    }
+    None
+}
+
 fn pre_close_unreachable_rejection(
     task_id: &str,
     commit: &str,
@@ -20193,7 +20268,18 @@ pub(crate) fn run_declared_pre_close_hook(
                     live_target_source,
                 ));
             }
-            if !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref) {
+            // cas-f1f4 (GH #1087): an unmerged parked anchor is still the
+            // task's delivery when the worker's HEAD or a delivery branch
+            // carries it, e.g. under a later stacked task's commits. The close
+            // then parks it for merge; the merge gate still measures it.
+            let anchor_is_unmerged_delivery = || {
+                normalized_receipt.is_none()
+                    && derived_epic_anchor.is_none()
+                    && parked_anchor_delivery_ref(&repo_context.repo_root, task, tip).is_some()
+            };
+            if !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref)
+                && !anchor_is_unmerged_delivery()
+            {
                 return Err(pre_close_unreachable_rejection(
                     &task.id,
                     tip,
@@ -24077,6 +24163,120 @@ mod merge_state_gate_tests {
         assert!(!is_error, "{closed}");
         assert!(!closed.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{closed}");
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
+    }
+
+    /// cas-f1f4 (GH #1087): the gabber-studio cas-4c7d sequence through the
+    /// real handler. A worker parks task A's anchor, commits task B on top in
+    /// the same checkout, and the supervisor's close of A (which has no
+    /// validated task worktree) used to be refused with "PRE-CLOSE HOOK
+    /// CONTEXT REJECTED … not reachable from the validated task worktree".
+    /// It must instead reach the merge gate and park A as awaiting_merge.
+    #[tokio::test]
+    async fn supervisor_close_of_stacked_delivery_parks_for_merge_cas_f1f4() {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+            open_worktree_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-f1f4-fixture\"\n\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "ignore store"]);
+
+        // The worker's checkout: task A, then task B stacked on it.
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join("watchful-dolphin-12");
+        git(
+            p,
+            &["worktree", "add", "-q", "-b", "factory/watchful-dolphin-12", wt.to_str().unwrap(), "main"],
+        );
+        std::fs::write(wt.join("task_a.rs"), "pub fn task_a() {}\n").unwrap();
+        git(&wt, &["add", "task_a.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-f1f4-a): task A"]);
+        let anchor_a = rev_parse_local(&wt, "HEAD");
+        std::fs::write(wt.join("task_b.rs"), "pub fn task_b() {}\n").unwrap();
+        git(&wt, &["add", "task_b.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-f1f4-b): task B on A"]);
+
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        open_worktree_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-f1f4-supervisor";
+        agents
+            .register(&Agent::new_with_role(
+                actor.into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+
+        let mut task = worker_task("watchful-dolphin-12");
+        task.id = "cas-f1f4-a".into();
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(anchor_a.clone());
+        // User-facing, so the park dispatches an independent QA round.
+        task.demo_statement = "Open the composer and the stacked card renders".into();
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-f1f4-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "supervisor_override": true,
+            "reason": "stacked delivery: task B is built on task A's tip",
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
+        assert!(text.contains("MERGE REQUIRED"), "{text}");
+        let parked = store.get(&task.id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{text}");
+        assert!(parked.notes.contains("Task parked as awaiting_merge"), "{}", parked.notes);
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(anchor_a.as_str()),
+            "the parked anchor stays task A's commit, not B's tip"
+        );
+        // QA dispatch ran for the park, bound to A's anchor.
+        let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
+        assert_eq!(rounds.len(), 1, "{text}");
+        assert_eq!(rounds[0].bound_head, anchor_a, "{text}");
     }
 
     /// What one cas-74cb handler close of a fixture epic produced.
@@ -33390,6 +33590,118 @@ mod zero_change_close_tests {
         )
         .expect("local target merge must satisfy the local_merge pre-close hook");
         assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
+    }
+
+    /// cas-f1f4 (GH #1087): commit `name` on the current branch of `dir`.
+    fn commit_file(dir: &Path, name: &str, message: &str) -> String {
+        std::fs::write(dir.join(name), format!("pub fn {}() {{}}\n", name.replace('.', "_")))
+            .unwrap();
+        git(dir, &["add", name]);
+        git(dir, &["commit", "-q", "-m", message]);
+        head_sha(dir)
+    }
+
+    /// cas-f1f4 (GH #1087): the stacked case with no validated task
+    /// worktree (a supervisor close). Task A parks its anchor, task B commits
+    /// on top in the same checkout, then A is closed: the anchor is behind
+    /// the worker's HEAD and not yet on the target, and must still pass the
+    /// pre-close hook so A parks for merge.
+    #[test]
+    fn stacked_parked_anchor_passes_pre_close_without_a_task_worktree_cas_f1f4() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        let anchor_a = commit_file(p, "task_a.rs", "feat(cas-f1f4-a): task A");
+        let tip_b = commit_file(p, "task_b.rs", "feat(cas-f1f4-b): task B on A");
+        assert!(!git_commit_is_ancestor(p, &anchor_a, "main"), "precondition: A is unmerged");
+        assert!(git_commit_is_ancestor(p, &anchor_a, &tip_b), "precondition: B stacks on A");
+
+        let mut task = Task::new("cas-f1f4-a".to_string(), "stacked A".to_string());
+        task.assignee = Some("test-worker".to_string());
+        task.deliverables.factory_branch_anchor = Some(anchor_a.clone());
+        for supervisor_override in [false, true] {
+            let evidence = run_declared_pre_close_hook(
+                &task,
+                &declared_main_context(p),
+                None,
+                None,
+                supervisor_override,
+            )
+            .unwrap_or_else(|error| {
+                panic!("a stacked anchor on the worker branch must pass (override={supervisor_override}): {error}")
+            });
+            assert_eq!(evidence.task_tip.as_deref(), Some(anchor_a.as_str()));
+            assert_eq!(evidence.worktree_branch, None);
+        }
+    }
+
+    /// cas-f1f4: the anchor is found from the worker worktree's HEAD even
+    /// when that worktree is on a branch the task never recorded.
+    #[test]
+    fn parked_anchor_reachable_from_worker_worktree_head_passes_cas_f1f4() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join("stack-worker");
+        git(
+            p,
+            &["worktree", "add", "-q", "-b", "scratch/stack", wt.to_str().unwrap(), "main"],
+        );
+        let anchor_a = commit_file(&wt, "task_a.rs", "feat(cas-f1f4-a): task A");
+        commit_file(&wt, "task_b.rs", "feat(cas-f1f4-b): task B on A");
+
+        let mut task = Task::new("cas-f1f4-a".to_string(), "stacked A".to_string());
+        task.assignee = Some("stack-worker".to_string());
+        task.deliverables.factory_branch_anchor = Some(anchor_a.clone());
+        // The only carrier is the worker worktree HEAD (git may report the
+        // checkout under its resolved path, e.g. /private/var on macOS).
+        let carrier = parked_anchor_delivery_ref(p, &task, &anchor_a).unwrap_or_default();
+        assert!(
+            carrier.starts_with("worker worktree ") && carrier.ends_with("/stack-worker HEAD"),
+            "{carrier}"
+        );
+        let evidence =
+            run_declared_pre_close_hook(&task, &declared_main_context(p), None, None, true)
+                .expect("an anchor behind the worker worktree HEAD must pass");
+        assert_eq!(evidence.task_tip.as_deref(), Some(anchor_a.as_str()));
+    }
+
+    /// cas-f1f4: a delivery branch that exists only on origin carries the
+    /// anchor too; an anchor no delivery ref carries is still refused.
+    #[test]
+    fn parked_anchor_on_origin_delivery_branch_passes_and_unreachable_is_refused_cas_f1f4() {
+        let (dir, _origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "factory/test-worker-cas-f1f4-a", "main"]);
+        let anchor_a = commit_file(p, "task_a.rs", "feat(cas-f1f4-a): task A");
+        git(p, &["push", "-q", "origin", "factory/test-worker-cas-f1f4-a"]);
+        git(p, &["fetch", "-q", "origin"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-q", "-D", "factory/test-worker-cas-f1f4-a"]);
+
+        let mut task = Task::new("cas-f1f4-a".to_string(), "origin-only A".to_string());
+        task.assignee = Some("test-worker".to_string());
+        task.deliverables.factory_branch_anchor = Some(anchor_a.clone());
+        assert_eq!(
+            parked_anchor_delivery_ref(p, &task, &anchor_a).as_deref(),
+            Some("refs/remotes/origin/factory/test-worker-cas-f1f4-a")
+        );
+        run_declared_pre_close_hook(&task, &declared_main_context(p), None, None, true)
+            .expect("an anchor on the task's origin delivery branch must pass");
+
+        // The same commit, but nothing of this task's carries it: refused.
+        git(p, &["checkout", "-q", "-b", "other/unrelated", "main"]);
+        let stray = commit_file(p, "stray.rs", "feat: unrelated work");
+        git(p, &["checkout", "-q", "main"]);
+        task.deliverables.factory_branch_anchor = Some(stray.clone());
+        assert_eq!(parked_anchor_delivery_ref(p, &task, &stray), None);
+        let error =
+            run_declared_pre_close_hook(&task, &declared_main_context(p), None, None, true)
+                .expect_err("an anchor no delivery ref carries stays refused");
+        assert!(
+            error.contains("PRE-CLOSE HOOK CONTEXT REJECTED") && error.contains(&stray),
+            "{error}"
+        );
     }
 
     #[test]

@@ -932,9 +932,7 @@ pub(crate) fn resolve_live_branch_tip(
     branch: &str,
     _recorded_anchor: Option<&str>,
 ) -> Option<String> {
-    use crate::mcp::tools::core::task::lifecycle::close_ops::{
-        git_commit_is_ancestor, resolve_branch_sha,
-    };
+    use crate::git_evidence::{git_commit_is_ancestor, resolve_branch_sha};
 
     let remote = resolve_branch_sha(repo_path, &format!("refs/remotes/origin/{branch}"));
     let local = resolve_branch_sha(repo_path, branch);
@@ -985,7 +983,7 @@ pub(crate) fn revalidate_merge_request(
     let Some(target_tip) = resolve_target_branch_tip(repo_path, target_branch) else {
         return MergeRequestDecision::Unverifiable;
     };
-    if crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
+    if crate::git_evidence::git_commit_is_ancestor(
         repo_path,
         branch_tip,
         &target_tip,
@@ -2196,7 +2194,7 @@ mod tests {
         let target_tip = git(repo.path(), &["rev-parse", "main"]);
 
         assert!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
+            crate::git_evidence::git_commit_is_ancestor(
                 repo.path(),
                 &worker_tip,
                 "main"

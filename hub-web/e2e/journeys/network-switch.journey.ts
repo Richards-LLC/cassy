@@ -488,13 +488,16 @@ test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'conn
     await expect(page.locator("#toast")).not.toContainText("connection dropped");
     expect(await page.locator("body").ariaSnapshot()).not.toContain("connection dropped");
     // Nor does control come back by itself: the pairing must be repaired first,
-    // and the controls say so instead of promising a reconnect.
-    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    // and the controls say so instead of promising a reconnect. The banner
+    // above says what is wrong, so the line says only the step (journey F42);
+    // the controls' own reason keeps the whole sentence.
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
+    await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", "Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
     // Heartbeats keep ticking: the refusal must stand on every surface (it
     // turned "live" again on the next beat, cas-05c0 QA).
     for (let beat = 0; beat < 3; beat++) await clock.advance(5_000);
     await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
-    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
     await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
     await expect(page.locator("[data-machine-latency]")).toHaveText("Needs pairing");
     await expect(page.locator("#attention-panel .attention-title").filter({ hasText: "Machine needs pairing" })).toBeVisible();

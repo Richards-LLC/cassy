@@ -168,12 +168,54 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
       expect(await anchorY(anchor.key)).toBeLessThanOrEqual(anchor.y + 3);
     };
     const beforeDrop = await reading();
+    // cas-c945 QA F01: what a screen reader would hear. Each change of text
+    // is attributed to its nearest live region (role status/alert/log or
+    // aria-live, an aria-live="off" ancestor silencing it), and the changed
+    // text itself is recorded, not the whole region's.
+    await page.evaluate(() => {
+      const w = window as unknown as { __heard: string[] };
+      w.__heard = [];
+      const region = (node: Node): Element | null => {
+        for (let element = node instanceof Element ? node : node.parentElement; element; element = element.parentElement) {
+          const live = element.getAttribute("aria-live");
+          if (live === "off") return null;
+          if (live || ["status", "alert", "log"].includes(element.getAttribute("role") ?? "")) return element;
+        }
+        return null;
+      };
+      new MutationObserver((records) => {
+        const last = new Map<Element, string>();
+        for (const record of records) {
+          for (const node of record.type === "characterData" ? [record.target] : [...record.addedNodes]) {
+            const speaker = region(node);
+            const words = node.textContent?.trim() ?? "";
+            if (!speaker || !words || last.get(speaker) === words) continue;
+            last.set(speaker, words);
+            w.__heard.push(words);
+          }
+        }
+      }).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
     hub.hold(PELICAN);
     hub.drop(PELICAN);
     await expect(header).toContainText("Reconnecting");
     await holds(beforeDrop, "when the connection drops");
+    // Journey F28: the card that said the machine "is connected" says what
+    // the header, banner, row and footer say, without another click, and
+    // without a second announcement of the outage.
+    const reconnecting = "Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.";
+    await expect(note("art-offline")).toHaveText(reconnecting);
+    await expect(note("art-offline")).not.toHaveAttribute("role", "status");
+    await expect(log.locator('a[data-artifact-id="art-offline"]')).toHaveAccessibleName(/Lost connection to Atlas · Linux\. Reconnecting…/);
+    await expect(log).not.toContainText("is connected");
+    // The banner says the drop once; the card's rewrite is not a second
+    // announcement, through its own role or the thread's log around it.
+    await page.waitForTimeout(1_500);
+    const heard = await page.evaluate(() => (window as unknown as { __heard: string[] }).__heard);
+    expect(heard.filter((words) => /lost connection|reconnecting/i.test(words)), "the outage is spoken once, by the banner").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
+    await expect(note("art-offline")).toHaveAttribute("aria-live", "off");
     await log.locator('a[data-artifact-id="art-offline"]').click();
-    await expect(note("art-offline")).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    await expect(note("art-offline")).toHaveText(reconnecting);
     // Opening the card brought it into view: that is where the reader is now.
     const beforeReconnect = await reading();
     const firstPages = hub.historyRequests.filter((request) => request.before === undefined).length;

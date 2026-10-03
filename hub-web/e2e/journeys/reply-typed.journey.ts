@@ -23,9 +23,10 @@ async function swipeAway(locator: import("@playwright/test").Locator, dx: number
 }
 
 test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
-  // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
-  // loaded host, so it gets the headroom HUB-J3 has.
-  test.setTimeout(120_000);
+  // Nineteen stages; on a loaded host (load ~50) the full run took 108 s of
+  // the old 120 s budget (cas-f657 QA N2). Every wait inside is event-driven,
+  // so the budget only needs headroom, as HUB-J3 has.
+  test.setTimeout(240_000);
   await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -555,7 +556,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     });
     await composer.fill("A reply typed while the browser's storage is full.");
     await expect(note).toBeVisible();
-    await expect(note).toHaveText("This browser couldn't save this draft, because its storage is full, so it won't survive a reload. Send it, or copy it somewhere safe, before you leave.");
+    await expect(note).toHaveText("This browser couldn't save this draft (its storage is full or blocked), so it won't survive a reload. Send it, or copy it somewhere safe, before you leave.");
     await expect(composer).toHaveAttribute("aria-describedby", /\bmessage-draft-note\b/);
     await expect(composer).toHaveValue("A reply typed while the browser's storage is full.");
     // Room again: the next keystroke saves it, and the note goes.

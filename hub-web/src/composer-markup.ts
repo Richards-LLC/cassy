@@ -19,9 +19,10 @@ export const DRAFT_TOO_LONG_NOTE = "This draft is too long to keep if the page r
 
 /**
  * cas-f657: the draft fits, but the browser refused to store it (localStorage
- * is full or denied), so it too lives only in this page.
+ * is full, or blocked by the browser's settings), so it too lives only in this
+ * page. The sentence names both, since the page cannot tell them apart.
  */
-export const DRAFT_NOT_SAVED_NOTE = "This browser couldn't save this draft, because its storage is full, so it won't survive a reload. Send it, or copy it somewhere safe, before you leave.";
+export const DRAFT_NOT_SAVED_NOTE = "This browser couldn't save this draft (its storage is full or blocked), so it won't survive a reload. Send it, or copy it somewhere safe, before you leave.";
 
 /** Why a draft lives only in this page, or false when it is safe on disk. */
 export type DraftNoteReason = false | "too-long" | "not-saved";

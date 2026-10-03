@@ -153,7 +153,14 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await copy.focus();
     await page.keyboard.press("Enter");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
-    // A control pairing may allow managing workers itself, once.
-    await expect(studio.locator('[data-permission="operate"]').getByRole("button", { name: "Allow managing workers" })).toBeVisible();
+    // A control pairing may allow managing workers itself, once: the first
+    // press says what it allows, the second grants it.
+    const allow = studio.locator('[data-permission="operate"]').getByRole("button", { name: "Allow managing workers" });
+    await allow.click();
+    await expect(studio.locator('[data-permission="operate"] .fleet-permission-allow')).toHaveText("Confirm: allow managing workers on Studio Mac · macOS");
+    await studio.locator('[data-permission="operate"] .fleet-permission-allow').click();
+    await expect(studio.locator('[data-permission="operate"] .fleet-permission-state')).toHaveText("Allowed");
+    // Stop and restart still is not: it is never allowed from this browser.
+    await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");
   });
 });

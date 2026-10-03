@@ -3178,6 +3178,28 @@ mod cpr_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
+        for (args, cli, account_env) in [
+            (vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex", "CODEX_HOME"),
+            (vec!["-n10", "claude", "--effort", "high", "--model", "codex"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--", "codex", "--model", "large"], "codex", "CODEX_HOME"),
+        ] {
+            let config = PtyConfig {
+                command: "nice".into(),
+                args: args.into_iter().map(str::to_string).collect(),
+                env: vec![("CAS_AGENT_ROLE".into(), "worker".into())],
+                ..PtyConfig::default()
+            };
+            assert_eq!(command_launches_codex(&config.command, &config.args), cli == "codex", "{:?}", config.args);
+            let audit = worker_spawn_audit(&config, |_| Some("/selected-account".into())).unwrap();
+            assert_eq!(audit.cli, cli);
+            assert_eq!(audit.account_env, account_env);
+            assert_eq!(audit.account, "/selected-account");
+        }
+    }
+
+    #[test]
     fn worker_spawn_audit_tracks_launched_cli_and_provider_account() {
         for cli in ["codex", "claude", "grok", "opencode"] {
             for wrapped in [false, true] {

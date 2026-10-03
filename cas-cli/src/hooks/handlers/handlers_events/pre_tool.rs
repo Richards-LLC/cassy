@@ -3169,6 +3169,13 @@ fn cas_runtime_leftover(path: &std::path::Path, home: Option<&std::path::Path>) 
 /// A socket is stale only when nothing accepts on it.
 #[cfg(unix)]
 fn socket_staleness(path: &std::path::Path) -> RuntimeLeftover {
+    use std::os::unix::fs::FileTypeExt;
+    // A regular file named *.sock (a 0-byte leftover) has no listener.
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_socket() => return RuntimeLeftover::Stale,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RuntimeLeftover::Stale,
+        _ => {}
+    }
     match std::os::unix::net::UnixStream::connect(path) {
         Ok(_) => RuntimeLeftover::Live("the socket has a listener"),
         Err(error)

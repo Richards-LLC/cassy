@@ -74,6 +74,25 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await expect(last.getByRole("button", { name: "Cancel" })).toBeInViewport({ ratio: 1 });
   });
 
+  await journey.stage("A failed End session keeps its row and returns focus for retry (cas-a549)", async () => {
+    const last = list.locator(".conversation-end").last();
+    // One refused request, then the normal protocol double handles the retry.
+    await page.route("**/v1/sessions/gabber-studio-amber-fox-29", async (route) => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      await route.fulfill({ status: 500, json: { error: "internal_error" } });
+    }, { times: 1 });
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Enter");
+    await expect(last.locator(".conversation-end-error")).toHaveText("Could not end amber-fox-29 on Atlas. Try End session again. If it still fails, check the session on Atlas.");
+    await expect(last.getByRole("button", { name: "End session amber-fox-29 on Atlas" })).toBeFocused();
+    await expect(row("amber-fox-29")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toHaveCount(7);
+    expect(hub.ends).toEqual([]);
+    // Enter on the returned control deliberately opens a fresh confirmation.
+    await page.keyboard.press("Enter");
+    await expect(last.getByRole("button", { name: "Cancel" })).toBeFocused();
+  });
+
   await journey.stage("Cancel, then end it from the keyboard", async () => {
     const last = list.locator(".conversation-end").last();
     await last.getByRole("button", { name: "Cancel" }).tap();

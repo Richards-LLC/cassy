@@ -934,6 +934,8 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     // (key, value to set, value get returns)
     let table: &[(&str, &str, &str)] = &[
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
+        ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
+        ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
         ("factory.message_max_chars", "3000", "3000"),
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),

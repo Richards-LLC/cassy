@@ -244,7 +244,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(6, "answer", "Same-session answer.", 5), at(9, 41));
     view.update();
     const [cross, same] = [...view.element.querySelectorAll<HTMLElement>('.turn.sup .bub[data-kind="answer"]')];
-    expect(cross!.querySelector(".reply-quote")?.textContent).toBe("re: earlier session wise-lion-31");
+    expect(cross!.querySelector(".reply-quote")?.textContent).toBe("Reply to your message in earlier session wise-lion-31");
     expect(cross!.querySelector(".reply-quote")?.getAttribute("title")).toBe("acct-wise-lion-31");
     expect(cross!.dataset.replyTo).toBe("3196243");
     expect(cross!.textContent).toContain("The import finished overnight.");

@@ -13,7 +13,7 @@ export function renderAttentionNoticeFixture(app: HTMLElement): void {
   const heading = document.createElement("h1");heading.textContent = "Attention";
   const panel = document.createElement("section");panel.id = "attention-panel";
   const item = createAttentionItem({ id: "notice-901", machineId: "atlas", machineLabel: "Atlas · Linux", session: "Accounting-rapid-gazelle-52", kind: NOTICE_KIND, createdAt: new Date(now - 86_400_000).toISOString() }, plan.content);
-  renderAttentionPanel(panel, [item], { dismiss: () => {}, act: () => {}, copy: () => {} }, { now });
+  renderAttentionPanel(panel, [item], { dismiss: () => {}, act: () => {}, copy: () => {} }, { now, sessionLabel: () => "Accounting · happy-cheetah-1" });
   panel.querySelector("details")!.open = true;
   main.append(heading, panel);app.replaceChildren(main);
 }

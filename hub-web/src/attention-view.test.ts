@@ -113,22 +113,22 @@ describe("heartbeat redraws (cas-a5c6 QA F03)", () => {
   it("leaves an unchanged panel, its focus and an opened Details alone, and redraws when something changes", () => {
     const root = document.createElement("div"); document.body.replaceChildren(root);
     renderAttentionPanel(root, [event("1")], callbacks(), { now });
-    const dismiss = root.querySelector<HTMLButtonElement>(".attention-dismiss-group")!;
+    const dismiss = root.querySelector<HTMLButtonElement>("[data-role='dismiss']")!;
     const details = root.querySelector<HTMLDetailsElement>("details")!;
     details.open = true;
     dismiss.focus();
     // The 5 s heartbeat: same items, same minute.
     renderAttentionPanel(root, [event("1")], callbacks(), { now: now + 5_000 });
-    expect(root.querySelector(".attention-dismiss-group")).toBe(dismiss);
+    expect(root.querySelector("[data-role='dismiss']")).toBe(dismiss);
     expect(document.activeElement).toBe(dismiss);
     expect(details.open).toBe(true);
     // A new item is a real change.
     renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 10_000 });
-    expect(root.querySelector(".attention-dismiss-group")).not.toBe(dismiss);
+    expect(root.querySelector("[data-role='dismiss']")).not.toBe(dismiss);
     // The next minute is not a redraw: the ages move on in place (round 3).
-    const before = root.querySelector(".attention-dismiss-group");
+    const before = root.querySelector("[data-role='dismiss']");
     renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 70_000 });
-    expect(root.querySelector(".attention-dismiss-group")).toBe(before);
+    expect(root.querySelector("[data-role='dismiss']")).toBe(before);
   });
 });
 

@@ -11601,6 +11601,10 @@ mod tests {
         let agents = SqliteAgentStore::open(&cas_root).expect("agents");
         let queue = SqlitePromptQueueStore::open(&cas_root).expect("queue");
         queue.init().expect("initialize queue");
+        let mut sender = cas_types::Agent::new("sender-c653".into(), "scope-supervisor".into());
+        sender.role = AgentRole::Supervisor;
+        sender.factory_session = Some("shutdown-c653".into());
+        agents.register(&sender).expect("register watchdog sender");
         let mut cancelled = Vec::new();
         for (name, status) in [
             ("proud-newt-45", AgentStatus::Stale),
@@ -11644,6 +11648,18 @@ mod tests {
         let unrelated = queue
             .enqueue_with_session("supervisor", "live-worker", "live message", "shutdown-c653")
             .unwrap();
+
+        // Watchdog eligibility requires a registered sender. Prove that the
+        // incident rows would alert before cancellation, then disappear from
+        // that same read path after shutdown.
+        let before = queue
+            .delivery_stalled_candidates("shutdown-c653", 0, 0, 100)
+            .unwrap();
+        assert!(
+            cancelled
+                .iter()
+                .all(|id| before.iter().any(|row| row.id == *id))
+        );
 
         let core = CasCore::with_daemon(cas_root, None, None);
         #[cfg(feature = "mcp-proxy")]

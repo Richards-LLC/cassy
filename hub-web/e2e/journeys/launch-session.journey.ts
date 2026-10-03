@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { SCOPES, type LaunchWorld, type Machine } from "./hub-double";
 import { PELICAN } from "./world";
 
@@ -188,7 +188,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
 // cas-0e14 (journey F30): New session follows the machine's connection. A
 // machine that is reconnecting says so in the sheet, in the banner's words,
 // instead of failing a project load; once it is back its projects load.
-test("HUB-J13 New session says a reconnecting machine is reconnecting, then loads once it's back (cas-0e14)", async ({ page, journey }) => {
+test("HUB-J13 New session says a reconnecting machine is reconnecting, then loads once it's back (cas-0e14)", journeyPart, async ({ page, journey }) => {
   test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });

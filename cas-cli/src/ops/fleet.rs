@@ -6,7 +6,10 @@
 //!   lane ([`enqueue_commander_message`]), the same row a Commander
 //!   `SendMessage` makes. MCP `message_send` is not reused: it derives its
 //!   sender from the MCP caller's registered agent, which a hub device has not.
-//! - O2, focus an epic: [`focus_epic`], the body of MCP `focus_epic`.
+//! - O2, focus an epic: [`focus_epic`], the body of MCP `focus_epic`, with
+//!   [`focus_epic_inverse`] for Undo (S3, cas-31f0).
+//! - O5, assign or unassign a task: [`assign_task`], the supervisor's own
+//!   `task_update` (S3, cas-31f0).
 //!
 //! Each hub operation states what the operator saw (`expected`); a mismatch
 //! is [`OperationError::Stale`] and changes nothing.
@@ -224,6 +227,106 @@ pub(crate) fn operator_stamp(
     }
 }
 
+
+/// What the operator saw when assigning (brief: O5's precondition).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct AssignTaskExpected {
+    /// The task's `updated_at` (RFC 3339) as the status read showed it.
+    pub updated_at: String,
+    #[serde(default)]
+    pub assignee: Option<String>,
+}
+
+/// The task note an operator's assignment leaves, naming the device so the
+/// task history says who assigned it, as a supervisor's update note does.
+pub(crate) fn assign_note(
+    assignee: Option<&str>,
+    attribution: &crate::ui::factory::MessageAttribution,
+) -> String {
+    let who = attribution
+        .operator_label
+        .as_deref()
+        .or(attribution.device_label.as_deref())
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or("an operator");
+    match assignee {
+        Some(assignee) => format!("Assigned to {assignee} from Commander by {who}."),
+        None => format!("Unassigned from Commander by {who}."),
+    }
+}
+
+/// O5: assign a task to a worker, or unassign it (`assignee: None`), through
+/// the supervisor's own `task_update`, so the assignee, the handoff record and
+/// the `task_assigned` session event are the ones that call makes. The
+/// precondition is the task's `updated_at` and assignee as the operator saw
+/// them; any change since is [`OperationError::Stale`] and nothing is written.
+/// The outcome names the inverse operation Undo sends.
+pub(crate) async fn assign_task(
+    cas_dir: &Path,
+    task_id: &str,
+    assignee: Option<&str>,
+    expected: &AssignTaskExpected,
+    attribution: &crate::ui::factory::MessageAttribution,
+) -> Result<serde_json::Value, OperationError> {
+    let assignee = assignee.map(str::trim).filter(|assignee| !assignee.is_empty());
+    let seen_at = chrono::DateTime::parse_from_rfc3339(&expected.updated_at)
+        .map_err(|error| {
+            OperationError::Invalid(format!(
+                "expected.updated_at must be the task's RFC 3339 updated_at: {error}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+    let store = crate::store::open_task_store(cas_dir)
+        .map_err(|error| OperationError::Failed(format!("task store unavailable: {error}")))?;
+    let task = store
+        .get(task_id)
+        .map_err(|_| OperationError::NotFound(format!("task {task_id} not found")))?;
+    if task.updated_at != seen_at || task.assignee != expected.assignee {
+        return Err(OperationError::Stale(serde_json::json!({
+            "updated_at": task.updated_at.to_rfc3339(),
+            "assignee": task.assignee,
+        })));
+    }
+    let prior = task.assignee.clone();
+
+    let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task_id,
+        // An empty assignee is task_update's explicit unassign (cas-bf98).
+        "assignee": assignee.unwrap_or(""),
+        "notes": assign_note(assignee, attribution),
+    }))
+    .map_err(|error| OperationError::Failed(format!("could not build the task update: {error}")))?;
+    let core = crate::mcp::CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
+    core.cas_task_update_with_target(request, None, None, false, None, None)
+        .await
+        .map_err(|error| OperationError::Failed(error.message.to_string()))?;
+
+    let task = store
+        .get(task_id)
+        .map_err(|error| OperationError::Failed(format!("task {task_id} could not be re-read: {error}")))?;
+    let updated_at = task.updated_at.to_rfc3339();
+    Ok(serde_json::json!({
+        "kind": "assign_task",
+        "task_id": task_id,
+        "assignee": task.assignee,
+        "prior_assignee": prior,
+        "updated_at": updated_at,
+        "inverse": {
+            "op": {"kind": "assign_task", "task_id": task_id, "assignee": prior},
+            "expected": {"updated_at": updated_at, "assignee": task.assignee},
+        },
+    }))
+}
+
+/// O2's Undo: the operation that restores `prior` once the session is pinned
+/// to `now`, preconditioned on `now` so a late Undo is stale.
+pub(crate) fn focus_epic_inverse(prior: Option<&str>, now: Option<&str>) -> serde_json::Value {
+    let op = match prior {
+        Some(epic_id) => serde_json::json!({"kind": "focus_epic", "epic_id": epic_id}),
+        None => serde_json::json!({"kind": "focus_epic", "clear": true}),
+    };
+    serde_json::json!({"op": op, "expected": {"epic_id": now}})
+}
 
 /// O2's request: pin the session to an epic, or clear the pin.
 #[derive(Debug, Clone, Copy)]

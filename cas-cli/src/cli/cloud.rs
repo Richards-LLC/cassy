@@ -9239,43 +9239,61 @@ mod purge_foreign_safety_tests {
 
     #[test]
     fn purge_queue_non_overlapping_changes_proceed_and_survive_delete() {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let (_env, home) = crate::test_support::TestEnvGuard::temp_home();
+        let cas_root = home.path().join("project/.cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"test-project\"\n").unwrap();
+        let mut conn = Connection::open(cas_root.join("cas.db")).unwrap();
         seed_db(&conn);
         conn.execute_batch(
-            "INSERT INTO tasks VALUES ('kept-task', 'local work', 'test-project');
-             INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
-                ('task', 'kept-task', 'update'),
-                ('rule', 'cas-0001', 'update'),
+            "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'open';
+             INSERT INTO tasks (id, title, origin_project) VALUES
+                ('kept-task', 'local work', 'test-project'),
+                ('kept-peer', 'other local work', 'test-project');",
+        ).unwrap();
+        conn.execute("INSERT INTO sync_metadata VALUES ('last_pull_at', ?1)", [chrono::Utc::now().to_rfc3339()]).unwrap();
+        // The incident shape: 362 unrelated task pushes plus two other kinds,
+        // none in the concrete delete set. No live store or cloud is involved.
+        for index in 0..362 {
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES ('task', ?1, 'update')",
+                [format!("local-edit-{index}")],
+            ).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
+                ('entry', 'local-learning', 'update'),
                 ('task_dependency', 'kept-task:kept-peer:blocks', 'upsert');",
         ).unwrap();
-        let delete_set = collect_purge_delete_set(&conn, "test-project").unwrap();
-        let pending = pending_content_pushes_excluding(&conn, &delete_set).unwrap();
-        let refusals = evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7);
+        let (analysis, refusals) = inspect_purge_state(&cas_root, "test-project", 3, 7, false, false).unwrap();
         assert!(refusals.is_empty(), "unrelated queued changes must survive safely: {refusals:?}");
-        assert_eq!(delete_purge_rows(&mut conn, &delete_set).unwrap(), 5);
+        assert_eq!(delete_purge_rows(&mut conn, &analysis.delete_set).unwrap(), 5);
         let queued: usize = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
-        assert_eq!(queued, 3);
+        assert_eq!(queued, 364);
         let title: String = conn.query_row("SELECT title FROM tasks WHERE id = 'kept-task'", [], |row| row.get(0)).unwrap();
         assert_eq!(title, "local work");
     }
 
     #[test]
-    fn purge_queue_overlapping_changes_refuse_without_losing_work() {
-        let conn = Connection::open_in_memory().unwrap();
+    fn purge_queue_delete_set_rows_remain_exempt() {
+        let mut conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);
         conn.execute_batch(
             "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
+                ('entry', 'e1', 'update'),
                 ('Task', 'cas-0001', 'update'),
                 ('rule', 'r1', 'update'),
-                ('skill', 's1', 'update');",
+                ('skill', 's1', 'update'),
+                ('task_dependency', 'cas-0001:kept-peer:blocks', 'upsert'),
+                ('task_dependency', 'kept-peer:cas-0001:blocks', 'upsert');",
         ).unwrap();
         let delete_set = collect_purge_delete_set(&conn, "test-project").unwrap();
         let pending = pending_content_pushes_excluding(&conn, &delete_set).unwrap();
-        let refusals = evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7);
-        assert!(matches!(refusals.as_slice(), [PurgeRefusal::UnpushedRows { pending: 3, .. }]), "{refusals:?}");
-        assert!(!refusals[0].is_hard(), "--force must retain its explicit recoverability override");
-        let tasks: usize = conn.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0)).unwrap();
-        assert_eq!(tasks, 1, "the guard must leave the store untouched");
+        assert!(pending.is_empty(), "queued replicas in the classified delete set are intentional cleanup");
+        assert!(evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7).is_empty());
+        assert_eq!(delete_purge_rows(&mut conn, &delete_set).unwrap(), 5);
+        let queued: usize = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
+        assert_eq!(queued, 6, "purge preserves the queue even for exempt rows");
     }
 
     #[test]

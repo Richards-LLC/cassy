@@ -105,7 +105,7 @@ export interface HubCallbacks {
  * "failed (409)". The message keeps the old wording for anything that logs it.
  */
 export class HubRequestError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string, readonly detail?: string) { super(message); }
+  constructor(message: string, readonly status: number, readonly code?: string, readonly detail?: string, readonly body?: Readonly<Record<string, unknown>>) { super(message); }
 }
 
 /** Read a refused response's `{error, detail}` body; a body that is not JSON leaves both unset. */
@@ -114,7 +114,7 @@ export async function hubRequestError(method: string, path: string, response: Re
   try { body = await response.json() as Record<string, unknown>; } catch { body = undefined; }
   const code = typeof body?.error === "string" ? body.error : undefined;
   const detail = typeof body?.detail === "string" ? body.detail : typeof body?.reason === "string" ? body.reason : undefined;
-  return new HubRequestError(`${method} ${path} failed (${response.status})`, response.status, code, detail);
+  return new HubRequestError(`${method} ${path} failed (${response.status})`, response.status, code, detail, body);
 }
 
 /** A refused scope self-grant, keeping its status so a 403 can offer a pairing command instead. */
@@ -653,6 +653,15 @@ export class HubConnectionSupervisor {
     const body = await response.json() as { scopes: StoredMachine["scopes"] };
     this.machine.scopes = body.scopes;
     await this.callbacks.onCredentialRefreshed?.(this.machine);
+  }
+
+  /**
+   * Run one structured fleet operation (cas-a474, fleet-operations brief):
+   * the hub dedupes `op_id`, refuses a stale `expected` with 409
+   * {error:"stale", current}, and announces FleetChanged. No terminal lease.
+   */
+  async operation(session: string, body: { op_id: string; op: Record<string, unknown>; expected: Record<string, unknown> }): Promise<{ op_id: string; outcome?: Record<string, unknown> }> {
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/operations`, body);
   }
 
   async status(session: string): Promise<Record<string, unknown>> {

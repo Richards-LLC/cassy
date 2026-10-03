@@ -1,5 +1,6 @@
 import "../src/styles.css";
 import { renderAttentionNoticeFixture } from "./attention-notice";
+import { renderFleetOpsFixture } from "./fleet-ops";
 import { renderConversationFixture } from "./conversations";
 import { attentionCounts, createAttentionItem } from "../src/attention";
 import { renderAttentionPanel } from "../src/attention-view";
@@ -36,6 +37,9 @@ export const FIXTURE_NAMES = [
   "attention-0",
   "attention-12",
   "attention-notice-details",
+  "fleet-ops-menu",
+  "fleet-ops-confirm",
+  "fleet-ops-undo",
   "drawer-attention-open",
   "operator-thread",
   "connection-failed-retry",
@@ -603,5 +607,6 @@ function renderShell(): void {
 }
 
 if (fixtureName === "attention-notice-details") renderAttentionNoticeFixture(app);
+else if (fixtureName.startsWith("fleet-ops-")) renderFleetOpsFixture(app, fixtureName);
 else if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines" || fixtureName === "paired-machines-down") renderConversationFixture(app, fixtureName);
 else renderShell();

@@ -36,6 +36,16 @@ fn commit(repo: &Path, path: &str, contents: &str, subject: &str) -> String {
 
 // The sync merge imports sibling docs; its first-parent effect is not dist.
 fn fixture(drop_on_merge: bool, revert_on_lane: bool) -> (tempfile::TempDir, Task, String) {
+    fixture_with_return(
+        drop_on_merge,
+        revert_on_lane.then_some(("(()=>base())();\n", "revert: abandon cas-test1 bundle")),
+    )
+}
+
+fn fixture_with_return(
+    drop_on_merge: bool,
+    return_to: Option<(&str, &str)>,
+) -> (tempfile::TempDir, Task, String) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q", "-b", "main"]);
@@ -73,13 +83,8 @@ fn fixture(drop_on_merge: bool, revert_on_lane: bool) -> (tempfile::TempDir, Tas
         "(()=>finalBuild())();\n",
         "build(cas-test1): final bundle",
     );
-    if revert_on_lane {
-        commit(
-            repo,
-            DIST,
-            "(()=>base())();\n",
-            "revert: abandon cas-test1 bundle",
-        );
+    if let Some((contents, subject)) = return_to {
+        commit(repo, DIST, contents, subject);
     }
     git(repo, &["checkout", "-q", "main"]);
     commit(
@@ -321,4 +326,43 @@ fn later_lane_task_cannot_supply_old_minified_snapshot_cas_5f0b() {
         row.blocks_epic_close() && row.dropped_paths.contains(&DIST.into()),
         "{row:?}"
     );
+}
+
+#[test]
+fn imported_baseline_inverse_close_and_epic_reject_cas_5f0b() {
+    // Both explicit and unlabeled inverses remove the task's final bundle.
+    // The imported epic baseline differs from the task's earliest baseline,
+    // so final-target equality and earliest-base inequality are insufficient.
+    for subject in [
+        "revert: abandon cas-test1 bundle",
+        "build(cas-test1): restore imported bundle",
+    ] {
+        let (dir, task, _) = fixture_with_return(false, Some(("(()=>epicBuild())();\n", subject)));
+        let repo = dir.path();
+        let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
+        let root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+        let target_blob = git(repo, &["rev-parse", &format!("main:{DIST}")]);
+        assert_eq!(
+            target_blob,
+            git(repo, &["rev-parse", &format!("{anchor}:{DIST}")])
+        );
+        assert_ne!(
+            target_blob,
+            git(repo, &["rev-parse", &format!("{root}:{DIST}")])
+        );
+        match close_gate(repo, &task) {
+            MergeStateGateOutcome::Reject(message) => assert!(
+                message.contains("DELIVERY CONTENT DROPPED") && message.contains(DIST),
+                "{subject}: {message}"
+            ),
+            other => panic!(
+                "an imported baseline is not this task's final delivery: {subject}: {other:?}"
+            ),
+        }
+        let row = epic_row(repo, &task);
+        assert!(
+            row.blocks_epic_close() && row.dropped_paths.contains(&DIST.into()),
+            "{subject}: {row:?}"
+        );
+    }
 }

@@ -23,7 +23,6 @@ mod lane;
 pub(crate) mod parked;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod process_probe;
-pub(crate) mod parked;
 pub use lane::LanePreviewRecord;
 
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";

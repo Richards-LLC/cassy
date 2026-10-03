@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
+import { controlCommandCopy, paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 
 function row(markup: string): HTMLButtonElement {
   const host = document.createElement("div");
@@ -61,5 +61,42 @@ describe("palette control command (journey F16)", () => {
       const copy = controlCommandCopy({ heldByMe, forceTakeover, controller: "Studio iPad" });
       expect(`${copy.title} ${copy.hint}`).not.toMatch(/session/i);
     }
+  });
+});
+
+describe("palette Enter target with no filter (cas-786a, journey F30)", () => {
+  const atlas = { id: "atlas", label: "Atlas · Linux" };
+  const studio = { id: "studio", label: "Studio Mac · macOS" };
+  const forge = { id: "forge", label: "Forge · Linux" };
+  const casSrc = row(sessionJumpCommandMarkup(atlas, { name: "s1", supervisor: "patient-pelican-9", project_dir: "/projects/cas-src" }, undefined, { current: true }));
+  const lighthouse = row(sessionJumpCommandMarkup(forge, { name: "s2", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse" }));
+  const gabber = row(sessionJumpCommandMarkup(studio, { name: "s3", supervisor: "calm-otter-4", project_dir: "/projects/gabber-studio" }, undefined, { needsYou: true }));
+  const settings = row('<button type="button" class="palette-command" data-palette-action="paired"><span>Paired machines</span></button>');
+
+  it("marks the open conversation as the palette's current item, its description unchanged", () => {
+    expect(casSrc.dataset.paletteCurrent).toBe("true");
+    expect(casSrc.getAttribute("aria-current")).toBe("true");
+    expect(casSrc.querySelector("small")?.textContent).toBe("patient-pelican-9 · Atlas · Linux");
+    expect(lighthouse.hasAttribute("aria-current")).toBe(false);
+    expect(lighthouse.dataset.paletteCurrent).toBeUndefined();
+    expect(gabber.dataset.paletteNeedsYou).toBe("true");
+  });
+
+  it("goes to the next conversation that needs the operator, never the open one", () => {
+    expect(paletteEnterTarget([casSrc, lighthouse, gabber, settings], "")).toBe(gabber);
+  });
+
+  it("goes to the first other conversation when none needs the operator", () => {
+    const quiet = row(sessionJumpCommandMarkup(studio, { name: "s3", supervisor: "calm-otter-4", project_dir: "/projects/gabber-studio" }));
+    expect(paletteEnterTarget([casSrc, lighthouse, quiet, settings], "  ")).toBe(lighthouse);
+    // With no other conversation, no setting becomes a surprise default: Enter stays on the open one.
+    expect(paletteEnterTarget([casSrc, settings], "")).toBe(casSrc);
+  });
+
+  it("with a filter, keeps the first row on screen unless it only jumps to the open conversation", () => {
+    expect(paletteEnterTarget([lighthouse, settings], "light")).toBe(lighthouse);
+    expect(paletteEnterTarget([casSrc, settings], "a")).toBe(settings);
+    expect(paletteEnterTarget([casSrc], "pelican")).toBe(casSrc);
+    expect(paletteEnterTarget([], "zzz")).toBeUndefined();
   });
 });

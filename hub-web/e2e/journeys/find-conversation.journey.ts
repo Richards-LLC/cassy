@@ -12,6 +12,48 @@ const FORGE: Machine = {
   sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live", last_activity_at: journeyStamp(-3 * 3_600_000), last_activity: "supervisor → swift-lark-3" }],
 };
 
+for (const width of [1280, 390]) for (const long of [true, false]) {
+  test(`HUB-J3 a ${long ? "wrapped" : "short"} footer name keeps its status dot on the first line at ${width} (cas-94eb)`, journeyPart, async ({ page, journey }) => {
+    const label = long ? "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap" : "Atlas · Linux";
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await journey.hub({ machines: [{ ...ATLAS, label }], paired: [ATLAS.id] });
+    await journey.stage("Read the machine name and its connection together", async () => {
+      await journey.open();
+      const footer = page.locator("#paired-machines-toggle");
+      await expect(footer.locator(".machine-badge-state")).toHaveText("Connected");
+      await expect(footer.locator("span").nth(1)).toHaveAttribute("title", label);
+      const geometry = await footer.evaluate((button) => {
+        const name = button.children[1] as HTMLElement;
+        const range = document.createRange();
+        range.setStart(name.firstChild!, 0); range.setEnd(name.firstChild!, 1);
+        const first = range.getBoundingClientRect();
+        const dot = button.children[0]!.getBoundingClientRect();
+        const state = button.children[2]!.getBoundingClientRect();
+        const bounds = button.getBoundingClientRect();
+        return { firstTop: first.top, firstBottom: first.bottom, nameHeight: name.getBoundingClientRect().height,
+          dotCentre: dot.top + dot.height / 2, dotRight: dot.right, nameLeft: first.left, stateCentre: state.top + state.height / 2,
+          stateRight: state.right, right: bounds.right, textFits: name.scrollWidth <= name.clientWidth + 1 };
+      });
+      expect(geometry.dotCentre, "status dot belongs to the label's first line").toBeGreaterThanOrEqual(geometry.firstTop);
+      expect(geometry.dotCentre, "status dot belongs to the label's first line").toBeLessThanOrEqual(geometry.firstBottom);
+      expect(geometry.dotRight).toBeLessThan(geometry.nameLeft);
+      expect(geometry.stateRight).toBeLessThanOrEqual(geometry.right);
+      if (width === 1280 && long) {
+        expect(geometry.nameHeight).toBeGreaterThan(geometry.firstBottom - geometry.firstTop);
+        expect(geometry.textFits, "the full desktop machine name wraps inside the footer").toBe(true);
+      }
+      if (!long) {
+        expect(geometry.stateCentre, "short names keep their state on the same row").toBeGreaterThanOrEqual(geometry.firstTop);
+        expect(geometry.stateCentre).toBeLessThanOrEqual(geometry.firstBottom);
+      }
+      await footer.focus(); await page.keyboard.press("Enter");
+      await expect(page.locator("#paired-machines-list h3")).toHaveText(label);
+      await page.locator("#paired-machines-close").click();
+      await expect(footer).toBeFocused();
+    });
+  });
+}
+
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
   // Fourteen stages, two searches, three page loads and the palette. On a
   // quiet host the test takes about 72 s (50 s of stages); on the loaded
@@ -114,6 +156,16 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await search.fill("atlas");
     await expect(list.getByRole("button")).toHaveCount(1);
     await expect(list.getByRole("button").first()).toContainText("cas-src");
+    // cas-786a (journey F29): the row Enter opens carries its "Enter ↵" hint
+    // and its unread count side by side, never one drawn over the other. Every
+    // point of the count is the count's own, not the hint painted on top.
+    await expect(list.locator('.conversation-row[data-enter-target="true"]').getByLabel("1 unread")).toBeVisible();
+    const covered = await list.locator('.conversation-row[data-enter-target="true"] .conversation-unread').evaluate((badge) => {
+      const box = badge.getBoundingClientRect();
+      const points = [[0.5, 0.5], [0.15, 0.2], [0.85, 0.2], [0.15, 0.8], [0.85, 0.8]].map(([x, y]) => [box.left + box.width * x, box.top + box.height * y]);
+      return points.filter(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit !== badge && !badge.contains(hit); }).length;
+    });
+    expect.soft(covered, "points of the unread count covered by the Enter hint").toBe(0);
     await search.fill(OTTER);
     await expect(list.getByRole("button")).toHaveCount(1);
     await expect(list.getByRole("button").first()).toContainText("gabber-studio");
@@ -374,7 +426,34 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await filter.press("Enter");
     await expect(palette).toBeHidden();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    // cas-786a (journey F30): with no filter, Enter goes to the next
+    // conversation that needs the operator, never the one already open, and
+    // the open one says so. gabber-studio gets a reply while cas-src is open
+    // (visited once since the reload, so its machine is attached).
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
+    await expect.poll(() => hub.hasSocket(OTTER)).toBe(true);
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    hub.supervisorSays(OTTER, "The Mac tests are green.", { kind: "status" });
+    await expect(list.getByRole("button", { name: /gabber-studio/ }).getByLabel("1 unread")).toBeVisible();
     await reopen();
+    const current = palette.locator('.palette-command[data-palette-current="true"]');
+    await expect(current).toHaveCount(1);
+    await expect(current).toContainText("Jump to cas-src");
+    await expect(current).toHaveAttribute("aria-current", "true");
+    expect(await current.locator("small").evaluate((node) => getComputedStyle(node, "::before").content), "the open conversation says so").toContain('"Open now · "');
+    const enterTarget = palette.locator('.palette-command[data-enter-target="true"]');
+    await expect(enterTarget).toHaveCount(1);
+    await expect(enterTarget).toContainText("Jump to gabber-studio");
+    await expect(filter).toHaveAttribute("aria-activedescendant", (await enterTarget.getAttribute("id"))!);
+    await filter.press("Enter");
+    await expect(palette).toBeHidden();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
+    // Nothing waits now: Enter offers the first other conversation, here cas-src.
+    await reopen();
+    await expect(current).toContainText("Jump to gabber-studio");
+    await expect(enterTarget).toContainText("Jump to cas-src");
     // Typing after the reopen filters from scratch.
     await filter.pressSequentially(OTTER.slice(0, 6));
     await expect(commands.visible().first()).toContainText("Jump to gabber-studio");

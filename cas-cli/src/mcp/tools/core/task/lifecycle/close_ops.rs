@@ -11939,7 +11939,10 @@ fn regenerated_artifact_drop_note(
 /// anchor and is already reachable on the target (a landing merge that
 /// re-synced the epic). The blob must also differ from the task's delivery
 /// base: content identical to where the task started (a reverted delivery)
-/// is never proof of delivery. Returns the decision note for the accepted
+/// is never proof of delivery. Epic accounting sets `include_live_tip=false`
+/// to keep the recorded child anchor authoritative after lane reuse. A task-attributed
+/// path effect must survive without restoring an imported baseline.
+/// Returns the decision note for the accepted
 /// paths and the paths that remain dropped; `None` when Git cannot decide.
 fn target_identical_delivered_paths(
     task: &Task,
@@ -11949,6 +11952,7 @@ fn target_identical_delivered_paths(
     content_window: Option<&TaskCommitReceiptWindow>,
     content_identity: &TaskCommitIdentity,
     paths: &[String],
+    include_live_tip: bool,
 ) -> Option<(Option<String>, Vec<String>)> {
     let anchor = resolve_branch_sha(repo_path, &format!("{anchor}^{{commit}}"))?;
     let origin = format!("origin/{parent_branch}");
@@ -11973,7 +11977,8 @@ fn target_identical_delivered_paths(
     let window = content_window.unwrap_or(&fallback_window);
     let base = task_attribution::delivery_base(repo_path, parent_branch, window, Some(&anchor))?;
     let mut delivered = vec![anchor.clone()];
-    if let Some(assignee) = task.assignee.as_deref()
+    if include_live_tip
+        && let Some(assignee) = task.assignee.as_deref()
         && let Some(tip) = resolve_branch_sha(
             repo_path,
             &close_measured_factory_branch(repo_path, task, assignee),
@@ -11990,7 +11995,8 @@ fn target_identical_delivered_paths(
         let target_blob = tree_path_blob(repo_path, &target, path)?;
         let present = target_blob != tree_path_blob(repo_path, &base, path)?
             && delivered.iter().try_fold(false, |found, commit| {
-                Some(found || tree_path_blob(repo_path, commit, path)? == target_blob)
+                Some(found || tree_path_blob(repo_path, commit, path)? == target_blob
+                    && task_attribution::final_path_snapshot_proven(repo_path, parent_branch, window, commit, &target, path)?)
             })?;
         if present {
             identical.push(path.clone());
@@ -12000,12 +12006,46 @@ fn target_identical_delivered_paths(
     }
     let note = (!identical.is_empty()).then(|| {
         format!(
-            "path(s) {} are byte-identical on the delivered tree ({}) and target `{target}`, and differ from delivery base `{base}`; the line proof's missing lines were not this delivery's final content (cas-f38ca)",
+            "path(s) {} are byte-identical on the delivered tree ({}) and target `{target}`, and differ from delivery base `{base}`; a task-attributed path effect survives without restoring an imported baseline, so the line proof's missing lines were not this delivery's final content (cas-f38ca, cas-5f0b)",
             identical.join(", "),
             delivered.join(", "),
         )
     });
     Some((note, dropped))
+}
+
+/// An epic must prove the child's delivery, not just the first-parent
+/// imports of its target-sync merge. Use the same attributed history and
+/// exact final-blob recovery as child close when that history is available.
+/// Legacy anchors without task-attributed history retain their existing proof.
+/// The recorded anchor is the only accepted snapshot: a reused live lane
+/// cannot supply another task's final blob to this child's epic accounting.
+fn epic_anchor_content_presence(
+    task: &Task,
+    repo: &std::path::Path,
+    anchor: &str,
+    target: &str,
+) -> (DeliveryContentPresence, Option<String>) {
+    let identity = TaskCommitIdentity {
+        task_id: Some(task.id.clone()),
+        known_commits: vec![anchor.to_string()],
+    };
+    let presence = if git_commit_parent_count(repo, anchor) >= 2 {
+        task_attribution::merge_tip_content_presence(repo, target, anchor, None, &identity, None)
+            .unwrap_or_else(|| delivery_content_presence_in_parent(repo, anchor, target))
+    } else {
+        delivery_content_presence_in_parent(repo, anchor, target)
+    };
+    let DeliveryContentPresence::Dropped { paths } = &presence else {
+        return (presence, None);
+    };
+    match target_identical_delivered_paths(task, repo, anchor, target, None, &identity, paths, false) {
+        Some((note, remaining)) if remaining.is_empty() => {
+            (DeliveryContentPresence::Present { paths: paths.clone() }, note)
+        }
+        Some((note, remaining)) => (DeliveryContentPresence::Dropped { paths: remaining }, note),
+        None => (presence, None),
+    }
 }
 
 /// cas-3f8c: name the delivered lines the target lacks, so a supervisor can
@@ -12342,6 +12382,7 @@ fn anchored_delivery_content_gate(
                 content_window,
                 content_identity,
                 &paths,
+                true,
             ) {
                 Some(proof) => proof,
                 None => (None, paths),
@@ -17503,7 +17544,14 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             && content_check_error.is_none()
             && merge_evidence_note.is_none()
         {
-            match delivery_content_presence_in_parent(repo_path, anchor, parent_branch) {
+            let (presence, snapshot_note) = epic_anchor_content_presence(t, repo_path, anchor, parent_branch);
+            if let Some(note) = snapshot_note {
+                content_evolution_note = Some(format!(
+                    "decision: recorded factory_branch_anchor `{anchor}` for child task `{}`: {note}.",
+                    t.id,
+                ));
+            }
+            match presence {
                 DeliveryContentPresence::Present { .. } => {
                     if unmerged_count > 0 {
                         unmerged_count = 0;
@@ -36862,3 +36910,10 @@ mod zero_diff_spike_close_tests {
     }
 
 }
+
+#[cfg(test)]
+mod identical_delivery_tests;
+
+#[cfg(test)]
+#[path = "close_ops/recovery_delivery_tests.rs"]
+mod recovery_delivery_tests;

@@ -189,22 +189,29 @@ impl CasService {
         // cas-5c38 (GH #999): a delivery that never parked has no anchor.
         // Waive the tip the open (or latest) round was bound to, then any
         // commit Cassy recorded for the delivery.
+        // cas-6c75 (GH #1048, #1078): worktree_merge checks the branch's
+        // current tip. After a rebase the waiver binds to that tip when the
+        // open round is bound to it or it is a rebased copy of the recorded
+        // one, not to the stale pre-rebase anchor no merge can accept.
         let passes = cas_store::list_qa_passes(&self.inner.cas_root, task_id).unwrap_or_default();
-        let head = task
+        let repo = self
+            .inner
+            .cas_root
+            .parent()
+            .unwrap_or(&self.inner.cas_root)
+            .to_path_buf();
+        let current_tip = crate::qa_pass::branch_tip(&repo, &branch);
+        let target = task
             .deliverables
-            .factory_branch_anchor
-            .clone()
-            .or_else(|| {
-                passes
-                    .iter()
-                    .find(|pass| !pass.is_withdrawn())
-                    .map(|pass| pass.bound_head.clone())
-            })
-            .or_else(|| task.deliverables.delivery_pr_merge_commit.clone())
-            .or_else(|| task.deliverables.merge_commit.clone())
-            .or_else(|| task.deliverables.commit_hash.clone())
-            .filter(|head| !head.trim().is_empty());
-        let Some(head) = head else {
+            .work_target
+            .as_ref()
+            .map(|target| target.target_branch.clone())
+            .filter(|target| !target.trim().is_empty())
+            .unwrap_or_else(|| "main".to_string());
+        let chosen = crate::qa_pass::waiver_head(&task, &passes, current_tip.as_deref(), |recorded, tip| {
+            crate::qa_pass::is_rebased_copy(&repo, recorded, tip, &target)
+        });
+        let Some(chosen) = chosen else {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
@@ -221,18 +228,35 @@ impl CasService {
             &supervisor,
             &implementer,
             &branch,
-            &head,
+            &chosen.head,
             reason,
             chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        // What the receipt adds: why a newer tip was chosen, or that the
+        // branch has moved past the waived tip so the merge will still refuse.
+        let short = |sha: &str| sha[..sha.len().min(8)].to_string();
+        let binding = match (&chosen.advanced_from, chosen.why) {
+            (Some(previous), Some(why)) => format!(
+                " It binds to {branch}'s current tip, not the recorded @{}: {why}.",
+                short(previous)
+            ),
+            _ => match current_tip.as_deref() {
+                Some(tip) if tip != chosen.head => format!(
+                    " Note: {branch} is now at @{}, which this waiver does not cover (it adds or changes work); \
+                     worktree_merge will refuse until a round covers that tip.",
+                    short(tip)
+                ),
+                _ => String::new(),
+            },
+        };
         // cas-2ee2: a waiver satisfies the GitHub required check too, and its
         // status description carries the logged reason.
         crate::qa_pass::github_gate::publish_pass_status(&self.inner.cas_root, &pass);
         // Same shape as `task action=notes note_type=decision`, so the waiver
         // reads as a decision in every note view.
         let note = format!(
-            "[{}] ✅ DECISION Independent QA waived by supervisor {supervisor} for @{} (pass {}). Reason: {}",
+            "[{}] ✅ DECISION Independent QA waived by supervisor {supervisor} for @{} (pass {}).{binding} Reason: {}",
             chrono::Utc::now().format("%Y-%m-%d %H:%M"),
             pass.head8(),
             pass.id,
@@ -245,7 +269,7 @@ impl CasService {
             ));
         }
         Ok(Self::success(format!(
-            "Independent QA waived for {task_id} @{} (pass {}). The waiver is logged on the task; merge and close accept this exact tip only.",
+            "Independent QA waived for {task_id} @{} (pass {}).{binding} The waiver is logged on the task; merge and close accept this exact tip only.",
             pass.head8(),
             pass.id
         )))

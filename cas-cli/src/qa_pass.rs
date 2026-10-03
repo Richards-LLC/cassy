@@ -224,6 +224,136 @@ pub fn merge_gate(task: &Task, qa: &QaConfig, passes: &[QaPass], head: &str) -> 
     ))
 }
 
+/// The tip a supervisor's `qa_waive` binds to (cas-6c75, GH #1048, #1078).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaiverHead {
+    pub head: String,
+    /// The recorded tip the waiver moved past, when it bound to a newer one.
+    pub advanced_from: Option<String>,
+    /// Why the newer tip is the same delivery, in words for the receipt.
+    pub why: Option<&'static str>,
+}
+
+fn same_sha(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    !a.is_empty() && !b.is_empty() && (a == b || (a.len().min(b.len()) >= 7 && (a.starts_with(b) || b.starts_with(a))))
+}
+
+/// Which tip a waiver covers.
+///
+/// The recorded delivery is the parked anchor, else the open (or latest)
+/// round's tip, else a commit Cassy recorded for the delivery. `worktree_merge`
+/// checks the branch's *current* tip, so after a rebase a waiver on the
+/// recorded tip never let the merge through. The waiver binds to the current
+/// branch tip when that tip is still this delivery:
+/// - the open QA round is already bound to it (GH #1078), or
+/// - it is a rebased copy of the recorded tip: the recorded tip is no longer
+///   on the branch and both carry the same change (GH #1048).
+///
+/// A tip that only adds commits on top of the recorded one is new, unreviewed
+/// work: the waiver stays on the recorded tip and the merge still refuses.
+pub fn waiver_head(
+    task: &Task,
+    passes: &[QaPass],
+    branch_tip: Option<&str>,
+    rebased_copy: impl Fn(&str, &str) -> bool,
+) -> Option<WaiverHead> {
+    let recorded = task
+        .deliverables
+        .factory_branch_anchor
+        .clone()
+        .or_else(|| {
+            passes
+                .iter()
+                .find(|pass| !pass.is_withdrawn())
+                .map(|pass| pass.bound_head.clone())
+        })
+        .or_else(|| task.deliverables.delivery_pr_merge_commit.clone())
+        .or_else(|| task.deliverables.merge_commit.clone())
+        .or_else(|| task.deliverables.commit_hash.clone())
+        .filter(|head| !head.trim().is_empty());
+    if let Some(tip) = branch_tip.map(str::trim).filter(|tip| !tip.is_empty()) {
+        if recorded.as_deref().is_some_and(|recorded| same_sha(recorded, tip)) {
+            return Some(WaiverHead { head: tip.to_string(), advanced_from: None, why: None });
+        }
+        let open_round_at_tip = passes
+            .iter()
+            .any(|pass| pass.state.is_active() && same_sha(&pass.bound_head, tip));
+        if open_round_at_tip {
+            return Some(WaiverHead {
+                head: tip.to_string(),
+                advanced_from: recorded,
+                why: Some("the open QA round is bound to it"),
+            });
+        }
+        if let Some(recorded) = recorded.as_deref()
+            && rebased_copy(recorded, tip)
+        {
+            return Some(WaiverHead {
+                head: tip.to_string(),
+                advanced_from: Some(recorded.to_string()),
+                why: Some("it is a rebased copy of the recorded tip (same change, which is no longer on the branch)"),
+            });
+        }
+    }
+    recorded.map(|head| WaiverHead { head, advanced_from: None, why: None })
+}
+
+/// The current tip of `branch` in `repo`, as a full SHA.
+pub fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("{branch}^{{commit}}")])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !sha.is_empty()).then_some(sha)
+}
+
+/// Whether `tip` is a rebased copy of `recorded` against `target`: `recorded`
+/// is no longer on `tip`'s history, and the change each brings over its
+/// merge-base with `target` has the same `git patch-id --stable`.
+pub fn is_rebased_copy(repo: &Path, recorded: &str, tip: &str, target: &str) -> bool {
+    let on_branch = Command::new("git")
+        .args(["merge-base", "--is-ancestor", recorded, tip])
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success());
+    if on_branch {
+        return false;
+    }
+    match (change_patch_id(repo, recorded, target), change_patch_id(repo, tip, target)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// `git patch-id --stable` of everything `head` brings over its merge-base
+/// with `target`. `None` when it cannot be computed or the change is empty.
+fn change_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
+    use std::io::Write;
+    let base = Command::new("git").args(["merge-base", head, target]).current_dir(repo).output().ok()?;
+    if !base.status.success() {
+        return None;
+    }
+    let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
+    let diff = Command::new("git").args(["diff", "--no-color", &base, head]).current_dir(repo).output().ok()?;
+    if !diff.status.success() || diff.stdout.is_empty() {
+        return None;
+    }
+    let mut child = Command::new("git")
+        .args(["patch-id", "--stable"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(&diff.stdout).ok()?;
+    let out = child.wait_with_output().ok()?;
+    let id = String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.to_string();
+    (out.status.success() && !id.is_empty()).then_some(id)
+}
+
 /// First changed path matching a configured glob, with the glob it matched.
 pub fn first_user_facing_path<'a>(
     changed_paths: &'a [String],
@@ -980,6 +1110,159 @@ mod tests {
         let integrated = integrated_paths(repo, delivery_head.trim(), "main").unwrap();
         assert!(integrated.iter().any(|path| path == "app.vue"), "{integrated:?}");
         assert!(!integrated.iter().any(|path| path == "incoming.vue"), "{integrated:?}");
+    }
+
+    /// A git repo for the cas-6c75 regression: `main` with a base commit and
+    /// `factory/worker` carrying one UI change.
+    fn rebase_repo() -> (tempfile::TempDir, impl Fn(&[&str]) -> String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let git = move |args: &[&str]| -> String {
+            let output = Command::new("git")
+                .args(["-c", "user.name=QA", "-c", "user.email=qa@example.invalid"])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("app.css"), "body { color: red; }\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["switch", "-q", "-c", "factory/worker"]);
+        std::fs::write(dir.path().join("app.css"), "body { color: blue; }\n").unwrap();
+        git(&["commit", "-q", "-am", "the delivery"]);
+        (dir, git)
+    }
+
+    fn parked(anchor: &str) -> Task {
+        let mut task = task();
+        task.deliverables.factory_branch_anchor = Some(anchor.to_string());
+        task.deliverables.parked_branch = Some("factory/worker".to_string());
+        task
+    }
+
+    fn dispatch(cas: &Path, head: &str) {
+        let new = cas_store::NewQaPass {
+            task_id: "cas-ui1",
+            implementer_agent_id: "worker",
+            branch: "factory/worker",
+            bound_head: head,
+            deadline_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            max_rounds: 3,
+        };
+        cas_store::open_qa_pass(cas, &new, chrono::Utc::now()).unwrap();
+    }
+
+    /// cas-6c75 (GH #1048): park at A, a round dispatched for A, a sibling
+    /// lands, the worker rebases to T (same change). The waiver used to record
+    /// @A, and worktree_merge, which checks the branch tip T, refused it every
+    /// time. It now binds to T, and the merge gate accepts it.
+    #[test]
+    fn waiver_after_a_rebase_binds_to_the_current_tip_and_the_merge_accepts_it_gh_1048() {
+        let (dir, git) = rebase_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let anchor = git(&["rev-parse", "HEAD"]);
+        let task = parked(&anchor);
+        dispatch(cas.path(), &anchor);
+
+        // A sibling lands on main; the worker rebases onto it.
+        git(&["switch", "-q", "main"]);
+        std::fs::write(repo.join("other.rs"), "fn sibling() {}\n").unwrap();
+        git(&["add", "other.rs"]);
+        git(&["commit", "-q", "-m", "sibling"]);
+        git(&["switch", "-q", "factory/worker"]);
+        git(&["rebase", "-q", "main"]);
+        let tip = branch_tip(repo, "factory/worker").unwrap();
+        assert_ne!(tip, anchor, "the rebase moved the tip");
+        assert!(is_rebased_copy(repo, &anchor, &tip, "main"));
+
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let chosen = waiver_head(&task, &passes, Some(&tip), |recorded, tip| {
+            is_rebased_copy(repo, recorded, tip, "main")
+        })
+        .unwrap();
+        assert_eq!(chosen.head, tip);
+        assert_eq!(chosen.advanced_from.as_deref(), Some(anchor.as_str()));
+
+        cas_store::waive_qa_pass(
+            cas.path(),
+            "cas-ui1",
+            "supervisor",
+            "worker",
+            "factory/worker",
+            &chosen.head,
+            "rebased; reviewed content unchanged",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let qa = QaConfig::default();
+        assert_eq!(
+            merge_gate(&task, &qa, &passes, &tip),
+            Ok(()),
+            "worktree_merge accepts the waiver"
+        );
+
+        // The old binding: a waiver on the pre-rebase anchor never covers the tip.
+        let mut stale = passes.clone();
+        for pass in &mut stale {
+            if pass.state == cas_types::QaPassState::Waived {
+                pass.bound_head = anchor.clone();
+            }
+        }
+        let refusal = merge_gate(&task, &qa, &stale, &tip).unwrap_err();
+        assert!(refusal.contains(&format!("covers @{}", &tip[..8])), "{refusal}");
+    }
+
+    /// cas-6c75 (GH #1078): the branch and the open dispatch are both at the
+    /// rebased tip while the parked anchor is the pre-rebase copy. The waiver
+    /// binds to the dispatch's tip.
+    #[test]
+    fn waiver_binds_to_the_open_dispatch_tip_over_a_stale_anchor_gh_1078() {
+        let (dir, git) = rebase_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let stale = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "-q", "--amend", "-m", "the delivery, reworded"]);
+        let tip = branch_tip(repo, "factory/worker").unwrap();
+        dispatch(cas.path(), &tip);
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let chosen = waiver_head(&parked(&stale), &passes, Some(&tip), |_, _| false).unwrap();
+        assert_eq!(chosen.head, tip);
+        assert_eq!(chosen.why, Some("the open QA round is bound to it"));
+    }
+
+    /// New commits on top of the parked tip are unreviewed work: the waiver
+    /// stays on the parked tip and the merge of the new tip still refuses.
+    #[test]
+    fn waiver_never_jumps_to_a_tip_that_adds_unreviewed_work() {
+        let (dir, git) = rebase_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let anchor = git(&["rev-parse", "HEAD"]);
+        dispatch(cas.path(), &anchor);
+        std::fs::write(repo.join("app.css"), "body { color: green; }\n").unwrap();
+        git(&["commit", "-q", "-am", "more work after park"]);
+        let tip = branch_tip(repo, "factory/worker").unwrap();
+        assert!(!is_rebased_copy(repo, &anchor, &tip, "main"));
+        let task = parked(&anchor);
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let chosen = waiver_head(&task, &passes, Some(&tip), |recorded, tip| {
+            is_rebased_copy(repo, recorded, tip, "main")
+        })
+        .unwrap();
+        assert_eq!(chosen.head, anchor);
+        assert_eq!(chosen.advanced_from, None);
+        // A rebased copy with a different change is not the same delivery either.
+        git(&["switch", "-q", "-c", "factory/other", "main"]);
+        std::fs::write(repo.join("app.css"), "body { color: purple; }\n").unwrap();
+        git(&["commit", "-q", "-am", "something else"]);
+        let other = branch_tip(repo, "factory/other").unwrap();
+        assert!(!is_rebased_copy(repo, &anchor, &other, "main"));
     }
 
     #[test]

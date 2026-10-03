@@ -369,6 +369,34 @@ else
     bad 'train rejected or lost web diagnostic selection'
 fi
 
+# cas-704a: the train's --only allowlist is exactly the gate's row list, so a
+# row the gate grows (hub-web-tests was refused) is never refused by the train.
+row_list() {
+    awk -v start="readonly -a $2=(" '
+        index($0, start) == 1 { inside = 1; next }
+        inside && /^\)/ { exit }
+        inside { for (i = 1; i <= NF; i++) print $i }
+    ' "$1"
+}
+train_rows="$(row_list "$script_dir/release-train.sh" gate_rows)"
+gate_rows_list="$(row_list "$script_dir/release-gate.sh" gate_check_ids)"
+if [[ -n "$gate_rows_list" && "$train_rows" == "$gate_rows_list" ]]; then
+    ok 'train --only allowlist equals the release-gate row list'
+else
+    bad "train and gate row lists differ: $(diff <(printf '%s\n' "$train_rows") <(printf '%s\n' "$gate_rows_list") | tr '\n' ' ')"
+fi
+wt_hub_tests="$(new_worktree epic-hub-web-tests-row)"
+dir_hub_tests="$("$train" 9.99.2 "$wt_hub_tests" --print-run-dir)"
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_hub_tests" \
+    --gate --only hub-web-tests >/dev/null 2>&1 || true
+wait_for_file "$dir_hub_tests/diagnostics/*/gate.done" || true
+hub_tests_log="$(find "$dir_hub_tests/diagnostics" -name gate.log -print -quit 2>/dev/null || true)"
+if [[ -n "$hub_tests_log" ]] && grep -qF 'args=9.99.2 --only hub-web-tests' "$hub_tests_log"; then
+    ok 'train accepts --gate --only hub-web-tests and forwards the row'
+else
+    bad "train refused or lost --only hub-web-tests: ${hub_tests_log:-no diagnostic receipt}"
+fi
+
 # A targeted rerun forwards only known non-empty rows to the gate, writes a
 # diagnostic receipt, and never overwrites the full-gate authorization/history.
 wt_only="$(new_worktree epic-only-merge)"

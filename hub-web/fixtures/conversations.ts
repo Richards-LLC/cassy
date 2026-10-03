@@ -1,4 +1,6 @@
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
+import { fleetControlGate } from '../src/fleet-permissions';
+import type { Scope } from '../src/types';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView, terminalOfferReason } from '../src/conversation-view';
@@ -92,7 +94,7 @@ export function fixtureManySessionRows(): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
   const supervisor = sessions ? 'calm-puma-34' : FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long', 'conversations-machine-label-overlong'].includes(state);
+  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-session-end-error', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long', 'conversations-machine-label-overlong'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
   // First run: the catalog is loaded and empty, so the welcome offers pairing.
@@ -115,7 +117,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
   // cas-b452: Atlas's pairing was revoked with its conversation open; its rows stay listed, reading Needs pairing.
   const needsPairing = state === 'conversation-needs-pairing';
-  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' ? fixtureManySessionRows()
+  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' || state === 'conversations-session-end-error' ? fixtureManySessionRows()
     : needsPairing ? fixtureConversationRows(selected).map((row) => row.machineId === 'atlas-linux' ? { ...row, connection: 'Needs pairing', interrupted: true } : row)
     : fixtureConversationRows(selected);
   const conversationList = new ConversationList();
@@ -123,6 +125,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // Ending a session drops its row, as main.ts does once the hub confirms.
   let shownRows = listRows;
   const endSession = async (ended: ConversationRow): Promise<void> => {
+    if (state === 'conversations-session-end-error') throw new Error('End session request failed (500)');
     shownRows = groupConversationRows(shownRows.filter((row) => row.key !== ended.key));
     conversationList.render(listNode, shownRows, () => {}, endSession);
   };
@@ -130,10 +133,12 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // The End session confirmation, open on the idle session (cas-55a4).
   if (state === 'conversation-sessions') app.querySelectorAll<HTMLButtonElement>('#conversation-list .conversation-end-ask')[1]?.click();
   // cas-f60a: noble-cheetah-84 just ended; the list says so where its row was.
-  if (state === 'conversations-session-ended') {
+  if (state === 'conversations-session-ended' || state === 'conversations-session-end-error') {
     const control = [...listNode.querySelectorAll<HTMLElement>('.conversation-end')].find((node) => node.previousElementSibling?.textContent?.includes('noble-cheetah-84'));
     control?.querySelector<HTMLButtonElement>('.conversation-end-ask')?.click();
-    control?.querySelector<HTMLButtonElement>('.conversation-end-confirm')?.click();
+    const confirm = control?.querySelector<HTMLButtonElement>('.conversation-end-confirm');
+    if (state === 'conversations-session-end-error') confirm?.focus();
+    confirm?.click();
   }
   // cas-0739: Bench can't be reached; the register lists it first and the footer names it.
   const machines = loading || unpaired ? [] : state === 'paired-machines-down'
@@ -159,7 +164,21 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // The footer counts conversations, not machines: it must equal the rows rendered above.
   app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, listRows.length, 'fixture', loading);
   app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
-  renderPairedMachines(app.querySelector('#paired-machines-list')!, machines, async () => {});
+  // cas-d382: the register names each pairing's fleet permissions: one holds
+  // both, one is a control pairing (may allow managing workers, Stop and
+  // restart is not allowed), one is read-only (commands for both).
+  const fleetScopes: Scope[][] = [
+    ['machine-read', 'session-read', 'pane-read', 'pane-input', 'message-send', 'pane-interrupt', 'factory-operate', 'factory-manage'],
+    ['machine-read', 'session-read', 'pane-read', 'pane-input', 'message-send', 'pane-interrupt'],
+    ['machine-read', 'session-read', 'pane-read'],
+  ];
+  const registerRows = state === 'paired-machines'
+    ? machines.map((machine, index) => {
+      const scopes = fleetScopes[index % fleetScopes.length]!;
+      return { ...machine, fleet: { operate: fleetControlGate(scopes, 'add-workers', 'https://commander.example'), manage: fleetControlGate(scopes, 'stop-worker', 'https://commander.example') } };
+    })
+    : machines;
+  renderPairedMachines(app.querySelector('#paired-machines-list')!, registerRows, async () => {});
   const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;
   app.querySelector<HTMLElement>('#paired-machines-toggle')!.onclick = () => dialog.showModal();
   app.querySelector<HTMLElement>('#paired-machines-close')!.onclick = () => dialog.close();

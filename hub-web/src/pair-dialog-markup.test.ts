@@ -4,6 +4,25 @@ import { firstEmptyField, pairDialogMarkup } from "./pair-dialog-markup";
 import { createPairingDraft } from "./pairing-draft";
 
 describe("invitation scope ceiling in the actual pairing form", () => {
+  it("names factory:manage in plain words and requests it when a link grants it (cas-d382)", () => {
+    const origin = "https://commander.example";
+    const granted = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt", "factory-manage"] as const;
+    const html = pairDialogMarkup({
+      cleanupFailed: false, cleanupContext: { cause: "cancel", storeOpen: false, rollbackPending: false },
+      pendingPairing: { kind: "invitation", token: "A".repeat(43), hubId: "studio", scopes: [...granted] },
+      draft: createPairingDraft(origin, [...granted]), status: "", createInFlight: false, exchangeInFlight: false,
+      relayOrigin: origin, pageOrigin: origin,
+    });
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector(".pair-lead")?.textContent).toBe("This browser will be able to: Read sessions and terminals · Type, send messages and interrupt · Stop and restart workers and sessions");
+    const manage = doc.querySelector<HTMLInputElement>('input[name="scope"][value="factory-manage"]');
+    expect(manage?.checked).toBe(true);
+    expect(manage?.disabled).toBe(false);
+    expect(new FormData(doc.querySelector("form")!).getAll("scope")).toEqual([...granted]);
+    // A full-control link with factory:manage withholds nothing.
+    expect(doc.querySelector(".pair-withheld")).toBeNull();
+  });
+
   it("disables and excludes ungranted control scopes even when the draft selects them", () => {
     const origin = "https://commander.example";
     const html = pairDialogMarkup({

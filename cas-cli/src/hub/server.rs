@@ -862,7 +862,6 @@ const LATER_FLEET_OPERATIONS: &[&str] = &[
     "set_worker_hold",
     "recycle_worker",
     "shutdown_workers",
-    "assign_task",
 ];
 
 enum ParsedOperation {
@@ -894,6 +893,13 @@ enum FleetOperation {
         #[serde(default)]
         clear: bool,
     },
+    /// O5: assign a task to a worker, or unassign it (null), through the
+    /// supervisor's task_update (S3, cas-31f0).
+    AssignTask {
+        task_id: String,
+        #[serde(default)]
+        assignee: Option<String>,
+    },
 }
 
 impl FleetOperation {
@@ -901,6 +907,7 @@ impl FleetOperation {
         match self {
             Self::RequestMerge { .. } => "operation:request_merge",
             Self::FocusEpic { .. } => "operation:focus_epic",
+            Self::AssignTask { .. } => "operation:assign_task",
         }
     }
 
@@ -909,7 +916,7 @@ impl FleetOperation {
     fn scope(&self) -> Scope {
         match self {
             Self::RequestMerge { .. } => Scope::MessageSend,
-            Self::FocusEpic { .. } => Scope::FactoryManage,
+            Self::FocusEpic { .. } | Self::AssignTask { .. } => Scope::FactoryManage,
         }
     }
 
@@ -921,6 +928,10 @@ impl FleetOperation {
                 (Some(epic_id), false) => format!("epic={epic_id}"),
                 (None, false) => "epic=<none>".to_string(),
             },
+            Self::AssignTask { task_id, assignee } => format!(
+                "task={task_id} assignee={}",
+                assignee.as_deref().unwrap_or("<none>")
+            ),
         }
     }
 }
@@ -1030,11 +1041,17 @@ async fn session_operation<R: SessionReadModel>(
     let attribution = verified_attribution(&context);
     let operation_session = session.clone();
     let expected = request.expected;
-    let outcome = tokio::task::spawn_blocking(move || {
-        run_fleet_operation(&cas_dir, &operation_session, operation, expected, &attribution)
-    })
-    .await
-    .unwrap_or_else(|error| Err(crate::ops::fleet::OperationError::Failed(error.to_string())));
+    let outcome = match operation {
+        // O5 runs the supervisor's async task_update on the hub's runtime.
+        FleetOperation::AssignTask { task_id, assignee } => {
+            run_assign_task(&cas_dir, &task_id, assignee.as_deref(), expected, &attribution).await
+        }
+        operation => tokio::task::spawn_blocking(move || {
+            run_fleet_operation(&cas_dir, &operation_session, operation, expected, &attribution)
+        })
+        .await
+        .unwrap_or_else(|error| Err(crate::ops::fleet::OperationError::Failed(error.to_string()))),
+    };
 
     use crate::ops::fleet::OperationError;
     let (status, body, audit_outcome, detail) = match outcome {
@@ -1142,13 +1159,38 @@ fn run_fleet_operation(
             };
             let cas_root = cas_dir;
             let text = fleet::focus_epic(cas_root, session, request)?;
+            let now = fleet::pinned_epic(session);
             Ok(serde_json::json!({
                 "kind": "focus_epic",
-                "epic_id": fleet::pinned_epic(session),
+                "epic_id": now,
+                "prior_epic_id": current,
                 "detail": text,
+                // S3 (cas-31f0): Undo sends this as a new operation.
+                "inverse": fleet::focus_epic_inverse(current.as_deref(), now.as_deref()),
             }))
         }
+        FleetOperation::AssignTask { .. } => Err(OperationError::Failed(
+            "assign_task runs on the async path".to_string(),
+        )),
     }
+}
+
+/// O5 (S3, cas-31f0): the precondition names the task's `updated_at` and
+/// assignee as the operator saw them.
+async fn run_assign_task(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    assignee: Option<&str>,
+    expected: serde_json::Value,
+    attribution: &MessageAttribution,
+) -> Result<serde_json::Value, crate::ops::fleet::OperationError> {
+    use crate::ops::fleet::{self, OperationError};
+    let expected: fleet::AssignTaskExpected = serde_json::from_value(expected).map_err(|error| {
+        OperationError::Invalid(format!(
+            "expected must name the task's updated_at and current assignee (or null): {error}"
+        ))
+    })?;
+    fleet::assign_task(cas_dir, task_id, assignee, &expected, attribution).await
 }
 
 fn launch_error(status: StatusCode, code: &str, detail: &str) -> Response {

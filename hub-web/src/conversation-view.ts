@@ -467,6 +467,18 @@ export class ConversationView {
    * either used to drop focus to the page body.
    */
   private loadEarlierFocus = false;
+  /**
+   * cas-c2cb: a control in the thread the reader moved focus to. Their focus
+   * scrolled it into view, so it outranks a pending put-back of the reading
+   * position (placePending), which would scroll it back out of the thread.
+   * The same control given focus back after a rebuild (recovery) is not a move,
+   * and neither is focus this view places itself.
+   */
+  private focusMoved?: HTMLElement;
+  /** The control in the thread that last held focus, kept across a re-mount's drop to <body>. */
+  private focusedControl?: HTMLElement;
+  /** Set while this view places focus itself (Load earlier's own recovery). */
+  private placingFocus = false;
   private pinPending = false;
   /** The thread's height at the last scroll or resize it saw (cas-16eed). */
   private lastHeight?: number;
@@ -501,6 +513,8 @@ export class ConversationView {
     // lands above and the turn on screen stays put (journey F7).
     this.loadEarlier.onclick = () => {
       this.following = false;
+      // Paging holds the reader's turn from here (journey F7), not the button.
+      this.focusMoved = undefined;
       this.loadEarlierFocus = this.element.ownerDocument.activeElement === this.loadEarlier;
       this.options.loadEarlier?.();
     };
@@ -509,7 +523,7 @@ export class ConversationView {
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
-    this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
+    this.jump.onclick = () => { this.following = true; this.focusMoved = undefined; this.update(); this.pin(); };
     this.unsent = document.createElement("button"); this.unsent.type = "button";
     this.unsent.className = "conversation-unsent"; this.unsent.hidden = true;
     this.unsent.onclick = () => this.restoreUnsent();
@@ -541,8 +555,36 @@ export class ConversationView {
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
       this.scrolledTo = this.element.scrollTop;
+      // The reader scrolled their focused control away: their scroll is the place now.
+      if (this.focusMoved && !this.shows(this.focusMoved)) this.focusMoved = undefined;
       this.notePlace();
     }, { passive: true });
+    this.element.addEventListener("focusin", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || target === this.element) return;
+      if (target !== this.focusedControl && !this.placingFocus) {
+        this.focusMoved = target;
+        // The reader moved to a control the thread does not show, or one a
+        // thread following its tail would pin out of view (Load earlier, above,
+        // just after a reconnect reset the scroll to the top). The browser
+        // shows it; pinning to the tail, or putting a reconnect's reading
+        // position back, would scroll it straight out again. The reader's
+        // focus is the place now.
+        if (!this.shows(target) || (this.following && this.hiddenAtTail(target))) {
+          this.following = false;
+          this.placePending = false;
+          this.place = undefined;
+        }
+      }
+      this.focusedControl = target;
+    });
+    this.element.addEventListener("focusout", (event) => {
+      const next = event.relatedTarget;
+      // No next target: a re-mount dropped it, and recovery gives the same control focus back.
+      if (!(next instanceof Node) || this.element.contains(next)) return;
+      this.focusedControl = undefined;
+      this.focusMoved = undefined;
+    });
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => {
         for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
@@ -627,7 +669,7 @@ export class ConversationView {
     const lost = !active || active === document.body || active === this.loadEarlier;
     if (!this.loadEarlier.hidden) {
       if (!lost) this.loadEarlierFocus = false;
-      else if (active !== this.loadEarlier) this.loadEarlier.focus({ preventScroll: true });
+      else if (active !== this.loadEarlier) this.placeFocus(this.loadEarlier);
       return;
     }
     this.loadEarlierFocus = false;
@@ -635,7 +677,41 @@ export class ConversationView {
     const target = this.msgs.querySelector<HTMLElement>(":scope > .history-end") ?? this.msgs.querySelector<HTMLElement>("[data-key]");
     if (!target) { this.element.focus({ preventScroll: true }); return; }
     target.tabIndex = -1;
-    target.focus({ preventScroll: true });
+    this.placeFocus(target);
+  }
+
+  /** Focus this view places itself, without scrolling: not the reader moving it (cas-c2cb). */
+  private placeFocus(target: HTMLElement): void {
+    this.placingFocus = true;
+    try { target.focus({ preventScroll: true }); } finally { this.placingFocus = false; }
+  }
+
+  /** Whether the element sits wholly above the thread's last screenful, where following the tail cannot show it. */
+  private hiddenAtTail(element: HTMLElement): boolean {
+    const view = this.element.getBoundingClientRect();
+    const bottom = element.getBoundingClientRect().bottom - view.top + this.element.scrollTop;
+    return bottom <= this.element.scrollHeight - this.element.clientHeight;
+  }
+
+  /** Whether any of the element shows inside the thread's scroll box. */
+  private shows(element: HTMLElement): boolean {
+    const view = this.element.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    return box.height > 0 && box.bottom > view.top && box.top < view.bottom;
+  }
+
+  /**
+   * The control the reader moved focus to, while it still has focus (cas-c2cb).
+   * A re-mount drops focus to <body> for a moment before recovery gives it
+   * back, so that does not count as the reader moving on.
+   */
+  private focusHeld(): HTMLElement | undefined {
+    const target = this.focusMoved;
+    const active = target?.ownerDocument.activeElement;
+    if (target && target.isConnected && this.element.contains(target)
+      && (active === target || !active || active === target.ownerDocument.body)) return target;
+    this.focusMoved = undefined;
+    return undefined;
   }
 
   /**
@@ -702,8 +778,19 @@ export class ConversationView {
     // Not drawn yet: try again on the next update.
     if (!node) return;
     this.placePending = false;
+    // cas-c2cb: the reader tabbed to a control here after the reset, and their
+    // focus scrolled it into view. If putting the old position back would
+    // scroll that control out of the thread, their focus is the place now.
+    const focused = this.focusHeld();
+    const before = this.element.scrollTop;
+    const shownBefore = focused !== undefined && this.shows(focused);
     const offset = node.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
     this.element.scrollTop += offset - place.offset;
+    if (focused && shownBefore && !this.shows(focused)) {
+      this.element.scrollTop = before;
+      this.scrolledTo = before;
+      this.notePlace();
+    }
   }
 
   private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {

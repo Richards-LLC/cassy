@@ -3073,6 +3073,12 @@ fn factory_write_violation(
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
             bash_write_targets(command)
         }
+        // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
+        // text in `tool_input.command`.
+        "apply_patch" => {
+            let patch = tool_input.get("command").and_then(|value| value.as_str())?;
+            apply_patch_write_targets(patch)
+        }
         _ => return None,
     };
 
@@ -3103,6 +3109,25 @@ fn factory_write_violation(
             matched_rule: "none",
         })
     })
+}
+
+/// cas-49c0: every file a Codex `apply_patch` call adds, updates, deletes or
+/// moves to, in patch order.
+fn apply_patch_write_targets(patch: &str) -> Vec<String> {
+    // Only header lines name files; `+`, `-` and ` ` lines are content, so a
+    // header-looking line inside an added file is never a target.
+    const HEADERS: [&str; 4] = ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
+    patch
+        .lines()
+        .filter_map(|line| {
+            HEADERS
+                .iter()
+                .find_map(|header| line.strip_prefix(header))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn unsanctioned_factory_path(
@@ -3461,6 +3486,82 @@ mod workspace_contract_tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": command })),
             ..Default::default()
+        }
+    }
+
+    fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {
+        HookInput {
+            cwd: cwd.to_string_lossy().to_string(),
+            tool_name: Some(tool.to_string()),
+            tool_input: Some(payload),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn apply_patch_targets_every_added_updated_deleted_and_moved_file_cas_49c0() {
+        let patch = "*** Begin Patch\n\
+                     *** Add File: src/new.rs\n+pub fn new() {}\n\
+                     *** Update File: /abs/src/lib.rs\n*** Move to: /abs/src/moved.rs\n@@\n-a\n+b\n\
+                     *** Delete File: ../other/gone.rs\n\
+                     *** End Patch\n";
+        assert_eq!(
+            apply_patch_write_targets(patch),
+            vec!["src/new.rs", "/abs/src/lib.rs", "/abs/src/moved.rs", "../other/gone.rs"]
+        );
+        // Patch body lines are content, never targets.
+        assert!(apply_patch_write_targets("*** Begin Patch\n+*** Add File: /etc/x\n*** End Patch\n").is_empty());
+    }
+
+    /// cas-49c0: the worker write guard's decision table. A worker may write
+    /// inside its own worktree and under the durable artifacts root; a write
+    /// that resolves into the supervisor's main checkout (or any other repo)
+    /// is refused with the path named, whichever tool makes it — including a
+    /// Codex `apply_patch` with an absolute path.
+    #[test]
+    fn worker_write_guard_decision_table_cas_49c0() {
+        let main = tempfile::tempdir().expect("main checkout");
+        let worktree = main.path().join(".cas/worktrees/strong-puma-16");
+        std::fs::create_dir_all(worktree.join("src")).expect("worktree");
+        let artifacts = tempfile::tempdir().expect("artifacts root");
+        let other_repo = tempfile::tempdir().expect("another repository");
+        let artifacts_root = Some(artifacts.path().display().to_string());
+        let main_file = main.path().join("cas-cli/src/mcp/tools/service/core.rs");
+        let patch = |header: &str, path: &str| {
+            serde_json::json!({ "command": format!("*** Begin Patch\n*** {header}: {path}\n+x\n*** End Patch\n") })
+        };
+        let cases: Vec<(&str, HookInput, Option<std::path::PathBuf>)> = vec![
+            ("apply_patch inside the worktree", tool_input("apply_patch", patch("Update File", "src/lib.rs"), &worktree), None),
+            ("apply_patch absolute inside the worktree", tool_input("apply_patch", patch("Add File", &worktree.join("src/new.rs").display().to_string()), &worktree), None),
+            ("apply_patch into the artifacts root", tool_input("apply_patch", patch("Add File", &artifacts.path().join("cas-49c0/LEDGER.md").display().to_string()), &worktree), None),
+            ("apply_patch absolute into the main checkout", tool_input("apply_patch", patch("Update File", &main_file.display().to_string()), &worktree), Some(main_file.clone())),
+            ("apply_patch relative escape into the main checkout", tool_input("apply_patch", patch("Delete File", "../../../cas-cli/src/mcp/tools/service/core.rs"), &worktree), Some(main_file.clone())),
+            ("apply_patch move into another repository", tool_input("apply_patch", serde_json::json!({ "command": format!("*** Begin Patch\n*** Update File: src/lib.rs\n*** Move to: {}\n*** End Patch\n", other_repo.path().join("lib.rs").display()) }), &worktree), Some(other_repo.path().join("lib.rs"))),
+            ("Edit absolute into the main checkout", tool_input("Edit", serde_json::json!({ "file_path": main_file.display().to_string() }), &worktree), Some(main_file.clone())),
+            ("Write inside the worktree", tool_input("Write", serde_json::json!({ "file_path": worktree.join("src/lib.rs").display().to_string() }), &worktree), None),
+        ];
+        for (case, input, expected) in cases {
+            let violation =
+                factory_write_violation(&input, &artifacts_root, None, false, Some(worktree.as_path()));
+            assert_eq!(
+                violation.as_ref().map(|violation| violation.resolved_path.clone()),
+                expected.as_deref().and_then(canonicalize_for_containment),
+                "{case}"
+            );
+            if let Some(violation) = violation {
+                let denial = factory_workspace_contract_denial(
+                    &input,
+                    &violation,
+                    artifacts_root.as_deref(),
+                    None,
+                    Some(worktree.as_path()),
+                );
+                assert!(
+                    denial.contains(&violation.resolved_path.display().to_string())
+                        && denial.contains(&worktree.display().to_string()),
+                    "{case}: the refusal names the path and the worker's own worktree: {denial}"
+                );
+            }
         }
     }
 

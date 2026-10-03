@@ -209,7 +209,13 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await ask.dblclick();
     await expect(end.locator(".conversation-end-question")).toHaveText("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
     expect(hub.ends).toEqual([]);
-    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.className ?? null, point), "the confirm is not under the pointer").not.toContain("conversation-end-confirm");
+    // cas-488f: ask the hit test a yes/no question. Whatever is under the
+    // pointer (Cancel, the question, or nothing), it must not be End session.
+    const underPointer = await page.evaluate(({ x, y }) => {
+      const hit = document.elementFromPoint(x, y);
+      return { hit: hit ? `${hit.tagName.toLowerCase()}.${hit.className}` : "nothing", confirm: Boolean(hit?.closest(".conversation-end-confirm")) };
+    }, point);
+    expect(underPointer.confirm, `the confirm is not under the pointer (hit: ${underPointer.hit})`).toBe(false);
     expect(await end.locator("button").allTextContents()).toEqual(["Cancel", "End session"]);
     // cas-d6bf: the last row's confirmation is in view and focused, and the list stays whole.
     await expect(end.getByRole("button", { name: "Cancel" })).toBeFocused();

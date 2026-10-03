@@ -632,12 +632,14 @@ pub struct FactoryConfig {
     #[serde(default = "default_target_cache_low_watermark_percent")]
     pub target_cache_low_watermark_percent: u8,
 
-    /// A cache with a write newer than this many seconds is never reclaimed.
+    /// Explicit GC preserves caches/previews with newer writes. Park-time
+    /// check-output pruning separately preserves durable logs and live handles.
     #[serde(default = "default_target_cache_min_idle_secs")]
     pub target_cache_min_idle_secs: u64,
 
     /// Number of the newest otherwise-stale worker caches retained as warm
     /// build caches even while the filesystem is above the high watermark.
+    /// Also bounds warm `target/debug` caches across parked worker deliveries.
     #[serde(default = "default_target_cache_retention_count")]
     pub target_cache_retention_count: usize,
 

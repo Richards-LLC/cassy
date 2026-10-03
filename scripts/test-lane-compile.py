@@ -39,7 +39,7 @@ class LaneCompile(unittest.TestCase):
         self.log = Path(self.temp.name) / "calls.jsonl"
         self.fake = Path(self.temp.name) / "fake-cas"
         self.fake.write_text("""#!/usr/bin/env python3
-import hashlib, json, os, pathlib, subprocess, sys
+import fcntl, hashlib, json, os, pathlib, subprocess, sys
 args = sys.argv[1:]
 assert args[:2] == ['factory', 'worker-check']
 assert args[2] == '--cas-root' and args[4] == '--'
@@ -47,9 +47,23 @@ root = pathlib.Path(args[3]).resolve()
 cwd = pathlib.Path.cwd().resolve()
 assert cwd.is_relative_to(root / 'worktrees')
 assert args[-1] in ['--lib', '--tests']
+owner_verified = False
+if os.environ.get('LANE_FIXTURE_OWNER_PROBE'):
+    marker = json.loads((cwd.parent / '.cas-lane-compile.json').read_text())
+    assert marker['version'] == 1
+    assert marker['head'] == subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    assert marker['git_common_dir'] == str((root.parent / '.git').resolve())
+    with (cwd.parent / '.cas-lane-compile.lock').open('a') as owner:
+        try:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            owner_verified = True
+        else:
+            raise AssertionError('live preview owner lock was not held')
 with open(os.environ['LANE_FIXTURE_LOG'], 'a') as log:
     log.write(json.dumps({'args': args, 'cwd': str(cwd), 'zig': os.environ.get('ZIG'),
-                          'continues': os.environ.get('CAS_WORKER_CHECK_CONTINUES_PASS')}) + '\\n')
+                          'continues': os.environ.get('CAS_WORKER_CHECK_CONTINUES_PASS'),
+                          'owner_verified': owner_verified}) + '\\n')
 if args[-1] == os.environ.get('LANE_FIXTURE_FAIL'):
     sys.exit(7)
 # cas-f616: the load the --lib step raised is above the cap when --tests starts;
@@ -217,6 +231,14 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
         self.assertFalse(any(Path(call["cwd"]).exists() for call in calls))
         self.assertNotIn("lane-compile-", self.git("worktree", "list", "--porcelain"))
         self.assertEqual(json.loads(path.read_text())["targets"], ["--lib", "--tests"])
+
+    def test_preview_has_provenance_and_owner_lock_for_both_steps_cas_29b0(self):
+        self.rust_lane()
+        result = self.run_check("--prove", env=dict(self.env, LANE_FIXTURE_OWNER_PROBE="1"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual([call["owner_verified"] for call in calls], [True, True])
+        self.assertNotIn("lane-compile-", self.git("worktree", "list", "--porcelain"))
 
     def test_load_raised_by_lib_step_does_not_refuse_its_tests_step_cas_f616(self):
         self.rust_lane()

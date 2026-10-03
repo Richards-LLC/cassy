@@ -536,3 +536,29 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
 - A failed end shows its error under the row and offers End session again.
+
+### HUB-J17 · Run the fleet from a conversation
+
+- **Entry:** `/commander/` at 1280, an open conversation whose session has workers, a ready task and an awaiting-merge task, on a device paired with factory:operate and factory:manage
+- **Goal:** pause a worker and undo it, assign a ready task to an idle worker, stop another worker after confirming, and ask the supervisor to merge after seeing the exact message, with every result announced and nothing refreshing on a timer
+- **Touches:** `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
+- **Suite:** `hub-web/e2e/journeys/fleet-ops.journey.ts`
+- **Gaps:** the hub double serves `POST /v1/sessions/<s>/operations` with the brief's contract (op_id dedupe, 409 stale, FleetChanged); the real endpoint (S1, S2) is verified when those land; the phone part is S6
+
+#### Steps
+
+1. Pause a worker and undo it — the agent row's ⋯ menu lists Pause, Restart… and Stop…, Pause runs at once, the row and the live region say it, and Undo (8 s) resumes it
+2. Assign a ready task to an idle worker — Assign… lists the idle workers, choosing one assigns it, and Undo unassigns it
+3. Stop another worker after confirming — Stop… opens an inline confirmation naming what stops, Cancel first and focused; confirming stops it, and a stale stop says what changed
+4. Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it once and the row reads "Asked … ago"
+5. A pairing without factory:manage — Stop… is disabled, saying it is not allowed on this pairing and naming the command that adds it
+
+#### Expected experience
+
+- Every action is one deliberate tap, destructive ones confirmed, reversible ones undoable.
+- Every result is announced in one live region; menus close with Escape back to their opener.
+
+#### Edge paths
+
+- A stale precondition (the worker restarted, the task was assigned elsewhere) changes nothing and says what changed.
+- A refused operation shows the hub's detail on the row.

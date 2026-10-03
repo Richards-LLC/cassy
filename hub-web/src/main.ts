@@ -47,6 +47,9 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { relativeTimestamp } from "./time";
 import { paneActivityLabel, paneShowsOutput } from "./pane-activity";
 import { fleetControlGate } from "./fleet-permissions";
+import { FleetOpsState, UNDO_WINDOW_MS, newOperationId, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
+import { agentControls, headerControls, taskControls, undoBar, type FleetOpsViewContext } from "./fleet-ops-view";
+import { HubRequestError } from "./connection";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -4702,13 +4705,169 @@ async function performAttentionAction(item: AttentionItem, action: AttentionActi
   render();
 }
 
+/*
+ * Fleet operations from the rail (cas-a474, fleet-operations brief S5). One
+ * state per page; a session switch closes its menus. The rail is rebuilt only
+ * when what it shows changes, so a heartbeat never closes a menu or moves focus.
+ */
+const fleetOps = new FleetOpsState();
+const fleetAsked = new Map<string, number>();
+let fleetHeaderPanel: "add" | "focus" | undefined;
+let fleetFocusNext: string | undefined;
+let fleetUndoTimer: number | undefined;
+
+/**
+ * The one live region for fleet results. It exists, empty, from the moment
+ * the rail draws its controls, so a screen reader is already watching it when
+ * the first sentence lands (cas-a474 QA N2).
+ */
+function fleetAnnouncer(): HTMLElement {
+  let region = document.querySelector<HTMLElement>("#fleet-ops-announcer");
+  if (!region) {
+    region = document.createElement("p");
+    region.id = "fleet-ops-announcer";
+    region.className = "sr-only";
+    region.setAttribute("role", "status");
+    document.body.append(region);
+  }
+  return region;
+}
+
+function fleetAnnounce(text: string): void {
+  const region = fleetAnnouncer();
+  if (region.textContent !== text) region.textContent = text;
+}
+
+async function runFleetAction(rowKey: string, action: FleetAction): Promise<void> {
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  const connection = machineId ? connections.get(machineId) : undefined;
+  if (!machineId || !session || !connection) return;
+  fleetOps.started(rowKey, action);
+  fleetAnnounce(action.progress);
+  fleetFocusNext = `${rowKey}:progress`;
+  renderStatus(statuses.get(sessionKey(machineId, session)));
+  try {
+    const answer = await connection.operation(session, { op_id: newOperationId(), op: { ...action.request.op }, expected: { ...action.request.expected } });
+    fleetOps.succeeded(rowKey, action, Date.now(), answer?.outcome);
+    if (action.request.op.kind === "request_merge") fleetAsked.set(String(action.request.op.task_id), Date.now());
+    fleetFocusNext = action.inverse ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
+    window.clearTimeout(fleetUndoTimer);
+    if (fleetOps.undo) fleetUndoTimer = window.setTimeout(() => { if (selectedMachineId && selectedSession) renderStatus(statuses.get(sessionKey(selectedMachineId, selectedSession))); }, UNDO_WINDOW_MS + 50);
+  } catch (error) {
+    const refused = error instanceof HubRequestError ? error : undefined;
+    const current = refused?.body?.current;
+    fleetOps.failed(rowKey, action, {
+      stale: refused?.status === 409 && refused.code === "stale",
+      ...(current && typeof current === "object" ? { current: current as Record<string, unknown> } : {}),
+      detail: refused?.detail ?? (error instanceof Error ? error.message : undefined),
+    });
+    fleetFocusNext = `${rowKey}:note`;
+  }
+  fleetAnnounce(fleetOps.announcement);
+  if (selectedMachineId === machineId && selectedSession === session) {
+    renderStatus(statuses.get(sessionKey(machineId, session)));
+    // The operation's own response drives the refresh; FleetChanged does for other devices.
+    void loadStatus(machineId, session);
+  }
+}
+
+function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext | undefined {
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  if (!machine || !selectedSession) return undefined;
+  const rerender = (focus?: string) => { fleetFocusNext = focus; renderStatus(status); };
+  const epics = ((status.epics as any[]) ?? []).map((epic) => String(epic?.id ?? epic)).filter(Boolean);
+  const currentEpic = typeof status.focused_epic === "string" ? status.focused_epic : (((status.epics as any[]) ?? []).find((epic) => epic?.focused)?.id ?? null);
+  return {
+    state: fleetOps,
+    scopes: machine.scopes,
+    origin: location.origin,
+    now: Date.now(),
+    agents: ((status.agents as any[]) ?? []) as FleetAgent[],
+    tasks: [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[],
+    epics,
+    currentEpic,
+    asked: fleetAsked,
+    relative: (at) => { const label = relativeTimestamp(at); return label === "now" ? "just now" : `${label} ago`; },
+    on: {
+      toggleMenu: (rowKey) => { const opening = fleetOps.menuFor !== rowKey; fleetOps.toggleMenu(rowKey); rerender(opening ? `${rowKey}:first-item` : `${rowKey}:trigger`); },
+      choose: (rowKey, action) => {
+        const run = fleetOps.choose(rowKey, action);
+        if (rowKey === "header") fleetHeaderPanel = undefined;
+        if (run) void runFleetAction(rowKey, run);
+        else rerender(`${rowKey}:cancel`);
+      },
+      confirm: () => { const rowKey = fleetOps.confirm?.rowKey; const run = fleetOps.confirmed(); if (rowKey && run) void runFleetAction(rowKey, run); },
+      cancelConfirm: () => { const rowKey = fleetOps.confirm?.rowKey; fleetOps.cancelConfirm(); rerender(rowKey ? `${rowKey}:trigger` : undefined); },
+      openPreview: (rowKey, task) => { fleetOps.openPreview(rowKey, task); rerender(`${rowKey}:preview-cancel`); },
+      sendMerge: (rowKey, task) => { fleetOps.closeMenus(); void runFleetAction(rowKey, fleetMergeAction(task)); },
+      closePanels: () => { const rowKey = fleetOps.preview?.rowKey ?? fleetOps.assignFor; fleetOps.closeMenus(); fleetHeaderPanel = undefined; rerender(rowKey ? `${rowKey}:ask` : undefined); },
+      toggleAssign: (rowKey) => { const opening = fleetOps.assignFor !== rowKey; fleetOps.closeMenus(); fleetOps.assignFor = opening ? rowKey : undefined; rerender(opening ? `${rowKey}:first-item` : `${rowKey}:assign`); },
+      toggleHeader: (panel) => { fleetOps.closeMenus(); fleetHeaderPanel = fleetHeaderPanel === panel ? undefined : panel; rerender(fleetHeaderPanel === "focus" ? "header:first-item" : fleetHeaderPanel === "add" ? "header:add-go" : `header:${panel}`); },
+      undo: () => { const run = fleetOps.takeUndo(Date.now()); if (run) void runFleetAction(run.request.op.kind === "assign_task" ? `task:${String(run.request.op.task_id)}` : run.request.op.kind === "focus_epic" ? "header" : `agent:${String(run.request.op.worker)}`, run); },
+    },
+  };
+}
+
+function fleetMergeAction(task: FleetTask): FleetAction {
+  return requestMergeActionFor(task);
+}
+
+/** What the rail shows, for skipping a rebuild that would change nothing. */
+function fleetOpsSignature(): string {
+  return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, [...fleetAsked].map(([id, at]) => [id, relativeTimestamp(at)])]);
+}
+
 function renderStatus(status?: Record<string, unknown>): void {
-  const container = document.querySelector("#status-view");
+  const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  const signature = JSON.stringify([selectedMachineId, selectedSession, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
+  container.dataset.signature = signature;
+  // A different conversation starts with every menu closed and no stale notes.
+  const fleetSession = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
+  if (container.dataset.fleetSession !== fleetSession) {
+    container.dataset.fleetSession = fleetSession;
+    fleetOps.closeMenus(); fleetOps.cancelConfirm(); fleetOps.notes.clear(); fleetOps.undo = undefined; fleetHeaderPanel = undefined;
+  }
+  // Escape closes the open menu, confirmation or panel and returns focus to its opener.
+  container.onkeydown = (event) => {
+    if (event.key !== "Escape") return;
+    const rowKey = fleetOps.confirm?.rowKey ?? fleetOps.menuFor ?? fleetOps.assignFor ?? fleetOps.preview?.rowKey ?? (fleetHeaderPanel ? "header" : undefined);
+    if (!rowKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const opener = fleetOps.assignFor ? `${rowKey}:assign` : fleetOps.preview ? `${rowKey}:ask` : rowKey === "header" ? `header:${fleetHeaderPanel}` : `${rowKey}:trigger`;
+    fleetOps.closeMenus(); fleetOps.cancelConfirm(); fleetHeaderPanel = undefined;
+    fleetFocusNext = opener;
+    renderStatus(status);
+  };
+  const hadFocus = document.activeElement instanceof HTMLElement && container.contains(document.activeElement) ? document.activeElement.dataset.fleetFocus : undefined;
+  // The rows' triggers in their drawn order, so focus on a row that leaves
+  // (a confirmed Stop) can move to its neighbour (cas-a474 QA N1).
+  const priorTriggers = [...container.querySelectorAll<HTMLElement>('[data-fleet-focus$=":trigger"]')].map((node) => node.dataset.fleetFocus ?? "");
   // Region updates run against a container the shell rebuild is no longer
   // clearing for them, so this owns its own emptying.
   container.replaceChildren();
   contextProgress = false;
+  const restoreFocus = (): void => {
+    const want = fleetFocusNext ?? hadFocus;
+    fleetFocusNext = undefined;
+    if (!want) return;
+    const target = want.endsWith(":first-item")
+      ? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
+      : container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`);
+    if (target) { target.focus({ preventScroll: false }); return; }
+    // Its row is gone: the next row's ⋯, else the list itself.
+    const at = priorTriggers.indexOf(`${want.slice(0, want.lastIndexOf(":"))}:trigger`);
+    if (at < 0) return;
+    const alive = (key: string) => container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(key)}"]`);
+    const neighbour = priorTriggers.slice(at + 1).map(alive).find(Boolean);
+    if (neighbour) { neighbour.focus({ preventScroll: false }); return; }
+    container.tabIndex = -1;
+    container.focus({ preventScroll: false });
+  };
   if (!status) {
     container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status.";
     // cas-813a: while this session's status is on its way, the rail is open
@@ -4748,6 +4907,13 @@ function renderStatus(status?: Record<string, unknown>): void {
   // Name, state, ticket, then the sentence: the identifiers stay mono and the
   // activity reads as prose, instead of one grey mono line per agent where the
   // eye had to find the dots to tell name from state from task.
+  const ops = fleetOpsContext(status);
+  if (ops) {
+    fleetAnnouncer();
+    const undo = undoBar(document, ops);
+    if (undo) container.append(undo);
+    container.append(headerControls(document, ops, fleetHeaderPanel));
+  }
   if (agents.length > 0) container.append(sectionLabel("Agents", agents.length));
   for (const agent of agents) {
     const row = document.createElement("article"); row.className = "status-row status-agent";
@@ -4755,6 +4921,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     line.append(identifier(agent.name), chip(agent.status));
     if (agent.current_task) line.append(identifier(agent.current_task));
     row.append(line);
+    if (ops && agent.name && String(agent.role ?? "").toLowerCase() !== "supervisor") row.append(agentControls(document, ops, agent as FleetAgent));
     if (agent.latest_activity?.summary) {
       const activity = document.createElement("p");
       activity.className = "status-activity";
@@ -4772,6 +4939,8 @@ function renderStatus(status?: Record<string, unknown>): void {
     title.className = "status-task-title";
     title.textContent = String(task.title ?? "");
     row.append(line, title);
+    const controls = ops ? taskControls(document, ops, task as FleetTask) : undefined;
+    if (controls) row.append(controls);
     container.append(row);
   }
   contextProgress = Boolean(summary) || agents.length > 0 || tasks.length > 0;
@@ -4781,6 +4950,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     empty.textContent = "No agents or tasks reported for this session yet.";
     container.append(empty);
   }
+  restoreFocus();
 }
 
 async function toggleControl(selected: StoredMachine | undefined, lease: LeaseState | undefined): Promise<void> {

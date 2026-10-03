@@ -5624,8 +5624,8 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
 
 }
 
-// Target-cache process liveness is implemented with Linux `/proc`; other
-// platforms intentionally fail closed and cannot select a cache for cleanup.
+// Linux reclamation requires readable process evidence; unavailable evidence
+// must remain visible through the public JSON and preserve every fixture byte.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
@@ -5635,11 +5635,75 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("artifact.rlib"), vec![0u8; 64]).unwrap();
     std::fs::write(worker.join("source.rs"), b"source").unwrap();
+    let source = std::fs::read(worker.join("source.rs")).unwrap();
+    let artifact = std::fs::read(target.join("artifact.rlib")).unwrap();
     std::fs::write(
         env.cas_root.join("config.toml"),
         "[factory]\ntarget_cache_high_watermark_percent = 1\ntarget_cache_low_watermark_percent = 0\ntarget_cache_min_idle_secs = 0\ntarget_cache_retention_count = 0\n",
     )
     .unwrap();
+
+    // Probe a separate, fresh, unregistered cache with no retained handles or
+    // fixture processes. A live result here establishes unavailable visibility,
+    // independently of genuine liveness in the actual MCP worker below. With
+    // readable visibility, an accidentally live MCP fixture must fail selection.
+    let baseline = TempDir::new().unwrap();
+    let baseline_root = baseline.path().join(".cas");
+    let baseline_worker = baseline_root.join("worktrees/capability-probe");
+    let baseline_cache = baseline_worker.join("target");
+    std::fs::create_dir_all(&baseline_cache).unwrap();
+    std::fs::write(baseline_cache.join("probe"), b"x").unwrap();
+    use cas::factory_target_cache::{CacheDisposition, TargetCachePolicy};
+    let native = cas::factory_target_cache::inspect(
+        &baseline_root,
+        TargetCachePolicy {
+            high_watermark_percent: 1,
+            low_watermark_percent: 0,
+            min_idle_secs: 0,
+            retention_count: 0,
+        },
+        &[],
+        &[],
+        true,
+    )
+    .unwrap();
+    assert_eq!(native.caches.len(), 1);
+    assert_eq!(native.candidate_bytes, 1);
+    assert_eq!(native.caches[0].bytes, 1);
+    assert_eq!(
+        native.caches[0].path,
+        baseline_cache.canonicalize().unwrap()
+    );
+    assert_ne!(native.caches[0].worktree, worker.canonicalize().unwrap());
+    let reclaim = match native.caches[0].disposition {
+        CacheDisposition::Selected => true,
+        CacheDisposition::LiveProcess => {
+            eprintln!(
+                "RECLAIM PROOF UNAVAILABLE: separate idle capability fixture has unverifiable native process evidence; actual MCP fixture must preserve source/cache bytes and JSON status. LiveProcess does not prove an observed process."
+            );
+            false
+        }
+        other => panic!("unexpected native GC fixture state: {other:?}"),
+    };
+    assert_eq!(native.selected_bytes, if reclaim { 1 } else { 0 });
+    assert_eq!(native.reclaimed_bytes, 0);
+    assert_eq!(std::fs::read(baseline_cache.join("probe")).unwrap(), b"x");
+    let disposition = if reclaim { "selected" } else { "live_process" };
+    let cache_path = worker.join("target").canonicalize().unwrap();
+    let assert_preserved = || {
+        assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
+        assert_eq!(
+            std::fs::read(target.join("artifact.rlib")).unwrap(),
+            artifact
+        );
+    };
+    fn status(text: &str) -> serde_json::Value {
+        let machine = text
+            .lines()
+            .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
+            .expect("machine-readable target-cache status line");
+        serde_json::from_str(machine).expect("valid status JSON")
+    }
 
     let report = env
         .service
@@ -5651,40 +5715,78 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
         report_text.contains("TARGET_CACHE_STATUS_JSON="),
         "{report_text}"
     );
-    let machine = report_text
-        .lines()
-        .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
-        .expect("machine-readable target-cache status line");
-    let machine: serde_json::Value = serde_json::from_str(machine).expect("valid status JSON");
+    let machine = status(&report_text);
     assert_eq!(machine["schema_version"], 1);
     assert_eq!(machine["dry_run"], true);
+    assert_eq!(machine["candidate_bytes"], 64);
+    assert_eq!(machine["selected_bytes"], if reclaim { 64 } else { 0 });
+    assert_eq!(machine["reclaimed_bytes"], 0);
+    assert_eq!(machine["caches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        machine["caches"][0]["path"],
+        serde_json::to_value(&cache_path).unwrap()
+    );
+    assert_eq!(machine["caches"][0]["bytes"], 64);
+    assert_eq!(machine["caches"][0]["disposition"], disposition);
     assert!(
         report_text.contains(&worker.join("target").display().to_string()),
         "dry-run must report the exact cache path: {report_text}"
     );
     assert!(report_text.contains("bytes=64"), "{report_text}");
+    assert_preserved();
 
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
     let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
     let preview_text = get_text(&preview);
     assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
-    assert!(
-        worker.join("target").exists(),
-        "omitted dry_run must not delete"
+    let preview_status = status(&preview_text);
+    assert_eq!(preview_status["schema_version"], 1);
+    assert_eq!(preview_status["dry_run"], true);
+    assert_eq!(preview_status["candidate_bytes"], 64);
+    assert_eq!(
+        preview_status["selected_bytes"],
+        if reclaim { 64 } else { 0 }
     );
+    assert_eq!(preview_status["reclaimed_bytes"], 0);
+    assert_eq!(preview_status["caches"][0]["disposition"], disposition);
+    assert_preserved(); // force alone/omitted dry_run never deletes.
 
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let cleanup = env.service.factory_request(Parameters(cleanup)).await.unwrap();
     let cleanup_text = get_text(&cleanup);
-    assert!(
-        cleanup_text.contains("reclaimed_bytes=64"),
-        "{cleanup_text}"
+    assert!(cleanup_text.contains("mode=cleanup"), "{cleanup_text}");
+    let cleaned = status(&cleanup_text);
+    assert_eq!(cleaned["schema_version"], 1);
+    assert_eq!(cleaned["dry_run"], false);
+    assert_eq!(cleaned["candidate_bytes"], 64);
+    assert_eq!(cleaned["selected_bytes"], if reclaim { 64 } else { 0 });
+    assert_eq!(cleaned["reclaimed_bytes"], if reclaim { 64 } else { 0 });
+    assert_eq!(cleaned["caches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        cleaned["caches"][0]["path"],
+        serde_json::to_value(&cache_path).unwrap()
     );
-    assert!(!worker.join("target").exists());
-    assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), b"source");
+    assert_eq!(cleaned["caches"][0]["bytes"], 64);
+    assert_eq!(
+        cleaned["caches"][0]["disposition"],
+        if reclaim { "reclaimed" } else { "live_process" }
+    );
+    assert_eq!(worker.join("target").exists(), !reclaim);
+    if !reclaim {
+        assert_preserved();
+        assert!(cleanup_text.contains("state=LiveProcess"), "{cleanup_text}");
+        assert_eq!(
+            cleaned["caches"][0]["reason"],
+            "registered or OS-visible live process uses this worktree"
+        );
+        eprintln!(
+            "RECLAIM PROOF UNAVAILABLE: raw actual-fixture status (ambiguous live/unknown reason, not an observed-process claim): {cleanup_text}"
+        );
+    }
+    assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
 }
 
 // =============================================================================

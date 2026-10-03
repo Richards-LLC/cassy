@@ -33,7 +33,7 @@ bytes that already exist.
 
 ## The architecture
 
-```
+```text
 release PR merges to main
         |
         v
@@ -131,7 +131,7 @@ only `contents: write` token in the release and stays on `ubuntu-latest`.
 
 Enabling and disabling the routing is a repository-variable change:
 
-```
+```bash
 gh variable set CASSY_RELEASE_SELF_HOSTED --body enabled    # opt in
 gh variable set CASSY_RELEASE_SELF_HOSTED --body disabled   # before box maintenance
 ```
@@ -173,7 +173,7 @@ workflow warning.
 
 Two receipts, both gates rather than reports:
 
-```
+```bash
 scripts/release-published-receipt.sh vX.Y.Z    # what shipped: digests, both assets
 scripts/release-latency-receipt.sh   vX.Y.Z    # how fast: tag push -> published
 ```

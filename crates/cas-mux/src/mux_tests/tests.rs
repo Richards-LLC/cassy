@@ -101,18 +101,30 @@ async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     let project = tempfile::tempdir().unwrap();
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
-    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_env = [\"DEPLOY_FIXTURE_TOKEN\"]\n").unwrap();
-    env.set("DEPLOY_FIXTURE_TOKEN", "inherited-fixture");
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\nsupervisor_only_env = [\"VERCEL_TOKEN\", \"NEON_API_KEY\", \"DEPLOY_FIXTURE_TOKEN\"]\n").unwrap();
+    std::fs::write(cas_root.join("proxy.toml"), "[servers.context7]\ntransport = 'http'\nauth = 'env:DEPLOY_FIXTURE_TOKEN'\n").unwrap();
+    let source = project.path().join(".mcp.json");
+    let original = serde_json::json!({"mcpServers": {
+        "vercel": {"command": "vercel-fixture"},
+        "neon": {"command": "neon-fixture"}
+    }}).to_string();
+    std::fs::write(&source, &original).unwrap();
+    for key in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+        env.set(key, "inherited-fixture");
+    }
     for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
         let configs = Mux::factory_pane_configs(&MuxConfig {
             cwd: project.path().into(), cas_root: Some(cas_root.clone()), workers: 1,
             worker_cli: cli, include_director: false, ..Default::default()
         });
         let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        let worker_mcp = cas_root.join("worker-mcp/worker-1.json");
+        let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(worker_mcp).unwrap()).unwrap();
+        assert!(mcp["mcpServers"].get("vercel").is_none() && mcp["mcpServers"].get("neon").is_none());
         // Replace only the harness executable with a local probe, retaining
         // the generated environment and the production Pty::spawn path.
         worker.command = "/bin/sh".into();
-        worker.args = vec!["-c".into(), "test -z \"${DEPLOY_FIXTURE_TOKEN+x}\" && printf 'worker-env-isolated\\n'".into()];
+        worker.args = vec!["-c".into(), "test -z \"${VERCEL_TOKEN+x}${NEON_API_KEY+x}${DEPLOY_FIXTURE_TOKEN+x}\" && printf 'worker-env-isolated\\n'".into()];
         let mut pty = crate::pty::Pty::spawn("resource-probe", worker).unwrap();
         let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let mut output = Vec::new();
@@ -128,7 +140,10 @@ async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
         }).await.expect("bounded local probe");
         assert!(String::from_utf8_lossy(&events).contains("worker-env-isolated"));
     }
-    assert!(std::env::var_os("DEPLOY_FIXTURE_TOKEN").is_some());
+    assert_eq!(std::fs::read_to_string(source).unwrap(), original, "shared-cwd workers keep supervisor configuration intact");
+    for key in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+        assert!(std::env::var_os(key).is_some());
+    }
 }
 
 #[test]
@@ -152,6 +167,14 @@ fn invalid_worker_resource_policy_refuses_launch_before_execution_gh_1047() {
         worker.args = vec!["-c".into(), "exit 0".into()];
         assert!(crate::pty::Pty::spawn("refused-worker", worker).is_err());
     }
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = ['server.with.dots']\n").unwrap();
+    std::fs::write(project.path().join(".mcp.json"), "{}").unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(cas_root), workers: 1,
+        worker_cli: SupervisorCli::Codex, include_director: false, ..Default::default()
+    });
+    let worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+    assert!(crate::pty::Pty::spawn("ambiguous-codex-server", worker).is_err());
 }
 
 fn shell_quote(value: &str) -> String {

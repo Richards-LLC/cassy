@@ -3896,9 +3896,16 @@ mod workspace_contract_tests {
 
     #[test]
     fn bash_rm_targets_expand_loop_variables() {
-        let targets = bash_write_targets(
+        // cas-cf4f: rm operands are deletion targets, still expanded and guarded.
+        let targets: Vec<String> = bash_delete_targets(
             "B=cas-cli/src/builtins; for h in codex grok; do for sk in cas-html-reports cas-dataviz; do rm -rf $B/$h/skills/$sk; done; done",
-        );
+        )
+        .into_iter()
+        .map(|(target, recursive)| {
+            assert!(recursive, "-rf is recursive");
+            target
+        })
+        .collect();
         for target in [
             "cas-cli/src/builtins/codex/skills/cas-html-reports",
             "cas-cli/src/builtins/codex/skills/cas-dataviz",

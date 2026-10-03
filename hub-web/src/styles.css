@@ -1173,6 +1173,22 @@ main {
 }
 
 .t3-ghostty-scrollbar { display: none; }
+/* cas-d1fa: while this browser is in control the terminal keeps Tab, so a
+   quiet line in its corner says how the keyboard leaves. */
+.t3-ghostty-escape-hint {
+  position: absolute;
+  right: var(--space-2);
+  bottom: var(--space-2);
+  z-index: 3;
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-mid);
+  background: var(--bg-raised);
+  border-radius: var(--radius-card);
+  font-size: var(--fs-xs);
+  pointer-events: none;
+}
+.t3-ghostty-escape-hint[hidden] { display: none; }
 .empty { place-self: center; color: var(--text-mid); }
 
 /* == Unit 3: empty state == */

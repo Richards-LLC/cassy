@@ -355,6 +355,26 @@ export function terminalLinkAtColumn(row: GhosttySnapshot["rowData"][number], co
   return terminalLinkAtPosition([row], 0, column);
 }
 
+/** The terminal's own keys, in the words its escape hint uses (cas-d1fa). */
+export const TERMINAL_ESCAPE_HINT = "Tab goes to the terminal. Ctrl+M leaves it.";
+
+/**
+ * Ctrl+M leaves the terminal input (cas-d1fa, WCAG 2.1.2): in control, Tab and
+ * Shift+Tab are the program's (completion, mode cycling), so the keyboard
+ * needs another way out. Ctrl+M is a carriage return to a terminal, which
+ * Enter already sends, and it is the escape editors such as VS Code use.
+ */
+export function isTerminalLeaveShortcut(event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "shiftKey" | "altKey">): boolean {
+  return event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "m";
+}
+
+/** A plain Tab or Shift+Tab, the keys that move focus. */
+export function isTerminalFocusTab(event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "altKey">): boolean {
+  return event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey;
+}
+
+let escapeHintCount = 0;
+
 export function isTerminalCopyShortcut(
   event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "shiftKey">,
   platform = navigator.platform,
@@ -505,6 +525,7 @@ export class GhosttyTerminalSurface {
   rows = 1;
 
   private readonly mount: HTMLElement;
+  private readonly escapeHint: HTMLParagraphElement;
   private readonly context: CanvasRenderingContext2D;
   private readonly core: GhosttyTerminalCore;
   private readonly options: GhosttyTerminalSurfaceOptions;
@@ -598,6 +619,13 @@ export class GhosttyTerminalSurface {
     this.input = input;
     this.scrollbar = scrollbar;
     this.scrollbarThumb = scrollbarThumb;
+    // cas-d1fa: in control, the terminal keeps Tab; this says how to leave.
+    this.escapeHint = document.createElement("p");
+    this.escapeHint.className = "t3-ghostty-escape-hint";
+    this.escapeHint.id = `t3-ghostty-escape-hint-${++escapeHintCount}`;
+    this.escapeHint.textContent = TERMINAL_ESCAPE_HINT;
+    this.escapeHint.hidden = true;
+    mount.append(this.escapeHint);
     this.context = context;
     this.core = core;
     this.metrics = metrics;
@@ -720,6 +748,7 @@ export class GhosttyTerminalSurface {
   setControlMode(enabled: boolean): void {
     if (this.disposed || this.controlMode === enabled) return;
     this.controlMode = enabled;
+    this.updateEscapeHint();
     // Lease changes are semantic mode changes. Restart from a visible phase so
     // observer mode cannot inherit the hidden half of a controller's blink.
     this.cursorOn = true;
@@ -1025,10 +1054,25 @@ export class GhosttyTerminalSurface {
       this.input.remove();
       this.scrollbar.remove();
     }
+    this.escapeHint.remove();
   }
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     this.updateLinkModifier(event);
+    // cas-d1fa (WCAG 2.1.2): the keyboard can always leave. Ctrl+M leaves
+    // from either mode; without control nothing reaches the program, so Tab
+    // and Shift+Tab keep their usual job of moving focus.
+    if (isTerminalLeaveShortcut(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.suppressedKeyCodes.add(event.code);
+      this.leaveFocus();
+      return;
+    }
+    if (!this.controlMode && isTerminalFocusTab(event)) {
+      this.suppressedKeyCodes.add(event.code);
+      return;
+    }
     // Presses handled outside the terminal must also swallow their release:
     // beforeKey runs side effects (keybindings, navigation sends), so it cannot
     // be consulted again on keyup, and Kitty report-event-types sessions would
@@ -1096,12 +1140,14 @@ export class GhosttyTerminalSurface {
 
   private readonly onFocus = () => {
     this.focused = true;
+    this.updateEscapeHint();
     this.cursorOn = true;
     this.requestRender();
   };
 
   private readonly onBlur = () => {
     this.focused = false;
+    this.updateEscapeHint();
     this.linkModifierActive = false;
     this.refreshHoveredLink();
     // Suppressions survive blur deliberately: a shortcut that moves focus (for
@@ -1112,6 +1158,26 @@ export class GhosttyTerminalSurface {
     this.cursorOn = true;
     this.requestRender();
   };
+
+  /** Shown, and the input's description, only while the terminal keeps Tab. */
+  private updateEscapeHint(): void {
+    const capturing = this.controlMode && !this.disposed;
+    this.escapeHint.hidden = !(capturing && this.focused);
+    if (capturing) this.input.setAttribute("aria-describedby", this.escapeHint.id);
+    else this.input.removeAttribute("aria-describedby");
+  }
+
+  /** Move focus to the next control after the terminal, else the one before it. */
+  private leaveFocus(): void {
+    const tabbable = [...document.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, [tabindex]")]
+      .filter((element) => element.tabIndex >= 0 && !this.mount.contains(element)
+        && !element.matches(":disabled") && element.getClientRects().length > 0
+        && element.closest("[inert], dialog:not([open])") === null);
+    const next = tabbable.find((element) => (this.mount.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    const target = next ?? tabbable.at(-1);
+    if (target) target.focus();
+    else this.input.blur();
+  }
 
   private readonly onDevicePixelRatioChange = () => {
     this.watchDevicePixelRatio();

@@ -117,9 +117,17 @@ pub(super) fn finish_worker_config(
             account_dir.to_string(),
         ));
     }
-    let project_grants = project_proxy_credential_names(cas_root);
+    let policy = match crate::worker_resources::load_worker_policy(cas_root.map(PathBuf::as_path)) {
+        Ok(policy) => policy,
+        Err(_) => {
+            config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Worker resource policy could not be loaded; fix [factory] supervisor_only_mcp/supervisor_only_env before spawning".into()));
+            config.apply_worker_credential_policy();
+            return;
+        }
+    };
+    let project_grants = project_proxy_credential_names(cas_root, &policy);
     config.env.extend(
-        proxy_credential_environment(cas_root)
+        proxy_credential_environment(cas_root, &policy)
             .into_iter()
             .filter(|(name, _)| {
                 !PROTECTED_OPERATOR_ENV.contains(&name.as_str()) || project_grants.contains(name)
@@ -130,6 +138,32 @@ pub(super) fn finish_worker_config(
     }
     grant_worker_github_read_token(config, &project_grants);
     config.apply_worker_credential_policy();
+    config.env.retain(|(name, _)| !policy.denies_env(name));
+    for name in &policy.supervisor_only_env {
+        if !config.env_remove.contains(name) { config.env_remove.push(name.clone()); }
+    }
+    if !policy.is_empty() {
+        tracing::info!(supervisor_only_mcp = ?policy.supervisor_only_mcp,
+            supervisor_only_env = ?policy.supervisor_only_env,
+            "factory worker resource denials; tasks needing these resources route to supervisor");
+        let worker = config.env.iter().rev().find_map(|(key, value)| (key == "CAS_AGENT_NAME").then_some(value.clone())).unwrap_or_else(|| "worker".into());
+        if let (Some(root), Some(cwd)) = (cas_root, config.cwd.as_deref()) {
+            match crate::worker_resources::prepare_worker_mcp(root, cwd, &worker, &policy) {
+                Ok(path) => {
+                    let cli = if config.command == "nice" { config.args.get(2).map(String::as_str).unwrap_or("") } else { &config.command };
+                    if cli == "claude" {
+                        config.args.extend(["--strict-mcp-config".into(), "--mcp-config".into(), path.display().to_string()]);
+                    } else if cli == "codex" {
+                        for name in &policy.supervisor_only_mcp {
+                            let key = serde_json::to_string(name).expect("string serialization");
+                            config.args.extend(["-c".into(), format!("mcp_servers.{key}.enabled=false")]);
+                        }
+                    }
+                }
+                Err(_) => config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Worker MCP isolation could not be provisioned; fix the project .mcp.json and worker directory before spawning".into())),
+            }
+        }
+    }
 }
 
 /// Operator-provisioned, read-only GitHub token for factory workers
@@ -174,7 +208,7 @@ fn grant_worker_github_read_token(config: &mut PtyConfig, project_grants: &BTree
 /// the supervisor, but they are machine-global state rather than a grant to a
 /// worker in this project. Only the project `.cas/proxy.toml` is an auditable
 /// worker grant source.
-fn project_proxy_credential_names(cas_root: Option<&PathBuf>) -> BTreeSet<String> {
+fn project_proxy_credential_names(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let Some(cas_root) = cas_root else {
         return names;
@@ -183,9 +217,10 @@ fn project_proxy_credential_names(cas_root: Option<&PathBuf>) -> BTreeSet<String
     let Ok(contents) = std::fs::read_to_string(path) else {
         return names;
     };
-    let Ok(document) = toml::from_str::<toml::Value>(&contents) else {
+    let Ok(mut document) = toml::from_str::<toml::Value>(&contents) else {
         return names;
     };
+    crate::worker_resources::filter_proxy_document(&mut document, policy);
     collect_env_references(&document, &mut names);
     // cas-ff74 (GH #1005 item 2): a server the project marks
     // `worker_access = "read-only"` may be defined only in the operator's
@@ -204,6 +239,7 @@ fn project_proxy_credential_names(cas_root: Option<&PathBuf>) -> BTreeSet<String
             }
         }
     }
+    names.retain(|name| !policy.denies_env(name));
     names
 }
 
@@ -258,7 +294,7 @@ fn user_proxy_config_document() -> Option<toml::Value> {
 /// the supervisor's login shell had sourced. Resolve the same private
 /// credentials file and shell profile used by `cas integrate violet` as a
 /// fallback, while keeping an explicitly exported value authoritative.
-fn proxy_credential_environment(cas_root: Option<&PathBuf>) -> Vec<(String, String)> {
+fn proxy_credential_environment(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> Vec<(String, String)> {
     let mut names = BTreeSet::new();
     let mut values = BTreeMap::new();
     let mut paths = Vec::new();
@@ -275,11 +311,13 @@ fn proxy_credential_environment(cas_root: Option<&PathBuf>) -> Vec<(String, Stri
         let Ok(contents) = std::fs::read_to_string(path) else {
             continue;
         };
-        let Ok(document) = toml::from_str::<toml::Value>(&contents) else {
+        let Ok(mut document) = toml::from_str::<toml::Value>(&contents) else {
             continue;
         };
+        crate::worker_resources::filter_proxy_document(&mut document, policy);
         collect_env_references(&document, &mut names);
     }
+    names.retain(|name| !policy.denies_env(name));
     for path in credential_source_paths() {
         load_shell_environment(&path, &mut values, &mut BTreeSet::new(), 0);
     }

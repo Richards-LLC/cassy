@@ -1047,3 +1047,24 @@ fn artifact_namespaces_distinguish_same_named_projects_and_share_store_aliases_c
         assert_eq!(project_factory_artifacts_root(&alias, &base), a_dir);
     }
 }
+
+#[test]
+fn factory_supervisor_only_resource_settings_round_trip_and_list_gh_1047() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    for (key, value) in [
+        ("factory.supervisor_only_mcp", "vercel,neon"),
+        ("factory.supervisor_only_env", "VERCEL_TOKEN,NEON_API_KEY"),
+    ] {
+        assert!(registry().get(key).is_some(), "cas config list needs registered metadata");
+        config.set(key, value).unwrap();
+        assert_eq!(config.get(key).as_deref(), Some(value));
+        assert!(config.list().contains(&(key.into(), value.into())));
+    }
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.factory().worker_policy.supervisor_only_mcp, ["vercel", "neon"]);
+    let shared = cas_mux::worker_resources::load_worker_policy(Some(temp.path())).unwrap();
+    assert!(shared.denies_env("VERCEL_TOKEN") && shared.denies_server("neon"));
+    assert!(!FactoryConfig::default().worker_policy.denies_server("vercel"));
+}

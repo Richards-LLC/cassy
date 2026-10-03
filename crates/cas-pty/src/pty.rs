@@ -2345,6 +2345,9 @@ fn worker_spawn_audit(
 impl Pty {
     /// Spawn a new PTY with the given configuration
     pub fn spawn(id: impl Into<String>, mut config: PtyConfig) -> Result<Self> {
+        if let Some((_, reason)) = config.env.iter().find(|(key, _)| key == "CAS_FACTORY_WORKER_LAUNCH_ERROR") {
+            return Err(Error::pty(reason.clone()));
+        }
         config.apply_worker_credential_policy();
         let id = id.into();
         let is_codex = command_launches_codex(&config.command, &config.args);

@@ -493,6 +493,9 @@ impl Default for OrchestrationConfig {
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
+    /// Resource denials applied to every factory worker, across harnesses.
+    #[serde(flatten)]
+    pub worker_policy: cas_types::factory_worker_policy::FactoryWorkerPolicy,
     /// Durable, per-task proof/artifact directory. Factory workers may write
     /// under this root/project-key in addition to their worktree. If unset, the hook
     /// resolves a real-disk fallback under `~/.cas/artifacts`.
@@ -860,6 +863,7 @@ fn default_merge_sweep_timeout_secs() -> u64 {
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
+            worker_policy: Default::default(),
             artifacts_root: None,
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),

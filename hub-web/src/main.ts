@@ -3580,7 +3580,9 @@ function render(captureDraft = true): void {
   // is printed under the header, not left in title and aria text (journey F9).
   // Journey F42: during an outage the banner says what was lost; this line
   // says only what it means for the controls, so the outage reads once.
-  const controlsNotice = !showSessionControls ? undefined : outageKind ? outageControlsNotice(outageKind) : sessionControlsNotice(takeControlReason, interruptReason);
+  const controlsNotice = !showSessionControls ? undefined
+    : outageKind === "machine" && machineConnectionSnapshot?.fatal === true ? outageReason
+    : outageKind ? outageControlsNotice(outageKind) : sessionControlsNotice(takeControlReason, interruptReason);
   // With machines paired and nothing open, the canvas is the fleet: every
   // machine and its sessions, one tap from opening. An empty card pointing at a
   // drawer was a detour to the same list.

@@ -247,7 +247,8 @@ impl CasService {
     where
         F: std::future::Future<Output = ToolResult> + Send + 'static,
     {
-        self.call_with_deadline_and_grace(tool_name, arguments, budget, budget, future)
+        let no_grace = budget.saturating_add(std::time::Duration::from_secs(3600));
+        self.call_with_deadline_and_grace(tool_name, arguments, budget, no_grace, future)
             .await
     }
 
@@ -306,8 +307,9 @@ impl CasService {
         let won = tokio::select! {
             biased;
             joined = &mut handle => Won::Handler(joined),
-            () = post_commit_grace => Won::Grace,
+            // The budget outranks the grace when both are due in one tick.
             () = tokio::time::sleep_until(deadline) => Won::Deadline,
+            () = post_commit_grace => Won::Grace,
         };
         match won {
             Won::Handler(joined) => {

@@ -476,9 +476,24 @@ export function relativeTime(createdAt: string, now = Date.now()): string {
   return `${Math.floor(elapsed / 86_400_000)}d`;
 }
 
+/**
+ * A delivery notice's recorded diagnostic as the operator reads it (cas-ed87):
+ * the watchdog's summary once, when it says something the message does not,
+ * then the message. Plain text, never the {summary, message} object.
+ */
+function deliveryNoticeText(payload: unknown): string | undefined {
+  const record = asRecord(payload);
+  if (typeof record?.message !== "string") return undefined;
+  const message = record.message.trim();
+  const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+  return summary && !message.includes(summary) ? `${summary}\n\n${message}` : message;
+}
+
 export function attentionPayload(item: AttentionItem): string {
   const payload = normalizedKind(item.kind) === "delivery_stall" ? attentionContent(item).payload : item.payload ?? item.message;
   if (typeof payload === "string") return payload;
+  const notice = normalizedKind(item.kind) === "delivery_stall" ? deliveryNoticeText(payload) : undefined;
+  if (notice !== undefined) return notice;
   try {
     return JSON.stringify(payload, null, 2);
   } catch {

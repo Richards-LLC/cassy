@@ -159,3 +159,20 @@ fn epic_receipt_wins_and_unresolved_delivery_fails_closed_cas_b36b() {
         Some(receipt)
     );
 }
+
+#[test]
+fn branchless_no_code_epic_has_no_delivery_window_cas_04c6() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    commit(repo, &[("unrelated.snap", "supervisor's unrelated snapshot\n")], "unrelated checkout work");
+    let mut epic = Task::new("cas-04c6".into(), "Planning epic".into());
+    epic.task_type = TaskType::Epic;
+    let tip = close_task_delivery_tip(&epic, repo, None, None).unwrap();
+    assert_eq!(tip, None, "no code epic must never inherit checkout HEAD");
+    assert!(snapshot_gate_range(repo, "main", None, tip.as_deref(), false, tip.is_some()).is_none());
+    epic.branch = Some("epic/missing".into());
+    let error = close_task_delivery_tip(&epic, repo, None, None).unwrap_err();
+    assert!(error.contains("EPIC DELIVERY TIP REQUIRED"), "{error}");
+    assert!(error.contains("epic/missing"), "{error}");
+}

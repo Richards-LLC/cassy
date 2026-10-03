@@ -8,6 +8,10 @@ the conjunction defect is fixed and re-measured at parity-or-better. The gate in
 §"The gate" is SATISFIED.** The body below is preserved unedited as the
 pre-fix record.
 
+**Ranking follow-up:** The 2026-10-03 cas-2929 addendum below measures ordering
+on a current, project-only common corpus. Its bounded heuristic passes; it does
+not establish the original global corpus's ranking quality.
+
 ## Why this document exists
 
 Nothing else on EPIC cas-b129 measures whether the knowledge system *retrieves*
@@ -174,13 +178,13 @@ subcommand is ergonomics.
 
 ---
 
-# Addendum — 2026-08-07: conjunction fixed, re-measured at parity-or-better
+## Addendum — 2026-08-07: conjunction fixed, re-measured at parity-or-better
 
 **Task:** cas-461a. **Measured:** 2026-08-07, host `soundwave`.
 **Revised verdict: AT PARITY OR BETTER on the cas-d075 query set. The removal
 gate stated above is SATISFIED.**
 
-## What changed
+### What changed
 
 `SqliteKnowledgeStore::fts_query` now joins terms with `OR` instead of a space,
 so multi-term knowledge search is disjunctive and ranked by `bm25()` — matching
@@ -194,7 +198,7 @@ No separate "AND-preference" pass was needed: `search` already orders by
 more of the query's terms above pages carrying fewer. That is the behaviour the
 pre-fix section above anticipated, obtained for free.
 
-## Re-measurement
+### Re-measurement
 
 Same ten `search` cases from `fixtures/retrieval-parity/queryset.toml`, same
 legacy baseline (`fixtures/retrieval-parity/baseline-soundwave.json`), same
@@ -226,7 +230,7 @@ pre-fix binary (`cas 2.50.0`, `4132e03`) was run against the same scratch copy
 and reproduced 7 / 0 / 0 / 0 on the spot-checked rows, confirming the harness is
 measuring the same thing the original verdict measured.
 
-## What this measurement does and does not claim
+### What this measurement does and does not claim
 
 It claims **findability is restored**: every query that silently returned nothing
 now returns results, and none returns fewer than legacy.
@@ -239,7 +243,7 @@ cliff is gone, not that the *best* page ranks first. Ordering is BM25's job and
 is unchanged in kind from the legacy surface, but a rank-quality comparison is a
 different measurement than this one and is not asserted here.
 
-## Coverage
+### Coverage
 
 Unit tests on the constructed expression (`fts_query_is_disjunctive_and_
 preserves_explicit_phrases`) and on store behaviour
@@ -248,3 +252,79 @@ integration test (`test_knowledge_multi_term_search_is_disjunctive`) that pins
 the disjunctive win, the phrase-adjacency guarantee, and the negative case — a
 query sharing no term with the corpus still reports no matches, so "disjunctive"
 has not become "matches anything".
+
+---
+
+## Addendum — 2026-10-03: project-only lexical ranking measured
+
+**Task:** cas-2929. **Verdict:** ADEQUATE under the frozen, lexical-coverage
+heuristic for the **current project-only common corpus**. This closes the ranking
+question for that bounded sample; it does not establish global or historical
+soundwave ranking parity, human relevance, or answer correctness.
+
+### Method and corpus
+
+The ten committed M4 `search` queries were used unchanged. Before either engine
+ran, `METHODOLOGY.md` fixed a query×entry relevance matrix: grade 2 requires a
+topic anchor and two distinct normalized query concepts in the original legacy
+title/content; grade 1 requires an anchor and one concept; otherwise grade 0.
+The primary measure is mean nDCG@10 (gain `2^grade - 1`); secondary measures are
+MRR@10 and precision@3 for grade-2 hits. The predeclared pass conditions are
+mean knowledge nDCG ≥ 0.80, mean knowledge-minus-legacy nDCG ≥ -0.05, and no
+query delta below -0.15. These thresholds are engineering judgments, not human
+relevance labels.
+
+A read-only SQLite backup of the current cas-src store was pruned **only in a
+disposable copy** to the exact common universe: 65 live, unarchived legacy
+entries and their deterministically linked migrated knowledge pages. Of the
+current 107 migrated project pages, 40 no longer resolve to a live legacy row;
+two linked rows are archived. The old soundwave 107/107 project and 39/39 global
+lineage is a different corpus. The current global store had zero pages/entries
+at inventory time, so this experiment contains **no global comparison**.
+
+The installed, shipped `cas 3.45.0` binary (`520cd74`) performed both searches:
+`cas knowledge search <query> --limit 1000` for the FTS5 order and isolated
+MCP `search action=search doc_type=entry scope=project limit=1000` for Tantivy
+BM25. Its private `HOME`, project `.cas`, and index contained no live writes.
+After removing unrelated copied tasks/rules/skills from the disposable DB,
+`system action=reindex bm25=true` completed with **65 indexed documents**.
+Every returned identifier mapped into the same 65-pair universe. The earlier
+attempt to reindex the copy *with* 3,247 unrelated tasks timed out after 55 s;
+its preliminary BM25 order is retained in the artifact but excluded here.
+
+| M4 search case | Relevant grade 2 | Matches knowledge / legacy | nDCG@10 knowledge / legacy | Difference |
+|---|---:|---:|---:|---:|
+| factory-workers | 30 | 45 / 43 | 1.000 / 0.958 | +0.042 |
+| task-close-verification | 23 | 41 / 38 | 0.934 / 0.931 | +0.003 |
+| worktree-commit | 6 | 65 / 25 | 0.764 / 0.794 | -0.031 |
+| build-tests | 14 | 27 / 24 | 0.958 / 0.956 | +0.002 |
+| session-agents | 25 | 53 / 50 | 0.958 / 0.936 | +0.021 |
+| cloud-sync-config | 10 | 40 / 38 | 0.772 / 0.739 | +0.033 |
+| release-staging | 11 | 35 / 32 | 0.934 / 0.715 | +0.218 |
+| root-cause-fixed | 6 | 30 / 29 | 0.872 / 0.610 | +0.263 |
+| review-skill | 12 | 65 / 33 | 0.956 / 0.724 | +0.232 |
+| cross-project-contamination | 0 | 3 / 3 | 0.920 / 0.920 | +0.000 |
+| **Mean** | | | **0.906613 / 0.828224** | **+0.078389** |
+
+All ten queries had a nonzero ideal DCG. The weakest delta was -0.030890
+(`worktree-commit`), above the -0.15 floor. Grade-2 MRR@10 was 0.900 vs 0.820;
+grade-2 precision@3 was 0.867 vs 0.667. The cross-project query had no
+grade-2 item under the frozen heuristic, though its grade-1 items made nDCG
+defined. Knowledge CLI does not expose scores; the saved artifact records its
+native order and Tantivy's exposed scores without inventing FTS5 scores.
+
+### Gate note and reproducibility
+
+The cas-b129 legacy-removal gate has a **measured-adequate ranking leg only for
+this current project-only lexical sample**. The earlier findability result
+still stands. A broader gate claim requires the missing global/historical
+corpus and human or task-outcome relevance judgments. No tuning task is filed
+because all three predeclared thresholds pass in the measured scope.
+
+The task-scoped `cas-2929` artifact holds the frozen `METHODOLOGY.md`,
+`qrels.json`, `prepare.py`, `measure.py`, `compute.py`, raw native orderings and
+scores where exposed (`raw-results.json`), `metrics.json`, the unmodified SQLite
+backup, and the complete-index run log. Re-running `compute.py` from saved raw
+outputs and frozen qrels reproduces the aggregates above. The committed
+soundwave baseline remains provenance only; no ranking is inferred from its
+hit counts.

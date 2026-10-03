@@ -366,7 +366,10 @@ impl CasCore {
 
         if let Some(peer) = peer {
             // Fire-and-forget - don't block on notification result
-            let _ = peer.notify_resource_list_changed().await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                peer.notify_resource_list_changed(),
+            ).await;
         }
     }
 

@@ -105,6 +105,21 @@ key inheritance.
 
 ## Testing
 
+### MCP mutation timeout receipts
+
+The MCP response budget is 55 seconds; timeout diagnostics report the measured
+elapsed time and budget separately. Message enqueues and task writes carry
+request-scoped commit evidence. A timeout after an observed commit reports
+`COMMITTED`; message receipts include `notification_id`. `UNKNOWN` means this
+request's commit was not confirmed. Re-query state before retrying either case.
+The error's structured data includes `mutation_outcome`, `notification_id`,
+`elapsed_ms` and `budget_ms`.
+
+Optional resource notifications and factory recall have bounded response waits.
+Late recall output is retained for the next successful response, including mail
+already consumed by the background reader. Message delivery remains asynchronous;
+use `coordination action=message_status` to inspect handoff and recipient evidence.
+
 Integration tests are in `cas-cli/tests/`. Key test files:
 
 - `cli_test.rs` — CLI command integration tests

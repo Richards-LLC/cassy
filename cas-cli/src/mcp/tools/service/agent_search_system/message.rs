@@ -1336,6 +1336,7 @@ impl CasService {
                     )
                 })?;
             let reply_id = reply.id();
+            crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
             if let Some(device_id) = device_id.as_deref() {
                 queue.stamp_recipient_device(reply_id, device_id).map_err(|error| {
                     Self::error(
@@ -2187,6 +2188,7 @@ impl CasService {
                 (enqueue_outcome.id(), duplicate_suppressed, None)
             };
 
+        crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
         if let Some(notification_id) = explicit_reply_to {
             queue.ack(notification_id).map_err(|error| {
                 Self::error(

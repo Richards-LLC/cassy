@@ -77,6 +77,14 @@ expired artifacts, an API outage — also reports `found=false` with the same
 loud cold-build signal. The prebuild is an accelerator; it can never be the
 reason a release cannot ship.
 
+When you run the lookup by hand without `GITHUB_REPOSITORY`, it takes the
+repository from `gh repo view` (the gh default repository) and then from the
+`origin` remote. It never uses another remote, because `upstream` here is a
+different project, and it names the repository it chose on stderr. If neither
+source names exactly one GitHub repository, the lookup exits 2 with an error and
+prints no `found=` line, so a hand check can't mistake it for a missing
+prebuild. CI always sets `GITHUB_REPOSITORY`, so this never happens there.
+
 Publication is the opposite. `release` requires exactly one complete supply
 path: either the prebuild was adopted **and both platform builds were skipped**,
 or no prebuild existed **and both platform builds succeeded**. A failed build, a

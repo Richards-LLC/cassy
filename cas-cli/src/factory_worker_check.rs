@@ -402,14 +402,15 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
 // capped builder owns the lane, even between process inspection and spawn.
 pub(crate) struct LaneLock(File);
 impl Drop for LaneLock {
-    fn drop(&mut self) { let _ = FileExt::unlock(&self.0); }
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
 }
 pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Option<LaneLock>> {
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
     let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
-    let lock = lock_file(&slots.join(format!("lane-{key}.lock")))
-        .map_err(std::io::Error::other)?;
+    let lock = lock_file(&slots.join(format!("lane-{key}.lock"))).map_err(std::io::Error::other)?;
     match lock.try_lock_exclusive() {
         Ok(()) => Ok(Some(LaneLock(lock))),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
@@ -491,7 +492,7 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     let slot = acquire_slot(&slots, config.max_concurrent_builders)?;
     // A parked target may contain proof logs but no debug artifacts. Seed only
     // missing children from the published immutable baseline under the lane lock.
-    if let Err(error) = crate::ui::factory::app::seed_worker_target_from_baseline(&cas_root, &repo) {
+    if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
         tracing::warn!(%error, "worker target re-seed skipped; Cargo will rebuild privately");
     }
     let count_file = slots.join(format!("count-{lane_key}"));

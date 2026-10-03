@@ -5663,24 +5663,54 @@ impl CasCore {
     }
 
     fn retire_delivered_worker_cache(&self, task: &Task) {
-        let Some(assignee) = task.assignee.as_deref() else { return; };
-        let Ok(store) = self.open_agent_store() else { return; };
-        let Ok(agents) = store.list(None) else { return; };
-        let Some(agent) = agents.into_iter().find(|agent| agent.id == assignee || agent.name == assignee) else { return; };
+        let Some(assignee) = task.assignee.as_deref() else {
+            return;
+        };
+        let Ok(store) = self.open_agent_store() else {
+            return;
+        };
+        let Ok(agents) = store.list(None) else {
+            return;
+        };
+        let Some(agent) = agents
+            .into_iter()
+            .find(|agent| agent.id == assignee || agent.name == assignee)
+        else {
+            return;
+        };
         // Legacy multi-task ownership cannot retire another active delivery's
         // cache. Store errors fail closed; only a known parked/closed worker runs.
-        let Ok(task_store) = crate::store::open_task_store(&self.inner.cas_root) else { return; };
-        let Ok(tasks) = task_store.list(None) else { return; };
-        if tasks.iter().any(|other| other.id != task.id
-            && other.status == TaskStatus::InProgress
-            && other.assignee.as_deref().is_some_and(|owner| owner == agent.id || owner == agent.name)) { return; }
-        let Some(worktree) = agent.metadata.get("clone_path").map(std::path::PathBuf::from) else { return; };
+        let Ok(task_store) = crate::store::open_task_store(&self.inner.cas_root) else {
+            return;
+        };
+        let Ok(tasks) = task_store.list(None) else {
+            return;
+        };
+        if tasks.iter().any(|other| {
+            other.id != task.id
+                && other.status == TaskStatus::InProgress
+                && other
+                    .assignee
+                    .as_deref()
+                    .is_some_and(|owner| owner == agent.id || owner == agent.name)
+        }) {
+            return;
+        }
+        let Some(worktree) = agent
+            .metadata
+            .get("clone_path")
+            .map(std::path::PathBuf::from)
+        else {
+            return;
+        };
         let root = self.inner.cas_root.clone();
         let retention = self.load_config().factory().target_cache_retention_count;
         // Recursive unlinking must not hold the MCP task mutation budget.
         // Failure leaves regenerable outputs for later GC; delivery is durable.
         std::thread::spawn(move || {
-            if let Err(error) = crate::factory_target_cache::parked::park(&root, &worktree, retention) {
+            if let Err(error) =
+                crate::factory_target_cache::parked::park(&root, &worktree, retention)
+            {
                 tracing::warn!(%error, worktree = %worktree.display(), "parked worker cache retirement deferred");
             }
         });

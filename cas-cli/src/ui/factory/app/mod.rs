@@ -377,6 +377,9 @@ pub(crate) fn seed_worker_target_from_baseline(
     cas_dir: &Path,
     worktree_path: &Path,
 ) -> anyhow::Result<Option<TargetSeedStats>> {
+    if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() == Ok("1") {
+        return Ok(None);
+    }
     let pointer = cas_dir.join("build-cache").join("current");
     let Ok(snapshot_name) = std::fs::read_to_string(&pointer) else {
         return Ok(None);
@@ -6538,8 +6541,16 @@ mod spawn_isolation_tests {
         let root = result.cwd.parent().unwrap().parent().unwrap();
         let reseeded = seed_worker_target_from_baseline(root, &result.cwd).unwrap();
         assert!(reseeded.is_some());
-        assert_eq!(std::fs::read(result.cwd.join("target/worker-check.log")).unwrap(), b"durable proof");
-        assert_eq!(std::fs::metadata(result.cwd.join("target/debug/deps/libwarm.rlib")).unwrap().ino(), source_metadata.ino());
+        assert_eq!(
+            std::fs::read(result.cwd.join("target/worker-check.log")).unwrap(),
+            b"durable proof"
+        );
+        assert_eq!(
+            std::fs::metadata(result.cwd.join("target/debug/deps/libwarm.rlib"))
+                .unwrap()
+                .ino(),
+            source_metadata.ino()
+        );
 
         let stats = result.target_seed.expect("target seed receipt");
         assert_eq!(stats.source_commit, source_commit.trim());

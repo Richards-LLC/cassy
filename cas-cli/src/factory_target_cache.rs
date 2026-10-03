@@ -19,8 +19,8 @@ use walkdir::WalkDir;
 
 use crate::config::FactoryConfig;
 
-pub(crate) mod parked;
 mod lane;
+pub(crate) mod parked;
 pub use lane::LanePreviewRecord;
 
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
@@ -246,8 +246,13 @@ pub fn inspect(
         .filter(|record| record.disposition == CacheDisposition::Selected)
         .map(|record| record.bytes)
         .sum::<u64>()
-        .saturating_add(lane_previews.iter().filter(|preview| preview.disposition == CacheDisposition::Selected)
-            .map(|preview| preview.bytes).sum::<u64>());
+        .saturating_add(
+            lane_previews
+                .iter()
+                .filter(|preview| preview.disposition == CacheDisposition::Selected)
+                .map(|preview| preview.bytes)
+                .sum::<u64>(),
+        );
     Ok(TargetCacheReport {
         schema_version: 1,
         filesystem: capacity,
@@ -381,13 +386,27 @@ pub fn cleanup_selected(
     }
     // cas-cef2: File close alone cannot release a flock inherited by a
     // concurrently forked child; make the operation boundary explicit.
-    let previously_reclaimed = report.lane_previews.iter()
+    let previously_reclaimed = report
+        .lane_previews
+        .iter()
         .filter(|preview| preview.disposition == CacheDisposition::Reclaimed)
-        .map(|preview| preview.bytes).sum::<u64>();
-    lane::cleanup(cas_root, &mut report.lane_previews, policy, live_worktree_roots);
-    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(report.lane_previews.iter()
-        .filter(|preview| preview.disposition == CacheDisposition::Reclaimed)
-        .map(|preview| preview.bytes).sum::<u64>().saturating_sub(previously_reclaimed));
+        .map(|preview| preview.bytes)
+        .sum::<u64>();
+    lane::cleanup(
+        cas_root,
+        &mut report.lane_previews,
+        policy,
+        live_worktree_roots,
+    );
+    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(
+        report
+            .lane_previews
+            .iter()
+            .filter(|preview| preview.disposition == CacheDisposition::Reclaimed)
+            .map(|preview| preview.bytes)
+            .sum::<u64>()
+            .saturating_sub(previously_reclaimed),
+    );
     FileExt::unlock(&lock)?;
     Ok(())
 }
@@ -486,6 +505,13 @@ fn discover_caches(
     roots.sort_by(|left, right| left.0.cmp(&right.0));
     let mut caches = Vec::new();
     for (root, ownership) in roots {
+        // Preview ownership, recency and lifetime locks are enforced by lane
+        // cleanup. Never select the same bytes through ordinary target GC.
+        let ownership = if lane::is_preview_path(cas_root, &root) {
+            CacheOwnership::GitConventionOnly
+        } else {
+            ownership
+        };
         let git_identity = git_identities.get(&root);
         let target = root.join("target");
         if fs::symlink_metadata(&target).is_ok() {
@@ -812,8 +838,14 @@ fn process_uses(worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
     // macOS has no /proc. Field output is NUL-delimited, so paths with spaces
     // or newlines cannot evade an open-output check. Unknown evidence is live.
     let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-F0pn"]).output() else { return true; };
-    if !output.status.success() || !output.stderr.is_empty() { return true; }
+        .args(["-nP", "-F0pn"])
+        .output()
+    else {
+        return true;
+    };
+    if !output.status.success() || !output.stderr.is_empty() {
+        return true;
+    }
     lsof_uses(&output.stdout, worktree, cache, ignore_self)
 }
 
@@ -825,12 +857,18 @@ fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, ignore_self: bool) ->
         let field = field.strip_prefix(b"\n").unwrap_or(field);
         match field.first() {
             Some(b'p') => {
-                pid = std::str::from_utf8(&field[1..]).ok().and_then(|value| value.parse::<u32>().ok());
-                if pid.is_none() { return true; }
+                pid = std::str::from_utf8(&field[1..])
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok());
+                if pid.is_none() {
+                    return true;
+                }
             }
             Some(b'n') if !(ignore_self && pid == Some(std::process::id())) => {
                 let path = Path::new(std::ffi::OsStr::from_bytes(&field[1..]));
-                if path.starts_with(worktree) || path.starts_with(cache) { return true; }
+                if path.starts_with(worktree) || path.starts_with(cache) {
+                    return true;
+                }
             }
             _ => {}
         }
@@ -854,7 +892,9 @@ fn process_uses(worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit())
     }) {
-        if ignore_self && process.file_name() == std::process::id().to_string().as_str() { continue; }
+        if ignore_self && process.file_name() == std::process::id().to_string().as_str() {
+            continue;
+        }
         let proc_path = process.path();
         if fs::read_link(proc_path.join("cwd"))
             .ok()
@@ -968,9 +1008,22 @@ mod tests {
     #[test]
     fn lsof_output_handles_paths_process_identity_and_unknown_evidence_cas_29b0() {
         let cache = Path::new("/repo with spaces/target/debug");
-        assert!(lsof_uses(b"p42\0\nn/repo with spaces/target/debug/output\0", cache, cache, true));
-        assert!(!lsof_uses(b"p42\0\nn/repo with spaces/target/debugger/unrelated\0", cache, cache, true));
-        let own = format!("p{}\0\nn/repo with spaces/target/debug/.cargo-lock\0", std::process::id());
+        assert!(lsof_uses(
+            b"p42\0\nn/repo with spaces/target/debug/output\0",
+            cache,
+            cache,
+            true
+        ));
+        assert!(!lsof_uses(
+            b"p42\0\nn/repo with spaces/target/debugger/unrelated\0",
+            cache,
+            cache,
+            true
+        ));
+        let own = format!(
+            "p{}\0\nn/repo with spaces/target/debug/.cargo-lock\0",
+            std::process::id()
+        );
         assert!(!lsof_uses(own.as_bytes(), cache, cache, true));
         assert!(lsof_uses(own.as_bytes(), cache, cache, false));
         assert!(lsof_uses(b"", cache, cache, true));

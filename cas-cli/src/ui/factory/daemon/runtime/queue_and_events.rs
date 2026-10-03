@@ -1560,6 +1560,65 @@ pub(super) fn claude_turn_aware_retry(
     }
 }
 
+/// cas-5129: how long a transcript write still counts as the recipient
+/// working. A Claude turn writes on every tool call and result, so a turn
+/// that is moving writes far more often than this; one long tool call is
+/// covered by the in-flight-call evidence instead.
+pub(super) const CLAUDE_ACTIVE_TRANSCRIPT_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+/// cas-5129 (GH #1054): how long a freshly registered Claude worker with no
+/// transcript yet is treated as still booting its TUI rather than unreachable.
+pub(super) const CLAUDE_FIRST_PROMPT_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
+/// cas-5129: evidence about a Claude recipient beyond its turn boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct RecipientWakeEvidence {
+    /// The transcript was written within [`CLAUDE_ACTIVE_TRANSCRIPT_WINDOW`],
+    /// or it shows a tool call still in flight: the turn is progressing.
+    /// The registry heartbeat is deliberately not used: the MCP server beats
+    /// on a timer while the harness process lives, wedged or not.
+    pub recently_active: bool,
+    /// No transcript exists yet and the worker registered within
+    /// [`CLAUDE_FIRST_PROMPT_GRACE`]: its session has not started.
+    pub awaiting_first_prompt: bool,
+}
+
+/// cas-5129: [`claude_turn_aware_retry`] that also refuses to spend the wake
+/// budget on a recipient that is evidently busy or still booting.
+///
+/// - A turn that is still progressing (recent transcript writes or an
+///   in-flight tool call) keeps waiting for its end past
+///   [`CLAUDE_TURN_END_WAIT_MAX`]. Long builds and test runs are normal; only
+///   a long *and silent* turn falls back to the cadence and its escalation.
+/// - A worker that has not received its first prompt yet waits out
+///   [`CLAUDE_FIRST_PROMPT_GRACE`] after the first offer instead of burning
+///   the remaining attempts while its TUI starts (GH #1054).
+///
+/// The first offer (`attempts == 0`) is never held back, and an idle,
+/// settled recipient is offered at once as before.
+pub(super) fn claude_turn_aware_retry_with_evidence(
+    attempts: u32,
+    recipient_mid_turn: Option<bool>,
+    pane_settled: bool,
+    last_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    evidence: RecipientWakeEvidence,
+) -> TurnAwareRetry {
+    let base =
+        claude_turn_aware_retry(attempts, recipient_mid_turn, pane_settled, last_attempt, now);
+    if attempts == 0 || base != TurnAwareRetry::UseCadence {
+        return base;
+    }
+    match recipient_mid_turn {
+        None if evidence.awaiting_first_prompt => TurnAwareRetry::Wait,
+        Some(mid_turn) if (mid_turn || !pane_settled) && evidence.recently_active => {
+            TurnAwareRetry::Wait
+        }
+        _ => base,
+    }
+}
+
 /// Whether a completed harness turn is newer than the wake attempt that
 /// declined to interrupt it. Kept pure so timestamp ordering stays explicit
 /// and testable at the queue boundary.
@@ -3019,6 +3078,49 @@ impl FactoryDaemon {
     /// cas-913c: whether `pane_target` is inside a turn by its harness
     /// transcript (latest turn start not yet followed by a turn end), or
     /// `None` when no transcript can be read.
+    /// cas-5129: activity and first-prompt evidence for a Claude recipient,
+    /// read from its transcript and registry row. Unknown evidence is the
+    /// default (no activity, not booting), which keeps the existing cadence.
+    fn recipient_wake_evidence(&self, pane_target: &str) -> RecipientWakeEvidence {
+        let Some(agent) = open_agent_store(self.app.cas_dir())
+            .ok()
+            .and_then(|store| store.list(None).ok())
+            .and_then(|agents| agents.into_iter().find(|agent| agent.name == pane_target))
+        else {
+            return RecipientWakeEvidence::default();
+        };
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            self.app.cas_dir(),
+            &agent,
+        )
+        .filter(|path| path.exists());
+        let now = chrono::Utc::now();
+        match path {
+            Some(path) => {
+                let written_recently = std::fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|written| std::time::SystemTime::now().duration_since(written).ok())
+                    .is_some_and(|age| age <= CLAUDE_ACTIVE_TRANSCRIPT_WINDOW);
+                RecipientWakeEvidence {
+                    recently_active: written_recently
+                        || crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                            &path, cli,
+                        ),
+                    awaiting_first_prompt: false,
+                }
+            }
+            None => RecipientWakeEvidence {
+                recently_active: false,
+                awaiting_first_prompt: cli == cas_mux::SupervisorCli::Claude
+                    && (now - agent.registered_at)
+                        .to_std()
+                        .is_ok_and(|age| age <= CLAUDE_FIRST_PROMPT_GRACE),
+            },
+        }
+    }
+
     fn recipient_mid_turn(&self, pane_target: &str) -> Option<bool> {
         let store = open_agent_store(self.app.cas_dir()).ok()?;
         let agent = store
@@ -5483,7 +5585,10 @@ impl FactoryDaemon {
                 // still-busy pane is certain to refuse. Three such refusals
                 // used to mark the row undelivered, so a worker in a long turn
                 // never got the message at all.
-                let turn_aware = claude_turn_aware_retry(
+                // cas-5129: a busy or still-booting recipient keeps the
+                // budget; only a silent long turn or an unreachable worker
+                // spends it and reaches the supervisor.
+                let turn_aware = claude_turn_aware_retry_with_evidence(
                     attempts,
                     self.recipient_mid_turn(pane_target),
                     self.pane_wake_state(pane_target)
@@ -5491,6 +5596,7 @@ impl FactoryDaemon {
                         .is_some_and(|silent| silent >= SILENCE_FOR_IDLE_RECIPIENT_WAKE),
                     last_attempt,
                     chrono::Utc::now(),
+                    self.recipient_wake_evidence(pane_target),
                 );
                 if retry_at_turn_end {
                     tracing::debug!(
@@ -14248,6 +14354,75 @@ mod declined_wake_retry_tests_cas_913c {
                 Some(Duration::from_secs(2))
             ),
             "a recipient working again is not idle"
+        );
+    }
+
+    /// cas-5129: the wake budget is not spent on a Claude worker that is
+    /// visibly working through a long turn, or still booting its first
+    /// session. A long silent turn and a worker past its boot grace still fall
+    /// back to the cadence and its supervisor escalation.
+    #[test]
+    fn busy_or_booting_claude_recipient_keeps_its_wake_budget_cas_5129() {
+        let declined = Utc
+            .with_ymd_and_hms(2026, 10, 2, 22, 50, 0)
+            .single()
+            .unwrap();
+        let active = RecipientWakeEvidence { recently_active: true, awaiting_first_prompt: false };
+        let silent = RecipientWakeEvidence::default();
+        let booting = RecipientWakeEvidence { recently_active: false, awaiting_first_prompt: true };
+
+        // Mid-turn well past the 15-minute bound (a long build or test run):
+        // still writing its transcript, so the message waits for the turn end.
+        for minutes in [16, 30, 90] {
+            let now = declined + Chrono::seconds(minutes * 60);
+            for attempts in [1, 2] {
+                assert_eq!(
+                    claude_turn_aware_retry_with_evidence(attempts, Some(true), false, Some(declined), now, active),
+                    TurnAwareRetry::Wait,
+                    "active mid-turn at +{minutes}m, attempt {attempts}"
+                );
+                // The same turn with no sign of progress is treated as wedged.
+                assert_eq!(
+                    claude_turn_aware_retry_with_evidence(attempts, Some(true), false, Some(declined), now, silent),
+                    TurnAwareRetry::UseCadence
+                );
+            }
+        }
+        // An idle, settled recipient is offered at once whatever its history.
+        let later = declined + Chrono::seconds(40 * 60);
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, Some(false), true, Some(declined), later, active),
+            TurnAwareRetry::OfferNow
+        );
+
+        // No transcript yet: a worker inside its boot grace keeps its budget;
+        // one without that evidence uses the cadence as before.
+        let soon = declined + Chrono::seconds(45);
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, None, true, Some(declined), soon, booting),
+            TurnAwareRetry::Wait
+        );
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, None, true, Some(declined), soon, silent),
+            TurnAwareRetry::UseCadence
+        );
+        // The first offer is never held back.
+        for evidence in [active, silent, booting] {
+            assert_eq!(
+                claude_turn_aware_retry_with_evidence(0, Some(true), false, None, soon, evidence),
+                TurnAwareRetry::UseCadence
+            );
+            assert_eq!(
+                claude_turn_aware_retry_with_evidence(0, None, true, None, soon, evidence),
+                TurnAwareRetry::UseCadence
+            );
+        }
+        // Waiting spends nothing: with three cadence slots, a waiting
+        // recipient never reaches StopUndelivered.
+        assert_eq!(
+            claude_redelivery_decision_after_turn(false, 2, Some(declined), later, false),
+            ClaudeRedelivery::Deliver,
+            "the cadence itself is unchanged once evidence stops holding it"
         );
     }
 

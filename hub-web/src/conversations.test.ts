@@ -582,7 +582,8 @@ describe("hostMarkup (journey F14)", () => {
     expect(css).toContain(".conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }");
     expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }");
     // The OS word goes whenever the line is short of room, not only on a phone.
-    expect(css).toContain(".conversation-identity .host-where.os-dropped .host-os { display: none; }");
+    // cas-8526: hidden from sight only, so the OS word is still heard.
+    expect(css).toContain(".conversation-identity .host-where.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
     expect(css).not.toContain("  .conversation-identity .host-os { display: none; }");
   });
 });
@@ -626,8 +627,11 @@ describe("fitMachineLine (cas-766c)", () => {
   });
   it("hides the codename, not the machine, in the stylesheet, header and empty card alike", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain(".conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { display: none; }");
-    expect(css).toContain(".thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { display: none; }");
+    // cas-8526: the codename steps aside from sight only; it is still heard.
+    expect(css).toContain(".conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
+    expect(css).toContain(".thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
+    expect(css).not.toMatch(/(host-where|proj2)\.(os-dropped|codename-squeezed)[^{]*\{ display: none; \}/);
+    expect(css).not.toContain(".conversation-identity .conversation-host { display: none; }");
     expect(css).not.toContain("machine-squeezed > :is(");
   });
 });

@@ -615,18 +615,20 @@ impl ShutdownWorkerSnapshot {
     }
 
     fn render(&self) -> String {
+        format!("{}; {}", self.render_state(), self.worktree_cleanup_verdict)
+    }
+
+    /// Tasks and worktree state without the shutdown cleanup verdict, which
+    /// does not apply to a recycle (it keeps the worktree).
+    fn render_state(&self) -> String {
         let tasks = if self.task_states.is_empty() {
             "none".to_string()
         } else {
             self.task_states.join(", ")
         };
         format!(
-            "{} (id={}): tasks=[{}]; {}; {}",
-            self.worker_name,
-            self.worker_id,
-            tasks,
-            self.worktree_state,
-            self.worktree_cleanup_verdict
+            "{} (id={}): tasks=[{}]; {}",
+            self.worker_name, self.worker_id, tasks, self.worktree_state
         )
     }
 }
@@ -3296,12 +3298,19 @@ impl CasService {
             local_merge_delivery,
             pinned_epic_branch.as_deref(),
         );
-        if snapshot.requires_force() {
+        // cas-a622: a recycle keeps the worktree and every task binding (the
+        // daemon respawns the same name and re-delivers the in-progress
+        // brief), so holding work is no reason to refuse. Only work that
+        // exists nowhere but this checkout is, and no flag overrides that.
+        if snapshot.unsafe_worktree {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "recycle_worker refused: selected worker state requires force=true, but recycling never force-destroys work.\n- {}",
-                    snapshot.render()
+                    "recycle_worker refused: {worker_name} has work that is only in its worktree. \
+                     Have it commit and push its branch (or get it merged, for local delivery), \
+                     then retry; recycling keeps the worktree and task bindings but never \
+                     restarts a worker over unsaved work.\n- {}",
+                    snapshot.render_state()
                 ),
             ));
         }
@@ -3364,7 +3373,8 @@ impl CasService {
         );
 
         Ok(Self::success(format!(
-            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe."
+            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe. Its task bindings are kept and its open work is re-delivered as a resume brief.\n- {}",
+            snapshot.render_state()
         )))
     }
 

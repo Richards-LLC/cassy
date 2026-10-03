@@ -3962,7 +3962,7 @@ async fn operations_request_merge_reuses_message_send() {
     assert_eq!(event.kind, MachineEventKind::FleetChanged);
     assert_eq!(event.session.as_deref(), Some(OPS_SESSION));
 
-    // A kind the wire contract reserves for a later slice answers in JSON.
+    // A device without factory:operate learns which scope assignment needs.
     let (status, body) = fixture
         .operate(serde_json::json!({
             "op_id": "6f1c2d3e-0000-4000-8000-0000000000ff",
@@ -4044,6 +4044,284 @@ async fn operations_stale_expected_returns_409_without_side_effects() {
     );
 }
 
+fn operate_scopes() -> std::collections::BTreeSet<Scope> {
+    let mut scopes = control_scopes();
+    // factory:operate gates O2, O3, O4 and O5 (S2, cas-9b08).
+    scopes.insert(Scope::FactoryOperate);
+    scopes
+}
+
+/// Add an open, unassigned task and return it as stored.
+fn ready_task(fixture: &OpsFixture, id: &str) -> cas_types::Task {
+    let store = crate::store::open_task_store(&fixture.cas_dir).unwrap();
+    let task = cas_types::Task::new(id.to_string(), "Wire the assign op".to_string());
+    store.add(&task).unwrap();
+    store.get(id).unwrap()
+}
+
+fn stored_task(fixture: &OpsFixture, id: &str) -> cas_types::Task {
+    crate::store::open_task_store(&fixture.cas_dir).unwrap().get(id).unwrap()
+}
+
+fn assign_op(
+    op_id: &str,
+    task_id: &str,
+    assignee: Option<&str>,
+    updated_at: &str,
+    current: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "op_id": op_id,
+        "op": {"kind": "assign_task", "task_id": task_id, "assignee": assignee},
+        "expected": {"updated_at": updated_at, "assignee": current},
+    })
+}
+
+/// A task note without its `[YYYY-MM-DD HH:MM] ` stamp, so two updates made
+/// a minute apart compare equal.
+fn unstamped_notes(task: &cas_types::Task) -> Vec<String> {
+    task.notes
+        .split("\n\n")
+        .map(|note| {
+            note.split_once("] ")
+                .filter(|(stamp, _)| stamp.starts_with('['))
+                .map_or(note, |(_, body)| body)
+                .to_string()
+        })
+        .collect()
+}
+
+async fn supervisor_task_update(fixture: &OpsFixture, id: &str, assignee: &str, notes: Option<&str>) {
+    let core = crate::mcp::CasCore::with_daemon(fixture.cas_dir.clone(), None, None);
+    let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": id,
+        "assignee": assignee,
+        "notes": notes,
+    }))
+    .unwrap();
+    core.cas_task_update_with_target(request, None, None, false, None, None)
+        .await
+        .expect("the supervisor's task update succeeds");
+}
+
+/// O5 (S3): assigning from the hub runs the supervisor's `task_update`: the
+/// same assignee and the same task note as that call, audited, followed by
+/// FleetChanged, and answered with the inverse operation Undo sends.
+/// Unassigning is the same operation with a null assignee.
+#[tokio::test]
+async fn operations_assign_task_matches_task_update() {
+    let fixture = ops_fixture(operate_scopes());
+    let mut events = fixture.events.subscribe();
+    let hub_task = ready_task(&fixture, "cas-asg1");
+    let mcp_task = ready_task(&fixture, "cas-asg2");
+
+    let (status, body) = fixture
+        .operate(assign_op(
+            "6f1c2d3e-0000-4000-8000-000000000101",
+            "cas-asg1",
+            Some("swift-lark-3"),
+            &hub_task.updated_at.to_rfc3339(),
+            None,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let outcome = &body["outcome"];
+    assert_eq!(outcome["kind"], "assign_task", "{body}");
+    assert_eq!(outcome["task_id"], "cas-asg1");
+    assert_eq!(outcome["assignee"], "swift-lark-3");
+    assert!(outcome["prior_assignee"].is_null(), "{body}");
+
+    let assigned = stored_task(&fixture, "cas-asg1");
+    assert_eq!(assigned.assignee.as_deref(), Some("swift-lark-3"));
+    assert_eq!(outcome["updated_at"], assigned.updated_at.to_rfc3339());
+    let note = unstamped_notes(&assigned).pop().unwrap_or_default();
+    assert!(
+        note.contains("swift-lark-3") && note.contains("Commander"),
+        "the assignment leaves a task note naming the assignee and Commander: {note:?}"
+    );
+
+    // The supervisor's own task update with that note yields the same task.
+    supervisor_task_update(&fixture, "cas-asg2", "swift-lark-3", Some(&note)).await;
+    let reference = stored_task(&fixture, "cas-asg2");
+    assert_eq!(assigned.assignee, reference.assignee);
+    assert_eq!(unstamped_notes(&assigned), unstamped_notes(&reference));
+    assert_eq!(assigned.status, reference.status);
+    assert_eq!(
+        assigned.deliverables.handoff_branches,
+        reference.deliverables.handoff_branches
+    );
+    assert_ne!(assigned.updated_at, hub_task.updated_at, "the update is stamped");
+    let _ = mcp_task;
+
+    // Undo is the inverse operation, preconditioned on the state just made.
+    assert_eq!(
+        outcome["inverse"],
+        serde_json::json!({
+            "op": {"kind": "assign_task", "task_id": "cas-asg1", "assignee": null},
+            "expected": {"updated_at": assigned.updated_at.to_rfc3339(), "assignee": "swift-lark-3"},
+        })
+    );
+    let audit = fixture.audit("operation:assign_task");
+    let outcomes: Vec<_> = audit.iter().map(|row| row["outcome"].as_str().unwrap()).collect();
+    assert_eq!(outcomes, ["requested", "allowed"], "{audit:?}");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("FleetChanged is emitted")
+        .unwrap();
+    assert_eq!(event.kind, MachineEventKind::FleetChanged);
+
+    // Unassign: the inverse, sent as Undo would send it.
+    let mut undo = outcome["inverse"].clone();
+    undo["op_id"] = "6f1c2d3e-0000-4000-8000-000000000102".into();
+    let (status, body) = fixture.operate(undo).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["outcome"]["assignee"].is_null(), "{body}");
+    assert_eq!(body["outcome"]["prior_assignee"], "swift-lark-3");
+    let unassigned = stored_task(&fixture, "cas-asg1");
+    assert_eq!(unassigned.assignee, None);
+    supervisor_task_update(&fixture, "cas-asg2", "", None).await;
+    assert_eq!(stored_task(&fixture, "cas-asg2").assignee, None);
+}
+
+/// O5 (S3): assigning a task another device has assigned since the operator
+/// looked returns 409 stale with the current assignee and changes nothing; so
+/// does any update since (a changed `updated_at`).
+#[tokio::test]
+async fn operations_assign_stale_assignee() {
+    let fixture = ops_fixture(operate_scopes());
+    let mut events = fixture.events.subscribe();
+    let seen = ready_task(&fixture, "cas-asg3");
+    let seen_at = seen.updated_at.to_rfc3339();
+
+    // Another device (or the supervisor) assigns it first.
+    supervisor_task_update(&fixture, "cas-asg3", "other-worker", None).await;
+    let current = stored_task(&fixture, "cas-asg3");
+
+    let (status, body) = fixture
+        .operate(assign_op(
+            "6f1c2d3e-0000-4000-8000-000000000103",
+            "cas-asg3",
+            Some("swift-lark-3"),
+            &seen_at,
+            None,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "stale");
+    assert_eq!(body["current"]["assignee"], "other-worker");
+    assert_eq!(body["current"]["updated_at"], current.updated_at.to_rfc3339());
+    let after = stored_task(&fixture, "cas-asg3");
+    assert_eq!(after.assignee.as_deref(), Some("other-worker"));
+    assert_eq!(after.updated_at, current.updated_at, "a stale assign writes nothing");
+
+    // The assignee matches but the task changed since: still stale.
+    let (status, body) = fixture
+        .operate(assign_op(
+            "6f1c2d3e-0000-4000-8000-000000000104",
+            "cas-asg3",
+            Some("swift-lark-3"),
+            &seen_at,
+            Some("other-worker"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(stored_task(&fixture, "cas-asg3").assignee.as_deref(), Some("other-worker"));
+
+    let outcomes: Vec<_> = fixture
+        .audit("operation:assign_task")
+        .iter()
+        .map(|row| row["outcome"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(outcomes, ["requested", "stale", "requested", "stale"]);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
+            .await
+            .is_err(),
+        "a stale operation changes nothing, so it emits nothing"
+    );
+}
+
+fn add_epic(fixture: &OpsFixture, id: &str) {
+    let mut epic = cas_types::Task::new(id.to_string(), format!("Epic {id}"));
+    epic.task_type = cas_types::TaskType::Epic;
+    crate::store::open_task_store(&fixture.cas_dir).unwrap().add(&epic).unwrap();
+}
+
+fn focus_op(op_id: &str, epic_id: Option<&str>, current: Option<&str>) -> serde_json::Value {
+    let op = match epic_id {
+        Some(epic_id) => serde_json::json!({"kind": "focus_epic", "epic_id": epic_id}),
+        None => serde_json::json!({"kind": "focus_epic", "clear": true}),
+    };
+    serde_json::json!({"op_id": op_id, "op": op, "expected": {"epic_id": current}})
+}
+
+/// O2 (S3): a focus answers with its inverse operation, which Undo sends as
+/// a new operation: it restores the previous focus (a pin or no pin), and it
+/// is itself stale once the focus has moved on.
+#[tokio::test]
+async fn operations_focus_epic_inverse() {
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let fixture = ops_fixture(operate_scopes());
+    add_epic(&fixture, "cas-epa1");
+    add_epic(&fixture, "cas-epa2");
+    let metadata_path = crate::ui::factory::metadata_path(OPS_SESSION);
+    std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+    let metadata = crate::ui::factory::create_metadata(OPS_SESSION, 12345, "supervisor", &[], None, None, None);
+    std::fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+    let pinned = || crate::ops::fleet::pinned_epic(OPS_SESSION);
+
+    // No pin -> pin: the inverse clears, expecting the new pin.
+    let (status, body) = fixture
+        .operate(focus_op("6f1c2d3e-0000-4000-8000-000000000201", Some("cas-epa1"), None))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(pinned().as_deref(), Some("cas-epa1"));
+    assert_eq!(body["outcome"]["prior_epic_id"], serde_json::Value::Null, "{body}");
+    assert_eq!(
+        body["outcome"]["inverse"],
+        serde_json::json!({
+            "op": {"kind": "focus_epic", "clear": true},
+            "expected": {"epic_id": "cas-epa1"},
+        })
+    );
+    let mut undo = body["outcome"]["inverse"].clone();
+    undo["op_id"] = "6f1c2d3e-0000-4000-8000-000000000202".into();
+    let (status, body) = fixture.operate(undo).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(pinned(), None, "Undo restores no pin");
+
+    // Pin -> another pin: the inverse re-pins the first epic.
+    fixture
+        .operate(focus_op("6f1c2d3e-0000-4000-8000-000000000203", Some("cas-epa1"), None))
+        .await;
+    let (status, body) = fixture
+        .operate(focus_op("6f1c2d3e-0000-4000-8000-000000000204", Some("cas-epa2"), Some("cas-epa1")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"]["prior_epic_id"], "cas-epa1");
+    assert_eq!(
+        body["outcome"]["inverse"],
+        serde_json::json!({
+            "op": {"kind": "focus_epic", "epic_id": "cas-epa1"},
+            "expected": {"epic_id": "cas-epa2"},
+        })
+    );
+    let inverse = body["outcome"]["inverse"].clone();
+    let mut undo = inverse.clone();
+    undo["op_id"] = "6f1c2d3e-0000-4000-8000-000000000205".into();
+    let (status, body) = fixture.operate(undo).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(pinned().as_deref(), Some("cas-epa1"), "Undo restores the previous pin");
+
+    // An Undo sent after the focus moved on is stale and changes nothing.
+    let mut late = inverse;
+    late["op_id"] = "6f1c2d3e-0000-4000-8000-000000000206".into();
+    let (status, body) = fixture.operate(late).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["current"]["epic_id"], "cas-epa1");
+    assert_eq!(pinned().as_deref(), Some("cas-epa1"));
+}
+
 /// End session was the one Commander mutation with no audit row (brief O8).
 #[tokio::test]
 async fn end_session_writes_audit_row() {
@@ -4071,12 +4349,6 @@ async fn end_session_writes_audit_row() {
 
 const OPS_WORKER: &str = "swift-lark-3";
 const OPS_GENERATION: &str = "swift-lark-3-gen-2";
-
-fn operate_scopes() -> std::collections::BTreeSet<Scope> {
-    let mut scopes = control_scopes();
-    scopes.insert(Scope::FactoryOperate);
-    scopes
-}
 
 impl OpsFixture {
     /// A live worker of the session whose current registration (its spawn
@@ -4165,16 +4437,6 @@ async fn operations_spawn_uses_factory_spawn_workers_queue() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(fixture.spawn_queue().len(), 1, "a refused spawn queues nothing");
 
-    // assign_task arrives with S3: authorized, then a JSON 501.
-    let (status, body) = fixture
-        .operate(serde_json::json!({
-            "op_id": "9b080000-0000-4000-8000-000000000003",
-            "op": {"kind": "assign_task", "task_id": OPS_TASK, "assignee": null},
-            "expected": {},
-        }))
-        .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
-    assert_eq!(body["error"], "not_implemented");
 }
 
 /// O6 and O7 are destructive: factory:operate is refused with the scope that

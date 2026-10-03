@@ -8,14 +8,14 @@ import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./co
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView, emptyActivityText } from "./conversation-view";
+import { ConversationView, emptyActivityText, terminalOfferReason } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
+import { applyTerminalOffer, arrangeConversationShell, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -41,6 +41,7 @@ import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPa
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { TERMINAL_ESCAPE_HINT, TERMINAL_ESCAPE_HINT_ID } from "./terminal/ghostty/surface";
 import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { relativeTimestamp } from "./time";
@@ -2111,7 +2112,19 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         if (storage) savePaneLayout(storage, selectedKey, next);
         void renderSessionState(machineId, session, state);
       };
+      // cas-d1fa: while this browser is in control the terminal keeps Tab, so
+      // its own header says how the keyboard leaves it, outside the drawing
+      // area. Activated, it takes focus itself (Safari does not focus a
+      // clicked button), which also puts a phone's soft keyboard away.
+      const leave = button("Leave terminal", "pane-leave", () => leave.focus());
+      // A short visible word beside its key, so the pane's own name keeps its room.
+      leave.textContent = "Leave";
+      leave.setAttribute("aria-keyshortcuts", "Control+Alt+M");
+      leave.title = "Leave terminal (Ctrl+Alt+M)";
+      const leaveKey = document.createElement("kbd"); leaveKey.setAttribute("aria-hidden", "true"); leaveKey.textContent = "Ctrl+Alt+M";
+      leave.append(leaveKey);
       controls.append(
+        leave,
         button("Show terminal", "pane-view-toggle", () => {
           setPaneViewMode(selectedKey, paneViewMode(selectedKey) === "transcript" ? "terminal" : "transcript");
         }),
@@ -2180,6 +2193,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (makePrimary) makePrimary.disabled = pane.id === layout.primaryPaneId;
     if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
     if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
+    const leaveTerminal = card.querySelector<HTMLButtonElement>(".pane-leave");
+    if (leaveTerminal) leaveTerminal.hidden = leases.get(selectedKey)?.held_by_me !== true;
     const paneView = paneViewMode(selectedKey);
     const viewToggle = card.querySelector<HTMLButtonElement>(".pane-view-toggle");
     if (viewToggle) {
@@ -3710,7 +3725,7 @@ function render(captureDraft = true): void {
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerTooltip)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
-          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}" aria-describedby="session-controls-reason"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>` : ""}</div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}" aria-describedby="session-controls-reason"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>${lease?.held_by_me && hubPresentation === "terminal" ? `<span id="${TERMINAL_ESCAPE_HINT_ID}" class="sr-only">${TERMINAL_ESCAPE_HINT}</span>` : ""}` : ""}</div>
         </header>
         ${showSessionControls ? `<p id="session-controls-reason" class="session-controls-reason" role="note"${controlsNotice ? "" : " hidden"}>${escapeHtml(controlsNotice ?? "")}</p>` : ""}
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
@@ -4023,6 +4038,28 @@ function keepConversationListPlace(container: HTMLElement, selectedKey: string |
   conversationListScroll = container.scrollTop;
 }
 
+/**
+ * Back from a conversation (a phone's list and thread take turns): the list
+ * is where the operator left it, and focus returns to the row that was open,
+ * brought into view if it is not, instead of the first row, whose focus
+ * scrolled the list back to its top (cas-f50f). With that row gone, the
+ * first row takes focus where the list already is.
+ */
+function returnToConversationRow(openedKey: string | undefined): void {
+  const container = document.querySelector<HTMLElement>("#conversation-list");
+  const rows = [...document.querySelectorAll<HTMLButtonElement>("#conversation-list .conversation-row")];
+  const row = rows.find((node) => node.dataset.threadKey === openedKey) ?? rows[0];
+  if (!row) return;
+  if (container && container.scrollTop !== conversationListScroll) container.scrollTop = conversationListScroll;
+  row.focus({ preventScroll: true });
+  if (!container) return;
+  const box = container.getBoundingClientRect();
+  const rect = row.getBoundingClientRect();
+  if (rect.top < box.top) container.scrollTop += rect.top - box.top;
+  else if (rect.bottom > box.bottom) container.scrollTop += rect.bottom - box.bottom;
+  conversationListScroll = container.scrollTop;
+}
+
 function renderConversationList(): void {
   renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
@@ -4097,6 +4134,7 @@ function renderConversationList(): void {
       const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
       state.replaceChildren(separator, label);
     }
+    applyTerminalOffer(document, terminalOfferReason(label, machines.get(selectedMachineId)?.label));
   }
   // The state's width changes the room the machine · codename line has.
   fitConversationHost(document);
@@ -4765,9 +4803,19 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
   if (sheetClose) sheetClose.onclick = closeAttentionSheet;
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
-  if (conversationBack) conversationBack.onclick = () => { attentionSheetOpen = false; if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
+  if (conversationBack) conversationBack.onclick = () => {
+    attentionSheetOpen = false;
+    // cas-f50f: back to the row that was open, not the list's first row.
+    const opened = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+    if (selectedMachineId) commitSelection({ machineId: selectedMachineId });
+    render();
+    queueMicrotask(() => returnToConversationRow(opened));
+  };
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
-  if (terminal) terminal.onclick = (event) => { attentionSheetOpen = false; hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
+  if (terminal) terminal.onclick = (event) => {
+    const unavailable = terminal.dataset.disabledReason;
+    if (unavailable) { toast(unavailable); return; }
+    attentionSheetOpen = false; hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
   if (returning) returning.onclick = (event) => {
     hubPresentation = "conversation";

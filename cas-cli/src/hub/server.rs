@@ -849,32 +849,18 @@ struct OperationReplay {
 #[derive(Debug, Deserialize)]
 struct OperationRequest {
     op_id: String,
-    /// Parsed by [`parse_fleet_operation`] so an unknown or not-yet-built
-    /// kind gets a JSON error, not the extractor's plain-text 422.
+    /// Parsed by [`parse_fleet_operation`] so an unknown or malformed kind
+    /// gets a JSON error, not the extractor's plain-text 422.
     op: serde_json::Value,
     #[serde(default)]
     expected: serde_json::Value,
 }
 
-/// Operation kinds the wire contract names for a later slice (S3); each
-/// needs `factory:operate`.
-const LATER_FLEET_OPERATIONS: &[&str] = &["assign_task"];
-
-enum ParsedOperation {
-    Ready(FleetOperation),
-    NotYet(String),
-    Invalid(String),
-}
-
-fn parse_fleet_operation(op: serde_json::Value) -> ParsedOperation {
-    let kind = op.get("kind").and_then(serde_json::Value::as_str).map(str::to_owned);
-    match serde_json::from_value::<FleetOperation>(op) {
-        Ok(operation) => ParsedOperation::Ready(operation),
-        Err(_) if kind.as_deref().is_some_and(|kind| LATER_FLEET_OPERATIONS.contains(&kind)) => {
-            ParsedOperation::NotYet(kind.unwrap_or_default())
-        }
-        Err(error) => ParsedOperation::Invalid(error.to_string()),
-    }
+/// Parse `op` by hand so a malformed or unknown kind gets a JSON error, not
+/// the extractor's plain-text 422. Every kind the wire contract names is
+/// implemented (S1-S3).
+fn parse_fleet_operation(op: serde_json::Value) -> Result<FleetOperation, String> {
+    serde_json::from_value::<FleetOperation>(op).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -905,6 +891,13 @@ enum FleetOperation {
         #[serde(default)]
         force: bool,
     },
+    /// O5: assign a task to a worker, or unassign it (null), through the
+    /// supervisor's task_update (S3, cas-31f0).
+    AssignTask {
+        task_id: String,
+        #[serde(default)]
+        assignee: Option<String>,
+    },
 }
 
 impl FleetOperation {
@@ -916,6 +909,7 @@ impl FleetOperation {
             Self::SetWorkerHold { .. } => "operation:set_worker_hold",
             Self::RecycleWorker { .. } => "operation:recycle_worker",
             Self::ShutdownWorkers { .. } => "operation:shutdown_workers",
+            Self::AssignTask { .. } => "operation:assign_task",
         }
     }
 
@@ -925,9 +919,10 @@ impl FleetOperation {
     fn scope(&self) -> Scope {
         match self {
             Self::RequestMerge { .. } => Scope::MessageSend,
-            Self::FocusEpic { .. } | Self::SpawnWorkers { .. } | Self::SetWorkerHold { .. } => {
-                Scope::FactoryOperate
-            }
+            Self::FocusEpic { .. }
+            | Self::SpawnWorkers { .. }
+            | Self::SetWorkerHold { .. }
+            | Self::AssignTask { .. } => Scope::FactoryOperate,
             Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } => Scope::FactoryManage,
         }
     }
@@ -949,6 +944,10 @@ impl FleetOperation {
             Self::ShutdownWorkers { workers, force } => {
                 format!("workers={} force={force}", workers.join(","))
             }
+            Self::AssignTask { task_id, assignee } => format!(
+                "task={task_id} assignee={}",
+                assignee.as_deref().unwrap_or("<none>")
+            ),
         }
     }
 }
@@ -966,35 +965,8 @@ async fn session_operation<R: SessionReadModel>(
 ) -> Response {
     let uri = format!("/v1/sessions/{session}/operations");
     let operation = match parse_fleet_operation(request.op) {
-        ParsedOperation::Ready(operation) => operation,
-        ParsedOperation::NotYet(kind) => {
-            // Authorized with the scope the operation will need, so a device
-            // learns what it lacks now rather than when the slice lands.
-            let scope = Scope::FactoryOperate;
-            match authorize(&state, HubAction::Mutation, scope, &headers, "POST", &uri) {
-                Ok(_) => {}
-                Err(error) if error.to_string() == "scope denied" => {
-                    return with_cors(
-                        (
-                            StatusCode::FORBIDDEN,
-                            Json(serde_json::json!({"error":"scope_denied", "required_scope":scope.as_str()})),
-                        )
-                            .into_response(),
-                        &headers,
-                    );
-                }
-                Err(error) => return with_cors(unauthorized_for(&error), &headers),
-            }
-            return with_cors(
-                launch_error(
-                    StatusCode::NOT_IMPLEMENTED,
-                    "not_implemented",
-                    &format!("{kind} arrives with a later fleet-operations slice"),
-                ),
-                &headers,
-            );
-        }
-        ParsedOperation::Invalid(detail) => {
+        Ok(operation) => operation,
+        Err(detail) => {
             return with_cors(
                 launch_error(StatusCode::BAD_REQUEST, "invalid_operation", &detail),
                 &headers,
@@ -1167,6 +1139,11 @@ async fn run_fleet_operation(
                 WorkerOperation::Shutdown { worker, force },
             )
         }
+        // O5 runs the supervisor's async task_update on the hub's runtime.
+        FleetOperation::AssignTask { task_id, assignee } => {
+            return run_assign_task(&cas_dir, &task_id, assignee.as_deref(), expected, &attribution)
+                .await;
+        }
         other => {
             return tokio::task::spawn_blocking(move || {
                 run_store_operation(&cas_dir, &session, other, expected, &attribution)
@@ -1245,10 +1222,14 @@ fn run_store_operation(
             };
             let cas_root = cas_dir;
             let text = fleet::focus_epic(cas_root, session, request)?;
+            let now = fleet::pinned_epic(session);
             Ok(serde_json::json!({
                 "kind": "focus_epic",
-                "epic_id": fleet::pinned_epic(session),
+                "epic_id": now,
+                "prior_epic_id": current,
                 "detail": text,
+                // S3 (cas-31f0): Undo sends this as a new operation.
+                "inverse": fleet::focus_epic_inverse(current.as_deref(), now.as_deref()),
             }))
         }
         worker => Err(OperationError::Failed(format!(
@@ -1256,6 +1237,24 @@ fn run_store_operation(
             worker.action()
         ))),
     }
+}
+
+/// O5 (S3, cas-31f0): the precondition names the task's `updated_at` and
+/// assignee as the operator saw them.
+async fn run_assign_task(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    assignee: Option<&str>,
+    expected: serde_json::Value,
+    attribution: &MessageAttribution,
+) -> Result<serde_json::Value, crate::ops::fleet::OperationError> {
+    use crate::ops::fleet::{self, OperationError};
+    let expected: fleet::AssignTaskExpected = serde_json::from_value(expected).map_err(|error| {
+        OperationError::Invalid(format!(
+            "expected must name the task's updated_at and current assignee (or null): {error}"
+        ))
+    })?;
+    fleet::assign_task(cas_dir, task_id, assignee, &expected, attribution).await
 }
 
 fn launch_error(status: StatusCode, code: &str, detail: &str) -> Response {

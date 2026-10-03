@@ -67,17 +67,30 @@ interface AttachmentNote {
    * header (cas-c808 QA F01).
    */
   readonly transient: boolean;
+  /**
+   * The note in the words the connection calls for now. Set for a note that
+   * depends on it ("is connected but didn't send"), so a card never keeps
+   * saying Connected while the header says Reconnecting (journey F28).
+   */
+  readonly restate?: () => string;
 }
 const attachmentNotes = new Map<string, AttachmentNote>();
 
-function applyAttachmentNote(sheet: HTMLAnchorElement, note: string | undefined): void {
+/**
+ * `announce: false` rewrites a note without speaking it: the connection
+ * change that caused it is already announced by the banner, once (journey
+ * F42), and the card's own name still carries the new words on focus.
+ */
+function applyAttachmentNote(sheet: HTMLAnchorElement, note: string | undefined, announce = true): void {
   const text = sheet.querySelector<HTMLElement>(".ftext");
   let line = sheet.querySelector<HTMLElement>(".fnote");
   if (note === undefined) {
     line?.remove();
   } else if (text) {
-    if (!line) { line = sheet.ownerDocument.createElement("span"); line.className = "fnote"; line.setAttribute("role", "status"); text.append(line); }
-    line.textContent = note;
+    if (!line) { line = sheet.ownerDocument.createElement("span"); line.className = "fnote"; text.append(line); }
+    if (announce) line.setAttribute("role", "status");
+    else line.removeAttribute("role");
+    if (line.textContent !== note) line.textContent = note;
   }
   // The link's own name is what a screen reader reads on focus, so the note is part of it.
   const label = sheet.dataset.label;
@@ -89,9 +102,9 @@ function applyAttachmentNote(sheet: HTMLAnchorElement, note: string | undefined)
  * that artifact. Returns how many cards now carry it; zero means the file is
  * not on screen as a card and the caller should say it elsewhere.
  */
-export function setAttachmentNote(root: ParentNode, artifactId: string, note: string | undefined, options: { machineId?: string; transient?: boolean } = {}): number {
+export function setAttachmentNote(root: ParentNode, artifactId: string, note: string | undefined, options: { machineId?: string; transient?: boolean; restate?: () => string } = {}): number {
   if (note === undefined) attachmentNotes.delete(artifactId);
-  else attachmentNotes.set(artifactId, { text: note, transient: options.transient ?? false, ...(options.machineId ? { machineId: options.machineId } : {}) });
+  else attachmentNotes.set(artifactId, { text: note, transient: options.transient ?? false, ...(options.machineId ? { machineId: options.machineId } : {}), ...(options.restate ? { restate: options.restate } : {}) });
   const sheets = [...root.querySelectorAll<HTMLAnchorElement>("a.sheet[data-artifact-id]")].filter((sheet) => sheet.dataset.artifactId === artifactId);
   for (const sheet of sheets) applyAttachmentNote(sheet, note);
   return sheets.length;
@@ -111,6 +124,27 @@ export function clearTransientAttachmentNotes(root: ParentNode, machineId: strin
     cleared += 1;
   }
   return cleared;
+}
+
+/**
+ * The machine's connection changed: every note for it whose words depend on
+ * the connection is said again in the words it calls for now (journey F28),
+ * quietly, since the banner announces the change itself. Returns how many
+ * notes changed.
+ */
+export function restateAttachmentNotes(root: ParentNode, machineId: string): number {
+  let changed = 0;
+  for (const [artifactId, note] of [...attachmentNotes]) {
+    if (!note.restate || note.machineId !== machineId) continue;
+    const text = note.restate();
+    if (text === note.text) continue;
+    attachmentNotes.set(artifactId, { ...note, text });
+    for (const sheet of root.querySelectorAll<HTMLAnchorElement>("a.sheet[data-artifact-id]")) {
+      if (sheet.dataset.artifactId === artifactId) applyAttachmentNote(sheet, text, false);
+    }
+    changed += 1;
+  }
+  return changed;
 }
 
 export function artifactHref(attachment: ArtifactRef): string {

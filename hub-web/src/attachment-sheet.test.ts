@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote, clearTransientAttachmentNotes } from "./attachment-sheet";
+import { attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote, clearTransientAttachmentNotes, restateAttachmentNotes } from "./attachment-sheet";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { ArtifactRef, OperatorReply } from "./types";
@@ -139,6 +139,38 @@ describe("a note about the connection does not outlive it (cas-c808 QA F01)", ()
     expect(document.querySelector(`a.sheet[data-artifact-id="${card.artifact_id}"] .fnote`)?.textContent).toContain("only saved on Atlas · Linux");
     // A rebuilt card does not bring the cleared note back.
     expect(renderAttachmentSheet(document, brief).querySelector(".fnote")).toBeNull();
+    setAttachmentNote(document, card.artifact_id, undefined);
+  });
+});
+
+describe("a note about the connection follows it (journey F28)", () => {
+  it("says a connected-but-silent note again, quietly, when the machine leaves Connected", () => {
+    document.body.replaceChildren(renderAttachmentSheet(document, brief), renderAttachmentSheet(document, card));
+    let reach = "live";
+    const words = () => reach === "live" ? "Atlas · Linux is connected but didn't send the file. Try again in a moment." : "Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.";
+    setAttachmentNote(document, brief.artifact_id, words(), { machineId: "atlas", transient: true, restate: words });
+    setAttachmentNote(document, card.artifact_id, "This file was only saved on Atlas · Linux. It was never uploaded to Cloud, so it can't open here.", { machineId: "atlas", transient: false });
+    const line = () => document.querySelector<HTMLElement>(`a.sheet[data-artifact-id="${brief.artifact_id}"] .fnote`);
+    expect(line()?.getAttribute("role")).toBe("status");
+    // Nothing changed: nothing is rewritten.
+    expect(restateAttachmentNotes(document, "atlas")).toBe(0);
+    reach = "reconnecting";
+    // Another machine's change leaves this card alone.
+    expect(restateAttachmentNotes(document, "studio")).toBe(0);
+    expect(line()?.textContent).toContain("is connected");
+    expect(restateAttachmentNotes(document, "atlas")).toBe(1);
+    expect(line()?.textContent).toBe("Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.");
+    // The banner announces the outage; the card's rewrite is not a second announcement (journey F42).
+    expect(line()?.hasAttribute("role")).toBe(false);
+    // Its name carries the new words on focus.
+    expect(document.querySelector(`a.sheet[data-artifact-id="${brief.artifact_id}"]`)?.getAttribute("aria-label")).toBe("3.26.0 release brief.pdf, PDF, 1.4 MB. Open. Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.");
+    // A rebuilt card shows the current words, not the click-time ones.
+    expect(renderAttachmentSheet(document, brief).querySelector(".fnote")?.textContent).toContain("Reconnecting");
+    // A note about the file itself is not restated.
+    expect(document.querySelector(`a.sheet[data-artifact-id="${card.artifact_id}"] .fnote`)?.textContent).toContain("only saved on Atlas · Linux");
+    // Back to Live: the reconnect clears it, as before (cas-c808 QA F01).
+    expect(clearTransientAttachmentNotes(document, "atlas")).toBe(1);
+    expect(line()).toBeNull();
     setAttachmentNote(document, card.artifact_id, undefined);
   });
 });

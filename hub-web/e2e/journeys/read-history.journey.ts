@@ -172,8 +172,16 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     hub.drop(PELICAN);
     await expect(header).toContainText("Reconnecting");
     await holds(beforeDrop, "when the connection drops");
+    // Journey F28: the card that said the machine "is connected" says what
+    // the header, banner, row and footer say, without another click, and
+    // without a second announcement of the outage.
+    const reconnecting = "Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.";
+    await expect(note("art-offline")).toHaveText(reconnecting);
+    await expect(note("art-offline")).not.toHaveAttribute("role", "status");
+    await expect(log.locator('a[data-artifact-id="art-offline"]')).toHaveAccessibleName(/Lost connection to Atlas · Linux\. Reconnecting…/);
+    await expect(log).not.toContainText("is connected");
     await log.locator('a[data-artifact-id="art-offline"]').click();
-    await expect(note("art-offline")).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    await expect(note("art-offline")).toHaveText(reconnecting);
     // Opening the card brought it into view: that is where the reader is now.
     const beforeReconnect = await reading();
     const firstPages = hub.historyRequests.filter((request) => request.before === undefined).length;

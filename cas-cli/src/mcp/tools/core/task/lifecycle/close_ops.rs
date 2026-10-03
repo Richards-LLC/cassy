@@ -25266,6 +25266,66 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-93db fixture (the cas-1451 shape): the worker's plain
+    /// `factory/worker` ends in cas-0906's delivery, already merged into the
+    /// target; this task's commit, when `with_delivery`, sits on the per-task
+    /// branch the worker opened for another task, `factory/worker-cas-6b75`.
+    fn plain_branch_claims_another_task_fixture(with_delivery: bool) -> TempDir {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("other.rs"), "fn other() {}\n").unwrap();
+        git(p, &["add", "other.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(task): another task's delivery (cas-0906)"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Merge branch 'factory/worker'"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-6b75", "main"]);
+        std::fs::write(p.join("prior.rs"), "fn prior() {}\n").unwrap();
+        git(p, &["add", "prior.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(task): the per-task branch's own task (cas-6b75)"]);
+        if with_delivery {
+            std::fs::write(p.join("mine.rs"), "fn mine() {}\n").unwrap();
+            git(p, &["add", "mine.rs"]);
+            git(p, &["commit", "-q", "-m", "fix(task): this task's delivery (cas-test1)"]);
+        }
+        git(p, &["checkout", "-q", "main"]);
+        dir
+    }
+
+    /// cas-93db: closing a task whose commit lives on another per-task branch
+    /// measures the branch whose commits claim it, never the plain branch
+    /// that ends in another task's merged delivery.
+    #[test]
+    fn close_binds_the_branch_claiming_the_task_not_a_plain_branch_claiming_another_cas_93db() {
+        let dir = plain_branch_claims_another_task_fixture(true);
+        let p = dir.path();
+        let task = worker_task("worker");
+        assert_eq!(close_measured_factory_branch(p, &task, "worker"), "factory/worker-cas-6b75");
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("factory/worker-cas-6b75"), "{message}")
+            }
+            other => panic!("the unmerged delivery must not close against cas-0906's tip: {other:?}"),
+        }
+    }
+
+    /// cas-93db: when no branch claims the task and the plain branch ends in
+    /// another task's delivery, close refuses with a reason instead of
+    /// binding to that delivery.
+    #[test]
+    fn close_refuses_when_only_a_plain_branch_claiming_another_task_resolves_cas_93db() {
+        let dir = plain_branch_claims_another_task_fixture(false);
+        let p = dir.path();
+        let task = worker_task("worker");
+        assert_ne!(close_measured_factory_branch(p, &task, "worker"), "factory/worker");
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY BRANCH UNRESOLVED"), "{message}");
+                assert!(message.contains("cas-0906"), "{message}");
+            }
+            other => panic!("another task's merged delivery must not close this task: {other:?}"),
+        }
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]

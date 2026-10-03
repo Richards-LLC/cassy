@@ -156,6 +156,16 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await search.fill("atlas");
     await expect(list.getByRole("button")).toHaveCount(1);
     await expect(list.getByRole("button").first()).toContainText("cas-src");
+    // cas-786a (journey F29): the row Enter opens carries its "Enter ↵" hint
+    // and its unread count side by side, never one drawn over the other. Every
+    // point of the count is the count's own, not the hint painted on top.
+    await expect(list.locator('.conversation-row[data-enter-target="true"]').getByLabel("1 unread")).toBeVisible();
+    const covered = await list.locator('.conversation-row[data-enter-target="true"] .conversation-unread').evaluate((badge) => {
+      const box = badge.getBoundingClientRect();
+      const points = [[0.5, 0.5], [0.15, 0.2], [0.85, 0.2], [0.15, 0.8], [0.85, 0.8]].map(([x, y]) => [box.left + box.width * x, box.top + box.height * y]);
+      return points.filter(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit !== badge && !badge.contains(hit); }).length;
+    });
+    expect.soft(covered, "points of the unread count covered by the Enter hint").toBe(0);
     await search.fill(OTTER);
     await expect(list.getByRole("button")).toHaveCount(1);
     await expect(list.getByRole("button").first()).toContainText("gabber-studio");
@@ -416,7 +426,34 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await filter.press("Enter");
     await expect(palette).toBeHidden();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    // cas-786a (journey F30): with no filter, Enter goes to the next
+    // conversation that needs the operator, never the one already open, and
+    // the open one says so. gabber-studio gets a reply while cas-src is open
+    // (visited once since the reload, so its machine is attached).
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
+    await expect.poll(() => hub.hasSocket(OTTER)).toBe(true);
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    hub.supervisorSays(OTTER, "The Mac tests are green.", { kind: "status" });
+    await expect(list.getByRole("button", { name: /gabber-studio/ }).getByLabel("1 unread")).toBeVisible();
     await reopen();
+    const current = palette.locator('.palette-command[data-palette-current="true"]');
+    await expect(current).toHaveCount(1);
+    await expect(current).toContainText("Jump to cas-src");
+    await expect(current).toHaveAttribute("aria-current", "true");
+    expect(await current.locator("small").evaluate((node) => getComputedStyle(node, "::before").content), "the open conversation says so").toContain('"Open now · "');
+    const enterTarget = palette.locator('.palette-command[data-enter-target="true"]');
+    await expect(enterTarget).toHaveCount(1);
+    await expect(enterTarget).toContainText("Jump to gabber-studio");
+    await expect(filter).toHaveAttribute("aria-activedescendant", (await enterTarget.getAttribute("id"))!);
+    await filter.press("Enter");
+    await expect(palette).toBeHidden();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
+    // Nothing waits now: Enter offers the first other conversation, here cas-src.
+    await reopen();
+    await expect(current).toContainText("Jump to gabber-studio");
+    await expect(enterTarget).toContainText("Jump to cas-src");
     // Typing after the reopen filters from scratch.
     await filter.pressSequentially(OTTER.slice(0, 6));
     await expect(commands.visible().first()).toContainText("Jump to gabber-studio");

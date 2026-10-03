@@ -764,13 +764,48 @@ pub fn validate_round_bundle(ledger_path: &Path, pass: &QaPass) -> Result<std::p
 /// build has it too, so it is not the delivery's defect (cas-e371, GH #1023
 /// finding 1). Cassy files each one as a follow-up task linked to the
 /// delivery instead of letting it reject a correct, narrow change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreExistingIssue {
+    /// The ledger's finding id ("F10"), when the reviewer gave one.
+    pub id: String,
+    /// A short title, when the reviewer gave one separately from the problem.
+    pub title: String,
     pub severity: String,
     pub problem: String,
     pub suggestion: String,
     /// The screenshot or file the reviewer cited, if any.
     pub evidence: String,
+}
+
+/// One finding line in a ledger's "## Pre-existing" section (cas-2849).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerFinding {
+    pub id: String,
+    pub severity: String,
+    pub text: String,
+}
+
+/// The "F10 NORMAL: <text>" lines of a ledger's pre-existing section.
+pub fn ledger_pre_existing_findings(_ledger: &str) -> Vec<LedgerFinding> {
+    Vec::new()
+}
+
+/// Fill each pre-existing issue's missing problem from the ledger, and refuse
+/// one that still has no text.
+pub fn complete_pre_existing_issues(
+    _issues: &mut [PreExistingIssue],
+    _ledger: &str,
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// The existing task a pre-existing issue already names as its follow-up.
+pub fn tracked_follow_up(
+    _issue: &PreExistingIssue,
+    _delivery_id: &str,
+    _exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    None
 }
 
 /// Split `qa_record`'s `issues` JSON array into the pre-existing issues and
@@ -802,6 +837,7 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
                 problem: text("problem"),
                 suggestion: text("suggestion"),
                 evidence: text("file"),
+                ..Default::default()
             });
         } else {
             delivery += 1;
@@ -1630,6 +1666,88 @@ mod tests {
         assert!(split_qa_issues(Some("[")).unwrap_err().contains("not valid JSON"));
     }
 
+    const D1FA_LEDGER: &str = include_str!("../tests/data/qa-ledgers/cas-d1fa-round-1-LEDGER.md");
+    const D1FA_ISSUES: &str = include_str!("../tests/data/qa-ledgers/cas-d1fa-round-1-issues.json");
+
+    /// cas-2849, the real cas-d1fa round 1: its pre-existing section is free
+    /// text, "F10 NORMAL: <text>", not a table.
+    #[test]
+    fn free_text_pre_existing_lines_are_parsed_cas_2849() {
+        let findings = ledger_pre_existing_findings(D1FA_LEDGER);
+        let ids: Vec<_> = findings.iter().map(|finding| finding.id.as_str()).collect();
+        assert_eq!(ids, ["F10", "F11"], "{findings:?}");
+        assert!(findings.iter().all(|finding| finding.severity == "normal"));
+        assert!(findings[0].text.starts_with("nativeMac CtrlK fixture mismatch"), "{findings:?}");
+        assert!(findings[1].text.starts_with("strict contrast captureinstability"), "{findings:?}");
+    }
+
+    /// cas-2849: the issues qa_record received for cas-d1fa used id, title
+    /// and description; the follow-ups are titled from that text and carry it
+    /// as the problem, never "(not described)".
+    #[test]
+    fn titled_issues_fill_the_follow_up_cas_2849() {
+        let (mut pre, delivery_issues) = split_qa_issues(Some(D1FA_ISSUES)).unwrap();
+        assert_eq!(delivery_issues, 2);
+        complete_pre_existing_issues(&mut pre, D1FA_LEDGER).unwrap();
+        let delivery = task();
+        let round = pass("bd3d3afd", cas_types::QaPassState::Failed);
+        assert_eq!(pre[0].id, "F10");
+        assert_eq!(
+            follow_up_title(&delivery, &pre[1]),
+            "Pre-existing: Strict contrast captures race existing color transitions (found in QA of cas-ui1)"
+        );
+        let body = follow_up_description(&delivery, &round, &pre[1], "/a/LEDGER.md");
+        assert!(body.contains("visual-qa.mjs940 waits50ms"), "{body}");
+        assert!(!body.contains("(not described)"), "{body}");
+    }
+
+    /// cas-2849: an issue that gives only its id takes its text from the
+    /// ledger's "F10 NORMAL:" line.
+    #[test]
+    fn an_id_only_issue_takes_its_text_from_the_ledger_cas_2849() {
+        let (mut pre, _) = split_qa_issues(Some(
+            r#"[{"id":"F11","scope":"pre-existing","severity":"normal"}]"#,
+        ))
+        .unwrap();
+        complete_pre_existing_issues(&mut pre, D1FA_LEDGER).unwrap();
+        assert!(pre[0].problem.starts_with("strict contrast captureinstability"), "{pre:?}");
+        assert!(
+            follow_up_title(&task(), &pre[0]).starts_with("Pre-existing: strict contrast captureinstability"),
+            "{}",
+            follow_up_title(&task(), &pre[0])
+        );
+    }
+
+    /// cas-2849: F10 names its existing follow-up cas-2a33, so no new task.
+    #[test]
+    fn a_finding_naming_an_existing_task_is_not_refiled_cas_2849() {
+        let (mut pre, _) = split_qa_issues(Some(D1FA_ISSUES)).unwrap();
+        complete_pre_existing_issues(&mut pre, D1FA_LEDGER).unwrap();
+        let exists = |id: &str| id == "cas-2a33";
+        assert_eq!(tracked_follow_up(&pre[0], "cas-d1fa", exists).as_deref(), Some("cas-2a33"));
+        assert_eq!(tracked_follow_up(&pre[1], "cas-d1fa", exists), None);
+        // The delivery itself is never its own follow-up.
+        let own = PreExistingIssue {
+            problem: "seen while reviewing cas-d1fa".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(tracked_follow_up(&own, "cas-d1fa", |_| true), None);
+    }
+
+    /// cas-2849: a pre-existing issue with no text anywhere is refused with
+    /// what to add.
+    #[test]
+    fn a_pre_existing_issue_without_text_is_refused_cas_2849() {
+        let (mut pre, _) =
+            split_qa_issues(Some(r#"[{"scope":"pre-existing","severity":"normal"}]"#)).unwrap();
+        let refusal = complete_pre_existing_issues(&mut pre, "# ledger\n").unwrap_err();
+        assert!(refusal.contains("problem"), "{refusal}");
+        assert!(refusal.contains("## Pre-existing"), "{refusal}");
+        let (mut unknown, _) =
+            split_qa_issues(Some(r#"[{"id":"F99","scope":"pre-existing"}]"#)).unwrap();
+        assert!(complete_pre_existing_issues(&mut unknown, D1FA_LEDGER).unwrap_err().contains("F99"));
+    }
+
     #[test]
     fn a_rejection_needs_an_issue_the_delivery_owns() {
         use cas_types::QaVerdict::*;
@@ -1649,6 +1767,7 @@ mod tests {
             problem: "Footer links fail contrast at 3.1:1. The base build too.".to_string(),
             suggestion: "use --ink-mid".to_string(),
             evidence: "F02.png".to_string(),
+            ..Default::default()
         };
         assert_eq!(
             follow_up_title(&delivery, &issue),

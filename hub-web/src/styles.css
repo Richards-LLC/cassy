@@ -2377,6 +2377,16 @@ fieldset {
   margin-top: var(--space-2);
 }
 
+/* cas-b52d (journey F26): what a narrowed link withholds sits under what it
+   grants, compact enough that the fields still open unscrolled: the hint and
+   its Copy share a row, and the command fills whole lines below them. */
+.pair-withheld { display: grid; gap: var(--space-1); }
+.pair-withheld > .pair-lead { margin: 0; }
+.pair-withheld-command { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+.pair-withheld-command .scope-hint { flex: 1 1 14rem; margin: 0; }
+.pair-withheld-command button { min-height: var(--space-8); padding: 0 var(--space-3); font-size: var(--fs-meta); }
+.pair-withheld-command code { flex: 1 1 100%; min-width: 0; color: var(--text-hi); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+
 .scope-hint + .pair-code-actions code {
   min-width: 0;
   overflow-wrap: anywhere;

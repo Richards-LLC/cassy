@@ -3850,7 +3850,7 @@ button.chip:disabled { cursor: default; }
      list is the count here). The toggle's hit area still reaches 40px. */
   .conversation-shell .conversation-sidebar > footer { padding-top: var(--space-1); padding-bottom: max(var(--space-1), env(safe-area-inset-bottom)); }
   .conversation-sidebar .hub-footer-badges { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-3); min-height: 32px; margin: 0; }
-  .conversation-sidebar #paired-machines-toggle { position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
+  .conversation-sidebar #paired-machines-toggle { display: flex; position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
   .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
   /* cas-c19d: the label shrinks too, ellipsised, once the state has given
@@ -3957,12 +3957,12 @@ button.chip:disabled { cursor: default; }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
-#paired-machines-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
-/* cas-0739 QA F02: the label keeps its own width (basis auto, never 0), so a
-   long outage state wraps onto its own line instead of squeezing the label
-   to a letter per line. */
+#paired-machines-toggle { display: grid; grid-template-columns: var(--space-2) minmax(0, 1fr); align-items: baseline; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
+/* cas-94eb: the dot shares the label's first line even when the full name
+   wraps. The state keeps its own row beneath the label. The phone's existing
+   one-line flex layout above still lets the state yield before the name. */
 #paired-machines-toggle > span:nth-child(2) { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.machine-badge-state { flex: 0 1 auto; min-width: 0; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.machine-badge-state { grid-column: 2; flex: 0 1 auto; min-width: 0; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .pairing-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--color-series-neutral); flex: none; }
 .pairing-dot.connected { background: var(--state-ok); }
 /* cas-b789: some machines connected, some down — not all-clear. */

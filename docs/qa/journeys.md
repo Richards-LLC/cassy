@@ -487,14 +487,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the session: only its conversation — the blocker and the operator's later message are in the thread, the watchdog notice is not, and yesterday's turn shows "Sep 29, 17:20"
 2. A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick, never "you replied"
-3. The delivery problem is one attention item — the notice is a single warning in Attention dated "Sep 29, 17:49" (its own time, not when the page heard of it), and a repeat of it adds nothing
+3. The delivery problem is one attention item — the notice is a single warning dated "Sep 29, 17:49", headed "The supervisor missed an update: a worker stopped", with the worker named in plain words and no baked age; the group is "Accounting · happy-cheetah-1", has no redundant Dismiss group for one item, and a repeat adds nothing
 4. On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1 sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the notice and its date
-5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss group stays there across a 5 s heartbeat; with a notice's Details open and Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
+5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss stays there across a 5 s heartbeat; with a notice's Details open, Copy occupies its own row above the full raw diagnostic at390 and1280px; with Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
 6. A palette opened over the sheet closes first — Ctrl+K opens the command palette over the sheet; Escape closes the palette, the sheet stays open and focus is back on the control it left
 7. Close it and keep reading — Escape closes the sheet even with focus dropped to the page, focus returns to the badge and stays on it when a catalog change rebuilds the page, and the thread is as it was
 8. A sheet left open on a phone is a plain rail on a desktop — reopened, then resized to 1280×800: the rail has no dialog role, aria-modal or sheet label, the badge is not expanded, nothing is inert, and the notice is in the side panel
 9. It retires once the update gets through — the resolution removes it, and a reload does not bring it back
-10. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "re: earlier session wise-lion-31", and no earlier-session section opens for it
+10. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "Reply to “Did the bank feed reconcile?” · wise-lion-31", quoting the question's first line; if its history is unavailable it explicitly says "Reply to your message in earlier session wise-lion-31"; no earlier-session section opens for it
 
 #### Expected experience
 

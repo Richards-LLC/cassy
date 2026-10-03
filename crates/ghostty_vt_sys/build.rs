@@ -59,6 +59,7 @@ fn main() {
     // Rebuild triggers
     println!("cargo:rerun-if-changed=zig/build.zig");
     println!("cargo:rerun-if-changed=zig/build.zig.zon");
+    println!("cargo:rerun-if-changed=zig/deps");
     println!("cargo:rerun-if-changed=zig/lib.zig");
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=include/ghostty_vt.h");
@@ -67,11 +68,41 @@ fn main() {
         ghostty_dir.join("build.zig.zon").display()
     );
 
-    // Build with Zig
+    // Import the vendored archive into a private package cache. Zig computes
+    // its package hash; build.zig.zon's unchanged hash selects that package.
+    // --system below forbids a remote fallback if the archive is missing or
+    // does not match the pinned dependency (including any future dependencies).
+    let zig_global_cache = out_dir.join("zig-global-cache");
+    let uucode_archive =
+        manifest_dir.join("zig/deps/uucode-31655fba3c638229989cc524363ef5e3c7b580c1.tar.gz");
+    let fetch = Command::new(&zig)
+        .arg("fetch")
+        .arg("--global-cache-dir")
+        .arg(&zig_global_cache)
+        .arg(&uucode_archive)
+        .output()
+        .expect("Failed to import vendored uucode with zig fetch");
+    if !fetch.status.success() {
+        panic!(
+            "Failed to import vendored uucode from {}: {}\n{}",
+            uucode_archive.display(),
+            fetch.status,
+            String::from_utf8_lossy(&fetch.stderr),
+        );
+    }
+
+    // Build with Zig, using only locally supplied packages. Neither cache
+    // reads from nor writes to the user's shared ~/.cache/zig directory.
     let zig_out = out_dir.join("zig-out");
     let mut cmd = Command::new(&zig);
     cmd.current_dir(manifest_dir.join("zig"))
         .arg("build")
+        .arg("--system")
+        .arg(zig_global_cache.join("p"))
+        .arg("--global-cache-dir")
+        .arg(&zig_global_cache)
+        .arg("--cache-dir")
+        .arg(out_dir.join("zig-cache"))
         .arg("-Doptimize=ReleaseFast")
         .arg("--prefix")
         .arg(&zig_out);

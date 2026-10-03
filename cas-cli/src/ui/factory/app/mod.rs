@@ -373,10 +373,13 @@ fn target_seed_staleness_warning(stats: &TargetSeedStats) -> Option<String> {
 /// atomically publishing the pointer, so this never clones another worker's
 /// live target. A temporary sibling also keeps failed seeds from leaving a
 /// partial `target/` that Cargo could mistake as valid.
-fn seed_worker_target_from_baseline(
+pub(crate) fn seed_worker_target_from_baseline(
     cas_dir: &Path,
     worktree_path: &Path,
 ) -> anyhow::Result<Option<TargetSeedStats>> {
+    if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() == Ok("1") {
+        return Ok(None);
+    }
     let pointer = cas_dir.join("build-cache").join("current");
     let Ok(snapshot_name) = std::fs::read_to_string(&pointer) else {
         return Ok(None);
@@ -407,8 +410,11 @@ fn seed_worker_target_from_baseline(
     let metadata = read_target_seed_metadata(&source)?;
 
     let target = worktree_path.join("target");
-    if target.exists() {
+    if target.join("debug").exists() {
         return Ok(None);
+    }
+    if std::fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        anyhow::bail!("worker target is a symlink; refusing baseline re-seed");
     }
     let staging = worktree_path.join(".target-seed-in-progress");
     if staging.exists() {
@@ -432,7 +438,20 @@ fn seed_worker_target_from_baseline(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
-    std::fs::rename(&staging, &target)?;
+    if target.exists() {
+        // Keep proof logs/reports at their original paths. Re-seeding only
+        // supplies missing output entries and never overwrites evidence.
+        for entry in std::fs::read_dir(&staging)? {
+            let entry = entry?;
+            let destination = target.join(entry.file_name());
+            if std::fs::symlink_metadata(&destination).is_err() {
+                std::fs::rename(entry.path(), destination)?;
+            }
+        }
+        std::fs::remove_dir_all(&staging)?;
+    } else {
+        std::fs::rename(&staging, &target)?;
+    }
     Ok(Some(stats))
 }
 
@@ -6515,6 +6534,24 @@ mod spawn_isolation_tests {
             std::fs::metadata(seeded_dep_info).unwrap().ino(),
             "rebased dep-info must not mutate the immutable baseline hardlink"
         );
+        // A later check re-seeds pruned debug outputs while keeping proof
+        // paths and immutable snapshot inodes intact (cas-29b0).
+        std::fs::write(result.cwd.join("target/worker-check.log"), b"durable proof").unwrap();
+        std::fs::remove_dir_all(result.cwd.join("target/debug")).unwrap();
+        let root = result.cwd.parent().unwrap().parent().unwrap();
+        let reseeded = seed_worker_target_from_baseline(root, &result.cwd).unwrap();
+        assert!(reseeded.is_some());
+        assert_eq!(
+            std::fs::read(result.cwd.join("target/worker-check.log")).unwrap(),
+            b"durable proof"
+        );
+        assert_eq!(
+            std::fs::metadata(result.cwd.join("target/debug/deps/libwarm.rlib"))
+                .unwrap()
+                .ino(),
+            source_metadata.ino()
+        );
+
         let stats = result.target_seed.expect("target seed receipt");
         assert_eq!(stats.source_commit, source_commit.trim());
         assert!(stats.skipped_crates.is_empty());

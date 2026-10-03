@@ -90,6 +90,28 @@ test('passes the clean fixture in light and dark at both required widths', async
   assert.deepEqual(json.viewports.map(({ width }) => width), [1280, 390]);
 });
 
+test('measures the settled colour of a 100 ms colour transition, identically on every run', async () => {
+  const runs = [];
+  for (let run = 0; run < 3; run += 1) {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-transition-'));
+    const result = await runVisualQa({
+      urls: [fixture('transition.html')],
+      artifactDir,
+      strict: true,
+      schemes: ['light', 'dark'],
+      viewports: [
+        { name: 'desktop', width: 1280, height: 800 },
+        { name: 'phone', width: 390, height: 800 },
+      ],
+    });
+    runs.push(result.findings.map(({ type, selector, scheme, viewport }) => `${type} ${selector} ${scheme} ${viewport.width}`));
+    assert.deepEqual(runs.at(-1), [], `run ${run + 1} measured a colour before the transition settled`);
+    assert.equal(result.status, 'PASS');
+  }
+  assert.deepEqual(runs[1], runs[0]);
+  assert.deepEqual(runs[2], runs[0]);
+});
+
 test('parses computed OKLCH colors without false invisible-text findings', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-oklch-'));
   const oklchPage = join(artifactDir, 'oklch.html');

@@ -953,7 +953,6 @@ fn filesystem_capacity(_path: &Path) -> io::Result<(u64, u64)> {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     pub(super) fn reclamation_available() -> bool {
         // No process can reference this fresh, nonexistent output path. A live
         // result means the native process table cannot establish idle safely.
@@ -1276,8 +1275,9 @@ mod tests {
             true,
         )
         .unwrap();
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
+        assert_eq!(report.caches.len(), 3);
+        assert_eq!(report.candidate_bytes, 15);
+        if reclamation_available() {
             assert!(report.caches.iter().any(|cache| {
                 cache.worktree == epic.canonicalize().unwrap()
                     && cache.disposition == CacheDisposition::OwnershipUncertain
@@ -1291,9 +1291,7 @@ mod tests {
                     && cache.disposition == CacheDisposition::Selected
             }));
             assert_eq!(report.selected_bytes, 7);
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
+        } else {
             // Without process liveness evidence, GC stays report-only.
             assert!(
                 report
@@ -1302,6 +1300,17 @@ mod tests {
                     .all(|cache| cache.disposition == CacheDisposition::LiveProcess)
             );
             assert_eq!(report.selected_bytes, 0);
+        }
+        for (path, artifact, expected) in [
+            (&epic, "epic-artifact", b"epic".as_slice()),
+            (&release, "release-artifact", b"release".as_slice()),
+            (&user_release, "user-artifact", b"user".as_slice()),
+        ] {
+            assert_eq!(
+                fs::read(path.join("target").join(artifact)).unwrap(),
+                expected
+            );
+            assert_eq!(fs::read(path.join("README")).unwrap(), b"fixture");
         }
     }
 
@@ -1388,9 +1397,13 @@ mod tests {
             min_idle_secs: 0,
             retention_count: 0,
         };
-        let report = inspect(&cas_root, policy, std::slice::from_ref(&owned), &[], false).unwrap();
+        let mut report =
+            inspect(&cas_root, policy, std::slice::from_ref(&owned), &[], false).unwrap();
         assert_eq!(report.caches.len(), 1);
-        assert_eq!(report.caches[0].disposition, CacheDisposition::Selected);
+        assert_eq!(report.caches[0].bytes, 3);
+        // Model a selected report predating ownership replacement even when
+        // this host cannot establish idle; ownership is checked before probes.
+        report.caches[0].disposition = CacheDisposition::Selected;
         let serialized = serde_json::to_string(&report).unwrap();
         let mut deserialized: TargetCacheReport = serde_json::from_str(&serialized).unwrap();
         let mut trusted_report = report;
@@ -1422,7 +1435,9 @@ mod tests {
             deserialized.caches[0].disposition,
             CacheDisposition::OwnershipChanged
         );
-        assert!(owned.join("target/after-replacement").exists());
+        assert_eq!(fs::read(owned.join("target/after-replacement")).unwrap(), b"keep");
+        assert_eq!(trusted_report.reclaimed_bytes, 0);
+        assert_eq!(deserialized.reclaimed_bytes, 0);
     }
 
     // Git-linked worktrees are task-owned fixtures. The explicit live root
@@ -1432,6 +1447,7 @@ mod tests {
     #[test]
     fn git_discovered_stale_release_target_is_reclaimed_while_active_epic_is_preserved() {
         let temp = tempfile::tempdir().unwrap();
+        let reclaim = reclamation_available();
         let repo = temp.path().join("repo");
         let cas_root = repo.join(".cas");
         fs::create_dir_all(&repo).unwrap();
@@ -1472,6 +1488,11 @@ mod tests {
         );
         fs::create_dir_all(release.join("target")).unwrap();
         fs::write(release.join("target/stale-artifact"), b"drop").unwrap();
+        let stale_bytes = fs::read(release.join("target/stale-artifact")).unwrap();
+        let sources: Vec<_> = [&epic, &release]
+            .into_iter()
+            .map(|path| (path.clone(), fs::read(path.join("README")).unwrap()))
+            .collect();
 
         let policy = TargetCachePolicy {
             high_watermark_percent: 1,
@@ -1488,21 +1509,40 @@ mod tests {
         }));
         assert!(report.caches.iter().any(|cache| {
             cache.worktree == release.canonicalize().unwrap()
-                && cache.disposition == CacheDisposition::Selected
+                && cache.disposition
+                    == if reclaim {
+                        CacheDisposition::Selected
+                    } else {
+                        CacheDisposition::LiveProcess
+                    }
         }));
+        assert_eq!(report.candidate_bytes, 8);
+        assert_eq!(report.selected_bytes, if reclaim { 4 } else { 0 });
 
         cleanup_selected(&cas_root, &mut report, policy, std::slice::from_ref(&epic)).unwrap();
-        assert!(epic.join("target/active-artifact").exists());
-        assert!(!release.join("target").exists());
-        assert!(release.join("README").exists());
+        assert_eq!(
+            fs::read(epic.join("target/active-artifact")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(release.join("target").exists(), !reclaim);
+        assert_eq!(report.reclaimed_bytes, if reclaim { 4 } else { 0 });
+        if !reclaim {
+            assert_eq!(
+                fs::read(release.join("target/stale-artifact")).unwrap(),
+                stale_bytes
+            );
+        }
+        for (path, before) in sources {
+            assert_eq!(fs::read(path.join("README")).unwrap(), before);
+        }
     }
 
-    // Process liveness is read from Linux `/proc`; other platforms
-    // intentionally fail closed and cannot exercise these dispositions.
+    // Unreadable Linux process evidence takes precedence over recency.
     #[cfg(target_os = "linux")]
     #[test]
     fn live_and_recent_caches_are_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
+        let reclaim = reclamation_available();
         let cas_root = temp.path().join(".cas");
         let worker = cas_root.join("worktrees/live-worker");
         fs::create_dir_all(worker.join("target")).unwrap();
@@ -1541,9 +1581,19 @@ mod tests {
         .unwrap();
         assert_eq!(
             recent_report.caches[0].disposition,
-            CacheDisposition::RecentWrite
+            if reclaim {
+                CacheDisposition::RecentWrite
+            } else {
+                CacheDisposition::LiveProcess
+            }
         );
-        assert!(worker.join("target/artifact").exists());
+        assert_eq!(recent_report.caches.len(), 1);
+        assert_eq!(recent_report.candidate_bytes, 8);
+        assert_eq!(recent_report.selected_bytes, 0);
+        assert_eq!(
+            fs::read(worker.join("target/artifact")).unwrap(),
+            b"artifact"
+        );
     }
 
     // The implementation discovers process cwd through Linux `/proc`.
@@ -1581,17 +1631,19 @@ mod tests {
         assert!(worker.join("target/artifact").exists());
     }
 
-    // Non-Linux hosts intentionally treat unknown process liveness as live,
-    // so destructive cleanup cannot be asserted safely there.
+    // Destructive cleanup requires readable native process evidence.
     #[cfg(target_os = "linux")]
     #[test]
     fn cleanup_removes_only_target_and_resumes_interrupted_quarantine() {
         let temp = tempfile::tempdir().unwrap();
+        let reclaim = reclamation_available();
         let cas_root = temp.path().join(".cas");
         let worker = cas_root.join("worktrees/dead-worker");
         fs::create_dir_all(worker.join("target/deps")).unwrap();
         fs::write(worker.join("target/deps/artifact.rlib"), vec![0u8; 32]).unwrap();
         fs::write(worker.join("source.rs"), b"source").unwrap();
+        let source = fs::read(worker.join("source.rs")).unwrap();
+        let artifact = fs::read(worker.join("target/deps/artifact.rlib")).unwrap();
 
         let policy = TargetCachePolicy {
             high_watermark_percent: 1,
@@ -1601,11 +1653,32 @@ mod tests {
         };
         let mut report = inspect(&cas_root, policy, &[], &[], false).unwrap();
         assert_eq!(report.caches[0].bytes, 32);
-        assert_eq!(report.caches[0].disposition, CacheDisposition::Selected);
+        assert_eq!(
+            report.caches[0].disposition,
+            if reclaim {
+                CacheDisposition::Selected
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
         cleanup_selected(&cas_root, &mut report, policy, &[]).unwrap();
-        assert_eq!(report.caches[0].disposition, CacheDisposition::Reclaimed);
-        assert!(!worker.join("target").exists());
-        assert_eq!(fs::read(worker.join("source.rs")).unwrap(), b"source");
+        assert_eq!(
+            report.caches[0].disposition,
+            if reclaim {
+                CacheDisposition::Reclaimed
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
+        assert_eq!(worker.join("target").exists(), !reclaim);
+        assert_eq!(report.reclaimed_bytes, if reclaim { 32 } else { 0 });
+        assert_eq!(fs::read(worker.join("source.rs")).unwrap(), source);
+        if !reclaim {
+            assert_eq!(
+                fs::read(worker.join("target/deps/artifact.rlib")).unwrap(),
+                artifact
+            );
+        }
 
         let quarantine = worker.join(format!("{QUARANTINE_PREFIX}interrupted"));
         fs::create_dir_all(&quarantine).unwrap();
@@ -1615,10 +1688,37 @@ mod tests {
             ..policy
         };
         let mut resumed = inspect(&cas_root, resume_policy, &[], &[], false).unwrap();
-        assert!(resumed.caches[0].interrupted_cleanup);
-        assert_eq!(resumed.caches[0].disposition, CacheDisposition::Selected);
+        let interrupted = resumed
+            .caches
+            .iter()
+            .position(|cache| cache.interrupted_cleanup)
+            .unwrap();
+        assert_eq!(resumed.caches[interrupted].bytes, 7);
+        assert_eq!(resumed.candidate_bytes, if reclaim { 7 } else { 39 });
+        assert_eq!(
+            resumed.caches[interrupted].disposition,
+            if reclaim {
+                CacheDisposition::Selected
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
         cleanup_selected(&cas_root, &mut resumed, resume_policy, &[]).unwrap();
-        assert!(!quarantine.exists());
-        assert_eq!(fs::read(worker.join("source.rs")).unwrap(), b"source");
+        assert_eq!(quarantine.exists(), !reclaim);
+        assert_eq!(resumed.reclaimed_bytes, if reclaim { 7 } else { 0 });
+        if !reclaim {
+            assert_eq!(fs::read(quarantine.join("partial")).unwrap(), b"partial");
+            assert_eq!(
+                fs::read(worker.join("target/deps/artifact.rlib")).unwrap(),
+                artifact
+            );
+            assert!(
+                resumed
+                    .caches
+                    .iter()
+                    .all(|cache| cache.disposition == CacheDisposition::LiveProcess)
+            );
+        }
+        assert_eq!(fs::read(worker.join("source.rs")).unwrap(), source);
     }
 }

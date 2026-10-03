@@ -1431,3 +1431,36 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
         "verbose prints every project's details:\n{verbose}"
     );
 }
+
+/// cas-937a: cas-8030 kept skipped phases table-only, and briefly took a dry
+/// run's planned phases with them. The compact view then never said "DRY RUN"
+/// (integration `update_all_projects_test.rs:88` failed on the epic). A planned
+/// phase keeps its details block; a skipped one still gets none.
+#[test]
+fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
+    let planned = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/first"),
+        unregistered: false,
+        migration: ProjectPhase::Planned("would apply 2 migrations".to_owned()),
+        search_index: ProjectPhase::Skipped("dry run".to_owned()),
+        skills: ProjectPhase::Skipped("dry run".to_owned()),
+        membership: ProjectPhase::Skipped("dry run".to_owned()),
+        cloud: ProjectPhase::Skipped("dry run".to_owned()),
+        details: String::new(),
+        phase_details: vec![(
+            false,
+            "[DRY RUN] migration: would apply 2 migrations\n".to_owned(),
+        )],
+    };
+    let compact = render_project_refresh_summary(
+        &[planned],
+        &ProjectPhase::Planned("migrate and sync builtins".to_owned()),
+        "",
+        &[],
+        false,
+    );
+    assert!(
+        compact.contains("  projects/first details:\n    [DRY RUN] migration: would apply 2 migrations"),
+        "a dry run says so in the compact view:\n{compact}"
+    );
+}

@@ -22,6 +22,8 @@ export interface AttentionPanelCallbacks {
 
 export interface AttentionPanelOptions {
   now?: number;
+  /** Catalog project and supervisor names, independent of the durable session id. */
+  sessionLabel?: (item: Pick<AttentionItem, "machineId" | "session">) => string | undefined;
   /**
    * A connection the rail covers is down ("Atlas · Linux is reconnecting").
    * With no events, the empty state says this instead of "All clear": the
@@ -136,6 +138,12 @@ function renderPayload(card: AttentionCard, callbacks: AttentionPanelCallbacks):
   return details;
 }
 
+function ownerLabel(item: AttentionItem, options: AttentionPanelOptions): string {
+  if (!item.session) return item.machineLabel;
+  return options.sessionLabel?.(item)
+    ?? `${item.machineLabel} · ${/([a-z]+-[a-z]+-\d+)$/i.exec(item.session)?.[1] ?? "Session unavailable"}`;
+}
+
 function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, options: AttentionPanelOptions, groupLabel?: string): HTMLElement {
   const severity = card.content.severity;
   const article = document.createElement("article");
@@ -157,7 +165,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   // The group header already names the session; repeating it on every card
   // in that group spent the eyebrow's width on the one thing it did not need
   // to say. A card grouped under another label still states its own.
-  const owner = card.latest.session ?? card.latest.machineLabel;
+  const owner = ownerLabel(card.latest, options);
   if (owner !== groupLabel) {
     const session = document.createElement("span");
     session.className = "attention-session";
@@ -243,9 +251,8 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
   toggle.append(severityDot(group.worstSeverity));
   const label = document.createElement("span");
   label.className = "attention-group-label";
-  label.textContent = group.overflow
-    ? group.machineLabel
-    : group.session ?? group.machineLabel;
+  const groupLabel = group.overflow ? group.machineLabel : ownerLabel(group.cards[0]!.latest, options);
+  label.textContent = groupLabel;
   const count = document.createElement("span");
   count.className = "attention-group-count";
   count.textContent = String(group.count);
@@ -253,10 +260,10 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
   const allItems = group.cards.flatMap((card) => card.items);
   const dismissGroup = button("Dismiss group", "attention-dismiss-group", () => void callbacks.dismiss(allItems));
   dismissGroup.dataset.role = "group-dismiss";
-  header.append(toggle, dismissGroup);
+  header.append(toggle);
+  if (group.count > 1) header.append(dismissGroup);
   const body = document.createElement("div");
   body.className = "attention-group-body";
-  const groupLabel = group.overflow ? group.machineLabel : group.session ?? group.machineLabel;
   for (const card of group.cards) body.append(renderCard(card, callbacks, options, groupLabel));
   section.append(header, body);
   return section;
@@ -276,6 +283,7 @@ export function renderAttentionPanel(
   const now = options.now ?? Date.now();
   const signature = JSON.stringify([
     items,
+    items.map((item) => ownerLabel(item, options)),
     options.outage ?? null,
     [...(options.animateIds ?? [])].filter((id) => items.some((item) => item.id === id)),
     [...(options.reclassifyIds ?? [])].filter((id) => items.some((item) => item.id === id)),

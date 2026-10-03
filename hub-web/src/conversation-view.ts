@@ -257,6 +257,34 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   bubble.focus({ preventScroll: true });
 }
 
+/** The header's connection label, as the empty thread and Terminal view's offer read it. */
+function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "reconnecting" | "unreachable" {
+  return label === undefined || label === "Live" ? "live"
+    : label === "Degraded" ? "degraded"
+      : label === NEEDS_PAIRING ? "pairing"
+        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
+          : "unreachable";
+}
+
+/**
+ * Why the conversation header's Terminal view can't open now, or nothing
+ * when it can (cas-6b75, journey F03). The empty card stops offering
+ * Terminal view once the connection is lost; the header says the same
+ * instead of offering a terminal it cannot reach. A first connection
+ * ("Connecting", "Idle") is on its way, not lost, so it is still offered.
+ */
+export function terminalOfferReason(connection: string | undefined, machine: string | undefined): string | undefined {
+  if (connection === "Connecting" || connection === "Idle") return undefined;
+  const where = machine || "this machine";
+  const subjectMachine = machine || "This machine";
+  switch (connectionKind(connection)) {
+    case "pairing": return `${subjectMachine} needs pairing again before Terminal view can open.`;
+    case "reconnecting": return `Reconnecting to ${where} — Terminal view opens once it's back.`;
+    case "unreachable": return `${subjectMachine} can't be reached — Terminal view opens once it's back.`;
+    default: return undefined;
+  }
+}
+
 /**
  * What the empty thread says (cas-010f), from the header's connection label
  * and whether this session's first history page has resolved:
@@ -273,11 +301,7 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
   const where = input.machine || "this machine";
   const subjectMachine = input.machine || "This machine";
   const label = input.connection;
-  const kind = label === undefined || label === "Live" ? "live"
-    : label === "Degraded" ? "degraded"
-      : label === NEEDS_PAIRING ? "pairing"
-        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
-          : "unreachable";
+  const kind = connectionKind(label);
   const none = `No messages from ${subject} in this session yet`;
   if (!input.resolved) {
     if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "", terminal: false };
@@ -316,11 +340,14 @@ function relativeAgo(at: number, now: number): string {
   return `${Math.floor(elapsed / 86_400_000)}d ago`;
 }
 
-/** "re: earlier session calm-puma-34" above an answer to another session's turn (cas-e829). */
-export function earlierReplyQuote(document: Document, session: string): HTMLElement {
+/** Name the question an answer belongs to; unavailable history stays explicit. */
+export function earlierReplyQuote(document: Document, session: string, question?: string): HTMLElement {
   const quote = document.createElement("div");
   quote.className = "reply-quote";
-  quote.textContent = `re: earlier session ${sessionCodename(session)}`;
+  const firstLine = question ? plainTextMarkdown(question.split(/\r?\n/, 1)[0] ?? "").trim() : "";
+  quote.textContent = firstLine
+    ? `Reply to “${firstLine}” · ${sessionCodename(session)}`
+    : `Reply to your message in earlier session ${sessionCodename(session)}`;
   quote.title = session;
   return quote;
 }
@@ -870,6 +897,13 @@ export class ConversationView {
     return context;
   }
 
+  private earlierQuestion(reply: OperatorReply): string | undefined {
+    if (!reply.reply_to_session || reply.reply_to === null) return undefined;
+    const entry = this.history.earlierSessions().find((entry) => entry.session === reply.reply_to_session);
+    const question = entry?.events.find((event) => event.kind === "send" && event.value.notificationId === reply.reply_to);
+    return question?.kind === "send" ? question.value.text : undefined;
+  }
+
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
   private turnSignature(turn: ThreadTurn): string {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
@@ -889,7 +923,8 @@ export class ConversationView {
     const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
     // cas-b00c: a run of unconfirmed messages repaints when Review opens or closes it.
     const review = settled === false ? [...this.reviewedRuns].join(",") : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
+    const earlierQuestion = reply?.reply_to_session ? this.earlierQuestion(reply) : undefined;
+    return JSON.stringify([turn.event, earlierQuestion, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
   }
 
   /**
@@ -1402,7 +1437,7 @@ export class ConversationView {
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
     // cas-e829: an answer to another session's turn stays in this thread and
     // only names what it answers; the earlier session itself is read-only.
-    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session));
+    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session, this.earlierQuestion(reply)));
     return { bubble, sheets };
   }
 

@@ -5,7 +5,7 @@
  * often it is replayed, retired once the relay reaches the supervisor or the
  * session ends. It is never a conversation turn.
  */
-import type { AttentionContent } from "./attention";
+import { deliveryNoticeAttention, type AttentionContent } from "./attention";
 import type { OperatorReply } from "./types";
 
 /** The attention kind a notice raises (attention.ts MACHINE_EVENT_TEMPLATES). */
@@ -48,10 +48,7 @@ export function planNotice(machineId: string, session: string, reply: OperatorRe
     action: "raise",
     fingerprint,
     content: {
-      headline: reply.summary?.trim() || "The supervisor missed an update",
-      detail: reply.message,
-      severity: "warning",
-      action: "view_pane",
+      ...deliveryNoticeAttention(reply.summary ?? "", reply.message),
       fingerprint,
     },
   };

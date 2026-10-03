@@ -8074,6 +8074,20 @@ impl FactoryDaemon {
                             "completed",
                             "Worker recycled in place with its existing worktree and recipe.",
                         );
+                        // cas-a622: the fresh conversation knows nothing; tell
+                        // it what it still holds and how to resume.
+                        if let Err(error) = crate::ui::factory::app::render_and_ops::epic_workers::enqueue_recycle_resume_brief(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            &name,
+                        ) {
+                            tracing::warn!(
+                                worker = %name,
+                                %error,
+                                "cas-a622: recycled worker kept its tasks but its resume brief could not be queued"
+                            );
+                        }
                         if self.app.record_enabled() {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
@@ -8085,6 +8099,16 @@ impl FactoryDaemon {
                     }
                     Err(e) => {
                         let detail = format!("Failed to recycle {name}: {e}");
+                        // cas-a622: the recycle kept the bindings for a
+                        // replacement that never started. Once the old process
+                        // is gone, release them as a shutdown would, rather
+                        // than leave tasks bound to a dead name.
+                        if !self.app.worker_names().iter().any(|worker| worker == &name) {
+                            crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
+                                self.app.cas_dir(),
+                                &name,
+                            );
+                        }
                         self.app.set_error(detail.clone());
                         append_spawn_audit(
                             self.app.cas_dir(),

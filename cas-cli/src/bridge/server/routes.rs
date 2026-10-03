@@ -10,7 +10,7 @@ use crate::bridge::server::session::{
 use crate::bridge::server::types::{
     ActivityJson, AgentLatestActivityJson, AgentSummaryJson, InboxAckJson, InboxAckRequest,
     InboxCountJson, InboxPeekJson, InboxPollJson, MessageRequest, MessageResponse, PaneTailJson,
-    PingJson, StatusJson, TargetsJson, TaskSummaryJson, session_json,
+    PingJson, StatusJson, TargetsJson, session_json,
 };
 use crate::store::{open_prompt_queue_store, open_supervisor_queue_store};
 
@@ -331,15 +331,9 @@ pub(crate) fn handle_session_routes(
                 })
                 .collect();
 
-            let to_task = |t: cas_factory::TaskSummary| TaskSummaryJson {
-                id: t.id,
-                title: t.title,
-                status: format!("{:?}", t.status).to_lowercase(),
-                priority: t.priority.0,
-                assignee: t.assignee,
-                task_type: format!("{:?}", t.task_type).to_lowercase(),
-                epic: t.epic,
-                branch: t.branch,
+            let task_store = crate::store::open_task_store(&cas_root).ok();
+            let to_task = |t: cas_factory::TaskSummary| {
+                super::session::task_summary_json(t, task_store.as_deref())
             };
 
             let queue = open_prompt_queue_store(&cas_root)?;

@@ -1436,6 +1436,26 @@ impl AuthStore {
         )
     }
 
+    /// One row of a structured fleet operation (cas-566b): `requested`
+    /// before it runs, then its outcome. `detail` names the operation's
+    /// subject (task, epic) and, on failure, why.
+    #[allow(clippy::too_many_arguments)]
+    pub fn audit_operation(
+        &self,
+        context: &AuthContext,
+        outcome: &str,
+        action: &str,
+        required_scope: Scope,
+        target_session: &str,
+        detail: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.write_audit_record(
+            Some(context), outcome, action, Some(required_scope), Some(target_session),
+            None, None, None, None, None, detail, now,
+        )
+    }
+
     /// A denied authentication, with its reason (cas-d636).
     fn audit_refusal(
         &self,
@@ -1465,6 +1485,28 @@ impl AuthStore {
         refusal: Option<AuthRefusal>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.write_audit_record(
+            context, outcome, action, required_scope, target_session, project,
+            supervisor_cli, profile, placement, refusal, None, now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_audit_record(
+        &self,
+        context: Option<&AuthContext>,
+        outcome: &str,
+        action: &str,
+        required_scope: Option<Scope>,
+        target_session: Option<&str>,
+        project: Option<&str>,
+        supervisor_cli: Option<&str>,
+        profile: Option<&str>,
+        placement: Option<&str>,
+        refusal: Option<AuthRefusal>,
+        detail: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let record = AuditRecord {
             timestamp: now,
             machine_id: &self.0.machine_id,
@@ -1483,7 +1525,7 @@ impl AuthStore {
             profile,
             placement,
             reason: refusal.map(AuthRefusal::code),
-            detail: refusal.and_then(AuthRefusal::detail),
+            detail: detail.or_else(|| refusal.and_then(AuthRefusal::detail)),
         };
         let written = self
             .lock()

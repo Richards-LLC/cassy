@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { test, expect, RECEIPTS } from "./journey";
+import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
@@ -477,7 +477,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const headerHost = () => page.locator(".conversation-identity .host-where").evaluate((line) => {
       const machine = line.querySelector<HTMLElement>(".host-machine")!;
       const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
-      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0 && machine.scrollWidth > machine.clientWidth + 1 };
+      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector<HTMLElement>(".host-os")?.getBoundingClientRect().width ?? 0) > 1 && machine.scrollWidth > machine.clientWidth + 1 };
     });
     for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 1280").toBeGreaterThanOrEqual(15.5); expect(header.osCut, "OS word cut at 1280").toBe(false); }
     await page.setViewportSize({ width: 390, height: 844 });
@@ -486,7 +486,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const fitted = await meta.evaluate((line) => {
       const machine = line.querySelector<HTMLElement>(".proj2-machine")!;
       const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
-      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0, title: line.getAttribute("title") };
+      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector<HTMLElement>(".host-os")?.getBoundingClientRect().width ?? 0) > 1, title: line.getAttribute("title") };
     });
     expect(fitted.machineChars, "the machine keeps 16ch at 390px").toBeGreaterThanOrEqual(15.5);
     expect(fitted.os, "the OS word goes before the name is cut").toBe(false);
@@ -528,5 +528,32 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const alarm = seen.pane.filter((text) => /Terminal unavailable|interrupted|retrying|Try again|relay|attempt|diagnostic|handshake/i.test(text));
     expect(alarm, "retry wording on the default surface while it opened").toEqual([]);
     await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Connected");
+  });
+});
+
+// cas-2a33: the journeys above run on a browser that declares Linux, so they
+// read "Ctrl K". On a Mac every surface names the palette chord "⌘K" instead,
+// never both, and ⌘K reaches the search and then the palette.
+test.describe("on a Mac", () => {
+  test.use({ journeyPlatform: "mac" });
+
+  test("HUB-J3 on a Mac, every surface names the palette chord ⌘K (cas-2a33)", journeyPart, async ({ page, journey }) => {
+    await journey.stage("On a Mac, the search, the palette and Terminal view all say ⌘K, and ⌘K opens them", async () => {
+      await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+      await journey.open();
+      const search = page.getByRole("searchbox", { name: "Search conversations" });
+      await expect(search).toHaveAttribute("placeholder", "Search conversations (⌘K)");
+      await page.keyboard.press("Meta+k");
+      await expect(search).toBeFocused();
+      await page.keyboard.press("Meta+k");
+      await expect(page.getByRole("searchbox", { name: "Filter commands" })).toBeFocused();
+      await page.keyboard.press("Escape");
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await page.locator("#conversation-terminal").click();
+      const paletteButton = page.getByRole("button", { name: "Open command palette (⌘K)", exact: true });
+      await expect(paletteButton).toHaveText("⌘K");
+      await expect(paletteButton).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
+      await expect(page.locator("body")).not.toContainText("Ctrl K");
+    });
   });
 });

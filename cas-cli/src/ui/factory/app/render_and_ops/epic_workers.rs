@@ -1481,6 +1481,146 @@ fn reset_stale_preassign_holder(
         .map_err(|e| format!("could not persist stale-holder reset: {e}"))
 }
 
+/// Why a worker's process was retired, which decides what happens to the
+/// tasks it was bound to (cas-a622).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkerRetirement {
+    /// The worker is gone for good: park what it held and release its
+    /// bindings so another worker can take them.
+    Shutdown,
+    /// The same name is respawned at once in the same worktree to reset its
+    /// context. Assignees are display names (cas-dbbb), so every binding
+    /// already belongs to the replacement process.
+    Recycle,
+}
+
+/// Settle the task bindings of a worker whose process has just been retired.
+/// Returns how many bindings were released.
+pub(crate) fn settle_retired_worker_bindings(
+    cas_dir: &std::path::Path,
+    agent_store: &dyn cas_store::AgentStore,
+    agent: &cas_types::Agent,
+    held_task_ids: &[String],
+    retirement: WorkerRetirement,
+) -> usize {
+    if retirement == WorkerRetirement::Recycle {
+        // cas-a622: parking or releasing here is what cost proud-newt-45 its
+        // assignment. The replacement is the same name in the same worktree,
+        // so it already owns every binding; graceful_shutdown released only
+        // the old process's leases, which `task action=start` re-takes from
+        // the resume brief (`enqueue_recycle_resume_brief`).
+        tracing::info!(
+            worker = %agent.name,
+            held = held_task_ids.len(),
+            "cas-a622: recycle keeps the worker's task bindings"
+        );
+        return 0;
+    }
+    // Emit the same durable supervisor lifecycle relay used for unexpected
+    // PTY exits. The process is already gone, and this runs before the legacy
+    // binding cleanup, so the relay records and parks any task that was held
+    // at termination instead of reporting a misleading empty task set.
+    crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+        cas_dir,
+        agent_store,
+        agent,
+        held_task_ids,
+        "worker terminated by shutdown request",
+    );
+
+    // cas-7a94: clear pure Open pre-assigns and any binding the recovery
+    // path could not inspect. Assignees are display names (cas-dbbb), so
+    // match on `name` rather than the registration UUID.
+    let released = release_worker_task_bindings(cas_dir, &agent.name);
+    if released > 0 {
+        tracing::info!(
+            worker = %agent.name,
+            released,
+            "cas-7a94: released remaining task bindings on shutdown_worker"
+        );
+    }
+    released
+}
+
+/// The brief a recycled worker receives so its fresh conversation resumes its
+/// assigned work (cas-a622). `None` when it holds no nonterminal task.
+pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str) -> Option<String> {
+    let task_store = open_task_store(cas_dir).ok()?;
+    let mut held: Vec<cas_types::Task> = task_store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|task| task.assignee.as_deref() == Some(worker_name) && !task.is_terminal())
+        .collect();
+    if held.is_empty() {
+        return None;
+    }
+    held.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut brief =
+        "Your context was reset by a recycle; your worktree and every task binding were kept.\n"
+            .to_string();
+    let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
+    for task in held.iter().filter(|task| task.status == cas_types::TaskStatus::InProgress) {
+        brief.push_str(&format!(
+            "{}\n  Resume it: run `task action=start id={}` to re-take its lease, read its notes with \
+             `task action=notes id={}`, then continue from the last checkpoint.\n",
+            line(task),
+            task.id,
+            task.id
+        ));
+    }
+    let parked: Vec<String> = held
+        .iter()
+        .filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
+        .map(line)
+        .collect();
+    if !parked.is_empty() {
+        brief.push_str(&format!(
+            "Awaiting merge (re-close each after its merge lands; do not start it):\n{}\n",
+            parked.join("\n")
+        ));
+    }
+    let other: Vec<String> = held
+        .iter()
+        .filter(|task| {
+            !matches!(
+                task.status,
+                cas_types::TaskStatus::InProgress | cas_types::TaskStatus::AwaitingMerge
+            )
+        })
+        .map(line)
+        .collect();
+    if !other.is_empty() {
+        brief.push_str(&format!(
+            "Also assigned to you (start only when the supervisor directs):\n{}\n",
+            other.join("\n")
+        ));
+    }
+    Some(brief)
+}
+
+/// Queue [`recycle_resume_brief`] to the recycled worker. Returns the prompt
+/// id, or `None` when there was nothing to resume.
+pub(crate) fn enqueue_recycle_resume_brief(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    worker_name: &str,
+) -> anyhow::Result<Option<i64>> {
+    let Some(brief) = recycle_resume_brief(cas_dir, worker_name) else {
+        return Ok(None);
+    };
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = queue.enqueue_with_summary(
+        supervisor_name,
+        worker_name,
+        &brief,
+        Some(factory_session),
+        Some("Recycled: resume your assigned work"),
+    )?;
+    Ok(Some(id))
+}
+
 /// cas-7a94: release tasks bound to a dead/shutting-down worker so they are
 /// claimable again without a manual `task action=reset`.
 ///
@@ -2272,8 +2412,20 @@ impl FactoryApp {
         force: bool,
         preserve_worktree: bool,
     ) -> anyhow::Result<()> {
-        // Check if worker exists
+        // Crash/recycle handling can remove the pane before shutdown arrives.
+        // A dead registration in our session is still a valid cleanup target.
         if !self.worker_names.contains(&name.to_string()) {
+            if crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(
+                self.cas_dir(),
+                name,
+                self.factory_session.as_deref(),
+            )?
+            .is_some()
+            {
+                self.last_db_fingerprint = None;
+                let _ = self.refresh_data();
+                return Ok(());
+            }
             anyhow::bail!("Worker '{name}' not found");
         }
 
@@ -2360,30 +2512,19 @@ impl FactoryApp {
             self.untrack_worker_process_group_if_gone(pgid).await;
         }
 
-        // Emit the same durable supervisor lifecycle relay used for unexpected
-        // PTY exits. Do this only after the process is actually gone, but
-        // before the legacy binding cleanup, so the relay records and parks
-        // any task that was held at termination instead of reporting a
-        // misleading empty task set.
-        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+        // Only after the process is actually gone: a shutdown parks and
+        // releases what the worker held; a recycle keeps it (cas-a622).
+        settle_retired_worker_bindings(
             &cas_dir,
             agent_store.as_ref(),
             agent,
             &held_task_ids,
-            "worker terminated by shutdown request",
+            if preserve_worktree {
+                WorkerRetirement::Recycle
+            } else {
+                WorkerRetirement::Shutdown
+            },
         );
-
-        // cas-7a94: clear pure Open pre-assigns and any binding the recovery
-        // path could not inspect. Assignees are display names (cas-dbbb), so
-        // match on `name` rather than the registration UUID.
-        let released = release_worker_task_bindings(&cas_dir, name);
-        if released > 0 {
-            tracing::info!(
-                worker = %name,
-                released,
-                "cas-7a94: released remaining task bindings on shutdown_worker"
-            );
-        }
 
         // Remove from tracking
         self.worker_names.retain(|n| n != name);
@@ -5666,6 +5807,145 @@ mod tests {
             assert_eq!(task.status, status);
             assert_eq!(task.assignee, None);
         }
+    }
+
+    // --- cas-a622: a recycle keeps bindings and re-delivers the brief ----
+
+    /// The binding set wise-raven-87 held when its refresh was refused.
+    fn seed_wise_raven_tasks(cas_dir: &std::path::Path) -> Vec<(&'static str, TaskStatus)> {
+        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let held = vec![
+            ("cas-e0be", TaskStatus::InProgress),
+            ("cas-7cb3", TaskStatus::AwaitingMerge),
+            ("cas-ed87", TaskStatus::Open),
+            ("cas-96c0", TaskStatus::Blocked),
+        ];
+        for (id, status) in &held {
+            store.add(&task_with(id, Some("wise-raven"), *status)).unwrap();
+        }
+        store
+            .add(&task_with("cas-done", Some("wise-raven"), TaskStatus::Closed))
+            .unwrap();
+        store
+            .add(&task_with("cas-peer", Some("other-worker"), TaskStatus::InProgress))
+            .unwrap();
+        held
+    }
+
+    fn retired_worker(cas_dir: &std::path::Path) -> cas_types::Agent {
+        let mut agent = cas_types::Agent::new("raven-old-session".into(), "wise-raven".into());
+        agent.role = cas_types::AgentRole::Worker;
+        // A pid that cannot be alive, so the worker reads as retired. Stamped
+        // like every pid assignment (cas-389c); a dead pid has no starttime,
+        // so the stamp records nothing and the row stays unfingerprinted.
+        agent.pid = Some(u32::MAX - 1);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, u32::MAX - 1);
+        crate::store::open_agent_store(cas_dir).unwrap().register(&agent).unwrap();
+        agent
+    }
+
+    /// cas-a622 (and the proud-newt-45 loss it cites): retiring a worker for
+    /// an in-place recycle must not park or release a single binding — the
+    /// same name is respawned in the same worktree at once.
+    #[test]
+    fn recycle_retirement_keeps_every_task_binding_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let held = seed_wise_raven_tasks(&cas_dir);
+        let agent = retired_worker(&cas_dir);
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+
+        let released = settle_retired_worker_bindings(
+            &cas_dir,
+            agent_store.as_ref(),
+            &agent,
+            &["cas-e0be".to_string()],
+            WorkerRetirement::Recycle,
+        );
+
+        assert_eq!(released, 0, "a recycle releases nothing");
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        for (id, status) in held {
+            let task = store.get(id).unwrap();
+            assert_eq!(task.assignee.as_deref(), Some("wise-raven"), "{id} keeps its assignee");
+            assert_eq!(task.status, status, "{id} keeps its status");
+        }
+    }
+
+    /// The contrast that keeps the shutdown contract honest: a real shutdown
+    /// still frees the worker's Open/InProgress/Blocked bindings.
+    #[test]
+    fn shutdown_retirement_still_releases_bindings_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        seed_wise_raven_tasks(&cas_dir);
+        let agent = retired_worker(&cas_dir);
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+
+        settle_retired_worker_bindings(
+            &cas_dir,
+            agent_store.as_ref(),
+            &agent,
+            &[],
+            WorkerRetirement::Shutdown,
+        );
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        assert_eq!(store.get("cas-ed87").unwrap().assignee, None, "Open pre-assign released");
+        assert_eq!(
+            store.get("cas-7cb3").unwrap().assignee.as_deref(),
+            Some("wise-raven"),
+            "AwaitingMerge parking is never clobbered"
+        );
+    }
+
+    /// cas-a622: the recycled worker's fresh conversation is told what it
+    /// holds and how to resume, and only its own nonterminal tasks are named.
+    #[test]
+    fn recycle_resume_brief_is_queued_to_the_worker_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        seed_wise_raven_tasks(&cas_dir);
+
+        let id = enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "wise-raven")
+            .unwrap()
+            .expect("a worker holding tasks gets a resume brief");
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let queued = queue
+            .peek_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("brief row");
+        assert_eq!(queued.target, "wise-raven");
+        assert_eq!(queued.source, "zen-condor");
+        assert_eq!(queued.factory_session.as_deref(), Some("session-a622"));
+        let brief = &queued.prompt;
+        assert!(
+            brief.contains("task action=start id=cas-e0be"),
+            "the in-progress task is resumed by re-taking its lease: {brief}"
+        );
+        for id in ["cas-e0be", "cas-7cb3", "cas-ed87", "cas-96c0"] {
+            assert!(brief.contains(id), "{id} is named: {brief}");
+        }
+        for id in ["cas-done", "cas-peer"] {
+            assert!(!brief.contains(id), "{id} is not this worker's open work: {brief}");
+        }
+    }
+
+    #[test]
+    fn a_worker_with_no_open_work_gets_no_resume_brief_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        assert_eq!(
+            enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "idle-worker")
+                .unwrap(),
+            None
+        );
+        assert!(
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // --- cas-7a94: shutdown / cancel must release pre-assigns -----------

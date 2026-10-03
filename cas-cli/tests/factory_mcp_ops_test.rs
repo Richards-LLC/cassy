@@ -5643,12 +5643,19 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     )
     .unwrap();
 
-    // No registered builder or output handle uses this disposable worker. Use
-    // the unchanged native inspector to establish capability independently of
-    // the MCP response; only Selected or unknown/live is valid for this fixture.
+    // Probe a separate, fresh, unregistered cache with no retained handles or
+    // fixture processes. A live result here establishes unavailable visibility,
+    // independently of genuine liveness in the actual MCP worker below. With
+    // readable visibility, an accidentally live MCP fixture must fail selection.
+    let baseline = TempDir::new().unwrap();
+    let baseline_root = baseline.path().join(".cas");
+    let baseline_worker = baseline_root.join("worktrees/capability-probe");
+    let baseline_cache = baseline_worker.join("target");
+    std::fs::create_dir_all(&baseline_cache).unwrap();
+    std::fs::write(baseline_cache.join("probe"), b"x").unwrap();
     use cas::factory_target_cache::{CacheDisposition, TargetCachePolicy};
     let native = cas::factory_target_cache::inspect(
-        &env.cas_root,
+        &baseline_root,
         TargetCachePolicy {
             high_watermark_percent: 1,
             low_watermark_percent: 0,
@@ -5661,17 +5668,26 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     )
     .unwrap();
     assert_eq!(native.caches.len(), 1);
-    assert_eq!(native.candidate_bytes, 64);
+    assert_eq!(native.candidate_bytes, 1);
+    assert_eq!(native.caches[0].bytes, 1);
+    assert_eq!(
+        native.caches[0].path,
+        baseline_cache.canonicalize().unwrap()
+    );
+    assert_ne!(native.caches[0].worktree, worker.canonicalize().unwrap());
     let reclaim = match native.caches[0].disposition {
         CacheDisposition::Selected => true,
         CacheDisposition::LiveProcess => {
             eprintln!(
-                "RECLAIM PROOF UNAVAILABLE: native process evidence is unreadable; public GC must preserve cache/source bytes and JSON status"
+                "RECLAIM PROOF UNAVAILABLE: separate idle capability fixture has unverifiable native process evidence; actual MCP fixture must preserve source/cache bytes and JSON status. LiveProcess does not prove an observed process."
             );
             false
         }
         other => panic!("unexpected native GC fixture state: {other:?}"),
     };
+    assert_eq!(native.selected_bytes, if reclaim { 1 } else { 0 });
+    assert_eq!(native.reclaimed_bytes, 0);
+    assert_eq!(std::fs::read(baseline_cache.join("probe")).unwrap(), b"x");
     let disposition = if reclaim { "selected" } else { "live_process" };
     let cache_path = worker.join("target").canonicalize().unwrap();
     let assert_preserved = || {
@@ -5762,6 +5778,13 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     if !reclaim {
         assert_preserved();
         assert!(cleanup_text.contains("state=LiveProcess"), "{cleanup_text}");
+        assert_eq!(
+            cleaned["caches"][0]["reason"],
+            "registered or OS-visible live process uses this worktree"
+        );
+        eprintln!(
+            "RECLAIM PROOF UNAVAILABLE: raw actual-fixture status (ambiguous live/unknown reason, not an observed-process claim): {cleanup_text}"
+        );
     }
     assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
 }

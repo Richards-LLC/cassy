@@ -2414,6 +2414,20 @@ impl SqlitePromptQueueStore {
         Ok(Self { conn })
     }
 
+    /// Inspect an existing queue without creating its database or schema.
+    /// This connection is deliberately independent of the writable pool so
+    /// diagnostic callers cannot inherit a writer's permissions or setup DDL.
+    pub fn open_read_only(cas_dir: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            cas_dir.join("cas.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
     fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
             return Some(dt.with_timezone(&Utc));
@@ -6139,6 +6153,20 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn prompt_queue_read_only_never_creates_or_writes_cas_d6b9() {
+        let temp = TempDir::new().unwrap();
+        assert!(SqlitePromptQueueStore::open_read_only(temp.path()).is_err());
+        assert!(!temp.path().join("cas.db").exists());
+        let writer = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        writer.init().unwrap();
+        writer.enqueue("supervisor", "worker", "retained").unwrap();
+        let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+        assert_eq!(reader.pending_count().unwrap(), 1);
+        assert!(reader.enqueue("supervisor", "worker", "forbidden").is_err());
+        assert_eq!(writer.pending_count().unwrap(), 1);
     }
 
     #[test]

@@ -11,6 +11,9 @@
 # Missing or incoherent measurements still fail; overruns warn and record false.
 set -euo pipefail
 
+# shellcheck source=scripts/release-portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-portable.sh"
+
 usage() {
     echo "Usage: scripts/release-latency-receipt.sh <vX.Y.Z> [--budget-seconds <n>] [--run-dir <path>]" >&2
 }
@@ -50,11 +53,14 @@ done
 
 if [[ -z "$run_dir" ]]; then
     artifacts_root="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts/release}"
-    mapfile -t candidates < <(find "$artifacts_root" -mindepth 1 -maxdepth 1 -type d \
+    candidate_count=0
+    candidate=''
+    while IFS= read -r candidate_path; do
+        candidate="$candidate_path"
+        candidate_count=$((candidate_count + 1))
+    done < <(find "$artifacts_root" -mindepth 1 -maxdepth 1 -type d \
         -name "v${tag#v}-*" -print 2>/dev/null | sort)
-    if [[ "${#candidates[@]}" -eq 1 ]]; then
-        run_dir="${candidates[0]}"
-    fi
+    if [[ "$candidate_count" -eq 1 ]]; then run_dir="$candidate"; fi
 fi
 
 intervention_count() {
@@ -138,24 +144,7 @@ repo="${RELEASE_REPO:-Richards-LLC/cassy}"
 
 # Keep GNU date results unchanged; BSD date requires the ISO fallback.
 epoch_of() {
-    local epoch
-    if epoch="$(date -u -d "$1" +%s 2>/dev/null)"; then
-        printf '%s\n' "$epoch"
-        return 0
-    fi
-    python3 - "$1" <<'PY_TIMESTAMP'
-import datetime
-import math
-import sys
-
-try:
-    timestamp = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
-    if timestamp.tzinfo is None:
-        raise ValueError("timestamp must carry a timezone")
-    print(math.floor(timestamp.timestamp()))
-except (ValueError, OverflowError, OSError):
-    sys.exit(1)
-PY_TIMESTAMP
+    release_portable_timestamp_epoch "$1"
 }
 
 published_at="$("$gh_bin" release view "$tag" --repo "$repo" --json publishedAt --jq '.publishedAt // empty')"

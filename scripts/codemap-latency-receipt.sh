@@ -6,6 +6,9 @@
 # fails rather than silently creating a content-changing codemap commit.
 set -uo pipefail
 
+# shellcheck source=scripts/release-portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-portable.sh"
+
 usage() {
     cat >&2 <<'EOF'
 Usage: scripts/codemap-latency-receipt.sh [options]
@@ -289,14 +292,7 @@ run_phase readiness phase_readiness
 run_phase docs phase_docs_only
 
 epoch_of() {
-    timestamp="$1"
-    if [[ "$timestamp" == *.* ]]; then
-        normalized="${timestamp%%.*}Z"
-    else
-        normalized="$timestamp"
-    fi
-    date -u -d "$normalized" +%s 2>/dev/null && return 0
-    date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$normalized" +%s 2>/dev/null
+    release_portable_timestamp_epoch "$1"
 }
 
 github_queue_status=not-requested

@@ -7,6 +7,9 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/release-portable.sh
+source "$script_dir/release-portable.sh"
+release_portable_define_sha256sum
 gate="$script_dir/release-gate.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

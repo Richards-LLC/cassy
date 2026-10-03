@@ -247,6 +247,17 @@ and stops assembly before either Rust suite. The full release gate runs this
 same mandatory row before build and Rust test rows; it is excluded from the
 short `--fast-rows` lane checks.
 
+Release scripts used from macOS source `scripts/release-portable.sh` for
+timestamp parsing and canonical paths. The timestamp helper retains GNU date
+results on Linux and falls back to Python for timezone-qualified ISO values
+on BSD hosts, including offsets and fractional seconds. The path helper
+resolves symlinks and missing trailing components without GNU `realpath -m`
+or `readlink -f`. Receipt paths and their worktree use the same canonical
+form before containment checks. `scripts/test-release-portable.py` exercises
+the report stage with GNU date and path commands unavailable. Provisioning
+and persistent Actions cache maintenance remain Linux-only and explicitly
+require GNU tools and Linux kernel interfaces.
+
 The assembly command then runs native full-workspace nextest in the factory
 worktree, then the gate's archive-mode row in a plain clone outside every
 `.cas` ancestor. The archive consumer uses the queue's remapped environment

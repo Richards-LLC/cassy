@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only provisioning/runner script: GNU coreutils and Linux kernel interfaces are required.
 # Refuse to start a persistent runner unless its cache is the expected
 # Shockwave-backed bind mount, not merely another directory on the same device.
 set -euo pipefail

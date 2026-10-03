@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only provisioning/runner script: GNU coreutils and Linux kernel interfaces are required.
 # Bound both persistent runner slots, but only when the complete GitHub Runner
 # job lifecycle is idle. Compiler-process absence alone is not an idle proof.
 set -euo pipefail

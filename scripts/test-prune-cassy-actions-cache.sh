@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only fixture: GNU tools, mount tables and /proc are the tested runner contracts.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

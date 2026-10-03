@@ -35,7 +35,8 @@ Close requires the delivered work on the named target. On MERGE REQUIRED:
 3. For `delivery_mode=local_merge`, retain the local commit and request supervisor
    merge with its branch and SHA. Push only with explicit supervisor authorization.
    Otherwise push the delivered branch, then send `merge_request=true` with the
-   target and SHA; re-close after confirmed merge.
+   target and SHA; re-close after confirmed merge. While it is pending, follow
+   [recovery.md](recovery.md#while-the-merge-is-pending): no polling loop.
 4. For a protected target, follow its PR flow. Ask for an epic merge rather than
    `gh pr create --base epic/...`; the supervisor owns the merge venue.
 

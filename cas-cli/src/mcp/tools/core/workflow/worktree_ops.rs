@@ -3328,14 +3328,43 @@ impl CasCore {
         let branch_ci_lookup = lookup_branch_ci(&worktree.branch, &worktree.parent_branch, &cwd);
         let ci_prefix = describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup);
         let branch_ci_state = branch_ci_lookup.state;
-        let ci_override =
-            admit_branch_ci(&branch_ci_state, supervisor_override, reason).map_err(|message| {
-                McpError {
+        let ci_override = match admit_branch_ci(&branch_ci_state, supervisor_override, reason) {
+            Ok(accepted) => accepted,
+            Err(message) => {
+                // cas-d1eb: CI refuses before Git runs. Withdraw the durable
+                // intent, including one stranded by an earlier attempt, while
+                // retaining the approved receipt for a supervisor retry.
+                // An already-merged reconciliation must never be downgraded.
+                if !reconciled_delivery
+                    && let (Some((_, transaction)), Some(authority)) =
+                        (transactional_delivery.as_ref(), delivery_authority.as_ref())
+                {
+                    cas_store::transition_worker_delivery(
+                        &cas_root,
+                        &transaction.id,
+                        &[cas_types::WorkerDeliveryState::MergeAuthorized],
+                        cas_types::WorkerDeliveryState::AwaitingMerge,
+                        &authority.agent_id,
+                        Some(&authority.agent_id),
+                        None,
+                        None,
+                        Some(("ci_refused", &message)),
+                    )
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "{ci_prefix}{message}\nFailed to persist retryable delivery state: {error}"
+                        )),
+                        data: None,
+                    })?;
+                }
+                return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!("{ci_prefix}{message}")),
                     data: None,
-                }
-            })?;
+                });
+            }
+        };
         let override_authority = if supervisor_override {
             Some(self.resolve_live_supervisor_authority().map_err(|error| McpError {
                 code: ErrorCode::INVALID_PARAMS,

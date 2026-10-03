@@ -5,11 +5,24 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 job_lock="$script_dir/cassy-actions-cache-job-lock.sh"
 pruner="$script_dir/prune-cassy-actions-cache.sh"
+"$script_dir/test-cassy-actions-process-identity.sh"
+if [[ "$(uname -s)" != Linux ]]; then
+    printf 'SKIP job lock integration: Linux /proc and util-linux flock required; owner comparison tested above\n'
+    exit 0
+fi
 fixture_root="$(mktemp -d)"
 holder_started=0
+worker_pid=''
+inherited_pid=''
 cleanup() {
     if (( holder_started )); then
         run_completed >/dev/null 2>&1 || true
+    fi
+    [[ -z "$worker_pid" ]] || kill -TERM "$worker_pid" 2>/dev/null || true
+    [[ -z "$inherited_pid" ]] || kill -TERM "$inherited_pid" 2>/dev/null || true
+    if [[ -s "$state_root/slot-1.pid" ]]; then
+        read -r remaining_pid _ <"$state_root/slot-1.pid"
+        kill -TERM "$remaining_pid" 2>/dev/null || true
     fi
     rm -rf "$fixture_root"
 }
@@ -44,6 +57,10 @@ EOF
 
 cat >"$fixture_root/mount-guard" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${TEST_INHERIT_LOCK:-}" == 1 ]]; then
+    sleep 30 &
+    printf '%s\n' "$!" >"$TEST_INHERITED_PID"
+fi
 if [[ "${TEST_BLOCK_GUARD:-}" == 1 ]]; then
     : >"$TEST_GUARD_ENTERED"
     while [[ ! -e "$TEST_GUARD_RELEASE" ]]; do sleep 0.02; done
@@ -59,13 +76,61 @@ common_env=(
     RUNNER_TRACKING_ID=runner-would-reap-this-holder
 )
 
-run_started() {
-    env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 "$started_hook"
+# A real process named Runner.Worker owns each hook through its ancestry.
+# Killing it leaves the detached holder alive, exactly as a runner crash does.
+cat >"$fixture_root/worker.py" <<'PYWORKER'
+import ctypes
+import pathlib
+import subprocess
+import sys
+import time
+ctypes.CDLL(None).prctl(15, b"Runner.Worker", 0, 0, 0)
+root = pathlib.Path(sys.argv[1])
+(root / "worker-ready").touch()
+while True:
+    request = root / "request"
+    if request.exists():
+        hook = request.read_text().strip()
+        request.unlink()
+        with (root / "hook-output").open("w") as output:
+            result = subprocess.run([hook], stdout=output, stderr=subprocess.STDOUT)
+        (root / "response").write_text(str(result.returncode))
+    time.sleep(0.01)
+PYWORKER
+
+start_worker() {
+    rm -f "$fixture_root/worker-ready" "$fixture_root/request" "$fixture_root/response"
+    env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 \
+        python3 "$fixture_root/worker.py" "$fixture_root" &
+    worker_pid=$!
+    for _ in $(seq 1 100); do
+        [[ -e "$fixture_root/worker-ready" ]] && return 0
+        sleep 0.02
+    done
+    printf 'FAIL fake Runner.Worker did not start\n' >&2
+    exit 1
 }
 
-run_completed() {
-    env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 "$completed_hook"
+run_hook() {
+    local hook="$1" result
+    rm -f "$fixture_root/response"
+    printf '%s\n' "$hook" >"$fixture_root/request.tmp"
+    mv "$fixture_root/request.tmp" "$fixture_root/request"
+    for _ in $(seq 1 500); do
+        if [[ -e "$fixture_root/response" ]]; then
+            result="$(cat "$fixture_root/response")"
+            cat "$fixture_root/hook-output"
+            return "$result"
+        fi
+        sleep 0.02
+    done
+    printf 'FAIL hook did not respond\n' >&2
+    return 1
 }
+
+run_started() { run_hook "$started_hook"; }
+run_completed() { run_hook "$completed_hook"; }
+start_worker
 
 run_pruner() {
     env "${common_env[@]}" \
@@ -101,6 +166,22 @@ run_completed
 holder_started=0
 run_pruner --now >/dev/null
 printf 'ok   job-lifetime shared lock excludes scheduled and forced pruning\n'
+
+# The Worker dies, but the old detached holder (and shared flock) survives.
+run_started >/dev/null
+holder_started=1
+read -r orphan_pid _ <"$state_root/slot-1.pid"
+kill -KILL "$worker_pid"
+wait "$worker_pid" 2>/dev/null || true
+kill -0 "$orphan_pid"
+start_worker
+run_started
+read -r recovered_pid _ <"$state_root/slot-1.pid"
+[[ "$recovered_pid" != "$orphan_pid" ]]
+run_completed
+holder_started=0
+run_pruner --now >/dev/null
+printf 'PASS crashed Runner.Worker lock recovery with real /proc and flock\n'
 
 run_started >/dev/null
 holder_started=1

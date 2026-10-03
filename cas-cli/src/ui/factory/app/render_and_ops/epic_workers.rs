@@ -5367,7 +5367,14 @@ mod tests {
     async fn spawn_workers_replaces_dead_qa_reviewer_same_round_cas_3172() {
         use rmcp::handler::server::wrapper::Parameters;
         use cas_store::SpawnQueueStore;
-        let _guard = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut guard = crate::test_env_guard::TestEnvGuard::temp_home();
+        let bin = guard.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::test_paths::warm_stub(&bin.join("codex"), "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
+        let auth = guard.home().join(".codex/auth.json");
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(auth, "{}").unwrap();
+        guard.set("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
         let (_temp, cas_dir) = seeded_cas_dir();
         let before = claimed_qa_fixture(&cas_dir);
         let agents = open_agent_store(&cas_dir).unwrap();

@@ -392,8 +392,9 @@ pub(crate) fn worker_generation(
 ) -> Result<Option<String>, OperationError> {
     use cas_types::{AgentRole, AgentStatus};
     let agents = crate::store::open_agent_store(cas_dir)
-        .and_then(|store| store.list(None))
-        .map_err(|error| OperationError::Failed(format!("agent store unavailable: {error}")))?;
+        .map_err(|error| OperationError::Failed(format!("agent store unavailable: {error}")))?
+        .list(None)
+        .map_err(|error| OperationError::Failed(format!("agent registry unreadable: {error}")))?;
     Ok(agents
         .into_iter()
         .filter(|agent| {

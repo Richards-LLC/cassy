@@ -3863,6 +3863,94 @@ mod workspace_contract_tests {
         assert_eq!(created.matched_rule, "none");
     }
 
+    /// cas-aa4e: a ~/.cas runtime leftover may be deleted only when it is
+    /// stale. A socket someone still listens on, a lock someone holds or
+    /// whose recorded pid is alive, a pid file or session record whose pid is
+    /// alive: all refused with the reason. Stale ones are allowed.
+    #[cfg(unix)]
+    #[test]
+    fn runtime_leftover_delete_requires_staleness_decision_table_cas_aa4e() {
+        use fs2::FileExt;
+        // Unix socket paths are short-limited (about 104 bytes on macOS).
+        let root = tempfile::Builder::new().prefix("aa4e").tempdir_in("/tmp").expect("short root");
+        let home = root.path().canonicalize().unwrap().join("h");
+        let cas = home.join(".cas");
+        let worktree = root.path().canonicalize().unwrap().join("wt");
+        std::fs::create_dir_all(cas.join("sessions")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // A pid that has exited.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let live_pid = std::process::id();
+
+        let stale_sock = cas.join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale_sock).unwrap());
+        let live_sock = cas.join("live.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&live_sock).unwrap();
+        let free_lock = cas.join("free.lock");
+        std::fs::write(&free_lock, b"").unwrap();
+        let held_lock = cas.join("held.lock");
+        std::fs::write(&held_lock, b"").unwrap();
+        let holder = std::fs::File::open(&held_lock).unwrap();
+        holder.lock_exclusive().unwrap();
+        let pid_lock_live = cas.join("runner.lock");
+        std::fs::write(&pid_lock_live, format!("{live_pid}\n")).unwrap();
+        let pid_lock_dead = cas.join("old-runner.lock");
+        std::fs::write(&pid_lock_dead, format!("{dead_pid}\n")).unwrap();
+        let live_pidfile = cas.join("daemon.pid");
+        std::fs::write(&live_pidfile, format!("{live_pid}\n")).unwrap();
+        let dead_pidfile = cas.join("old-daemon.pid");
+        std::fs::write(&dead_pidfile, format!("{dead_pid}\n")).unwrap();
+        let live_session = cas.join("sessions/live.json");
+        std::fs::write(&live_session, format!("{{\"daemon_pid\": {live_pid}}}")).unwrap();
+        let dead_session = cas.join("sessions/dead.json");
+        std::fs::write(&dead_session, format!("{{\"daemon_pid\": {dead_pid}}}")).unwrap();
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let artifacts_root = Some(root.path().join("artifacts").display().to_string());
+        let decide = |path: &std::path::Path| {
+            factory_write_violation(
+                &bash_input(&format!("rm -f {}", path.display()), &worktree),
+                &artifacts_root,
+                None,
+                false,
+                Some(worktree.as_path()),
+            )
+        };
+
+        for (case, path) in [
+            ("socket with connect() refused", &stale_sock),
+            ("lock nobody holds", &free_lock),
+            ("lock recording a dead pid", &pid_lock_dead),
+            ("pid file of a dead pid", &dead_pidfile),
+            ("session record of a dead daemon", &dead_session),
+        ] {
+            assert_eq!(decide(path), None, "{case}: a stale leftover is deletable");
+        }
+        for (case, path, reason) in [
+            ("socket with a live listener", &live_sock, "listener"),
+            ("lock held by another handle", &held_lock, "held"),
+            ("lock recording a live pid", &pid_lock_live, "alive"),
+            ("pid file of a live pid", &live_pidfile, "alive"),
+            ("session record of a live daemon", &live_session, "alive"),
+        ] {
+            let violation = decide(path).unwrap_or_else(|| panic!("{case} must be refused"));
+            assert!(
+                violation.matched_rule.contains("live Cassy runtime file")
+                    && violation.matched_rule.contains(reason),
+                "{case}: {violation:?}"
+            );
+        }
+        drop(holder);
+    }
+
     #[test]
     fn home_paths_in_read_only_commands_are_not_write_targets() {
         for command in [

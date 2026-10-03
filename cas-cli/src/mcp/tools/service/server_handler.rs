@@ -410,7 +410,7 @@ mod tests {
         let call = async move {
             sender.coordination(Parameters(request)).await.unwrap();
             // Simulate post-commit work that outlives the response budget.
-            std::future::pending::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>().await;
+            std::future::pending::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>().await
         };
         let started = std::time::Instant::now();
         let error = service

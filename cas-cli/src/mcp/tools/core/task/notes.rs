@@ -87,7 +87,7 @@ impl CasCore {
             data: None,
         })?;
 
-        crate::mcp::tools::service::mutation_receipt::task_committed(&req.id);
+        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
         if let Err(e) = self.record_task_note_activity(
             &req.id,
             &req.note_type,

@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, renderPairedMachines, type PairedMachineRow } from './paired-machines';
 import { UNSTEADY } from './connection-state';
 
@@ -108,5 +111,36 @@ describe('the machine that is not connected comes first and the footer names it 
     expect(ids()).toEqual(['atlas', 'studio', 'shed', 'forge']);
     renderPairedMachines(container, orderPairedMachines(fleet), async () => undefined);
     expect(ids()).toEqual(['shed', 'atlas', 'studio', 'forge']);
+  });
+});
+
+describe('an overlong machine label on the phone footer (cas-c19d)', () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'styles.css'), 'utf8');
+  const name = 'soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap';
+  const live = (id: string, label: string): PairedMachineRow => ({ id, label, address: `${id}.test`, connection: 'Connected', connected: true, everConnected: true, lastSeen: '', connectionState: { phase: 'live', degraded: false } });
+
+  it('carries its full name as a title, since the phone footer may ellipsise it', () => {
+    const footer = document.createElement('div');
+    footer.innerHTML = machineFooterMarkup([live('atlas', name)], 1, 'test-build');
+    const label = footer.querySelector('#paired-machines-toggle')!.children[1] as HTMLElement;
+    expect(label.textContent).toBe(name);
+    expect(label.title).toBe(name);
+  });
+
+  it('lets the label shrink and ellipsise after the state has yielded, so the two never overlap', () => {
+    const rule = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      return at < 0 ? '' : css.slice(at, css.indexOf('}', at));
+    };
+    const label = rule('  .conversation-sidebar #paired-machines-toggle > span:nth-child(2)');
+    expect(label).toContain('flex: 0 1 auto');
+    expect(label).toContain('min-width: 0');
+    expect(label).toContain('text-overflow: ellipsis');
+    expect(label).toContain('overflow: hidden');
+    // The state still gives way first: its shrink weight dwarfs the label's.
+    const state = rule('  .conversation-sidebar #paired-machines-toggle .machine-badge-state');
+    expect(state).toContain('flex: 1 1000 auto');
+    // ...but never below a 4em stub, so an overlong name cannot hide it entirely.
+    expect(state).toContain('min-width: 4em');
   });
 });

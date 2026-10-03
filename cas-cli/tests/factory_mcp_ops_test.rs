@@ -5592,8 +5592,8 @@ async fn test_gc_cleanup_without_force() {
 
     let text = get_text(&result.unwrap());
     assert!(
-        text.contains("Prompt queue entries cleared: 0"),
-        "Should NOT clear prompts without force: {text}"
+        text.contains("Prompt queue entries pruned: 0"),
+        "Should NOT prune prompts without force: {text}"
     );
     assert!(
         text.contains("Orphan worker process groups reaped: 0"),
@@ -5631,13 +5631,37 @@ async fn test_gc_cleanup_removes_only_stale_skill_markers_and_invalid_bare_marke
     assert!(current.exists(), "live session marker must be preserved");
 }
 
+/// cas-9d8a: `force=true` without `older_than_secs` is a retention sweep, not
+/// an all-history clear. Terminal rows older than the window go; recent
+/// forensics, pending rows and relay episode rows stay.
 #[tokio::test]
-async fn test_gc_cleanup_with_force() {
+async fn test_gc_cleanup_with_force_prunes_by_retention_window() {
     let env = FactoryTestEnv::new();
 
     let pq = env.prompt_queue();
-    pq.enqueue("src", "wolf", "test1").expect("enqueue");
-    pq.enqueue("src", "fox", "test2").expect("enqueue");
+    let pending = pq.enqueue("src", "wolf", "still pending").expect("enqueue");
+    let old_a = pq.enqueue("src", "fox", "old delivered").expect("enqueue");
+    let old_b = pq.enqueue("src", "fox", "old acked").expect("enqueue");
+    let recent = pq.enqueue("src", "fox", "recent delivered").expect("enqueue");
+    let episode = match pq
+        .enqueue_idempotent("daemon", "supervisor", "relay", None, None, None, "lifecycle-relay:old", None)
+        .unwrap()
+    {
+        cas_store::EnqueueIdempotentResult::Created(id) => id,
+        other => panic!("{other:?}"),
+    };
+    {
+        let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+        let aged = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        let fresh = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        for (id, at) in [(old_a, &aged), (old_b, &aged), (episode, &aged), (recent, &fresh)] {
+            conn.execute(
+                "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
+                rusqlite::params![at, id],
+            )
+            .unwrap();
+        }
+    }
 
     let mut req = factory_req("gc_cleanup");
     req.force = Some(true);
@@ -5647,11 +5671,16 @@ async fn test_gc_cleanup_with_force() {
 
     let text = get_text(&result.unwrap());
     assert!(
-        text.contains("Prompt queue entries cleared: 2"),
-        "Should clear prompts with force: {text}"
+        text.contains("Prompt queue entries pruned: 2 (terminal rows older than 7 days)"),
+        "force prunes only aged terminal rows: {text}"
     );
-
-    assert_eq!(pq.pending_count().expect("count"), 0);
+    assert!(text.contains("Prompt queue episode rows retained: 1"), "{text}");
+    assert_eq!(pq.pending_count().expect("count"), 1, "pending rows are never pruned");
+    assert!(pq.message_delivery_report(pending).unwrap().is_some());
+    assert!(pq.message_delivery_report(recent).unwrap().is_some(), "recent forensics stay");
+    assert!(pq.message_delivery_report(episode).unwrap().is_some(), "episode rows stay");
+    assert!(pq.message_delivery_report(old_a).unwrap().is_none());
+    assert!(pq.message_delivery_report(old_b).unwrap().is_none());
 }
 
 #[tokio::test]
@@ -5671,7 +5700,7 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
         "targeted remediation must report terminalized rows: {text}"
     );
     assert!(
-        text.contains("Prompt queue entries cleared: 0"),
+        text.contains("Prompt queue entries pruned: 0"),
         "age-targeted remediation must preserve history: {text}"
     );
     assert_eq!(pq.pending_count().unwrap(), 0);

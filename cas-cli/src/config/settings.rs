@@ -561,6 +561,13 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
+    /// Days a terminal prompt-queue row (delivered, acked, suppressed or
+    /// abandoned) is kept before the maintenance sweep deletes it (cas-9d8a).
+    /// Pending rows and rows carrying a relay episode key are never deleted
+    /// by retention. 0 disables the sweep.
+    #[serde(default = "default_prompt_retention_days")]
+    pub prompt_retention_days: u32,
+
     /// Seconds a worker may hold an in-progress task with a fresh heartbeat
     /// but zero observable activity (no file edits, commits, or subagent
     /// events) before the director flags it `WorkerStalled` and notifies
@@ -794,6 +801,10 @@ fn default_max_concurrent_builders() -> usize {
     4
 }
 
+pub(crate) fn default_prompt_retention_days() -> u32 {
+    7
+}
+
 fn default_message_max_chars() -> usize {
     1200
 }
@@ -859,6 +870,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            prompt_retention_days: default_prompt_retention_days(),
             stall_threshold_secs: default_stall_threshold_secs(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),

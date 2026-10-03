@@ -92,7 +92,7 @@ export function fixtureManySessionRows(): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
   const supervisor = sessions ? 'calm-puma-34' : FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long'].includes(state);
+  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long', 'conversations-machine-label-overlong'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
   // First run: the catalog is loaded and empty, so the welcome offers pairing.
@@ -137,6 +137,10 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       // cas-0739 QA round 1: a long machine name down; the footer state must
       // not collide with the label (phone) or squeeze it (desktop).
       ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'bench-1' ? { ...machine, label: 'Build Server Rack Seven Downstairs · Windows', connection: "Can't reach · retrying", connected: false, lastSeen: 'Not yet seen in this visit' } : machine))
+      : state === 'conversations-machine-label-overlong'
+        // cas-c19d: one connected machine whose name is about 691px wide at
+        // 390, so the phone footer shows the label itself beside its state.
+        ? [{ ...FIXTURE_MACHINES[0]!, label: 'soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap' }]
       : needsPairing
         ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'atlas-linux' ? { ...machine, connection: 'Needs pairing', connected: false } : machine))
         : FIXTURE_MACHINES;

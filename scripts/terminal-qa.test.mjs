@@ -284,3 +284,95 @@ test("a missing command is a usage error", async (t) => {
   assert.equal(cli.status, 2);
   assert.match(cli.stderr, /command not found/);
 });
+
+// Capture integrity regressions (cas-c161). Exercise the production runner,
+// including expected nonzero command exits, rather than just ANSI analysis.
+test("stderr-only diagnostics are captured in every run, including expected failures", async (t) => {
+  const out = tmpOut(t);
+  const report = await runTerminalQa({
+    command: [process.execPath, "-e", 'process.stderr.write("FAIL release assembly\\nRecovery: rerun --cut\\n"); process.exit(7)'],
+    out,
+  });
+  assert.equal(report.verdict, "PASS", JSON.stringify(report.findings));
+  assert.equal(report.runs.length, 11);
+  for (const run of report.runs) {
+    assert.equal(run.exit_code, 7, run.name);
+    assert.match(fs.readFileSync(run.files.txt, "utf8"), /FAIL release assembly/);
+    assert.ok(run.max_width > 0, run.name);
+  }
+  const piped = report.runs.find((r) => r.name === "piped");
+  assert.match(fs.readFileSync(piped.files.stderr, "utf8"), /Recovery: rerun --cut/);
+});
+
+test("piped stderr receives the same rendering checks as stdout", async (t) => {
+  const out = tmpOut(t);
+  const report = await runTerminalQa({ command: [process.execPath, "-e", 'process.stderr.write("\\x1b[2Kdiagnostic\\n")'], out });
+  assert.equal(report.verdict, "FAIL");
+  assert.ok(report.findings.some((f) => f.run === "piped" && f.check === "control-when-piped"));
+});
+
+test("empty captures fail even with a wildcard allowlist", async (t) => {
+  const out = tmpOut(t);
+  const allowlist = path.join(out, "allow.json");
+  fs.writeFileSync(allowlist, JSON.stringify([{ check: "*", reason: "rendering exceptions cannot waive missing evidence" }]));
+  const report = await runTerminalQa({ command: [process.execPath, "-e", ""], out, allowlist });
+  assert.equal(report.verdict, "FAIL");
+  assert.equal(report.findings.filter((f) => f.check === "empty-capture").length, 11);
+  assert.equal(report.allowed.length, 0);
+  assert.match(fs.readFileSync(path.join(out, "report.md"), "utf8"), /^terminal-qa: FAIL/);
+});
+
+function fakeScript(t, body) {
+  const dir = tmpOut(t);
+  const executable = path.join(dir, "script");
+  fs.writeFileSync(executable, "#!/bin/sh\n" + body + "\n", { mode: 0o755 });
+  const original = process.env.PATH;
+  process.env.PATH = dir + path.delimiter + original;
+  t.after(() => { process.env.PATH = original; });
+}
+
+for (const [name, body] of [
+  ["unsupported script", 'printf "script: unsupported option\\n" >&2; exit 1'],
+  ["silent successful script", "exit 0"],
+  ["script that only prints its own error", 'printf "script runner failed\\n"; exit 1'],
+]) {
+  test(`${name} is unavailable and cannot retain a stale PASS`, async (t) => {
+    fakeScript(t, body);
+    const out = tmpOut(t);
+    fs.writeFileSync(path.join(out, "report.md"), "terminal-qa: PASS stale\n");
+    fs.writeFileSync(path.join(out, "report.json"), '{"verdict":"PASS"}');
+    await assert.rejects(
+      runTerminalQa({ command: [process.execPath, "-e", 'console.log("healthy")'], out }),
+      (err) => err instanceof UsageError && /pty unavailable/i.test(err.message),
+    );
+    assert.ok(!fs.existsSync(path.join(out, "report.md")));
+    assert.ok(!fs.existsSync(path.join(out, "report.json")));
+    const cli = spawnSync(process.execPath, [script, "--out", out, "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
+    assert.equal(cli.status, 2, cli.stderr + cli.stdout);
+    assert.match(cli.stderr, /pty unavailable/i);
+    assert.doesNotMatch(cli.stdout, /terminal-qa: PASS/);
+  });
+}
+
+test("JSON analysis retains stdout separately from diagnostic stderr", async (t) => {
+  const out = tmpOut(t);
+  const report = await runTerminalQa({
+    command: [process.execPath, "-e", 'console.log(process.argv.includes("--json") ? JSON.stringify({healthy:true}) : "healthy"); process.stderr.write("diagnostic\\n")', "--"],
+    out, jsonFlag: "--json",
+  });
+  assert.equal(report.verdict, "PASS", JSON.stringify(report.findings));
+  const json = report.runs.find((r) => r.name === "json");
+  assert.deepEqual(JSON.parse(fs.readFileSync(json.files.txt, "utf8")), { healthy: true });
+  assert.equal(fs.readFileSync(json.files.stderr, "utf8"), "diagnostic\n");
+});
+
+test("JSON stderr is checked for piped control sequences without polluting the document", async (t) => {
+  const out = tmpOut(t);
+  const report = await runTerminalQa({
+    command: [process.execPath, "-e", 'if (process.argv.includes("--json")) {console.log("{}"); process.stderr.write("\\x1b[2Kdiagnostic\\n")} else console.log("healthy")', "--"],
+    out, jsonFlag: "--json",
+  });
+  assert.equal(report.verdict, "FAIL");
+  assert.ok(report.findings.some((f) => f.run === "json.stderr" && f.check === "control-when-piped"));
+  assert.ok(!report.findings.some((f) => f.check === "json-contract"));
+});

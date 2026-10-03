@@ -38,15 +38,18 @@
 //                                      stdout is not a tty
 //   color-when-piped            warn   SGR colour when stdout is not a tty
 //   json-contract               fail   --json stdout is not exactly one document
+//   empty-capture               fail   no visible command output (cannot be allowlisted)
 //
 // Receipt (first line of report.md, last line on stdout):
 //   terminal-qa: PASS <label> · <n> runs · <fails> fail · <warns> warn · <allowed> allowed · <report.json>
 //
-// Exit codes: 0 PASS, 1 FAIL, 2 usage/error. The command's own exit status is
-// recorded per run and never decides the verdict.
+// Exit codes: 0 PASS, 1 FAIL, 2 usage/error or unavailable capture runner.
+// Expected command failures are valid diagnostic captures; script must finish
+// the command and every run must contain visible output before PASS is possible.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -817,15 +820,29 @@ function baseEnv() {
 }
 
 function runInPty(command, args, { columns, env, timeoutMs }) {
-  const inner = `stty cols ${columns} rows 50 2>/dev/null; exec ${[command, ...args].map(shellQuote).join(" ")}`;
-  const res = spawnSync("script", ["-q", "-e", "-c", inner, "/dev/null"], {
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: timeoutMs,
-  });
-  if (res.error) throw res.error;
-  return { raw: res.stdout ?? Buffer.alloc(0), stderr: res.stderr ?? Buffer.alloc(0), exit_code: res.status ?? (res.signal ? 128 : 1), timed_out: Boolean(res.error?.code === "ETIMEDOUT") };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "terminal-qa-pty-"));
+  const statusFile = path.join(dir, "command-status");
+  // The marker proves the requested command finished, rather than script just
+  // printing an error. Keep it outside the byte stream being evaluated.
+  const inner = `stty cols ${columns} rows 50 || exit 1; ${[command, ...args].map(shellQuote).join(" ")}; tqa_command_status=$?; printf '%s\\n' "$tqa_command_status" > ${shellQuote(statusFile)}; exit "$tqa_command_status"`;
+  const bsd = ["darwin", "freebsd", "openbsd", "netbsd"].includes(process.platform);
+  const scriptArgs = bsd ? ["-q", "/dev/null", "/bin/sh", "-c", inner] : ["-q", "-e", "-c", inner, "/dev/null"];
+  try {
+    const res = spawnSync("script", scriptArgs, {
+      env: { ...env, SHELL: "/bin/sh" },
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: timeoutMs,
+    });
+    const status = fs.existsSync(statusFile) ? fs.readFileSync(statusFile, "utf8").trim() : "";
+    if (res.error || res.signal || !/^\d+$/.test(status)) {
+      const detail = res.error?.message || res.stderr?.toString().trim() || res.stdout?.toString().trim() || `script exited ${res.status} without completing the command`;
+      throw new UsageError(`pty unavailable: ${detail}`);
+    }
+    return { raw: res.stdout ?? Buffer.alloc(0), exit_code: Number(status) };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function runPiped(command, args, { env, timeoutMs }) {
@@ -836,7 +853,11 @@ function runPiped(command, args, { env, timeoutMs }) {
     timeout: timeoutMs,
   });
   if (res.error) throw res.error;
-  return { raw: res.stdout ?? Buffer.alloc(0), stderr: res.stderr ?? Buffer.alloc(0), exit_code: res.status ?? (res.signal ? 128 : 1) };
+  const stdout = res.stdout ?? Buffer.alloc(0);
+  const stderr = res.stderr ?? Buffer.alloc(0);
+  // Human pipe captures include both streams. JSON keeps stdout as its one
+  // document and evaluates stderr separately below; both streams get sidecars.
+  return { raw: Buffer.concat([stdout, stderr]), stdout, stderr, exit_code: res.status ?? (res.signal ? 128 : 1) };
 }
 
 function slugify(s) {
@@ -902,33 +923,43 @@ export async function runTerminalQa(options) {
   if (!command || command.length === 0) throw new UsageError("no command given after --");
   for (const p of palettes) if (!PALETTES[p]) throw new UsageError(`unknown palette "${p}" (known: ${Object.keys(PALETTES).join(", ")})`);
   for (const w of widths) if (!Number.isInteger(w) || w < 20) throw new UsageError(`invalid width "${w}"`);
-  const which = spawnSync("sh", ["-c", "command -v script"], { stdio: ["ignore", "pipe", "ignore"] });
-  if (which.status !== 0) throw new UsageError("util-linux `script` is required to allocate a pty and was not found on PATH");
-
   const [cmd, ...args] = command;
   const label = options.label ?? slugify([path.basename(cmd), ...args].join("-"));
   const outDir = path.resolve(options.out ?? path.join(".cas", "artifacts", "terminal-qa", label));
   fs.mkdirSync(outDir, { recursive: true });
+  // An interrupted/unavailable rerun must not leave an older passing receipt.
+  for (const file of ["report.md", "report.json"]) fs.rmSync(path.join(outDir, file), { force: true });
+  const which = spawnSync("sh", ["-c", "command -v script"], { stdio: ["ignore", "pipe", "ignore"] });
+  if (which.status !== 0) throw new UsageError("pty unavailable: BSD or util-linux `script` is required and was not found on PATH");
   const allowlist = loadAllowlist(options.allowlist);
 
   const runs = [];
   const captures = new Map();
   const record = (name, extra, result) => {
-    const lines = parseAnsi(result.raw);
+    const raw = extra.kind === "json" ? result.stdout : result.raw;
+    const lines = parseAnsi(raw);
     const ansiFile = path.join(outDir, `${label}.${name}.ansi`);
     const txtFile = path.join(outDir, `${label}.${name}.txt`);
-    fs.writeFileSync(ansiFile, result.raw);
-    fs.writeFileSync(txtFile, stripAnsi(result.raw));
+    fs.writeFileSync(ansiFile, raw);
+    fs.writeFileSync(txtFile, stripAnsi(raw));
+    const files = { ansi: relPath(ansiFile), txt: relPath(txtFile) };
+    for (const stream of ["stdout", "stderr"]) {
+      if (result[stream] === undefined) continue;
+      const file = path.join(outDir, `${label}.${name}.${stream}`);
+      fs.writeFileSync(file, result[stream]);
+      files[stream] = relPath(file);
+    }
     const run = {
       name,
       ...extra,
       exit_code: result.exit_code,
       lines: lines.length,
       max_width: Math.max(0, ...lines.map(lineWidth)),
-      files: { ansi: relPath(ansiFile), txt: relPath(txtFile) },
+      capture_bytes: raw.length,
+      files,
     };
     runs.push(run);
-    captures.set(name, { run, raw: result.raw });
+    captures.set(name, { run, raw, stderr: result.stderr });
     return run;
   };
 
@@ -966,7 +997,12 @@ export async function runTerminalQa(options) {
   // Analysis. Narrow pty runs get the widest same-palette capture as a word-split reference.
   const widest = Math.max(...widths);
   const findingsAll = [];
-  for (const { run, raw } of captures.values()) {
+  for (const { run, raw, stderr } of captures.values()) {
+    if (!stripAnsi(raw).trim()) {
+      findingsAll.push({ check: "empty-capture", severity: "fail", run: run.name, line: 1,
+        excerpt: "(no visible command output)", detail: { bytes: raw.length },
+        fix: "Capture a command that prints the intended terminal surface; empty evidence cannot pass." });
+    }
     let referenceText = null;
     if (run.kind === "pty" && run.width !== widest) {
       const ref = captures.get(`${widest}.${run.palette}`);
@@ -975,12 +1011,15 @@ export async function runTerminalQa(options) {
     findingsAll.push(
       ...analyzeCapture({ raw, columns: run.width ?? 80, palette: run.palette ?? "dark", run: { name: run.name, kind: run.kind }, escapeFlag, jsonFlag: jsonFlag ?? "--json", referenceText }),
     );
+    if (run.kind === "json" && stderr.length > 0) {
+      findingsAll.push(...analyzeCapture({ raw: stderr, columns: 80, palette: "dark", run: { name: "json.stderr", kind: "piped" }, escapeFlag }));
+    }
   }
 
   const findings = [];
   const allowed = [];
   for (const f of findingsAll) {
-    const entry = allowlist.find((e) => (e.check === "*" || e.check === f.check) && allowMatcher(e)(f));
+    const entry = f.check === "empty-capture" ? undefined : allowlist.find((e) => (e.check === "*" || e.check === f.check) && allowMatcher(e)(f));
     if (entry) allowed.push({ ...f, reason: entry.reason });
     else findings.push(f);
   }

@@ -314,8 +314,9 @@ assembly stage use this same command; retries cite the existing receipt.
 Before the pipeline lands, `--cut --resume` compares the integration tip/base
 with the input recorded by assemble. A changed integration input archives the
 old stage receipts and reruns assemble, prep, ledger and every later stage.
-Release prose, member-version bumps and the generated ledger are replayed onto
-the new tested tip; source edits block automatic replay. A rebase conflict
+Release prose, journey-evaluation reports, member-version bumps and the
+generated ledger are replayed onto the new tested tip; source edits block
+automatic replay. A rebase conflict
 restores the checkout and prints a named blocker with a recovery command.
 After a valid pipeline/publish receipt exists, resume finishes that landed
 release without adopting a newer integration tip.
@@ -323,9 +324,10 @@ release without adopting a newer integration tip.
 The first full release gate automatically reuses its nextest and archive-mode
 rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
 expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows,
-toolchain or test environment cause a miss. Only `CHANGELOG.md` and release
-prose under `docs/release-notes/` and `docs/release-reports/` are excluded from
-the code-input hash; embedded Rust documentation fixtures remain inputs.
+toolchain or test environment cause a miss. `CHANGELOG.md`, release prose under
+`docs/release-notes/` and `docs/release-reports/`, and Markdown under
+`docs/qa/journey-evaluations/` are excluded from the code-input hash; embedded
+Rust documentation fixtures remain inputs.
 The prep stage's workspace-member `[package]` version values and corresponding
 source-less member `[[package]]` lock versions are normalized. The generated
 `cas-cli/src/builtins/reference-history.json` ledger is excluded; its source

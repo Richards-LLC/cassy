@@ -129,7 +129,8 @@ def code_input(root, revision="HEAD"):
             mode_type = entry.split(b" ", 2)[:2]
             entry = b" ".join(mode_type + [digest(normalized[path.decode()]).encode()]) + b"\t" + path
         prose = path == b"CHANGELOG.md" or path.startswith(
-            (b"docs/release-notes/", b"docs/release-reports/"))
+            (b"docs/release-notes/", b"docs/release-reports/")) or (
+                path.startswith(b"docs/qa/journey-evaluations/") and path.endswith(b".md"))
         if not prose or any(path == item or path.startswith(item.rstrip(b"/") + b"/")
                             for item in embedded):
             material.append(entry)

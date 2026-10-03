@@ -6836,15 +6836,41 @@ async fn test_branchless_no_code_epic_closes_without_checkout_snapshot_cas_04c6(
     epic.epic_verification_owner = Some(owner);
     store.add(&epic).unwrap();
     let _supervisor = ScopedSupervisorEnv::new(&mut env);
-    let text = extract_text(service.cas_task_close(Parameters(TaskCloseRequest {
-        id: epic.id.clone(),
+    let id = epic.id.clone();
+    let close_request = || TaskCloseRequest {
+        id: id.clone(),
         reason: Some("Planning complete".into()),
         stranded_branch_override: None,
         supervisor_override: None,
         legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
-    })).await.unwrap());
+    };
+    // A declared missing branch remains fail-closed even with no child code.
+    epic.branch = Some("epic/missing".into());
+    store.update(&epic).unwrap();
+    let text = extract_text(service.cas_task_close(Parameters(close_request())).await.unwrap());
+    assert!(text.contains("EPIC DELIVERY TIP REQUIRED"), "{text}");
+    assert_eq!(store.get(&id).unwrap().status, TaskStatus::InProgress);
+    epic.branch = None;
+    store.update(&epic).unwrap();
+
+    // Durable child code also requires an epic tip; clearing only the parent
+    // branch must not turn a code delivery into a planning-only close.
+    let mut child = cas::types::Task::new("cas-04c6-child".into(), "Child".into());
+    child.status = TaskStatus::Closed;
+    child.deliverables.files_changed = vec!["child.rs".into()];
+    store.add(&child).unwrap();
+    store.add_dependency(&cas::types::Dependency::new(
+        child.id.clone(), id.clone(), cas::types::DependencyType::ParentChild,
+    )).unwrap();
+    let text = extract_text(service.cas_task_close(Parameters(close_request())).await.unwrap());
+    assert!(text.contains("EPIC DELIVERY TIP REQUIRED"), "{text}");
+    assert_eq!(store.get(&id).unwrap().status, TaskStatus::InProgress);
+    // A completed ops child has no code delivery to measure.
+    child.deliverables.files_changed.clear();
+    store.update(&child).unwrap();
+    let text = extract_text(service.cas_task_close(Parameters(close_request())).await.unwrap());
     assert_eq!(store.get(&epic.id).unwrap().status, TaskStatus::Closed, "{text}");
     assert!(!text.contains("SNAPSHOT APPROVAL REQUIRED"), "{text}");
 }

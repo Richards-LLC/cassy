@@ -548,8 +548,9 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+M leave
     await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
     const input = terminalInput(page);
     await input.focus();
-    const hint = page.locator(".t3-ghostty-escape-hint");
-    await expect(hint).toBeVisible();
+    // The focused terminal's own hint: other panes' terminals keep theirs hidden.
+    const hint = page.locator(".t3-ghostty-escape-hint").filter({ visible: true });
+    await expect(hint).toHaveCount(1);
     await expect(hint).toHaveText("Tab goes to the terminal. Ctrl+M leaves it.");
     await expect(input).toHaveAccessibleDescription("Tab goes to the terminal. Ctrl+M leaves it.");
     await page.keyboard.press("Tab");
@@ -557,7 +558,7 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+M leave
     await page.keyboard.press("Control+m");
     await expect(input).not.toBeFocused();
     expect(await offBody(page), "Ctrl+M lands on a real control, not the page").toBe(true);
-    await expect(hint).toBeHidden();
+    await expect(hint).toHaveCount(0);
   });
 });
 

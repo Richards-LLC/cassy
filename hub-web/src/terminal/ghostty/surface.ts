@@ -608,6 +608,7 @@ export class GhosttyTerminalSurface {
     input: HTMLTextAreaElement,
     scrollbar: HTMLDivElement,
     scrollbarThumb: HTMLDivElement,
+    escapeHint: HTMLParagraphElement,
     context: CanvasRenderingContext2D,
     core: GhosttyTerminalCore,
     metrics: GhosttyCellMetrics,
@@ -619,13 +620,7 @@ export class GhosttyTerminalSurface {
     this.input = input;
     this.scrollbar = scrollbar;
     this.scrollbarThumb = scrollbarThumb;
-    // cas-d1fa: in control, the terminal keeps Tab; this says how to leave.
-    this.escapeHint = document.createElement("p");
-    this.escapeHint.className = "t3-ghostty-escape-hint";
-    this.escapeHint.id = `t3-ghostty-escape-hint-${++escapeHintCount}`;
-    this.escapeHint.textContent = TERMINAL_ESCAPE_HINT;
-    this.escapeHint.hidden = true;
-    mount.append(this.escapeHint);
+    this.escapeHint = escapeHint;
     this.context = context;
     this.core = core;
     this.metrics = metrics;
@@ -671,7 +666,14 @@ export class GhosttyTerminalSurface {
     // thread, marked data-mount-overlay) survives the setup, so the reader never
     // sees the mount blank while fonts and WASM load (cas-04ee).
     const overlays = [...mount.children].filter((child) => child instanceof HTMLElement && child.dataset.mountOverlay !== undefined);
-    mount.replaceChildren(canvas, input, scrollbar, ...overlays);
+    // cas-d1fa: in control, the terminal keeps Tab; this says how to leave. It
+    // is mounted with the input, so a later surface on this mount replaces both.
+    const escapeHint = document.createElement("p");
+    escapeHint.className = "t3-ghostty-escape-hint";
+    escapeHint.id = `t3-ghostty-escape-hint-${++escapeHintCount}`;
+    escapeHint.textContent = TERMINAL_ESCAPE_HINT;
+    escapeHint.hidden = true;
+    mount.replaceChildren(canvas, input, scrollbar, escapeHint, ...overlays);
 
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("Canvas 2D is unavailable");
@@ -705,6 +707,7 @@ export class GhosttyTerminalSurface {
       input,
       scrollbar,
       scrollbarThumb,
+      escapeHint,
       context,
       core,
       metrics,

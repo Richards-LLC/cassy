@@ -975,6 +975,22 @@ pub(crate) fn resolve_target_branch_tip(repo_path: &Path, target_branch: &str) -
     resolve_live_branch_tip(repo_path, target_branch, None)
 }
 
+/// The git decision for a queued merge request at delivery time: the live tip
+/// of the task's merge-request branch, judged against the envelope's target.
+/// Falls back to the envelope's tip only when the branch no longer resolves.
+pub(crate) fn queued_merge_request_decision(
+    repo_root: &Path,
+    task: Option<&Task>,
+    envelope: &MergeRequestEnvelope,
+) -> MergeRequestDecision {
+    let live_branch_tip = merge_request_branch(task)
+        .and_then(|branch| {
+            resolve_live_branch_tip(repo_root, &branch, Some(envelope.branch_tip.as_str()))
+        })
+        .unwrap_or_else(|| envelope.branch_tip.clone());
+    revalidate_merge_request(repo_root, &live_branch_tip, &envelope.target_branch)
+}
+
 pub(crate) fn revalidate_merge_request(
     repo_path: &Path,
     branch_tip: &str,
@@ -1947,6 +1963,87 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// cas-afa9 fixture (the cas-3508 shape): the previous cycle's branch
+    /// `factory/old-cas-t` landed on main; the task was reopened and
+    /// reassigned, and its current delivery `factory/new-cas-t` is unmerged.
+    /// The task still records the stale `parked_branch`. Returns the repo,
+    /// the task as stored then, and the worker's merge-request envelope.
+    fn reassigned_delivery_fixture() -> (tempfile::TempDir, cas_types::Task, MergeRequestEnvelope) {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let p = repo.path();
+        git(p, &["init", "-b", "main"]);
+        git(p, &["config", "user.email", "cas-test@example.invalid"]);
+        git(p, &["config", "user.name", "Cassy Test"]);
+        std::fs::write(p.join("base"), "base\n").expect("base file");
+        git(p, &["add", "base"]);
+        git(p, &["commit", "-m", "base"]);
+        git(p, &["checkout", "-b", "factory/old-cas-t"]);
+        std::fs::write(p.join("draft"), "first cycle\n").expect("draft file");
+        git(p, &["add", "draft"]);
+        git(p, &["commit", "-m", "first cycle (cas-t)"]);
+        let old_tip = git(p, &["rev-parse", "HEAD"]);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "factory/old-cas-t", "-m", "merge first cycle"]);
+        let target_tip = git(p, &["rev-parse", "main"]);
+        git(p, &["checkout", "-b", "factory/new-cas-t"]);
+        std::fs::write(p.join("draft"), "second cycle\n").expect("draft file");
+        git(p, &["add", "draft"]);
+        git(p, &["commit", "-m", "second cycle (cas-t)"]);
+        let new_tip = git(p, &["rev-parse", "HEAD"]);
+        git(p, &["checkout", "main"]);
+
+        let mut task = cas_types::Task::new("cas-t".to_string(), "reopened delivery".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("new".to_string());
+        task.deliverables.parked_branch = Some("factory/old-cas-t".to_string());
+        task.deliverables.factory_branch_anchor = Some(new_tip.clone());
+        task.deliverables.historical_factory_branch_anchors = vec![old_tip];
+        let envelope = MergeRequestEnvelope {
+            task_id: "cas-t".to_string(),
+            branch_tip: new_tip,
+            target_branch: "main".to_string(),
+            target_branch_tip: target_tip,
+            anchor_tip: None,
+            commits_not_on_target_base: 1,
+            pr_number: None,
+        };
+        (repo, task, envelope)
+    }
+
+    /// cas-afa9: a merge request whose requested delivery is not on the target
+    /// is delivered, never answered "merge already landed", even when the
+    /// task's recorded branch is an older cycle's that did land.
+    #[test]
+    fn an_unmerged_delivery_is_never_suppressed_as_landed_cas_afa9() {
+        let (repo, task, envelope) = reassigned_delivery_fixture();
+        let git_decision = queued_merge_request_decision(repo.path(), Some(&task), &envelope);
+        assert!(
+            matches!(git_decision, MergeRequestDecision::Pending { ref target_tip } if *target_tip == envelope.target_branch_tip),
+            "the requested tip is not on main, which is unchanged: {git_decision:?}"
+        );
+        assert_eq!(
+            merge_request_delivery_decision(Some(&task), &envelope, &git_decision),
+            MergeRequestDelivery::Deliver,
+            "an unchanged target keeps the merge request live"
+        );
+    }
+
+    /// cas-afa9: once that delivery really lands, the landed notice is right.
+    #[test]
+    fn the_landed_notice_follows_the_requested_delivery_cas_afa9() {
+        let (repo, task, envelope) = reassigned_delivery_fixture();
+        git(repo.path(), &["merge", "--no-ff", "factory/new-cas-t", "-m", "merge second cycle"]);
+        let git_decision = queued_merge_request_decision(repo.path(), Some(&task), &envelope);
+        assert!(
+            matches!(git_decision, MergeRequestDecision::AlreadyIntegrated { .. }),
+            "{git_decision:?}"
+        );
+        assert!(matches!(
+            merge_request_delivery_decision(Some(&task), &envelope, &git_decision),
+            MergeRequestDelivery::SuppressLanded { .. }
+        ));
     }
 
     /// GH #703 (cas-b17c) — the reported defect, replayed.

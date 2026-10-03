@@ -100,6 +100,53 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
     }
 }
 
+/// Policy dispatch must follow the executable through supported nice forms,
+/// including forms where the harness is not the third argument.
+#[test]
+fn worker_resource_policy_uses_effective_command_for_nice_wrappers_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[factory]\nsupervisor_only_mcp = ['vercel', 'neon']\n",
+    )
+    .unwrap();
+    for cli in ["claude", "codex"] {
+        for prefix in [
+            vec![],
+            vec!["--"],
+            vec!["-n", "10"],
+            vec!["--adjustment=10"],
+        ] {
+            let mut worker = crate::pty::PtyConfig {
+                command: "nice".into(),
+                args: prefix.into_iter().chain([cli, "--model", "claude"])
+                    .map(str::to_owned).collect(),
+                cwd: project.path().into(),
+                ..Default::default()
+            };
+            crate::backend::finish_worker_config(
+                &mut worker, SupervisorCli::Codex, None, None, Some(&cas_root),
+            );
+            assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+            if cli == "claude" {
+                let flag = worker.args.iter().position(|arg| arg == "--mcp-config").unwrap();
+                assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+                assert_eq!(worker.args[flag + 1],
+                    cas_root.join("worker-mcp/worker.json").display().to_string());
+            } else {
+                assert!(!worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+                for name in ["vercel", "neon"] {
+                    assert!(worker.args.iter().any(|arg|
+                        arg == &format!("mcp_servers.{name}.enabled=false")));
+                }
+            }
+        }
+    }
+}
+
 /// The real PTY command builder must remove inherited AND explicitly granted
 /// credentials; a configuration-only assertion cannot prove that boundary.
 #[tokio::test]

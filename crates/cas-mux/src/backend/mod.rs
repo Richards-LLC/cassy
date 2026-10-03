@@ -150,7 +150,7 @@ pub(super) fn finish_worker_config(
         if let Some(root) = cas_root {
             match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy) {
                 Ok(path) => {
-                    let cli = if config.command == "nice" { config.args.get(2).map(String::as_str).unwrap_or("") } else { &config.command };
+                    let cli = config.effective_command();
                     if cli == "claude" {
                         config.args.extend(["--strict-mcp-config".into(), "--mcp-config".into(), path.display().to_string()]);
                     } else if cli == "codex" {

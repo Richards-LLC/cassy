@@ -1029,6 +1029,21 @@ pub fn load_machine_credentials_into_process_env() -> Result<usize> {
 /// would otherwise restore variables removed at the PTY boundary.
 #[cfg(feature = "mcp-proxy")]
 pub fn load_machine_credentials_into_process_env_except(excluded: &[String]) -> Result<usize> {
+    load_machine_credentials_with_installer(excluded, |name, value| {
+        // SAFETY: this is process initialization, before the async proxy
+        // runtime starts and before any threads are spawned.
+        unsafe { std::env::set_var(name, value) };
+    })
+}
+
+/// Share credential parsing and exclusion with tests without calling the
+/// startup-only process setter. The test installer records restoration in its
+/// TestEnvGuard, including values absent before bootstrap.
+#[cfg(feature = "mcp-proxy")]
+fn load_machine_credentials_with_installer(
+    excluded: &[String],
+    mut install: impl FnMut(&str, &str),
+) -> Result<usize> {
     let paths = MachinePaths::from_env(&ProcessEnv)?;
     let mut values = std::collections::BTreeMap::new();
     let mut visited = std::collections::BTreeSet::new();
@@ -1041,9 +1056,7 @@ pub fn load_machine_credentials_into_process_env_except(excluded: &[String]) -> 
         if excluded.contains(&name) || value.trim().is_empty() || std::env::var_os(&name).is_some() {
             continue;
         }
-        // SAFETY: this is process initialization, before the async proxy
-        // runtime starts and before any threads are spawned.
-        unsafe { std::env::set_var(&name, value) };
+        install(&name, &value);
         loaded += 1;
     }
     Ok(loaded)
@@ -2457,11 +2470,23 @@ mod tests {
         env.set("CAS_CREDENTIALS_FILE", &credentials);
         env.remove("WORKER_DENIED_FIXTURE_TOKEN");
         env.remove("WORKER_ALLOWED_FIXTURE_TOKEN");
-        assert_eq!(load_machine_credentials_into_process_env_except(&["WORKER_DENIED_FIXTURE_TOKEN".into()]).unwrap(), 1);
+        assert_eq!(
+            load_machine_credentials_with_installer(
+                &["WORKER_DENIED_FIXTURE_TOKEN".into()],
+                |name, value| env.set(name, value),
+            ).unwrap(),
+            1,
+        );
         assert!(std::env::var_os("WORKER_DENIED_FIXTURE_TOKEN").is_none());
         assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "allowed-fixture");
-        assert_eq!(load_machine_credentials_into_process_env().unwrap(), 1);
+        env.set("WORKER_ALLOWED_FIXTURE_TOKEN", "existing-fixture");
+        assert_eq!(
+            load_machine_credentials_with_installer(&[], |name, value| env.set(name, value))
+                .unwrap(),
+            1,
+        );
         assert_eq!(std::env::var("WORKER_DENIED_FIXTURE_TOKEN").unwrap(), "denied-fixture");
+        assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "existing-fixture");
     }
 
     struct FakeEnv(HashMap<String, String>);

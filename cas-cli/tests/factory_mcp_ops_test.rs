@@ -6866,6 +6866,141 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
     );
 }
 
+/// cas-4a8e1 (GH #1064): a supervisor interrupts a worker, which answers with
+/// an ordinary message (not message_ack). That reply discharges the halt, so
+/// a later unrelated close is not refused with WORK HALTED. Before the reply,
+/// the refusal names the interrupt's notification id and the exact ack.
+#[tokio::test]
+async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_close() {
+    let mut role_guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_AGENT_NAME", Some("supervisor")),
+        ("CAS_SUPERVISOR_NAME", Some("supervisor")),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker_id = env.register_worker("swift-fox");
+
+    let interrupt = coord_msg("interrupt", "swift-fox", "Stop and tell me where cas-12b5 stands", None);
+    let error = env
+        .service
+        .coordination(Parameters(interrupt))
+        .await
+        .expect_err("the fixture has no live Claude pane to confirm");
+    assert!(
+        error.message.contains("Could not confirm Claude interrupt delivery"),
+        "unexpected interrupt error: {}",
+        error.message
+    );
+    let interrupt_id = env
+        .prompt_queue()
+        .peek_all(10)
+        .expect("peek")
+        .into_iter()
+        .next()
+        .expect("interrupt row")
+        .id;
+    assert!(env.worker_halted("swift-fox"), "the interrupt must arm the halt");
+
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing(worker_id);
+    let worker_service = CasService::new(worker_core, None);
+    role_guard._guard.set("CAS_AGENT_ROLE", "worker");
+    role_guard._guard.set("CAS_AGENT_NAME", "swift-fox");
+
+    let task_id = env.task_store().generate_id().expect("task id");
+    let mut task = Task::new(task_id.clone(), "unrelated merged work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("someone-else".to_string());
+    env.task_store().add(&task).expect("add unrelated task");
+    let close = |reason: &str| cas::mcp::tools::TaskCloseRequest {
+        stranded_branch_override: None,
+        id: task_id.clone(),
+        reason: Some(reason.to_string()),
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
+
+    // Still halted: the refusal names this interrupt and the exact ack.
+    let refused = worker_service
+        .inner
+        .cas_task_close(Parameters(close("before answering")))
+        .await
+        .expect_err("an unanswered interrupt still halts close");
+    assert!(refused.message.contains("WORK HALTED"), "{}", refused.message);
+    assert!(
+        refused.message.contains(&format!("notification {interrupt_id}"))
+            && refused
+                .message
+                .contains(&format!("action=message_ack notification_id={interrupt_id}")),
+        "the refusal names the notification and the exact ack: {}",
+        refused.message
+    );
+
+    // The interrupt reaches the worker's pane; the worker reads it and answers
+    // with an ordinary message, as keen-cobra-50 did.
+    env.prompt_queue()
+        .mark_transport_delivered(interrupt_id)
+        .expect("deliver interrupt");
+    worker_service
+        .coordination(Parameters(coord_msg(
+            "message",
+            "supervisor",
+            "cas-12b5: tests green, closing next",
+            None,
+        )))
+        .await
+        .expect("worker reply");
+    assert!(
+        !env.worker_halted("swift-fox"),
+        "an ordinary reply after the interrupt reached the worker discharges the halt"
+    );
+
+    let closed = worker_service
+        .inner
+        .cas_task_close(Parameters(close("already merged before the interrupt")))
+        .await
+        .expect("the answered interrupt must allow the later close to proceed");
+    let text = get_text(&closed);
+    assert!(!text.contains("WORK HALTED"), "no collateral halt: {text}");
+}
+
+/// cas-4a8e1: a reply written before the interrupt reached the worker cannot
+/// have answered it, so the halt stays.
+#[tokio::test]
+async fn cas_4a8e1_reply_before_the_interrupt_reached_the_worker_keeps_the_halt() {
+    let mut role_guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_AGENT_NAME", Some("supervisor")),
+        ("CAS_SUPERVISOR_NAME", Some("supervisor")),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker_id = env.register_worker("swift-fox");
+    let _ = env
+        .service
+        .coordination(Parameters(coord_msg("interrupt", "swift-fox", "Stop now", None)))
+        .await;
+    assert!(env.worker_halted("swift-fox"), "the interrupt must arm the halt");
+
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing(worker_id);
+    let worker_service = CasService::new(worker_core, None);
+    role_guard._guard.set("CAS_AGENT_ROLE", "worker");
+    role_guard._guard.set("CAS_AGENT_NAME", "swift-fox");
+    // Never handed to the worker: still pending when it writes.
+    worker_service
+        .coordination(Parameters(coord_msg("message", "supervisor", "status: still running tests", None)))
+        .await
+        .expect("worker message");
+    assert!(
+        env.worker_halted("swift-fox"),
+        "a message the worker wrote before the interrupt reached it must not discharge it"
+    );
+}
+
 /// cas-ae2f AC1/AC2: exercise the real factory spawn configuration through the
 /// public coordination handler. This is intentionally wider than a resolver
 /// unit test: the supervisor identity must cross the Codex PTY -> MCP env

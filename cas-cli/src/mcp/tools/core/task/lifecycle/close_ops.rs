@@ -6564,6 +6564,7 @@ impl CasCore {
                                         "{}task action=close",
                                         crate::mcp::tools::core::guidance::caller_prefix()
                                     ),
+                                    super::stale_close_guard::halt_prompt_id(&agent.metadata),
                                 ),
                             ),
                             data: None,

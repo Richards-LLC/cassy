@@ -9239,8 +9239,8 @@ mod purge_foreign_safety_tests {
 
     #[test]
     fn purge_queue_non_overlapping_changes_proceed_and_survive_delete() {
-        let (_env, home) = crate::test_support::TestEnvGuard::temp_home();
-        let cas_root = home.path().join("project/.cas");
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let cas_root = env.home().join("project/.cas");
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"test-project\"\n").unwrap();
         let mut conn = Connection::open(cas_root.join("cas.db")).unwrap();
@@ -9268,7 +9268,7 @@ mod purge_foreign_safety_tests {
         let (analysis, refusals) = inspect_purge_state(&cas_root, "test-project", 3, 7, false, false).unwrap();
         assert!(refusals.is_empty(), "unrelated queued changes must survive safely: {refusals:?}");
         assert_eq!(delete_purge_rows(&mut conn, &analysis.delete_set).unwrap(), 5);
-        let queued: usize = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
+        let queued: i64 = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
         assert_eq!(queued, 364);
         let title: String = conn.query_row("SELECT title FROM tasks WHERE id = 'kept-task'", [], |row| row.get(0)).unwrap();
         assert_eq!(title, "local work");
@@ -9292,7 +9292,7 @@ mod purge_foreign_safety_tests {
         assert!(pending.is_empty(), "queued replicas in the classified delete set are intentional cleanup");
         assert!(evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7).is_empty());
         assert_eq!(delete_purge_rows(&mut conn, &delete_set).unwrap(), 5);
-        let queued: usize = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
+        let queued: i64 = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
         assert_eq!(queued, 6, "purge preserves the queue even for exempt rows");
     }
 

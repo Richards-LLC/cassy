@@ -539,4 +539,30 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(composer).toHaveValue("Short enough to keep.");
     await expect(note).toBeHidden();
   });
+
+  await journey.stage("A draft the full browser storage refuses says so, and stays on screen", async () => {
+    // cas-f657: localStorage is full, so writing the drafts entry throws
+    // QuotaExceededError. The draft stays in the field, the composer says it
+    // won't survive a reload, and the field is described by that note.
+    const note = page.locator("#message-draft-note");
+    await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      (window as unknown as { restoreSetItem: () => void }).restoreSetItem = () => { Storage.prototype.setItem = original; };
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key.includes(":drafts:")) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+        return original.call(this, key, value);
+      };
+    });
+    await composer.fill("A reply typed while the browser's storage is full.");
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText("This browser couldn't save this draft, because its storage is full, so it won't survive a reload. Send it, or copy it somewhere safe, before you leave.");
+    await expect(composer).toHaveAttribute("aria-describedby", /\bmessage-draft-note\b/);
+    await expect(composer).toHaveValue("A reply typed while the browser's storage is full.");
+    // Room again: the next keystroke saves it, and the note goes.
+    await page.evaluate(() => (window as unknown as { restoreSetItem: () => void }).restoreSetItem());
+    await composer.press("End");
+    await composer.pressSequentially("!");
+    await expect(note).toBeHidden();
+    await expect(composer).not.toHaveAttribute("aria-describedby", /\bmessage-draft-note\b/);
+  });
 });

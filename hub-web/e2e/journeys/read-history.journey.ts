@@ -301,8 +301,15 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
 // see it; the pending put-back must not then scroll the focused control out of
 // the thread. Tall enough history that the two positions differ, on a desktop
 // and a phone.
-for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["phone", { width: 390, height: 844 }]] as const) {
-  test(`HUB-J4 a reader who tabs to Load earlier during a reconnect sees it, and paging goes on (cas-c2cb, ${name})`, journeyPart, async ({ page, journey }) => {
+// The reader rests either in the composer (the thread follows its tail) or on
+// the header's Terminal view (the thread stays on their earlier page).
+for (const [name, viewport, rest] of [
+  ["following desktop", { width: 1280, height: 800 }, "composer"],
+  ["following phone", { width: 390, height: 844 }, "composer"],
+  ["reading desktop", { width: 1280, height: 800 }, "header"],
+  ["reading phone", { width: 390, height: 844 }, "header"],
+] as const) {
+  test(`HUB-J4 cas-c2cb ${name}: a reader who tabs to Load earlier during a reconnect sees it, and paging goes on`, journeyPart, async ({ page, journey }) => {
     const turn = (id: number, text: string, day: number) => ({ notification_id: id, reply_to: null, message: text, summary: "", device_id: "journey-device", kind: "answer", attachments: [], at: journeyDay(day, 0, id % 20) });
     await page.setViewportSize(viewport);
     const hub = await journey.hub({
@@ -344,7 +351,9 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       await loadEarlier.click();
       await expect(log.getByText("Earlier turn 0:")).toBeAttached();
       await expect(loadEarlier).toBeEnabled();
-      await page.getByRole("textbox", { name: "Your message" }).focus();
+      if (rest === "composer") await page.getByRole("textbox", { name: "Your message" }).focus();
+      // A header control outside the thread: the thread keeps the earlier page.
+      else await page.locator("#conversation-terminal").focus();
     });
 
     await journey.stage(`The reader tabs to Load earlier as the machine comes back, and sees it (${name})`, async () => {

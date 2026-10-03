@@ -5,7 +5,8 @@
 // sessions are grouped with the most recent one marked.
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
-import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
+import { applyTerminalOffer, conversationHeaderMarkup } from "./conversation-shell";
+import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy, terminalOfferReason } from "./conversation-view";
 import { activityTime, ConversationList, conversationRowMarkup, ENDED_NOTICE_MS, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
@@ -421,5 +422,48 @@ describe("grouped project sessions (cas-55a4)", () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     new ConversationList().render(container, groupConversationRows([row("a-b-1", 2), row("c-d-2", 1)]), vi.fn(), vi.fn());
     expect(container.querySelector(".conversation-end")).toBeNull();
+  });
+});
+
+describe("cas-6b75: the header's Terminal view while the connection is lost", () => {
+  it("is offered whenever the empty card would offer it, and says why when it is not", () => {
+    for (const live of [undefined, "Live", "Degraded"]) {
+      expect(terminalOfferReason(live, "Atlas · Linux")).toBeUndefined();
+      expect(emptyThreadCopy({ machine: "Atlas · Linux", connection: live, resolved: true }).terminal).toBe(true);
+    }
+    expect(terminalOfferReason("Reconnecting", "Atlas · Linux")).toBe("Reconnecting to Atlas · Linux — Terminal view opens once it's back.");
+    expect(terminalOfferReason("Needs pairing", "Atlas · Linux")).toBe("Atlas · Linux needs pairing again before Terminal view can open.");
+    expect(terminalOfferReason("Unreachable · message pending", "Atlas · Linux")).toBe("Atlas · Linux can't be reached — Terminal view opens once it's back.");
+    expect(terminalOfferReason("Reconnecting", undefined)).toBe("Reconnecting to this machine — Terminal view opens once it's back.");
+    for (const lost of ["Reconnecting", "Needs pairing", "Unreachable · message pending"]) {
+      expect(emptyThreadCopy({ machine: "Atlas · Linux", connection: lost, resolved: true }).terminal).toBe(false);
+    }
+  });
+
+  it("is still offered on a first connection, which is on its way rather than lost", () => {
+    expect(terminalOfferReason("Connecting", "Atlas · Linux")).toBeUndefined();
+    expect(terminalOfferReason("Idle", "Atlas · Linux")).toBeUndefined();
+  });
+});
+
+describe("cas-6b75: applyTerminalOffer", () => {
+  it("marks the header's Terminal view unavailable with a spoken reason, and restores it", () => {
+    document.body.innerHTML = conversationHeaderMarkup({ supervisor: "patient-pelican-9", projectDir: "/projects/cas-src", host: "Atlas · Linux", selected: true, loaded: true, paired: true });
+    const button = document.querySelector<HTMLButtonElement>("#conversation-terminal")!;
+    const reason = terminalOfferReason("Reconnecting", "Atlas · Linux")!;
+    applyTerminalOffer(document, reason);
+    applyTerminalOffer(document, reason);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.dataset.disabledReason).toBe(reason);
+    expect(button.title).toBe(reason);
+    expect(document.querySelectorAll("#conversation-terminal-reason")).toHaveLength(1);
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(reason);
+    expect(button.getAttribute("aria-label")).toBe("Terminal view");
+    applyTerminalOffer(document, undefined);
+    expect(button.hasAttribute("aria-disabled")).toBe(false);
+    expect(button.hasAttribute("aria-describedby")).toBe(false);
+    expect(button.hasAttribute("title")).toBe(false);
+    expect(button.dataset.disabledReason).toBeUndefined();
+    expect(document.querySelector("#conversation-terminal-reason")).toBeNull();
   });
 });

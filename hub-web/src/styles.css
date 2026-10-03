@@ -4196,6 +4196,12 @@ button.chip:disabled { cursor: default; }
 .thread .empty .empty-terminal { display: inline-flex; align-items: center; min-height: 24px; padding: 0 2px; border: 0; background: none; color: var(--ink-mid); font: inherit; text-decoration: underline; text-decoration-color: var(--line-subtle); text-underline-offset: 3px; cursor: pointer; }
 .thread .empty .empty-terminal:hover { color: var(--ink); text-decoration-color: currentColor; }
 .thread .empty .empty-terminal:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
+/* cas-6b75: on a phone or any coarse pointer, Terminal view is a full
+   44 px target; the line centres the activity text on it. */
+@media (max-width: 53rem), (pointer: coarse) {
+  .thread .empty .empty-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; }
+  .thread .empty .empty-terminal { min-height: 44px; min-width: 44px; padding: 0 var(--space-2); }
+}
 @media (max-width: 720px) {
   .thread .earlier-sessions { margin: 10px 14px 0; }
 }

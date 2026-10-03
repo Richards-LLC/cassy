@@ -118,14 +118,48 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     // stops offering Terminal view; back on, it is the plain live copy again.
     const empty = page.locator(".thread .empty");
     const header = page.locator("#conversation-connection");
+    const headerTerminal = page.locator("#conversation-terminal");
+    await expect(headerTerminal).not.toHaveAttribute("aria-disabled", "true");
     await hub.down("atlas", { sockets: "close" });
     await expect(header).toContainText("Reconnecting");
     await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
     await expect(empty.getByRole("button", { name: "Terminal view" })).toHaveCount(0);
+    // cas-6b75 (F03): the header doesn't offer the terminal either; it says
+    // why, to the eye (dimmed, title) and to a screen reader (description),
+    // and pressing it explains instead of opening a terminal it can't reach.
+    const unavailable = "Reconnecting to Atlas · Linux — Terminal view opens once it's back.";
+    await expect(headerTerminal).toHaveAttribute("aria-disabled", "true");
+    await expect(headerTerminal).toHaveAccessibleName("Terminal view");
+    await expect(headerTerminal).toHaveAccessibleDescription(unavailable);
+    await expect(headerTerminal).toHaveAttribute("title", unavailable);
+    await headerTerminal.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#toast")).toHaveText(unavailable);
+    await expect(page.locator("#conversation-return")).toBeHidden();
+    await expect(empty.locator(".said")).toBeVisible();
     await hub.up("atlas");
     await expect(header).toContainText("Live", { timeout: 20_000 });
     await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
     await expect(empty.getByRole("button", { name: "Terminal view" })).toBeVisible();
+    await expect(headerTerminal).not.toHaveAttribute("aria-disabled", "true");
+    await expect(headerTerminal).toHaveAccessibleDescription("");
+  });
+
+  await journey.stage("On a phone, Terminal view on the empty card is a full-size target", async () => {
+    // cas-6b75 (F01): at 390 the card's Terminal view is at least 44 px each
+    // way, the coarse-pointer minimum, and still opens Terminal view.
+    const viewport = page.viewportSize()!;
+    await page.setViewportSize({ width: 390, height: 844 });
+    const open = page.locator(".thread .empty").getByRole("button", { name: "Terminal view" });
+    await expect(open).toBeVisible();
+    const box = (await open.boundingBox())!;
+    expect(box.height, "Terminal view is at least 44 px tall").toBeGreaterThanOrEqual(44);
+    expect(box.width, "Terminal view is at least 44 px wide").toBeGreaterThanOrEqual(44);
+    await open.click();
+    await expect(page.locator("#conversation-return")).toBeVisible();
+    await page.locator("#conversation-return").click();
+    await expect(page.locator(".thread .empty .said")).toBeVisible();
+    await page.setViewportSize(viewport);
   });
 
   await journey.stage("Each session shows its own conversation", async () => {

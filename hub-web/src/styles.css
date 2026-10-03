@@ -2258,6 +2258,9 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 /* Journey F20: the Appearance row in effect carries a check and "Current". */
 .palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
 .palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* cas-786a (journey F30): the conversation already open leads its description
+   with "Open now". The button is aria-current, so the words are visual only. */
+.palette-command[data-palette-current] small::before { content: "Open now · " / ""; color: var(--text-hi); font-weight: var(--weight-medium); }
 /* A phone row is too narrow for both on one line: the description drops under
    the title, both at full row width, so each reads in full or ellipsises alone. */
 @media (max-width: 40rem) {
@@ -4350,4 +4353,11 @@ button.chip:disabled { cursor: default; }
   #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target],
   .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] { outline: 2px solid Highlight; outline-offset: -2px; }
 }
-.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { top: auto; bottom: 6px; translate: none; }
+/* cas-786a (journey F29): the row's hint is laid out, not overlaid. A row
+   with no marks sets it in its own grid cell, under the time; the column
+   widens and the title and preview ellipsise around it. A row with an unread
+   count or waiting dot carries it inside its marks, in flow before them, so
+   the count moves aside instead of sitting under the hint. */
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { position: static; grid-column: 3; grid-row: 2; justify-self: end; translate: none; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]:has(.conversation-marks)::after { content: none; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] .conversation-marks::before { content: "Enter ↵"; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }

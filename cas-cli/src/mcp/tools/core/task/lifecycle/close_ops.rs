@@ -11782,6 +11782,99 @@ fn regenerated_artifact_drop_note(
     ))
 }
 
+/// The blob a commit's tree holds at `path`: `Some(None)` when the path is
+/// absent, `None` when Git cannot answer (which never proves anything).
+fn tree_path_blob(repo_path: &std::path::Path, commit: &str, path: &str) -> Option<Option<String>> {
+    let output = std::process::Command::new("git")
+        .args(["ls-tree", "-z", commit, "--", path])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let listing = String::from_utf8(output.stdout).ok()?;
+    let Some(entry) = listing.split('\0').find(|entry| !entry.is_empty()) else {
+        return Some(None);
+    };
+    let (meta, listed) = entry.split_once('\t')?;
+    let blob = meta.split_whitespace().nth(2)?;
+    (listed == path).then(|| Some(blob.to_string()))
+}
+
+/// cas-f38ca: a path the line proof calls dropped is present when the task's
+/// final delivered tree holds it byte-for-byte on the target. The delivered
+/// tree is the anchor, or the live factory tip when it descends from the
+/// anchor and is already reachable on the target (a landing merge that
+/// re-synced the epic). The blob must also differ from the task's delivery
+/// base: content identical to where the task started (a reverted delivery)
+/// is never proof of delivery. Returns the decision note for the accepted
+/// paths and the paths that remain dropped; `None` when Git cannot decide.
+fn target_identical_delivered_paths(
+    task: &Task,
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    content_window: Option<&TaskCommitReceiptWindow>,
+    content_identity: &TaskCommitIdentity,
+    paths: &[String],
+) -> Option<(Option<String>, Vec<String>)> {
+    let anchor = resolve_branch_sha(repo_path, &format!("{anchor}^{{commit}}"))?;
+    let origin = format!("origin/{parent_branch}");
+    let target_ref = if git_ref_exists(repo_path, &origin)
+        && git_commit_is_ancestor(repo_path, &anchor, &origin)
+    {
+        origin
+    } else {
+        parent_branch.to_string()
+    };
+    let target = resolve_branch_sha(repo_path, &format!("{target_ref}^{{commit}}"))?;
+    if !git_commit_is_ancestor(repo_path, &anchor, &target) {
+        return None;
+    }
+    let fallback_window = TaskCommitReceiptWindow {
+        supervisor_override_reason: None,
+        not_before: chrono::DateTime::from_timestamp(0, 0)?,
+        task_floor: chrono::DateTime::from_timestamp(0, 0)?,
+        basis: "task identity fallback",
+        identity: content_identity.clone(),
+    };
+    let window = content_window.unwrap_or(&fallback_window);
+    let base = task_attribution::delivery_base(repo_path, parent_branch, window, Some(&anchor))?;
+    let mut delivered = vec![anchor.clone()];
+    if let Some(assignee) = task.assignee.as_deref()
+        && let Some(tip) = resolve_branch_sha(
+            repo_path,
+            &close_measured_factory_branch(repo_path, task, assignee),
+        )
+        && tip != anchor
+        && git_commit_is_ancestor(repo_path, &anchor, &tip)
+        && git_commit_is_ancestor(repo_path, &tip, &target)
+    {
+        delivered.push(tip);
+    }
+    let mut identical = Vec::new();
+    let mut dropped = Vec::new();
+    for path in paths {
+        let target_blob = tree_path_blob(repo_path, &target, path)?;
+        let present = target_blob != tree_path_blob(repo_path, &base, path)?
+            && delivered.iter().try_fold(false, |found, commit| {
+                Some(found || tree_path_blob(repo_path, commit, path)? == target_blob)
+            })?;
+        if present {
+            identical.push(path.clone());
+        } else {
+            dropped.push(path.clone());
+        }
+    }
+    let note = (!identical.is_empty()).then(|| {
+        format!(
+            "path(s) {} are byte-identical on the delivered tree ({}) and target `{target}`, and differ from delivery base `{base}`; the line proof's missing lines were not this delivery's final content (cas-f38ca)",
+            identical.join(", "),
+            delivered.join(", "),
+        )
+    });
+    Some((note, dropped))
+}
+
 /// cas-3f8c: name the delivered lines the target lacks, so a supervisor can
 /// confirm a DELIVERY CONTENT DROPPED in seconds instead of diffing trees.
 /// The delivery's own effect is measured against its first parent, or
@@ -12108,6 +12201,24 @@ fn anchored_delivery_content_gate(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            let (identical, paths) = match target_identical_delivered_paths(
+                task,
+                repo_path,
+                anchor,
+                parent_branch,
+                content_window,
+                content_identity,
+                &paths,
+            ) {
+                Some(proof) => proof,
+                None => (None, paths),
+            };
+            if paths.is_empty() {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    identical.unwrap_or_default()
+                )));
+            }
             if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
                     "DECISION: delivery content accepted for task {task_id}: {note}."

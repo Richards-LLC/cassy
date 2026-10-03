@@ -2778,7 +2778,8 @@ impl SqlitePromptQueueStore {
         if current == DeliveryStage::Suppressed && proposed != DeliveryStage::Confirmed {
             let reason: Option<String> = tx.query_row(
                 "SELECT last_pending_reason FROM prompt_queue WHERE id = ?",
-                params![prompt_id], |row| row.get(0),
+                params![prompt_id],
+                |row| row.get(0),
             )?;
             if reason.as_deref() == Some(PendingReason::ShutdownCancelled.as_str()) {
                 // A late in-flight delivery/retry cannot revive explicitly

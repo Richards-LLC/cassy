@@ -11851,6 +11851,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_positive_count_skips_retired_history_cas_c653() {
+        use cas_types::AgentStatus;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-count");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut retired = worker_named("retired-count-worker", "retired-count-id");
+        retired.factory_session = Some("shutdown-count".into());
+        retired.status = AgentStatus::Shutdown;
+        retired.registered_at = chrono::Utc::now() - chrono::Duration::days(1);
+        retired.pid = Some(i32::MAX as u32);
+        agents.register(&retired).unwrap();
+        let mut live = worker_named("live-count-worker", "live-count-id");
+        live.factory_session = Some("shutdown-count".into());
+        live.pid = Some(std::process::id());
+        agents.register(&live).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "count": 1
+        }))
+        .unwrap();
+        service.factory_shutdown_workers(request).await.unwrap();
+        let requests = crate::store::open_spawn_queue_store(&root)
+            .unwrap()
+            .poll("shutdown-count", 10)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].worker_names, vec![live.name]);
+        assert_eq!(
+            requests[0].count, None,
+            "daemon receives an exact target, never a count to expand"
+        );
+    }
+
+    #[tokio::test]
     async fn restarted_supervisor_sees_rehomed_worker_on_status_and_activity_surfaces() {
         use cas_store::{AgentStore, EventStore, SqliteAgentStore, SqliteEventStore};
         use cas_types::{Agent, AgentRole, Event, EventEntityType, EventType};

@@ -80,6 +80,38 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     expect(heard, "the host line is heard whole").toContain(codename);
   };
 
+  /**
+   * cas-1451: the empty-thread card under the title keeps the machine as the
+   * header does: whole before any codename character, the OS word dropped
+   * whole, and one separator between them, never a double gap.
+   */
+  const expectCardKeepsMachine = async (machine: string, codename: string) => {
+    const where = page.locator(".thread .empty .proj2");
+    await expect(where).toHaveAttribute("title", `${machine} · ${codename}`);
+    const shown = await where.evaluate((line) => {
+      const host = line.querySelector<HTMLElement>(".proj2-machine")!;
+      const os = host.querySelector<HTMLElement>(".host-os");
+      const name = line.querySelector<HTMLElement>(".codename");
+      const separator = line.querySelector<HTMLElement>(".proj2-sep");
+      const visible = (node: HTMLElement | null) => node !== null && node.getClientRects().length > 0;
+      const box = (node: HTMLElement) => node.getBoundingClientRect();
+      return {
+        machineCut: host.scrollWidth > host.clientWidth + 1,
+        osShown: visible(os),
+        codenameShown: visible(name),
+        codenameChars: visible(name) ? box(name!).width / (parseFloat(getComputedStyle(name!).fontSize) * 0.6) : 0,
+        separatorShown: visible(separator),
+        gaps: visible(name) && visible(separator) ? [box(separator!).left - box(host).right, box(name!).left - box(separator!).right] : [],
+        separatorText: separator?.textContent ?? "",
+      };
+    });
+    expect(shown.machineCut && shown.codenameShown, `${codename} yields before ${machine} is cut`).toBe(false);
+    expect(shown.osShown && shown.machineCut, "the OS word is never cut mid-word").toBe(false);
+    expect(shown.separatorShown, "the separator goes with the codename").toBe(shown.codenameShown);
+    for (const gap of shown.gaps) expect(Math.abs(gap), "one separator, no double gap").toBeLessThanOrEqual(1);
+    expect(shown.separatorText).toBe(" · ");
+  };
+
   await journey.stage("Open the list on a phone", async () => {
     // Record every word the list and the footer badge show during the cold
     // load: they must not claim "Not paired", "No live supervisors" or
@@ -214,6 +246,9 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       await list.getByRole("button", { name: new RegExp(project) }).tap();
       await expect(page.locator(".conversation-identity h1")).toHaveText(project);
       await expectHeaderKeepsMachine(machine, codename);
+      // These sessions have not written yet, so the empty card names them too.
+      await expect(page.locator(".thread .empty .said")).toBeVisible();
+      await expectCardKeepsMachine(machine, codename);
     }
   });
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactViewResult } from "./artifact-open";
+import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactViewResult } from "./artifact-open";
 import { HubConnectionSupervisor, type HubCallbacks } from "./connection";
 import { createDeviceKey } from "./dpop";
 import type { StoredMachine } from "./types";
@@ -90,6 +90,18 @@ describe("opening an artifact from Commander (cassy#910)", () => {
     const silent = { ok: false, status: 0 } as const;
     expect(artifactOpenFailure(silent, "Atlas · Linux", true)).toBe("Atlas · Linux is connected but didn't send the file. Try again in a moment.");
     expect(artifactOpenFailure(silent, "Atlas · Linux", false)).toBe("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    // Journey F28: while the header says Reconnecting, a card says it in the banner's words.
+    expect(artifactOpenFailure(silent, "Atlas · Linux", "reconnecting")).toBe("Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.");
+    expect(artifactOpenFailure(silent, "Atlas · Linux", "reconnecting")).not.toMatch(/is connected/);
+    expect(artifactOpenFailure(silent, "Atlas · Linux", "live")).toBe(artifactOpenFailure(silent, "Atlas · Linux", true));
+    expect(artifactOpenFailure(silent, "Atlas · Linux", "unreachable")).toBe(artifactOpenFailure(silent, "Atlas · Linux", false));
+    // Only a no-answer failure follows the connection; Cloud's and the file's own reasons do not.
+    expect(artifactFailureFollowsConnection(silent)).toBe(true);
+    for (const result of [{ ok: false, status: 502, code: "cloud_failed" }, { ok: false, status: 409, code: "artifact_not_in_cloud" }, { ok: false, status: 403 }, { ok: false, status: 500 }] as const) {
+      expect(artifactFailureFollowsConnection(result)).toBe(false);
+      expect(artifactOpenFailure(result, "Atlas · Linux", "live")).toBe(artifactOpenFailure(result, "Atlas · Linux", "reconnecting"));
+    }
+    expect(artifactFailureFollowsConnection({ ok: true, view: { artifact_id: "a", url: "https://x.example/" } })).toBe(false);
     for (const result of [silent, { ok: false, status: 502, code: "cloud_failed" }, { ok: false, status: 500 }] as const) {
       for (const live of [true, false]) expect(artifactOpenFailure(result, "Atlas · Linux", live)).not.toMatch(/\btap\b/i);
     }

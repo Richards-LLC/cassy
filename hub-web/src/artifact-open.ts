@@ -50,6 +50,15 @@ export function artifactLinkFor(target: EventTarget | null): HTMLAnchorElement |
 }
 
 /**
+ * Whether a failure's words depend on the connection right now (no answer at
+ * all), so a card showing it is said again when the connection changes
+ * (journey F28).
+ */
+export function artifactFailureFollowsConnection(result: ArtifactViewResult | undefined): result is Extract<ArtifactViewResult, { ok: false }> {
+  return result !== undefined && !result.ok && result.status === 0 && !["artifact_not_in_cloud", "artifact_not_committed", "cloud_not_configured", "cloud_storage_not_live", "not_found", "cloud_artifact_not_found", "cloud_failed"].includes(result.code ?? "");
+}
+
+/**
  * Whether a failure describes the file itself (never uploaded, gone), which
  * stays true, rather than the connection or Cloud right now, which the next
  * reconnect makes out of date (cas-c808 QA F01).
@@ -64,12 +73,23 @@ export function artifactIsLocalOnly(result: ArtifactViewResult | undefined): boo
 }
 
 /**
- * Why an artifact did not open, in the operator's words. `machineLive` is
- * whether this page's connection to the machine is up: a request that got no
- * answer from a connected machine must not claim the machine is off while the
- * header says Live (journey F6). The words work for a click and a tap alike.
+ * How this page reaches the machine right now, in the header's terms:
+ * Live, Reconnecting (a drop that retries), or anything else (never reached,
+ * not retrying). A file card's connection note is said in these words, so it
+ * never disagrees with the header, banner, row and footer beside it.
  */
-export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: false }>, machineLabel: string, machineLive = false): string {
+export type ArtifactMachineReach = "live" | "reconnecting" | "unreachable";
+
+/**
+ * Why an artifact did not open, in the operator's words. `reach` is this
+ * page's connection to the machine (a boolean is read as live / unreachable):
+ * a request that got no answer from a connected machine must not claim the
+ * machine is off while the header says Live (journey F6), and a card must not
+ * say the machine "is connected" while the header says Reconnecting (journey
+ * F28). The words work for a click and a tap alike.
+ */
+export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: false }>, machineLabel: string, reach: ArtifactMachineReach | boolean = false): string {
+  const machineReach: ArtifactMachineReach = reach === true ? "live" : reach === false ? "unreachable" : reach;
   switch (result.code) {
     case "artifact_not_in_cloud":
       return `This file was only saved on ${machineLabel}. It was never uploaded to Cloud, so it can't open here.`;
@@ -92,9 +112,10 @@ export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: fa
       // No answer at all: the machine is off, asleep or off the network
       // (cas-e503), so the fix is on the machine, not in Cloud.
       if (result.status === 0) {
-        return machineLive
-          ? `${machineLabel} is connected but didn't send the file. Try again in a moment.`
-          : `Couldn't reach ${machineLabel}. Check that it's on and connected, then open the file again.`;
+        if (machineReach === "live") return `${machineLabel} is connected but didn't send the file. Try again in a moment.`;
+        // The banner's own words for the same drop (lostConnectionBanner).
+        if (machineReach === "reconnecting") return `Lost connection to ${machineLabel}. Reconnecting… Open the file again when it's back.`;
+        return `Couldn't reach ${machineLabel}. Check that it's on and connected, then open the file again.`;
       }
       return "The file didn't open. Try again.";
   }
@@ -108,8 +129,8 @@ export interface ArtifactOpenDeps {
   /** Say something to the operator; `result` is the machine's answer, when there was one. */
   readonly notify: (message: string, result?: ArtifactViewResult) => void;
   readonly machineLabel: string;
-  /** Whether this page's connection to the machine is live right now. */
-  readonly machineLive?: () => boolean;
+  /** How this page reaches the machine right now (true: live). */
+  readonly machineLive?: () => ArtifactMachineReach | boolean;
   /**
    * The machine already said this file was never uploaded (journey F6). No
    * tab is opened for it; the machine is asked again only to learn whether

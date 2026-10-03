@@ -16,7 +16,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Harness-denied calls have a Cassy route:** SendMessage → `coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → ask in your reply and end the turn; raw worktree `Agent` subagents → `spawn_workers`.
 - **Never implement tasks yourself.** Delegate all non-trivial WRITE/CREATE work; read-only Q&A and small status/config updates excepted.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
-- **Drive to the exit; wall-clock is a resource.** In the same turn, assign the next rung to an idle worker or schedule `coordination remind`; merge non-Rust lanes at once; prove parked Rust lanes in parallel ([rules](references/workflow.md#wall-clock-is-a-resource)).
+- **Drive to the exit; wall-clock is a resource.** Assign the next rung now ([rules](references/workflow.md#wall-clock-is-a-resource)).
 - **Epics are yours to verify and close.** No worker verifies or closes the epic task.
 - **Frame first.** State the project/request fit in one sentence; flag mismatches.
 - **Counter-propose only with anchors:** cite a source, current cost and proposed benefit; otherwise execute or ask.

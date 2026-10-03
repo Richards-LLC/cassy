@@ -174,6 +174,10 @@ impl Config {
                 factory.max_concurrent_builders.to_string(),
             ),
             (
+                "factory.prompt_retention_days".to_string(),
+                factory.prompt_retention_days.to_string(),
+            ),
+            (
                 "factory.worker_build_jobs".to_string(),
                 factory.cargo_build_jobs.clone(),
             ),

@@ -6,6 +6,7 @@ export type Scope =
   | "message-send"
   | "pane-interrupt"
   | "session-launch"
+  | "factory-operate"
   | "factory-manage"
   | "hub-admin";
 

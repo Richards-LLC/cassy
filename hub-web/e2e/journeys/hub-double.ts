@@ -570,9 +570,13 @@ export class HubDouble {
     if (path === "/v1/auth/scopes" && method === "POST") {
       const add = (route.request().postDataJSON() as { add?: string[] }).add;
       const scopes = this.options.scopes?.[machineId] ?? SCOPES;
-      if (JSON.stringify(add) !== JSON.stringify(["session-launch"])) return route.fulfill({ status: 400, json: { error: "invalid_scope" } });
+      // Session launch, and factory:operate as the fleet-operations brief's S2
+      // allows it (cas-d382): one self-grantable scope per request, never
+      // factory:manage.
+      const grant = add?.length === 1 && ["session-launch", "factory-operate"].includes(add[0]!) ? add[0]! : undefined;
+      if (!grant) return route.fulfill({ status: 400, json: { error: "invalid_scope" } });
       if (!["pane-input", "message-send", "pane-interrupt"].every((scope) => scopes.includes(scope))) return route.fulfill({ status: 403, json: { error: "scope_denied" } });
-      this.setScopes(machineId, [...new Set([...scopes, "session-launch"])]);
+      this.setScopes(machineId, [...new Set([...scopes, grant])]);
       return route.fulfill({ json: { scopes: this.options.scopes![machineId] } });
     }
     if (path === "/v1/sessions" && method === "POST") return this.launch(route, machineId);

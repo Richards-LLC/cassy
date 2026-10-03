@@ -6,7 +6,10 @@
 //!   lane ([`enqueue_commander_message`]), the same row a Commander
 //!   `SendMessage` makes. MCP `message_send` is not reused: it derives its
 //!   sender from the MCP caller's registered agent, which a hub device has not.
-//! - O2, focus an epic: [`focus_epic`], the body of MCP `focus_epic`.
+//! - O2, focus an epic: [`focus_epic`], the body of MCP `focus_epic`, with
+//!   [`focus_epic_inverse`] for Undo (S3, cas-31f0).
+//! - O5, assign or unassign a task: [`assign_task`], the supervisor's own
+//!   `task_update` (S3, cas-31f0).
 //!
 //! Each hub operation states what the operator saw (`expected`); a mismatch
 //! is [`OperationError::Stale`] and changes nothing.
@@ -225,6 +228,106 @@ pub(crate) fn operator_stamp(
 }
 
 
+/// What the operator saw when assigning (brief: O5's precondition).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct AssignTaskExpected {
+    /// The task's `updated_at` (RFC 3339) as the status read showed it.
+    pub updated_at: String,
+    #[serde(default)]
+    pub assignee: Option<String>,
+}
+
+/// The task note an operator's assignment leaves, naming the device so the
+/// task history says who assigned it, as a supervisor's update note does.
+pub(crate) fn assign_note(
+    assignee: Option<&str>,
+    attribution: &crate::ui::factory::MessageAttribution,
+) -> String {
+    let who = attribution
+        .operator_label
+        .as_deref()
+        .or(attribution.device_label.as_deref())
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or("an operator");
+    match assignee {
+        Some(assignee) => format!("Assigned to {assignee} from Commander by {who}."),
+        None => format!("Unassigned from Commander by {who}."),
+    }
+}
+
+/// O5: assign a task to a worker, or unassign it (`assignee: None`), through
+/// the supervisor's own `task_update`, so the assignee, the handoff record and
+/// the `task_assigned` session event are the ones that call makes. The
+/// precondition is the task's `updated_at` and assignee as the operator saw
+/// them; any change since is [`OperationError::Stale`] and nothing is written.
+/// The outcome names the inverse operation Undo sends.
+pub(crate) async fn assign_task(
+    cas_dir: &Path,
+    task_id: &str,
+    assignee: Option<&str>,
+    expected: &AssignTaskExpected,
+    attribution: &crate::ui::factory::MessageAttribution,
+) -> Result<serde_json::Value, OperationError> {
+    let assignee = assignee.map(str::trim).filter(|assignee| !assignee.is_empty());
+    let seen_at = chrono::DateTime::parse_from_rfc3339(&expected.updated_at)
+        .map_err(|error| {
+            OperationError::Invalid(format!(
+                "expected.updated_at must be the task's RFC 3339 updated_at: {error}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+    let store = crate::store::open_task_store(cas_dir)
+        .map_err(|error| OperationError::Failed(format!("task store unavailable: {error}")))?;
+    let task = store
+        .get(task_id)
+        .map_err(|_| OperationError::NotFound(format!("task {task_id} not found")))?;
+    if task.updated_at != seen_at || task.assignee != expected.assignee {
+        return Err(OperationError::Stale(serde_json::json!({
+            "updated_at": task.updated_at.to_rfc3339(),
+            "assignee": task.assignee,
+        })));
+    }
+    let prior = task.assignee.clone();
+
+    let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task_id,
+        // An empty assignee is task_update's explicit unassign (cas-bf98).
+        "assignee": assignee.unwrap_or(""),
+        "notes": assign_note(assignee, attribution),
+    }))
+    .map_err(|error| OperationError::Failed(format!("could not build the task update: {error}")))?;
+    let core = crate::mcp::CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
+    core.cas_task_update_with_target(request, None, None, false, None, None)
+        .await
+        .map_err(|error| OperationError::Failed(error.message.to_string()))?;
+
+    let task = store
+        .get(task_id)
+        .map_err(|error| OperationError::Failed(format!("task {task_id} could not be re-read: {error}")))?;
+    let updated_at = task.updated_at.to_rfc3339();
+    Ok(serde_json::json!({
+        "kind": "assign_task",
+        "task_id": task_id,
+        "assignee": task.assignee,
+        "prior_assignee": prior,
+        "updated_at": updated_at,
+        "inverse": {
+            "op": {"kind": "assign_task", "task_id": task_id, "assignee": prior},
+            "expected": {"updated_at": updated_at, "assignee": task.assignee},
+        },
+    }))
+}
+
+/// O2's Undo: the operation that restores `prior` once the session is pinned
+/// to `now`, preconditioned on `now` so a late Undo is stale.
+pub(crate) fn focus_epic_inverse(prior: Option<&str>, now: Option<&str>) -> serde_json::Value {
+    let op = match prior {
+        Some(epic_id) => serde_json::json!({"kind": "focus_epic", "epic_id": epic_id}),
+        None => serde_json::json!({"kind": "focus_epic", "clear": true}),
+    };
+    serde_json::json!({"op": op, "expected": {"epic_id": now}})
+}
+
 /// O2's request: pin the session to an epic, or clear the pin.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FocusEpic<'a> {
@@ -352,4 +455,170 @@ fn record_focus_epic_event(
     .with_metadata(metadata)
     .with_session(factory_session);
     let _ = event_store.record(&event);
+}
+
+/// What a fleet operation acts with: the factory session, whose workers it
+/// may touch, whether it holds supervisor authority, and whose account dirs a
+/// spawned worker inherits. MCP callers derive it from their environment;
+/// the hub builds it for an operator (cas-9b08).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FleetContext {
+    pub(crate) factory_session: Option<String>,
+    /// `None` means no ownership filter.
+    pub(crate) owned_workers: Option<std::collections::HashSet<String>>,
+    pub(crate) supervisor_authorized: bool,
+    /// Spawned workers inherit this process's account dirs (an MCP
+    /// supervisor). An operator's spawn uses the daemon's defaults instead.
+    pub(crate) requester_from_env: bool,
+}
+
+impl FleetContext {
+    /// An operator acting on one session through the hub. The hub has
+    /// already checked the device's scope; the operator stands in for the
+    /// session's supervisor over that session's workers.
+    pub(crate) fn operator(factory_session: &str) -> Self {
+        Self {
+            factory_session: Some(factory_session.to_string()),
+            owned_workers: None,
+            supervisor_authorized: true,
+            requester_from_env: false,
+        }
+    }
+}
+
+/// The spawn generation of `worker` in `factory_session`: the id of its live
+/// registration, which a restart replaces. `None` when it is not live.
+pub(crate) fn worker_generation(
+    cas_dir: &Path,
+    factory_session: &str,
+    worker: &str,
+) -> Result<Option<String>, OperationError> {
+    use cas_types::{AgentRole, AgentStatus};
+    let agents = crate::store::open_agent_store(cas_dir)
+        .map_err(|error| OperationError::Failed(format!("agent store unavailable: {error}")))?
+        .list(None)
+        .map_err(|error| OperationError::Failed(format!("agent registry unreadable: {error}")))?;
+    Ok(agents
+        .into_iter()
+        .filter(|agent| {
+            agent.role == AgentRole::Worker
+                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                && agent.name == worker
+                && agent.visible_to_factory_session(Some(factory_session))
+        })
+        .max_by_key(|agent| agent.registered_at)
+        .map(|agent| agent.id))
+}
+
+/// What the operator saw of a worker (brief: worker preconditions).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct WorkerExpected {
+    pub worker: String,
+    #[serde(default)]
+    pub generation: Option<String>,
+}
+
+/// Refuse as stale unless `worker` still has the generation `expected` names.
+pub(crate) fn check_worker_generation(
+    cas_dir: &Path,
+    factory_session: &str,
+    worker: &str,
+    expected: &WorkerExpected,
+) -> Result<(), OperationError> {
+    if expected.worker != worker {
+        return Err(OperationError::Invalid(format!(
+            "expected names worker {}, but the operation targets {worker}",
+            expected.worker
+        )));
+    }
+    let current = worker_generation(cas_dir, factory_session, worker)?;
+    if current != expected.generation {
+        return Err(OperationError::Stale(serde_json::json!({
+            "worker": worker,
+            "generation": current,
+        })));
+    }
+    Ok(())
+}
+
+/// O3, O4, O6 and O7 (brief S2): the worker lifecycle operations.
+#[derive(Debug, Clone)]
+pub(crate) enum WorkerOperation {
+    Spawn { count: u8, task_id: Option<String> },
+    Hold { worker: String, hold: bool },
+    Recycle { worker: String },
+    Shutdown { worker: String, force: bool },
+}
+
+/// Run a worker operation through the same `CasService` body its MCP action
+/// runs, with an operator [`FleetContext`]. Returns the action's reply text.
+pub(crate) async fn run_worker_operation(
+    cas_dir: &Path,
+    factory_session: &str,
+    operation: WorkerOperation,
+) -> Result<String, OperationError> {
+    let core = crate::mcp::CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::tools::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::tools::CasService::new(core);
+    let ctx = FleetContext::operator(factory_session);
+    let request = |value: serde_json::Value| {
+        serde_json::from_value::<cas_mcp::FactoryRequest>(value)
+            .map_err(|error| OperationError::Invalid(format!("bad operation fields: {error}")))
+    };
+    let result = match operation {
+        WorkerOperation::Spawn { count, task_id } => {
+            let mut fields = serde_json::json!({"action": "spawn_workers", "count": count});
+            if let Some(task_id) = task_id {
+                fields["task_id"] = serde_json::Value::String(task_id);
+            }
+            service.factory_spawn_workers_in(&ctx, request(fields)?).await
+        }
+        WorkerOperation::Hold { worker, hold } => {
+            let action = if hold { "hold_worker" } else { "release_worker" };
+            service
+                .factory_set_worker_hold_in(
+                    &ctx,
+                    request(serde_json::json!({"action": action, "target": worker}))?,
+                    hold,
+                )
+                .await
+        }
+        WorkerOperation::Recycle { worker } => {
+            service
+                .factory_recycle_worker_in(
+                    &ctx,
+                    request(serde_json::json!({"action": "recycle_worker", "target": worker}))?,
+                )
+                .await
+        }
+        WorkerOperation::Shutdown { worker, force } => {
+            service
+                .factory_shutdown_workers_in(
+                    &ctx,
+                    request(serde_json::json!({
+                        "action": "shutdown_workers",
+                        "worker_names": worker,
+                        "force": force,
+                    }))?,
+                )
+                .await
+        }
+    };
+    match result {
+        Ok(reply) => Ok(reply
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")),
+        Err(error)
+            if error.code == rmcp::model::ErrorCode::INVALID_PARAMS
+                || error.code == rmcp::model::ErrorCode::INVALID_REQUEST =>
+        {
+            Err(OperationError::Invalid(error.message.to_string()))
+        }
+        Err(error) => Err(OperationError::Failed(error.message.to_string())),
+    }
 }

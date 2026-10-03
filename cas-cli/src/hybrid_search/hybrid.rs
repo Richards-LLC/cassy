@@ -539,9 +539,14 @@ impl HybridSearch {
         let mut bm25_opts = opts.base.clone();
         bm25_opts.query = search_query.clone();
         let bm25_results = self.bm25_index.search(&bm25_opts, entries)?;
+        // cas-e7ae: fuse the score the index sorted by (calibrated, and any
+        // later post-scoring adjustment), not the raw `bm25_score`. Both fusion
+        // paths are invariant to the calibration's rescale, so today's
+        // rankings do not move; an adjustment that is not a pure rescale is
+        // no longer discarded here, as cas-e979's boosts were.
         let bm25_scores: Vec<(String, f64)> = bm25_results
             .iter()
-            .map(|r| (r.id.clone(), r.bm25_score))
+            .map(|r| (r.id.clone(), r.score))
             .collect();
 
         // 2. Semantic search (if enabled)
@@ -1090,6 +1095,66 @@ impl HybridSearch {
 #[cfg(test)]
 mod tests {
     use crate::hybrid_search::hybrid::*;
+
+    /// cas-e7ae: the BM25 channel HybridSearch fuses is the value
+    /// `SearchIndex::search` produced and sorted by (its calibrated `score`).
+    /// Reading the raw `bm25_score` instead discarded every adjustment the
+    /// index applies after scoring, which is how cas-e979's boosts were inert.
+    #[test]
+    fn hybrid_fuses_the_score_the_bm25_index_sorted_by_cas_e7ae() {
+        let entry = |id: &str, content: &str| Entry {
+            id: id.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        };
+        let entries = vec![
+            entry("e1", "postgres connection pool timeout tuning for the pool"),
+            entry("e2", "postgres pool sizing"),
+            entry("e3", "timeout handling in the worker pool"),
+            entry("e4", "unrelated notes about sourdough"),
+        ];
+        let index = SearchIndex::in_memory().expect("index");
+        for item in &entries {
+            index.index_entry(item).expect("index entry");
+        }
+        let base = SearchOptions {
+            query: "postgres pool timeout".to_string(),
+            limit: 10,
+            ..Default::default()
+        };
+        let direct = index.search(&base, &entries).expect("bm25 search");
+        assert!(direct.len() >= 3, "fixture must match several entries: {direct:?}");
+        assert!(
+            direct.iter().any(|hit| (hit.score - hit.bm25_score).abs() > 1e-9),
+            "fixture must make the index's post-scoring adjustment visible: {direct:?}"
+        );
+
+        let hybrid = HybridSearch::new(index);
+        let opts = HybridSearchOptions {
+            base,
+            enable_semantic: false,
+            enable_temporal: false,
+            enable_graph: false,
+            enable_code: false,
+            enable_knowledge: false,
+            enable_history: false,
+            ..Default::default()
+        };
+        let fused = hybrid.search(&opts, &entries).expect("hybrid search");
+        assert_eq!(
+            fused.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            direct.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            "a BM25-only search keeps the index's order"
+        );
+        for hit in &fused {
+            let sorted_by = direct.iter().find(|d| d.id == hit.id).expect("same hits").score;
+            assert_eq!(
+                hit.bm25_score, sorted_by,
+                "{} fused bm25 {} but the index sorted it by {}",
+                hit.id, hit.bm25_score, sorted_by
+            );
+        }
+    }
 
     #[test]
     fn test_hybrid_search_options_default() {

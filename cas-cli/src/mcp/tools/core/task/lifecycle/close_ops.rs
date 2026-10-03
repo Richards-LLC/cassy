@@ -5686,29 +5686,16 @@ impl CasCore {
         // A later AwaitingMerge retry may advance this anchor through
         // `advance_awaiting_merge_anchor`, but never replaces the parked
         // branch name that preserves task ownership across reassignment.
-        if parked.deliverables.factory_branch_anchor.is_none() {
-            parked.deliverables.factory_branch_anchor = factory_branch_anchor;
-        }
         // cas-a844: record the branch NAME (not just its tip sha) so a lost
         // worker's commits stay linked to this task even after the assignee
-        // field is reassigned or cleared. Never overwrite an existing value —
-        // this only fires once per task, same as the anchor above.
-        if parked.deliverables.parked_branch.is_none() {
-            // cas-73b8: the branch the merge gate measured (a per-task branch
-            // when the worker used one), so merge requests name it too.
-            parked.deliverables.parked_branch = measured_branch
-                .map(|branch| {
-                    branch
-                        .strip_prefix("origin/")
-                        .map(str::to_string)
-                        .unwrap_or(branch)
-                })
-                .or_else(|| {
-                    task.assignee
-                        .as_deref()
-                        .map(|assignee| format!("factory/{assignee}"))
-                });
-        }
+        // field is reassigned or cleared. cas-73b8: the branch the merge gate
+        // measured (a per-task branch when the worker used one), so merge
+        // requests name it too.
+        parked.deliverables.record_park(
+            measured_branch.as_deref(),
+            factory_branch_anchor.as_deref(),
+            task.assignee.as_deref(),
+        );
         // Parking precedes verification dispatch. Clear only this task's
         // pending flag so the next close attempt can create a fresh typed
         // dispatch after the merge gate succeeds.
@@ -25161,6 +25148,79 @@ mod merge_state_gate_tests {
             }
             other => panic!("another task's merged delivery must not close this task: {other:?}"),
         }
+    }
+
+    /// cas-a44a: a task reopened and reassigned keeps the previous worker's
+    /// `parked_branch`. When the new worker re-parks from its own per-task
+    /// branch, the merge-request, close and QA readers all name that branch,
+    /// and the anchor is the new tip. The old branch stays a handoff record.
+    #[test]
+    fn re_park_after_reassignment_records_the_new_workers_branch_cas_a44a() {
+        let dir = init_factory_repo("old");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "factory/old-cas-test1"]);
+        std::fs::write(p.join("draft.md"), "first cycle\n").unwrap();
+        git(p, &["add", "draft.md"]);
+        git(p, &["commit", "-q", "-m", "first cycle (cas-test1)"]);
+        let old_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/old-cas-test1", "-m", "merge first cycle"]);
+        git(p, &["checkout", "-q", "-b", "factory/new-cas-test1"]);
+        std::fs::write(p.join("draft.md"), "second cycle\n").unwrap();
+        git(p, &["add", "draft.md"]);
+        git(p, &["commit", "-q", "-m", "second cycle (cas-test1)"]);
+        let new_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+
+        // Reopened (anchor retired) and reassigned to `new`.
+        let mut task = worker_task("new");
+        task.deliverables.parked_branch = Some("factory/old-cas-test1".into());
+        task.deliverables.factory_branch_anchor = Some(old_tip.clone());
+        task.deliverables.retain_factory_branch_anchor_as_history();
+
+        // The re-park records what the merge gate measured.
+        let measured = close_measured_factory_branch(p, &task, "new");
+        let measured_tip = resolve_branch_sha(p, &measured);
+        task.deliverables
+            .record_park(Some(&measured), measured_tip.as_deref(), Some("new"));
+        task.status = TaskStatus::AwaitingMerge;
+
+        assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(new_tip.as_str()));
+        assert_eq!(
+            crate::prompt_revalidation::merge_request_branch(Some(&task)).as_deref(),
+            Some("factory/new-cas-test1"),
+            "the merge-request reader names the new worker's branch"
+        );
+        assert_eq!(close_measured_factory_branch(p, &task, "new"), "factory/new-cas-test1");
+        assert_eq!(
+            task.deliverables.parked_branch.as_deref(),
+            Some("factory/new-cas-test1")
+        );
+        assert!(
+            task.deliverables
+                .handoff_branches
+                .iter()
+                .any(|branch| branch == "factory/old-cas-test1"),
+            "the previous worker's branch stays linked to the task: {:?}",
+            task.deliverables.handoff_branches
+        );
+        assert!(task.deliverables.historical_factory_branch_anchors.contains(&old_tip));
+    }
+
+    /// cas-a44a: an AwaitingMerge retry after a handoff to the supervisor
+    /// keeps the parked branch; a re-park on the same branch keeps the
+    /// commit-time anchor.
+    #[test]
+    fn re_park_on_the_same_branch_keeps_its_records_cas_a44a() {
+        let mut deliverables = cas_types::TaskDeliverables {
+            parked_branch: Some("factory/worker-cas-test1".into()),
+            factory_branch_anchor: Some("a".repeat(40)),
+            ..Default::default()
+        };
+        deliverables.record_park(Some("origin/factory/worker-cas-test1"), Some(&"b".repeat(40)), Some("worker"));
+        assert_eq!(deliverables.parked_branch.as_deref(), Some("factory/worker-cas-test1"));
+        assert_eq!(deliverables.factory_branch_anchor, Some("a".repeat(40)));
+        assert!(deliverables.handoff_branches.is_empty());
     }
 
     /// Without a per-task branch the worker's own branch is measured, as

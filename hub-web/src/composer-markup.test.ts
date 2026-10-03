@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CHECKING_VOICE_INPUT, DRAFT_TOO_LONG_NOTE, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyDraftNote, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
+import { CHECKING_VOICE_INPUT, DRAFT_NOT_SAVED_NOTE, DRAFT_TOO_LONG_NOTE, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyDraftNote, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
 import { COMPOSER_ROLE_PLACEHOLDER, composerPlaceholder, composerPlaceholders, dressComposer, fitComposerPlaceholder, fittingPlaceholder } from "./conversation-shell";
 
 // WCAG 2.x contrast, the same arithmetic as machine-accent.test.ts.
@@ -222,5 +222,26 @@ describe("a draft too long to keep across a reload says so (cas-adfc)", () => {
     expect(note.hidden).toBe(true);
     expect(note.textContent).toBe("");
     return Promise.resolve().then(() => expect(writes.filter((text) => text === DRAFT_TOO_LONG_NOTE)).toHaveLength(1));
+  });
+});
+
+describe("a draft the browser could not save says so, and the composer is described by it (cas-f657)", () => {
+  it("shows the not-saved sentence, and the textarea's aria-describedby includes the note only while it shows", () => {
+    const { field } = composer();
+    const note = document.querySelector<HTMLElement>("#message-draft-note")!;
+    const described = () => (field.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean);
+    expect(described()).toEqual(["message-status"]);
+    applyDraftNote(document, "not-saved");
+    expect(note.hidden).toBe(false);
+    expect(note.textContent).toBe(DRAFT_NOT_SAVED_NOTE);
+    expect(DRAFT_NOT_SAVED_NOTE).toMatch(/couldn't save this draft/);
+    expect(described()).toEqual(["message-status", "message-draft-note"]);
+    // The too-long sentence takes its place when that is the reason.
+    applyDraftNote(document, "too-long");
+    expect(note.textContent).toBe(DRAFT_TOO_LONG_NOTE);
+    expect(described()).toEqual(["message-status", "message-draft-note"]);
+    applyDraftNote(document, false);
+    expect(note.hidden).toBe(true);
+    expect(described()).toEqual(["message-status"]);
   });
 });

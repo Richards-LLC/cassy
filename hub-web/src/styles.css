@@ -2661,7 +2661,10 @@ dialog form > *,
   position: fixed;
   top: calc(var(--space-4) + env(safe-area-inset-top));
   right: var(--space-4);
-  z-index: 10;
+  /* cas-f4e5: above every in-page layer, including the phone Attention sheet
+     (z-index 20), so a confirmation such as "Details copied" is seen where the
+     action happened. Modal dialogs sit in the top layer and stay above it. */
+  z-index: 30;
   max-width: min(28rem, calc(100vw - 2 * var(--space-4)));
   transform: translate(0, calc(-1 * var(--space-6)));
   opacity: 0;

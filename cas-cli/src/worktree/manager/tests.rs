@@ -176,7 +176,7 @@ fn worker_project_mcp_is_private_and_filtered_without_mutating_supervisor_gh_104
     let worker = temp.path().join("worker");
     std::fs::create_dir_all(&worker).unwrap();
     std::os::unix::fs::symlink(&source, worker.join(".mcp.json")).unwrap();
-    symlink_project_config(&repo, &worker);
+    provision_worker_project_config(&repo, &worker);
     let path = worker.join(".mcp.json");
     let metadata = std::fs::symlink_metadata(&path).unwrap();
     assert!(!metadata.file_type().is_symlink());
@@ -187,7 +187,11 @@ fn worker_project_mcp_is_private_and_filtered_without_mutating_supervisor_gh_104
     assert_eq!(config["mcpServers"]["context7"]["env"]["ALLOWED"], "fixture");
     assert!(config["mcpServers"]["context7"]["env"].get("VERCEL_TOKEN").is_none());
     assert!(config["mcpServers"].get("cas").is_some());
-    assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+    let supervisor = temp.path().join("supervisor");
+    std::fs::create_dir_all(&supervisor).unwrap();
+    symlink_project_config(&repo, &supervisor);
+    assert_eq!(std::fs::read_to_string(supervisor.join(".mcp.json")).unwrap(), original);
 }
 
 #[cfg(unix)]

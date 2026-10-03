@@ -7,7 +7,7 @@ use crate::worktree::external_symlinks::{
 };
 use crate::worktree::git::GitOperations;
 use crate::worktree::manager::{
-    WorktreeError, WorktreeManager, WorktreeResult, symlink_project_config,
+    WorktreeError, WorktreeManager, WorktreeResult, provision_worker_project_config,
 };
 
 /// Describes a worker worktree that was left on disk because it held uncommitted work.
@@ -141,7 +141,7 @@ impl WorktreeManager {
             .create_worktree(&worktree_path, &branch_name, Some(&resolved.branch_ref))?;
 
         let _ = self.git.mark_config_skip_worktree(&worktree_path);
-        symlink_project_config(&self.repo_root, &worktree_path);
+        provision_worker_project_config(&self.repo_root, &worktree_path);
 
         let worktree = Worktree::new(
             Worktree::generate_id(),
@@ -183,7 +183,7 @@ impl WorktreeManager {
             .create_worktree(&worktree_path, &branch_name, Some(&resolved.branch_ref))?;
 
         let _ = self.git.mark_config_skip_worktree(&worktree_path);
-        symlink_project_config(&self.repo_root, &worktree_path);
+        provision_worker_project_config(&self.repo_root, &worktree_path);
 
         let worktree = Worktree::new(
             Worktree::generate_id(),
@@ -210,7 +210,7 @@ impl WorktreeManager {
         if worktree_path.exists() {
             let _ = self.git.mark_config_skip_worktree(&worktree_path);
             let _ = self.git.init_submodules(&worktree_path);
-            symlink_project_config(&self.repo_root, &worktree_path);
+            provision_worker_project_config(&self.repo_root, &worktree_path);
 
             let branch_name = self.branch_name_for_worker(worker_name);
             let parent_branch = self
@@ -249,7 +249,7 @@ impl WorktreeManager {
         if worktree_path.exists() {
             let _ = self.git.mark_config_skip_worktree(&worktree_path);
             let _ = self.git.init_submodules(&worktree_path);
-            symlink_project_config(&self.repo_root, &worktree_path);
+            provision_worker_project_config(&self.repo_root, &worktree_path);
 
             let branch_name = self.branch_name_for_worker(worker_name);
 

@@ -5056,6 +5056,59 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
     assert_eq!(task.status, cas::types::TaskStatus::Blocked);
 }
 
+/// cas-1638: a transfer addressed by session id must store the worker's
+/// registered name. Observed: `task transfer id=cas-ed87
+/// to_agent=60502d01-… supervisor_override=true` stored the raw id as the
+/// assignee, so bold-lark-15's close looked for `factory/60502d01-…`, which
+/// does not exist, and the delivery never parked. Close builds every branch
+/// candidate from the assignee (`factory/<assignee>-<task>`,
+/// `factory/<assignee>`), so the assignee has to be the name.
+#[tokio::test]
+async fn transfer_by_session_id_stores_the_worker_name_cas_1638() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, worker_core) = setup_cas(&mut test_env);
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    // The registration id is the session id (the observed case) ...
+    register_live_worker(&agent_store, "60502d01-90f8-4b86-99be-e7ca2cf14bc6", "bold-lark-15");
+    // ... or the harness session moved on after a context reset, so only
+    // `cc_session_id` carries the id the supervisor sees.
+    let mut reset = cas::types::Agent::new("calm-heron-agent".to_string(), "calm-heron-2".to_string());
+    reset.role = cas::types::AgentRole::Worker;
+    reset.cc_session_id = Some("11112222-3333-4444-5555-666677778888".to_string());
+    reset.heartbeat();
+    agent_store.register(&reset).expect("register reset worker");
+
+    let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing("supervisor-session-id".to_string());
+    let _role_guard = ScopedSupervisorRole::enter(&mut test_env);
+    let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
+
+    for (to_agent, name) in [
+        ("60502d01-90f8-4b86-99be-e7ca2cf14bc6", "bold-lark-15"),
+        ("11112222-3333-4444-5555-666677778888", "calm-heron-2"),
+    ] {
+        let task_id = create_task_for_transfer(&worker_core, &format!("Transfer to {name}")).await;
+        supervisor_core
+            .cas_task_transfer(Parameters(TaskTransferRequest {
+                task_id: task_id.clone(),
+                to_agent: to_agent.to_string(),
+                note: None,
+                supervisor_override: Some(true),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("transfer to {to_agent}: {}", error.message));
+
+        let task = task_store.get(&task_id).expect("task after transfer");
+        assert_eq!(
+            task.assignee.as_deref(),
+            Some(name),
+            "to_agent={to_agent} must be stored as the worker's registered name, the name \
+             close builds factory/{name}-{task_id} and factory/{name} from"
+        );
+    }
+}
+
 // =============================================================================
 // cas-6009: dep_remove honors dep_type — does not silently remove the wrong dep
 // =============================================================================

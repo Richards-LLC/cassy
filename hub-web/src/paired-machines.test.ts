@@ -43,7 +43,7 @@ describe('paired machine footer after authentication loss (cas-f698)', () => {
   });
 
   it('names the machine that needs pairing beside a connected one (cas-0739)', () => {
-    expect(footerState([atlas, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Atlas needs pairing');
+    expect(footerState([atlas, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Needs pairing: Atlas');
   });
 });
 
@@ -60,7 +60,7 @@ describe('an unsteady machine reads Unsteady in the footer, as in the header and
     expect(footerState([unsteady, retrying])).toBe('Reconnecting');
   });
   it('names the unsteady machine beside a connected one (cas-0739)', () => {
-    expect(footerState([unsteady, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Atlas unsteady');
+    expect(footerState([unsteady, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Unsteady: Atlas');
   });
 });
 
@@ -70,15 +70,20 @@ describe('the machine that is not connected comes first and the footer names it 
   const fleet = [live('atlas', 'Atlas · Linux'), live('studio', 'Studio Mac · macOS'), shed, live('forge', 'Forge · Linux')];
 
   it('names the one machine that cannot be reached, by its own name', () => {
-    expect(footerState(fleet)).toBe("Shed NAS can't be reached");
+    expect(footerState(fleet)).toBe("Can't reach Shed NAS");
   });
 
-  it('names its state in words for each kind of outage', () => {
+  // cas-cae9: the outage words lead and the name follows, so the phone
+  // footer's end ellipsis shortens the name, never the verb.
+  it('names its state in words for each kind of outage, before the name', () => {
     const one = (connection: string) => footerState([live('atlas', 'Atlas · Linux'), { ...shed, connection }]);
-    expect(one('Reconnecting')).toBe('Shed NAS reconnecting');
-    expect(one('Needs pairing')).toBe('Shed NAS needs pairing');
-    expect(one('Unreachable')).toBe("Shed NAS can't be reached");
-    expect(one('Connecting…')).toBe('Shed NAS connecting');
+    expect(one('Reconnecting')).toBe('Reconnecting to Shed NAS');
+    expect(one('Needs pairing')).toBe('Needs pairing: Shed NAS');
+    expect(one('Unreachable')).toBe("Can't reach Shed NAS");
+    expect(one(CANT_REACH_RETRYING)).toBe("Can't reach Shed NAS");
+    expect(one('Connecting…')).toBe('Connecting to Shed NAS');
+    expect(one('Idle')).toBe('Connecting to Shed NAS');
+    expect(one(UNSTEADY)).toBe('Unsteady: Shed NAS');
   });
 
   it('keeps a long name whole in the title and safe as text (cas-0739 QA round 1)', () => {
@@ -86,7 +91,7 @@ describe('the machine that is not connected comes first and the footer names it 
     const rack = { ...shed, label: 'Build Server Rack Seven Downstairs <b>x</b> · Windows' };
     footer.innerHTML = machineFooterMarkup([live('atlas', 'Atlas · Linux'), rack], 1, 'test-build');
     const state = footer.querySelector<HTMLElement>('.machine-badge-state')!;
-    expect(state.textContent).toBe("Build Server Rack Seven Downstairs <b>x</b> can't be reached");
+    expect(state.textContent).toBe("Can't reach Build Server Rack Seven Downstairs <b>x</b>");
     expect(state.title).toBe(state.textContent);
     expect(state.querySelector('b')).toBeNull();
     // The label and the state are separate spans, so CSS can let the state yield.

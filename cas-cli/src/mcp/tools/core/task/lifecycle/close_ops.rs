@@ -8541,6 +8541,12 @@ impl CasCore {
                 {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
+                // cas-49c0: name main-checkout edits that match this delivery.
+                if let Some(note) =
+                    stray_main_checkout_edit_note(worker_wt, &resolved_parent_branch)
+                {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
             }
         }
 
@@ -11241,6 +11247,72 @@ fn commit_ids_match(a: &str, b: &str) -> bool {
     }
     let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
     long.starts_with(short)
+}
+
+/// cas-49c0: a decision note naming files that are dirty in the session's
+/// main checkout *and* changed by this worker's delivery (`parent...HEAD` in
+/// its worktree): the shape of a worker edit that landed in the supervisor's
+/// checkout instead of its own. `None` when the worktree is the main
+/// checkout, nothing matches, or git cannot answer. Audit only, never a
+/// refusal: the supervisor's own edits can share a path.
+fn stray_main_checkout_edit_note(
+    worker_worktree: &std::path::Path,
+    parent_branch: &str,
+) -> Option<String> {
+    use std::process::Command;
+    let git = |args: &[&str]| -> Option<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(worker_worktree)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    // The main checkout owns the shared git dir; a linked worktree does not.
+    let common_dir = std::path::PathBuf::from(git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
+    if common_dir.file_name() != Some(std::ffi::OsStr::new(".git")) {
+        return None;
+    }
+    let main = common_dir.parent()?.canonicalize().ok()?;
+    if worker_worktree.canonicalize().ok()? == main {
+        return None;
+    }
+    let delivery: std::collections::BTreeSet<String> = git(&[
+        "diff",
+        "--name-only",
+        &format!("{parent_branch}...HEAD"),
+        "--",
+    ])?
+    .lines()
+    .map(str::to_string)
+    .collect();
+    if delivery.is_empty() {
+        return None;
+    }
+    let receipt = clean_tree_receipt(&main);
+    if receipt.unavailable.is_some() {
+        return None;
+    }
+    let stray: Vec<String> = receipt
+        .tracked_dirty
+        .iter()
+        .map(|entry| entry.path.clone())
+        .chain(receipt.untracked.iter().cloned())
+        .filter(|path| delivery.contains(path))
+        .collect();
+    (!stray.is_empty()).then(|| {
+        format!(
+            "STRAY MAIN-CHECKOUT EDITS (cas-49c0): {} has uncommitted changes to {} file(s) this delivery also changes: {}. A worker may have written to the main checkout instead of its worktree {}; the supervisor should review them before they are committed or discarded.",
+            main.display(),
+            stray.len(),
+            stray.join(", "),
+            worker_worktree.display()
+        )
+    })
 }
 
 /// Collect the close-time clean-tree receipt for the git repo at
@@ -33797,6 +33869,41 @@ mod zero_change_close_tests {
             error.contains("PRE-CLOSE HOOK CONTEXT REJECTED") && error.contains(&stray),
             "{error}"
         );
+    }
+
+    /// cas-49c0: the close receipt flags main-checkout edits that match the
+    /// worker's delivery: the 2026-09-01 include_foreign incident, where the
+    /// same files were edited in the supervisor's checkout during the lane.
+    #[test]
+    fn close_receipt_flags_stray_main_checkout_edits_matching_the_delivery_cas_49c0() {
+        let dir = init_worker_repo();
+        let main = dir.path();
+        git(main, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/core.rs"), "pub fn core() {}\n").unwrap();
+        std::fs::write(main.join("src/unrelated.rs"), "pub fn other() {}\n").unwrap();
+        git(main, &["add", "src"]);
+        git(main, &["commit", "-q", "-m", "base files"]);
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join("strong-puma-16");
+        git(main, &["worktree", "add", "-q", "-b", "factory/strong-puma-16", wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join("src/core.rs"), "pub fn core() { include_foreign(); }\n").unwrap();
+        git(&wt, &["commit", "-q", "-am", "feat: include_foreign"]);
+
+        // Clean main checkout: nothing to flag.
+        assert_eq!(stray_main_checkout_edit_note(&wt, "main"), None);
+
+        // The same file edited in the main checkout during the lane, plus an
+        // unrelated dirty file that is not part of the delivery.
+        std::fs::write(main.join("src/core.rs"), "pub fn core() { include_foreign(); }\n").unwrap();
+        std::fs::write(main.join("src/unrelated.rs"), "pub fn other() { 1; }\n").unwrap();
+        let note = stray_main_checkout_edit_note(&wt, "main").expect("the stray edit is flagged");
+        assert!(note.contains("src/core.rs"), "{note}");
+        assert!(!note.contains("src/unrelated.rs"), "{note}");
+        assert!(note.contains(&main.canonicalize().unwrap().display().to_string()) || note.contains(&main.display().to_string()), "{note}");
+
+        // Run from the main checkout itself, there is nothing to compare.
+        assert_eq!(stray_main_checkout_edit_note(main, "main"), None);
     }
 
     #[test]

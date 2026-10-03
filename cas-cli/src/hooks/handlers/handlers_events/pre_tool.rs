@@ -2936,9 +2936,10 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or(command);
+                // cas-cf4f: `rm` is a deletion, judged by bash_delete_targets.
                 if !matches!(
                     command,
-                    "touch" | "mkdir" | "tee" | "cp" | "mv" | "rm" | "install"
+                    "touch" | "mkdir" | "tee" | "cp" | "mv" | "install"
                 ) {
                     index += 1;
                     continue;
@@ -3046,6 +3047,182 @@ fn factory_unsanctioned_write_path(
     .map(|violation| violation.resolved_path)
 }
 
+/// cas-cf4f: the operands of `rm`, `rmdir` and `unlink` in command position,
+/// each with whether its command was recursive (`-r`, `-R`, `--recursive`).
+/// Mirrors the small command recognizer in [`bash_write_targets`].
+fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
+    let shell_command = shell_command_without_heredoc_bodies(command);
+    let tokens = factory_shell_tokens(&shell_command);
+    let variable_values = factory_shell_variable_values(&tokens);
+    let mut targets = Vec::new();
+    let mut index = 0;
+    let mut command_position = true;
+    while index < tokens.len() {
+        match &tokens[index] {
+            ShellToken::Operator(';')
+            | ShellToken::Operator('|')
+            | ShellToken::Operator('&')
+            | ShellToken::Operator('(')
+            | ShellToken::Operator(')') => {
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => index += 1,
+            ShellToken::Word(word) if command_position => {
+                if matches!(word.as_str(), "do" | "then" | "else" | "elif")
+                    || word.starts_with('-')
+                    || word.contains('=')
+                    || matches!(word.as_str(), "command" | "env" | "sudo")
+                {
+                    index += 1;
+                    continue;
+                }
+                command_position = false;
+                let name = std::path::Path::new(word)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(word);
+                if !matches!(name, "rm" | "rmdir" | "unlink") {
+                    index += 1;
+                    continue;
+                }
+                let mut recursive = false;
+                let mut operands = Vec::new();
+                let mut cursor = index + 1;
+                while cursor < tokens.len() {
+                    match &tokens[cursor] {
+                        ShellToken::Operator(';')
+                        | ShellToken::Operator('|')
+                        | ShellToken::Operator('&')
+                        | ShellToken::Operator('(')
+                        | ShellToken::Operator(')') => break,
+                        ShellToken::Operator(_) => {}
+                        ShellToken::Word(flag) if flag == "--recursive" => recursive = true,
+                        ShellToken::Word(flag) if flag.starts_with("--") => {}
+                        ShellToken::Word(flag) if flag.starts_with('-') => {
+                            recursive |= flag.contains('r') || flag.contains('R');
+                        }
+                        ShellToken::Word(operand) => operands.push(operand.clone()),
+                    }
+                    cursor += 1;
+                }
+                for operand in operands {
+                    for expanded in expand_factory_shell_word(&operand, &variable_values) {
+                        targets.push((expanded, recursive));
+                    }
+                }
+                index = cursor;
+            }
+            ShellToken::Word(_) => {
+                command_position = false;
+                index += 1;
+            }
+        }
+    }
+    targets
+}
+
+/// cas-cf4f: a stale Cassy runtime file under `~/.cas`: a socket, lock or pid
+/// file, or a session record under `~/.cas/sessions`. These are left behind
+/// by throwaway factories and any agent may clean them up. Files only: the
+/// directories themselves are not leftovers.
+fn is_cas_runtime_leftover(path: &std::path::Path, home: Option<&std::path::Path>) -> bool {
+    let Some(cas_home) = home.and_then(|home| canonicalize_for_containment(&home.join(".cas")))
+    else {
+        return false;
+    };
+    if !path.starts_with(&cas_home) || path == cas_home || path.is_dir() {
+        return false;
+    }
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    name.ends_with(".sock")
+        || name.ends_with(".lock")
+        || name.ends_with(".pid")
+        || path.parent() == Some(cas_home.join("sessions").as_path())
+}
+
+/// cas-cf4f: judge one deletion target. Never `/`, `$HOME` or an ancestor of
+/// it, `/tmp` itself, or the worktree root or any ancestor of it (which
+/// includes the main checkout). Otherwise allowed inside the sanctioned write
+/// roots, for stale Cassy runtime files under `~/.cas`, and, for the
+/// supervisor, below `/tmp` (cache cleanup, cas-a3af).
+fn factory_delete_violation(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
+    is_supervisor: bool,
+    registered_worktree_root: Option<&std::path::Path>,
+    raw_path: &str,
+) -> Option<FactoryWriteViolation> {
+    let violation = |resolved_path: std::path::PathBuf, matched_rule: &'static str| FactoryWriteViolation {
+        evaluated_path: raw_path.to_string(),
+        resolved_path,
+        matched_rule,
+    };
+    if raw_path.contains('$') {
+        return Some(violation(
+            std::path::PathBuf::from(raw_path),
+            "deletion with an unresolved shell variable",
+        ));
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let expanded = if raw_path == "~" {
+        home.clone()?
+    } else if let Some(suffix) = raw_path.strip_prefix("~/") {
+        home.as_ref()?.join(suffix)
+    } else {
+        std::path::PathBuf::from(raw_path)
+    };
+    let path = if expanded.is_absolute() {
+        lexically_normalize_path(expanded)
+    } else {
+        lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(expanded))
+    };
+    let Some(resolved) = canonicalize_for_containment(&path) else {
+        return Some(violation(path, "deletion outside sanctioned roots (unresolvable path)"));
+    };
+    let canonical = |path: &std::path::Path| canonicalize_for_containment(path);
+    let worktree_root = registered_worktree_root
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::var_os("CAS_CLONE_PATH").filter(|v| !v.is_empty()).map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    let is_root_or_ancestor_of = |protected: Option<std::path::PathBuf>| {
+        protected
+            .and_then(|protected| canonical(&protected))
+            .is_some_and(|protected| protected.starts_with(&resolved))
+    };
+    if resolved.parent().is_none()
+        || is_root_or_ancestor_of(home.clone())
+        || is_root_or_ancestor_of(Some(worktree_root))
+        || ["/tmp", "/private/tmp"]
+            .iter()
+            .any(|tmp| canonical(std::path::Path::new(tmp)).is_some_and(|tmp| tmp == resolved))
+    {
+        return Some(violation(resolved, "deletion of a protected root ($HOME, /, /tmp, the repository or the worktree)"));
+    }
+    if unsanctioned_factory_path_with_worktree(
+        input,
+        configured_artifacts_root,
+        configured_scratch_root,
+        is_supervisor,
+        raw_path,
+        registered_worktree_root,
+    )
+    .is_none()
+        || is_cas_runtime_leftover(&resolved, home.as_deref())
+    {
+        return None;
+    }
+    if is_supervisor
+        && ["/tmp", "/private/tmp"].iter().any(|tmp| {
+            canonical(std::path::Path::new(tmp)).is_some_and(|tmp| resolved.starts_with(tmp))
+        })
+    {
+        return None;
+    }
+    Some(violation(resolved, "deletion outside sanctioned roots"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FactoryWriteViolation {
     evaluated_path: String,
@@ -3062,6 +3239,22 @@ fn factory_write_violation(
 ) -> Option<FactoryWriteViolation> {
     let tool = input.tool_name.as_deref()?;
     let tool_input = input.tool_input.as_ref()?;
+    // cas-cf4f: Bash deletions are judged as deletions, before creation.
+    if tool == "Bash"
+        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
+        && let Some(violation) = bash_delete_targets(command).into_iter().find_map(|(raw_path, _recursive)| {
+            factory_delete_violation(
+                input,
+                configured_artifacts_root,
+                configured_scratch_root,
+                is_supervisor,
+                registered_worktree_root,
+                &raw_path,
+            )
+        })
+    {
+        return Some(violation);
+    }
     let raw_paths = match tool {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
             .get("file_path")
@@ -3072,6 +3265,12 @@ fn factory_write_violation(
         "Bash" => {
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
             bash_write_targets(command)
+        }
+        // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
+        // text in `tool_input.command`.
+        "apply_patch" => {
+            let patch = tool_input.get("command").and_then(|value| value.as_str())?;
+            apply_patch_write_targets(patch)
         }
         _ => return None,
     };
@@ -3103,6 +3302,25 @@ fn factory_write_violation(
             matched_rule: "none",
         })
     })
+}
+
+/// cas-49c0: every file a Codex `apply_patch` call adds, updates, deletes or
+/// moves to, in patch order.
+fn apply_patch_write_targets(patch: &str) -> Vec<String> {
+    // Only header lines name files; `+`, `-` and ` ` lines are content, so a
+    // header-looking line inside an added file is never a target.
+    const HEADERS: [&str; 4] = ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
+    patch
+        .lines()
+        .filter_map(|line| {
+            HEADERS
+                .iter()
+                .find_map(|header| line.strip_prefix(header))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn unsanctioned_factory_path(
@@ -3279,6 +3497,16 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if violation.matched_rule.starts_with("deletion") {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: deletion refused ({}): {}. Assigned worktree: `{}`. Deleting is allowed inside your worktree, under `{}/<task-id>/`{}, and for stale Cassy runtime files (sockets, locks, pid and session files) under ~/.cas. $HOME, /, /tmp, the repository and your worktree root are never deleted.",
+            violation.matched_rule,
+            violation.resolved_path.display(),
+            worktree.display(),
+            artifacts,
+            scratch,
+        );
+    }
     format!(
         "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
         violation.resolved_path.display(),
@@ -3464,6 +3692,177 @@ mod workspace_contract_tests {
         }
     }
 
+    fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {
+        HookInput {
+            cwd: cwd.to_string_lossy().to_string(),
+            tool_name: Some(tool.to_string()),
+            tool_input: Some(payload),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn apply_patch_targets_every_added_updated_deleted_and_moved_file_cas_49c0() {
+        let patch = "*** Begin Patch\n\
+                     *** Add File: src/new.rs\n+pub fn new() {}\n\
+                     *** Update File: /abs/src/lib.rs\n*** Move to: /abs/src/moved.rs\n@@\n-a\n+b\n\
+                     *** Delete File: ../other/gone.rs\n\
+                     *** End Patch\n";
+        assert_eq!(
+            apply_patch_write_targets(patch),
+            vec!["src/new.rs", "/abs/src/lib.rs", "/abs/src/moved.rs", "../other/gone.rs"]
+        );
+        // Patch body lines are content, never targets.
+        assert!(apply_patch_write_targets("*** Begin Patch\n+*** Add File: /etc/x\n*** End Patch\n").is_empty());
+    }
+
+    /// cas-49c0: the worker write guard's decision table. A worker may write
+    /// inside its own worktree and under the durable artifacts root; a write
+    /// that resolves into the supervisor's main checkout (or any other repo)
+    /// is refused with the path named, whichever tool makes it — including a
+    /// Codex `apply_patch` with an absolute path.
+    #[test]
+    fn worker_write_guard_decision_table_cas_49c0() {
+        let main = tempfile::tempdir().expect("main checkout");
+        let worktree = main.path().join(".cas/worktrees/strong-puma-16");
+        std::fs::create_dir_all(worktree.join("src")).expect("worktree");
+        let artifacts = tempfile::tempdir().expect("artifacts root");
+        let other_repo = tempfile::tempdir().expect("another repository");
+        let artifacts_root = Some(artifacts.path().display().to_string());
+        let main_file = main.path().join("cas-cli/src/mcp/tools/service/core.rs");
+        let patch = |header: &str, path: &str| {
+            serde_json::json!({ "command": format!("*** Begin Patch\n*** {header}: {path}\n+x\n*** End Patch\n") })
+        };
+        let cases: Vec<(&str, HookInput, Option<std::path::PathBuf>)> = vec![
+            ("apply_patch inside the worktree", tool_input("apply_patch", patch("Update File", "src/lib.rs"), &worktree), None),
+            ("apply_patch absolute inside the worktree", tool_input("apply_patch", patch("Add File", &worktree.join("src/new.rs").display().to_string()), &worktree), None),
+            ("apply_patch into the artifacts root", tool_input("apply_patch", patch("Add File", &artifacts.path().join("cas-49c0/LEDGER.md").display().to_string()), &worktree), None),
+            ("apply_patch absolute into the main checkout", tool_input("apply_patch", patch("Update File", &main_file.display().to_string()), &worktree), Some(main_file.clone())),
+            ("apply_patch relative escape into the main checkout", tool_input("apply_patch", patch("Delete File", "../../../cas-cli/src/mcp/tools/service/core.rs"), &worktree), Some(main_file.clone())),
+            ("apply_patch move into another repository", tool_input("apply_patch", serde_json::json!({ "command": format!("*** Begin Patch\n*** Update File: src/lib.rs\n*** Move to: {}\n*** End Patch\n", other_repo.path().join("lib.rs").display()) }), &worktree), Some(other_repo.path().join("lib.rs"))),
+            ("Edit absolute into the main checkout", tool_input("Edit", serde_json::json!({ "file_path": main_file.display().to_string() }), &worktree), Some(main_file.clone())),
+            ("Write inside the worktree", tool_input("Write", serde_json::json!({ "file_path": worktree.join("src/lib.rs").display().to_string() }), &worktree), None),
+        ];
+        for (case, input, expected) in cases {
+            let violation =
+                factory_write_violation(&input, &artifacts_root, None, false, Some(worktree.as_path()));
+            assert_eq!(
+                violation.as_ref().map(|violation| violation.resolved_path.clone()),
+                expected.as_deref().and_then(canonicalize_for_containment),
+                "{case}"
+            );
+            if let Some(violation) = violation {
+                let denial = factory_workspace_contract_denial(
+                    &input,
+                    &violation,
+                    artifacts_root.as_deref(),
+                    None,
+                    Some(worktree.as_path()),
+                );
+                assert!(
+                    denial.contains(&violation.resolved_path.display().to_string())
+                        && denial.contains(&worktree.display().to_string()),
+                    "{case}: the refusal names the path and the worker's own worktree: {denial}"
+                );
+            }
+        }
+    }
+
+    /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
+    /// its sanctioned roots and stale Cassy runtime files (sockets, locks,
+    /// pid and session files) under ~/.cas; the supervisor may also clear
+    /// caches under /tmp. `$HOME`, `/`, `/tmp`, the repository and the
+    /// worktree root are never deletable, and every other delete is refused
+    /// as a deletion with its reason, never as "file creation".
+    #[test]
+    fn rm_is_classified_as_deletion_decision_table_cas_cf4f() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let root_path = root.path().canonicalize().expect("canonical fixture root");
+        let home = root_path.join("home");
+        let main = root_path.join("main");
+        let worktree = main.join(".cas/worktrees/solid-condor-23");
+        let artifacts = root_path.join("artifacts");
+        for dir in [home.join(".cas/sessions"), worktree.join("src"), artifacts.join("cas-cf4f/old")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for file in [
+            home.join(".cas/factory-qa4cd6.gui.sock"),
+            home.join(".cas/sessions/qa4cd6.json.lock"),
+            home.join(".cas/sessions/qa4cd6.json"),
+            home.join(".cas/daemon.pid"),
+            home.join(".zshrc"),
+            worktree.join("src/stale.rs"),
+        ] {
+            std::fs::write(file, b"").unwrap();
+        }
+        let tmp_cache = tempfile::Builder::new()
+            .prefix("cas-cf4f-cache")
+            .tempdir_in("/tmp")
+            .expect("/tmp cache dir");
+        let tmp_cache_path = tmp_cache.path().display().to_string();
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let artifacts_root = Some(artifacts.display().to_string());
+        let decide = |command: &str, supervisor: bool| {
+            factory_write_violation(
+                &bash_input(command, &worktree),
+                &artifacts_root,
+                None,
+                supervisor,
+                Some(worktree.as_path()),
+            )
+        };
+
+        let allowed: Vec<(&str, String, bool)> = vec![
+            ("stale socket and lock under ~/.cas", "rm -f ~/.cas/factory-qa4cd6.gui.sock ~/.cas/sessions/qa4cd6.json.lock".into(), false),
+            ("stale session file", "rm ~/.cas/sessions/qa4cd6.json".into(), false),
+            ("stale pid file via $HOME", "rm -f $HOME/.cas/daemon.pid".into(), false),
+            ("a file in the worktree", "rm -f src/stale.rs".into(), false),
+            ("task-scoped artifacts", format!("rm -rf {}", artifacts.join("cas-cf4f/old").display()), false),
+            ("supervisor clears a /tmp cache", format!("rm -rf {tmp_cache_path}"), true),
+        ];
+        for (case, command, supervisor) in &allowed {
+            assert_eq!(decide(command, *supervisor), None, "{case}: {command}");
+        }
+
+        let refused: Vec<(&str, String, bool, &str)> = vec![
+            ("all of $HOME", "rm -rf ~".into(), false, "protected"),
+            ("all of $HOME via the variable", "rm -rf $HOME".into(), true, "protected"),
+            ("the main checkout", format!("rm -rf {}", main.display()), true, "protected"),
+            ("the worktree root", "rm -rf .".into(), false, "protected"),
+            ("/tmp itself", "rm -rf /tmp".into(), true, "protected"),
+            ("the whole ~/.cas directory", "rm -rf ~/.cas".into(), false, "outside"),
+            ("an unrelated home file", "rm ~/.zshrc".into(), false, "outside"),
+            ("a worker clearing /tmp", format!("rm -rf {tmp_cache_path}"), false, "outside"),
+        ];
+        for (case, command, supervisor, rule) in &refused {
+            let violation = decide(command, *supervisor).unwrap_or_else(|| panic!("{case} must be refused: {command}"));
+            assert!(violation.matched_rule.starts_with("deletion"), "{case}: {violation:?}");
+            assert!(violation.matched_rule.contains(rule), "{case}: {violation:?}");
+            let denial = factory_workspace_contract_denial(
+                &bash_input(command, &worktree),
+                &violation,
+                artifacts_root.as_deref(),
+                None,
+                Some(worktree.as_path()),
+            );
+            assert!(
+                denial.contains("deletion") && !denial.contains("file creation"),
+                "{case}: a delete is refused as a deletion, with its reason: {denial}"
+            );
+        }
+
+        // Creation keeps its own rule: `touch` of the same socket path is
+        // still refused as file creation outside the sanctioned roots.
+        let created = decide("touch ~/.cas/factory-qa4cd6.gui.sock", false).expect("creation is still guarded");
+        assert_eq!(created.matched_rule, "none");
+    }
+
     #[test]
     fn home_paths_in_read_only_commands_are_not_write_targets() {
         for command in [
@@ -3499,9 +3898,16 @@ mod workspace_contract_tests {
 
     #[test]
     fn bash_rm_targets_expand_loop_variables() {
-        let targets = bash_write_targets(
+        // cas-cf4f: rm operands are deletion targets, still expanded and guarded.
+        let targets: Vec<String> = bash_delete_targets(
             "B=cas-cli/src/builtins; for h in codex grok; do for sk in cas-html-reports cas-dataviz; do rm -rf $B/$h/skills/$sk; done; done",
-        );
+        )
+        .into_iter()
+        .map(|(target, recursive)| {
+            assert!(recursive, "-rf is recursive");
+            target
+        })
+        .collect();
         for target in [
             "cas-cli/src/builtins/codex/skills/cas-html-reports",
             "cas-cli/src/builtins/codex/skills/cas-dataviz",

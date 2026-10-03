@@ -11515,6 +11515,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_dead_session_worker_cancels_notifications_cas_c653() {
+        use cas_store::{AgentStore, PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore};
+        use cas_types::AgentStatus;
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_SESSION", "shutdown-c653"),
+            ("CAS_AGENT_ROLE", "supervisor"),
+            ("CAS_FACTORY_WORKER_NAMES", "live-worker"),
+        ]);
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let agents = SqliteAgentStore::open(&cas_root).expect("agents");
+        let queue = SqlitePromptQueueStore::open(&cas_root).expect("queue");
+        let mut cancelled = Vec::new();
+        for (name, status) in [
+            ("proud-newt-45", AgentStatus::Stale),
+            ("bold-stork-90", AgentStatus::Shutdown),
+        ] {
+            let mut worker = worker_named(name, &format!("id-{name}"));
+            worker.factory_session = Some("shutdown-c653".into());
+            worker.status = status;
+            worker.pid = Some(u32::MAX);
+            worker.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(10);
+            agents.register(&worker).expect("register dead worker");
+            for target in [name, worker.id.as_str()] {
+                let id = queue
+                    .enqueue_with_session("supervisor", target, "unfinished message", "shutdown-c653")
+                    .expect("enqueue");
+                cancelled.push(id);
+            }
+        }
+        // Already handed to the transport, but unread: cancellation must not
+        // rely on processed_at being NULL or pretend the recipient read it.
+        queue
+            .mark_transport_delivered(cancelled[0])
+            .expect("handoff");
+        let broadcast = queue
+            .enqueue_with_session("supervisor", "all_workers", "broadcast", "shutdown-c653")
+            .unwrap();
+        let foreign = queue
+            .enqueue_with_session(
+                "supervisor",
+                "proud-newt-45",
+                "foreign message",
+                "other-session",
+            )
+            .unwrap();
+        let unrelated = queue
+            .enqueue_with_session("supervisor", "live-worker", "live message", "shutdown-c653")
+            .unwrap();
+
+        let core = CasCore::with_daemon(cas_root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "proud-newt-45,bold-stork-90"
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("same-session dead workers remain shutdownable without panes");
+        for id in cancelled {
+            let report = queue.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+            assert!(format!("{report:?}").contains("shutdown"), "{report:?}");
+            assert!(queue.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
+        }
+        for id in [broadcast, foreign, unrelated] {
+            assert_eq!(
+                queue.message_delivery_report(id).unwrap().unwrap().stage,
+                cas_store::DeliveryStage::Enqueued
+            );
+        }
+        for name in ["proud-newt-45", "bold-stork-90"] {
+            assert_eq!(
+                agents.get(&format!("id-{name}")).unwrap().status,
+                AgentStatus::Shutdown
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn restarted_supervisor_sees_rehomed_worker_on_status_and_activity_surfaces() {
         use cas_store::{AgentStore, EventStore, SqliteAgentStore, SqliteEventStore};
         use cas_types::{Agent, AgentRole, Event, EventEntityType, EventType};

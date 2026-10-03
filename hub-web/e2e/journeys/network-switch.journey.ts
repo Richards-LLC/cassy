@@ -1039,12 +1039,12 @@ test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journe
     await hub.down("atlas", { sockets: "close" });
     await clock.advance(2_000);
     const banner = page.locator(".terminal-disconnected-banner .banner-text");
-    await expect(banner).toHaveText("Lost connection to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
+    await expect(banner).toHaveText("Lost connection to Atlas · Linux. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
     await expect(page.locator(".connection-summary")).toContainText("Unreachable");
-    await expect(page.locator(".status-stale").filter({ visible: true })).toHaveText(/^Not live — this browser cannot make this connection\./);
-    await expect(page.locator("#attention-panel .attention-card[data-kind=\"session_transport\"]")).toHaveCount(0);
+    await expect(page.locator(".status-stale").filter({ visible: true })).toHaveText(/^Not live — This browser is missing a feature Cassy Cloud needs\./);
+    await expect(page.locator("#attention-panel").getByText("Lost connection to Atlas · Linux", { exact: true })).toHaveCount(1);
     // No automatic reconnect is claimed on any visible surface.
     await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
-    await expect(banner).toMatchAriaSnapshot("- text: Lost connection to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
+    await expect(banner).toMatchAriaSnapshot("- text: Lost connection to Atlas · Linux. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
   });
 });

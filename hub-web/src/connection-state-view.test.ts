@@ -11,6 +11,7 @@ import {
   connectingView,
   disconnectedView,
   elapsedSeconds,
+  fatalConnectionRecovery,
   lostConnectionBanner,
   pairingControlsReason,
   pairingLostBanner,
@@ -278,6 +279,12 @@ describe("a conversation opens behind one quiet line (cas-813a)", () => {
 });
 
 describe("one outage, one vocabulary (journey F9)", () => {
+  it("uses the actual unsupported-browser reason without an API name in the recovery sentence", () => {
+    const reason = "This browser is missing AbortSignal.timeout, which Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer.";
+    expect(lostConnectionBanner("Atlas", true, reason)).toBe("Lost connection to Atlas. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
+    expect(fatalConnectionRecovery()).toContain("Update your browser, then reload this page.");
+    expect(lostConnectionBanner("Atlas", false, reason)).toBe("Lost connection to Atlas. Reconnecting…");
+  });
   it("folds a fatal session failure into the machine outage (cas-99d7)", () => {
     const fatal = snapshot({ phase: "failed", fatal: true });
     expect(transportFailureNeedsAttention(fatal, snapshot({ phase: "failed", fatal: true }))).toBe(false);

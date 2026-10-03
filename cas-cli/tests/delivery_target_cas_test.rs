@@ -632,14 +632,10 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
             fixture.receipt.target_sha,
             "{label}: the target must not move"
         );
-        assert!(
-            !matches!(
-                delivery_state(&fixture),
-                WorkerDeliveryState::Merged
-                    | WorkerDeliveryState::CloseReady
-                    | WorkerDeliveryState::Delivered
-            ),
-            "{label}: the delivery must not merge"
+        assert_eq!(
+            delivery_state(&fixture),
+            WorkerDeliveryState::AwaitingMerge,
+            "{label}: the refused delivery must remain retryable"
         );
     };
     unmerged("red CI without override");
@@ -733,6 +729,14 @@ async fn red_ci_refusal_restores_awaiting_merge_cas_d1eb() {
                 .unwrap()
                 .unwrap();
         assert_eq!(parked.state, WorkerDeliveryState::AwaitingMerge);
+        assert_eq!(parked.last_error_code.as_deref(), Some("ci_refused"));
+        assert!(
+            parked
+                .last_error_detail
+                .as_deref()
+                .unwrap()
+                .contains("CI RED")
+        );
         assert_eq!(
             retained_receipt, receipt,
             "retry retains the reviewed receipt"
@@ -748,6 +752,38 @@ async fn red_ci_refusal_restores_awaiting_merge_cas_d1eb() {
             TaskStatus::AwaitingMerge
         );
     }
+
+    // A later CI refusal during reconciliation cannot erase a completed merge.
+    run_git(
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "land reviewed delivery",
+            &receipt.source_branch,
+        ],
+        &fixture.repo.root,
+    );
+    let merged_tip = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
+    cas_store::transition_worker_delivery(
+        &fixture.cas_root,
+        &approved.id,
+        &[WorkerDeliveryState::AwaitingMerge],
+        WorkerDeliveryState::Merged,
+        &fixture.supervisor_id,
+        Some(&fixture.supervisor_id),
+        None,
+        Some(&merged_tip),
+        None,
+    )
+    .unwrap();
+    let refusal = run_merge(&fixture).await;
+    assert!(refusal.contains("CI RED"), "{refusal}");
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Merged);
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "main"]),
+        merged_tip
+    );
 }
 
 #[tokio::test]
@@ -793,14 +829,10 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
             fixture.receipt.target_sha,
             "{label}: the target must not move"
         );
-        assert!(
-            !matches!(
-                delivery_state(&fixture),
-                WorkerDeliveryState::Merged
-                    | WorkerDeliveryState::CloseReady
-                    | WorkerDeliveryState::Delivered
-            ),
-            "{label}: the delivery must not merge"
+        assert_eq!(
+            delivery_state(&fixture),
+            WorkerDeliveryState::AwaitingMerge,
+            "{label}: the refused delivery must remain retryable"
         );
     };
     unmerged("docs-only code CI without override");

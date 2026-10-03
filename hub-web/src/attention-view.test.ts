@@ -200,3 +200,25 @@ describe("a rebuilt page keeps the Attention panel as the operator left it (cas-
     expect(document.activeElement).toBe(document.body);
   });
 });
+
+describe("Attention notice labels (cas-7cb3)", () => {
+  it("uses catalog project/supervisor names and refreshes them without a notice change", () => {
+    const root = document.createElement("div"); const item = { ...event("label"), session: "Accounting-rapid-gazelle-52" };
+    let label = "Accounting · happy-cheetah-1";
+    const options = { now, sessionLabel: () => label };
+    renderAttentionPanel(root, [item], callbacks(), options);
+    expect(root.querySelector(".attention-group-label")?.textContent).toBe(label);
+    expect(root.textContent).not.toContain(item.session);
+    expect(root.querySelector(".attention-dismiss-group")).toBeNull();
+    label = "Ledger · happy-cheetah-1";
+    renderAttentionPanel(root, [item], callbacks(), options);
+    expect(root.querySelector(".attention-group-label")?.textContent).toBe(label);
+    renderAttentionPanel(root, [item, { ...item, id: "other", message: "Another failure" }], callbacks(), options);
+    expect(root.querySelector(".attention-dismiss-group")).not.toBeNull();
+  });
+  it("does not show an opaque id when catalog metadata is unavailable", () => {
+    const root = document.createElement("div");
+    renderAttentionPanel(root, [{ ...event("fallback"), session: "f98e41d1-c544-443a-8256-22360ddf3701" }], callbacks(), { now });
+    expect(root.querySelector(".attention-group-label")?.textContent).toBe("Workstation · Session unavailable");
+  });
+});

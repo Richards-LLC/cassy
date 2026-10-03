@@ -410,7 +410,15 @@ export class ConversationList {
       ask.innerHTML = `${END_ICON}<span class="conversation-end-label">End session</span>`;
       ask.setAttribute("aria-label", `End session ${row.supervisor} on ${machineName(row.host)}`);
       const children: Node[] = [ask];
-      if (typeof state === "object") { const error = document.createElement("span"); error.className = "conversation-end-error"; error.setAttribute("role", "alert"); error.textContent = state.error; children.push(error); }
+      if (typeof state === "object") {
+        const error = document.createElement("span");
+        error.id = `conversation-end-error:${row.key}`;
+        error.className = "conversation-end-error";
+        error.setAttribute("role", "alert");
+        error.textContent = state.error;
+        ask.setAttribute("aria-describedby", error.id);
+        children.push(error);
+      }
       control.replaceChildren(...children);
       return;
     }
@@ -440,9 +448,17 @@ export class ConversationList {
         this.ending.delete(row.key);
         this.announceEnded(row, neighbours);
         this.landAfterEnd(control, neighbours);
-      }, (error: unknown) => {
-        this.ending.set(row.key, { error: `Could not end ${row.supervisor}: ${error instanceof Error ? error.message : String(error)}` });
+      }, () => {
+        // Keep the failed row actionable, but leave focus alone if the operator
+        // moved elsewhere while the request was in flight (cas-a549).
+        const heldFocus = control.contains(document.activeElement);
+        this.ending.set(row.key, { error: `Could not end ${row.supervisor} on ${machineName(row.host)}. Try End session again. If it still fails, check the session on ${machineName(row.host)}.` });
         rerender();
+        if (heldFocus) {
+          control.scrollIntoView?.({ block: "nearest" });
+          revealWhole(control);
+          control.querySelector<HTMLButtonElement>(".conversation-end-ask")?.focus({ preventScroll: true });
+        }
       });
     });
     const cancel = button("Cancel", "conversation-end-cancel", (event) => {

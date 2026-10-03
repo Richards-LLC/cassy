@@ -136,6 +136,23 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(notice.locator("pre")).toContainText("9 minutes ago");
     // cas-ed87: Details reads as the message, never as a {summary, message} object.
     await expect(notice.locator("pre"), "Details is the message as text at 390px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
+    // cas-f4e5: on a phone the Copy confirmation is drawn over the open
+    // Attention sheet, not under it: the toast is the topmost thing at its
+    // own centre.
+    await notice.getByRole("button", { name: "Copy" }).click();
+    await expect(page.locator("#toast")).toHaveText("Details copied");
+    await expect(page.locator("#toast")).toBeVisible();
+    const onTop = await page.locator("#toast").evaluate((toast) => {
+      // The toast ignores the pointer (pointer-events: none), so let the hit
+      // test see it for this one measurement.
+      const before = toast.style.pointerEvents;
+      toast.style.pointerEvents = "auto";
+      const box = toast.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      toast.style.pointerEvents = before;
+      return { onTop: hit === toast || toast.contains(hit), hit: hit ? `${hit.tagName.toLowerCase()}.${hit.className}` : "nothing" };
+    });
+    expect(onTop.onTop, `the toast is not under the sheet at 390px (hit: ${onTop.hit})`).toBe(true);
     await notice.locator("summary").focus();
     await page.keyboard.press("Tab");
     await expectWholeFocusRing(notice.getByRole("button", { name: "Copy" }), { vertical: true });

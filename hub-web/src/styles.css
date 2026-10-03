@@ -1738,6 +1738,8 @@ main {
 
 .attention-copy {
   align-self: flex-end;
+  /* Keep the outer focus ring inside the Attention tab's scroll boundary. */
+  margin-inline-end: calc(2 * var(--focus-ring-width));
   min-height: var(--space-6);
   padding: var(--space-1) var(--space-2);
   color: var(--text-mid);

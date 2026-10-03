@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, expectWholeFocusRing } from "./journey";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
 
@@ -135,6 +135,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     expect(payloadBox!.y, "Copy has its own row, above the full Details text at390px").toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height);
     await expect(notice.locator("pre")).toContainText("9 minutes ago");
     await notice.getByRole("button", { name: "Copy" }).focus();
+    await expectWholeFocusRing(notice.getByRole("button", { name: "Copy" }), { vertical: true });
     const copy = await focused();
     await page.clock.fastForward(61_000);
     await hub.announceCatalog("atlas");

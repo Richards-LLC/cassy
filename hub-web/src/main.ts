@@ -4023,6 +4023,28 @@ function keepConversationListPlace(container: HTMLElement, selectedKey: string |
   conversationListScroll = container.scrollTop;
 }
 
+/**
+ * Back from a conversation (a phone's list and thread take turns): the list
+ * is where the operator left it, and focus returns to the row that was open,
+ * brought into view if it is not, instead of the first row, whose focus
+ * scrolled the list back to its top (cas-f50f). With that row gone, the
+ * first row takes focus where the list already is.
+ */
+function returnToConversationRow(openedKey: string | undefined): void {
+  const container = document.querySelector<HTMLElement>("#conversation-list");
+  const rows = [...document.querySelectorAll<HTMLButtonElement>("#conversation-list .conversation-row")];
+  const row = rows.find((node) => node.dataset.threadKey === openedKey) ?? rows[0];
+  if (!row) return;
+  if (container && container.scrollTop !== conversationListScroll) container.scrollTop = conversationListScroll;
+  row.focus({ preventScroll: true });
+  if (!container) return;
+  const box = container.getBoundingClientRect();
+  const rect = row.getBoundingClientRect();
+  if (rect.top < box.top) container.scrollTop += rect.top - box.top;
+  else if (rect.bottom > box.bottom) container.scrollTop += rect.bottom - box.bottom;
+  conversationListScroll = container.scrollTop;
+}
+
 function renderConversationList(): void {
   renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
@@ -4766,7 +4788,14 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
   if (sheetClose) sheetClose.onclick = closeAttentionSheet;
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
-  if (conversationBack) conversationBack.onclick = () => { attentionSheetOpen = false; if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
+  if (conversationBack) conversationBack.onclick = () => {
+    attentionSheetOpen = false;
+    // cas-f50f: back to the row that was open, not the list's first row.
+    const opened = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+    if (selectedMachineId) commitSelection({ machineId: selectedMachineId });
+    render();
+    queueMicrotask(() => returnToConversationRow(opened));
+  };
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
   if (terminal) terminal.onclick = (event) => {
     const unavailable = terminal.dataset.disabledReason;

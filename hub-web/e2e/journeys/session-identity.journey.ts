@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { journeyDay, journeyStamp } from "./clock";
 import { SCOPES, type Machine } from "./hub-double";
 
@@ -223,5 +223,38 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     // cas-f60a: the list says it ended where the row was, and so does a polite live region.
     await expect(list.locator(".conversation-ended")).toHaveText("noble-cheetah-84 on Atlas ended.");
     await expect(page.locator(".conversation-ended-status[role=status]")).toHaveText("noble-cheetah-84 on Atlas ended.");
+  });
+});
+
+// cas-f50f: on a phone the list and the thread take turns. Back from a lower
+// row's conversation returns the list to where it was, with that row in view
+// and focused, not the list's top with focus on its first row.
+test.describe("on a phone", () => {
+  test.use({ viewport: { width: 390, height: 600 }, hasTouch: true, isMobile: true });
+  test("HUB-J14 Back from a lower grouped row returns the list to that row (cas-f50f)", journeyPart, async ({ page, journey }) => {
+    // Enough live sessions in one project that a phone's list scrolls.
+    const crowded = atlas();
+    for (const [index, name] of ["amber-heron-11", "brisk-lynx-22", "copper-wren-33", "dusky-otter-44", "eager-finch-55", "fable-moth-66"].entries()) {
+      crowded.sessions!.push(session(`gabber-studio-${name}`, name, journeyStamp(-(5 + index) * 60_000), "supervisor → Commander"));
+    }
+    await journey.hub({ machines: [crowded], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage"] } });
+    const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+    const scroller = page.locator("#conversation-list");
+    const row = (codename: string) => list.locator(".conversation-row", { hasText: codename });
+    await journey.stage("Open the lowest grouped row from a list scrolled down to it", async () => {
+      await journey.open();
+      await expect(list.locator(".conversation-row")).toHaveCount(9);
+      await row("noble-cheetah-84").scrollIntoViewIfNeeded();
+      const scrolled = await scroller.evaluate((node) => node.scrollTop);
+      expect(scrolled, "the list scrolls on a phone, so its place matters").toBeGreaterThan(0);
+      await row("noble-cheetah-84").tap();
+      await expect(page.locator("#conversation-back")).toBeVisible();
+    });
+    await journey.stage("Back returns to that row, in view and focused", async () => {
+      await page.locator("#conversation-back").tap();
+      await expect(row("noble-cheetah-84")).toBeFocused();
+      await expect(row("noble-cheetah-84")).toBeInViewport({ ratio: 1 });
+      expect(await scroller.evaluate((node) => node.scrollTop), "the list did not jump back to its top").toBeGreaterThan(0);
+    });
   });
 });

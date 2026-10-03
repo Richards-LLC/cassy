@@ -64,7 +64,7 @@ import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connecti
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import { operatorThreadMarkup } from "./operator-thread";
 import { applyDraftNote, applyMicState, composerMarkup } from "./composer-markup";
-import { pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
+import { countdownLabel, nextCountdown, pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -1629,15 +1629,44 @@ function stopPairingTimers(): void {
   pairingCountdownTimer = undefined;
 }
 
+/**
+ * cas-d8a5 (journey F31): the countdown last shown, per request. A dialog the
+ * machine's claim rebuilds starts from it, and the next tick may only lower it.
+ */
+let pairingCountdownShown: { request: string; ms: number } | undefined;
+
+/**
+ * One pairing request from its code to the machine's claim: the code request
+ * and the invitation the claim delivers share the relay's request id.
+ */
+function pairingRequestKey(pending: PendingPairing | null): string | undefined {
+  if (!pending) return undefined;
+  return pending.kind === "relay-request" ? pending.pairingRequestId : pending.relay?.pairingRequestId ?? pending.token;
+}
+
+function lastPairingCountdown(): number | undefined {
+  const request = pairingRequestKey(pendingPairing);
+  return request !== undefined && pairingCountdownShown?.request === request ? pairingCountdownShown.ms : undefined;
+}
+
+function shownPairingCountdown(): string | undefined {
+  const expiresAt = pendingPairing?.expiresAt;
+  if (!expiresAt) return undefined;
+  return countdownLabel(nextCountdown(expiresAt, Date.now(), lastPairingCountdown()));
+}
+
 function syncPairingCountdown(): void {
   if (pairingCountdownTimer !== undefined) window.clearInterval(pairingCountdownTimer);
   pairingCountdownTimer = undefined;
   const expiresAt = pendingPairing?.expiresAt;
-  if (!expiresAt) return;
+  if (!expiresAt) { pairingCountdownShown = undefined; return; }
   const update = () => {
     const output = document.querySelector<HTMLElement>("#pair-countdown");
-    const remaining = Math.max(0, Date.parse(expiresAt) - Date.now());
-    if (output) output.textContent = `${Math.floor(remaining / 60_000)}:${String(Math.floor(remaining / 1000) % 60).padStart(2, "0")}`;
+    const remaining = nextCountdown(expiresAt, Date.now(), lastPairingCountdown());
+    const request = pairingRequestKey(pendingPairing);
+    if (request !== undefined) pairingCountdownShown = { request, ms: remaining };
+    const label = countdownLabel(remaining);
+    if (output && output.textContent !== label) output.textContent = label;
     if (remaining === 0) {
       pairingOperations.invalidate();
       pendingPairingStore.clear();
@@ -2486,6 +2515,7 @@ function pairDialogMarkup(): string {
     exchangeInFlight: pairingExchangeInFlight,
     relayOrigin,
     pageOrigin: location.origin,
+    countdown: shownPairingCountdown(),
   });
 }
 

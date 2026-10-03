@@ -104,7 +104,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.getByRole("log")).toMatchAriaSnapshot(`
       - group /^You, \\d{1,2}:\\d{2}/:
         - paragraph: Please keep the release notes short this time.
-      - group /^patient-pelican-9, \\d{1,2}:\\d{2}/:
+      - group /^cas-src supervisor, \\d{1,2}:\\d{2}/:
         - paragraph: Understood — two lines per item, no process talk.
     `);
     await expect(page.locator("#conversation-connection")).toMatchAriaSnapshot(`- status: Live`);

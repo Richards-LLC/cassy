@@ -15,7 +15,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         const canvas = page.locator(".conversation-active > canvas");
         await expect(thread).toBeVisible();
         await expect(canvas).toBeAttached();
-        await expect.poll(() => canvas.evaluate((node) => node.width), { message: "the real terminal has sized its 80-column backing store" }).toBeGreaterThan(390);
+        await expect.poll(() => canvas.evaluate((node) => (node as HTMLCanvasElement).width), { message: "the real terminal has sized its 80-column backing store" }).toBeGreaterThan(390);
         hub.supervisorSays(PELICAN, "The phone conversation stays readable.");
         await expect(page.getByRole("log").getByText("The phone conversation stays readable.")).toBeVisible();
         const geometry = await page.locator(".terminal-mount.conversation-active").evaluate((mount) => {

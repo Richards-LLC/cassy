@@ -11,7 +11,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/release-portable.sh"
 release_portable_define_sha256sum
 gate="$script_dir/release-gate.sh"
-tmp="$(mktemp -d)"
+# cas-db34: the physical spelling. macOS's $TMPDIR is under /var, a symlink
+# to /private/var, and the gate reports the resolved checkout path; fixtures
+# compare against that spelling.
+tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
 # The gate refuses any scratch base with a .cas ancestor. Its default used to be
@@ -671,8 +674,11 @@ output="$(cd "$epic_worktree" && \
     env -u ZIG \
     CAS_RELEASE_EPIC_REF=refs/heads/epic/release-gate-fixture \
     GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+    GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
+    GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
     GATE_FIXTURE_ZIG_LOG="$zig_log" \
     CARGO="$epic_worktree/scripts/cargo-stub" \
+    RUSTUP="$epic_worktree/scripts/rustup-stub" \
     RELEASE_GATE_GEN_REFERENCE_HISTORY="$epic_worktree/scripts/gen-builtin-reference-history.sh" \
     "$epic_worktree/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 git -C "$repo" worktree remove --force "$epic_worktree" >/dev/null
@@ -800,7 +806,10 @@ run_gate_unset_home() {
 
 repo="$(new_fixture default-scratch-base)"
 output="$(run_gate_unset_home "$repo" 2>&1 || true)"
-if grep -qF 'scratch base: /var/tmp/cas-release-gate (from default)' <<<"$output" \
+# cas-db34: the default is per host (/Users/Shared on macOS, where /var/tmp is
+# a Cassy disposable root); ask the gate's own helper which one applies.
+default_scratch_base="$(bash -c 'source "$1"; release_portable_default_scratch_base' _ "$repo/scripts/release-portable.sh")"
+if grep -qF "scratch base: $default_scratch_base (from default)" <<<"$output" \
     && grep -qF 'PASS archive-mode' <<<"$output" \
     && grep -qF 'PASS snapshot-portability' <<<"$output"; then
     ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the gate default, and the scratch rows run'
@@ -1050,13 +1059,17 @@ assert_all_pass "$output"
 # test compile, and run_check must retain its measured timing in timing.tsv.
 repo="$(new_fixture macos-check-receipt)"
 macos_log_dir="$tmp/macos-check-logs"
+# cas-db34: judge only this run's dispatch, not earlier fixtures' calls.
+: >"$tmp/rustup.log"
+: >"$tmp/cargo.log"
+rm -f "$tmp/macos-check.o"
 output="$(CAS_RELEASE_GATE_LOG_DIR="$macos_log_dir" run_gate "$repo" '' \
     "$repo/scripts/release-gate.sh" 9.99.7 --only macos-check 2>&1)"
 if grep -qF 'PASS macos-check' <<<"$output" \
     && grep -qxF 'target add aarch64-apple-darwin' "$tmp/rustup.log" \
     && grep -qxF 'check --workspace --tests --target aarch64-apple-darwin' "$tmp/cargo.log" \
     && [[ -s "$tmp/macos-check.o" ]] \
-    && [[ "$(wc -l <"$macos_log_dir/timing.tsv")" == 2 ]] \
+    && (( $(wc -l <"$macos_log_dir/timing.tsv") == 2 )) \
     && awk -F '\t' '$1 == "macos-check" && $7 == 0 && $4 ~ /^[0-9]+\.[0-9]+$/ {found=1} END {exit !found}' \
         "$macos_log_dir/timing.tsv"; then
     ok 'macos-check installs the Darwin target, compiles the workspace, and records timing'
@@ -1116,7 +1129,7 @@ export CAS_RELEASE_GATE_CACHE_DIR="$tmp/pass-cache"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1 || { cat "$tmp/cache-first.log"; exit 1; }
 expected_timing_rows=$(( $(grep -c '^PASS ' "$tmp/cache-first.log") + 1 ))
-if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == "$expected_timing_rows" ]] \
+if (( $(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv") == expected_timing_rows )) \
     && [[ -s "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" ]] \
     && grep -qE '^  timing: wall=[0-9]+\.[0-9]+s user=' "$tmp/cache-first.log"; then
     ok 'every row retains wall/CPU timing and successful raw logs'

@@ -136,8 +136,25 @@ def code_input(root, revision="HEAD"):
     return digest(b"\0".join(material))
 
 
+def with_cargo_bin(env):
+    """The PATH release-portable.sh gives the gate and the train.
+
+    release_portable_path_add_cargo_bin appends an existing Cargo bin directory
+    missing from PATH. A proof run from a shell without it (a macOS agent or
+    launchd shell) otherwise keys a different PATH than the gate and train that
+    look it up, so the receipt never matched there (cas-db34).
+    """
+    home = env.get("CARGO_HOME") or (env.get("HOME", "") + "/.cargo")
+    cargo_bin = home + "/bin"
+    path = env.get("PATH", "")
+    if Path(cargo_bin).is_dir() and cargo_bin not in path.split(":"):
+        env["PATH"] = f"{path}:{cargo_bin}" if path else cargo_bin
+    return env
+
+
 def test_environment(root):
     env = {key: value for key, value in os.environ.items() if key not in IDENTITY}
+    with_cargo_bin(env)
     env.setdefault("CAS_INIT_TIMEOUT_SECS", "900")
     if "ZIG" in env:
         zig = Path(env["ZIG"])

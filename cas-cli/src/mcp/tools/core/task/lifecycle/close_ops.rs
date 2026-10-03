@@ -27705,6 +27705,39 @@ mod merge_state_gate_tests {
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
     }
 
+    #[test]
+    fn zz_diag_f38ca_replay() {
+        let root = crate::test_paths::workspace_root();
+        let repo = root.as_path();
+        let mut out = String::new();
+        for (id, assignee, anchor, olds, target, floor) in [
+            ("cas-940f", "wise-raven-87", "3e9121d3a", vec!["31a3c3519"], "59be03ce1", 1_791_000_000i64),
+            ("cas-6a96", "nimble-marten-87", "2333b09e7", vec!["2d9b3824d", "d0f02c3b8"], "5f04f2ea8", 1_791_000_000),
+            ("cas-cee5", "nimble-marten-87", "6143de642", vec!["bd75338c6"], "05be2b5da", 1_791_000_000),
+        ] {
+            let anchor = resolve_task_commit_receipt_sha(repo, anchor).unwrap();
+            let target = resolve_task_commit_receipt_sha(repo, target).unwrap();
+            let mut task = worker_task(assignee);
+            task.id = id.into();
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.historical_factory_branch_anchors = olds.iter().map(|o| resolve_task_commit_receipt_sha(repo, o).unwrap()).collect();
+            for (label, floor_epoch, reason, receipt) in [
+                ("plain", floor, None, None),
+                ("override+receipt", floor, Some("supervisor"), Some(anchor.as_str())),
+                ("floor0", 0, None, None),
+            ] {
+                let mut window = window_at(floor_epoch, "diag");
+                window.supervisor_override_reason = reason.map(str::to_string);
+                window.identity = TaskCommitIdentity { task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+                let raw = task_attribution::merge_tip_content_presence(repo, &target, &anchor, Some(&window), &window.identity, receipt);
+                let outcome = anchored_delivery_content_gate(&task, repo, &anchor, &target, Some(&window), &window.identity, receipt, None);
+                out.push_str(&format!("\n== {id} {label}\nraw={raw:?}\noutcome={outcome:?}\n"));
+            }
+        }
+        panic!("{out}");
+    }
+
     /// Replays immutable production delivery anchors. Run explicitly in a
     /// checkout retaining the v34 history; normal shallow CI uses the fixtures.
     #[test]

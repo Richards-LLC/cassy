@@ -1460,6 +1460,8 @@ fn reset_stale_preassign_holder(
             "task assignee changed from stale holder '{holder}' while preparing reset"
         ));
     }
+    cas_store::release_qa_claim_for_reviewer(cas_dir, &task.id, holder)
+        .map_err(|e| format!("could not release stale QA reviewer '{holder}' claim: {e}"))?;
     let prior_status = reset.status;
     reset.status = cas_types::TaskStatus::Open;
     reset.assignee = None;
@@ -1511,14 +1513,20 @@ pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_nam
             // Continue without lease release — clearing assignee is still useful.
             // agent_store calls below are skipped when this is None-equivalent by
             // using a local flag.
-            return release_worker_task_bindings_tasks_only(&*task_store, worker_name, None);
+            return release_worker_task_bindings_tasks_only(
+                cas_dir,
+                &*task_store,
+                worker_name,
+                None,
+            );
         }
     };
 
-    release_worker_task_bindings_tasks_only(&*task_store, worker_name, Some(&*agent_store))
+    release_worker_task_bindings_tasks_only(cas_dir, &*task_store, worker_name, Some(&*agent_store))
 }
 
 fn release_worker_task_bindings_tasks_only(
+    cas_dir: &std::path::Path,
     task_store: &dyn cas_store::TaskStore,
     worker_name: &str,
     agent_store: Option<&dyn cas_store::AgentStore>,
@@ -1547,6 +1555,11 @@ fn release_worker_task_bindings_tasks_only(
 
     let mut released = 0usize;
     for mut t in assigned {
+        if let Err(e) = cas_store::release_qa_claim_for_reviewer(cas_dir, &t.id, worker_name) {
+            tracing::error!(task_id = %t.id, worker_name, error = %e,
+                "cas-3172: QA claim release failed; retaining shutdown task binding for retry");
+            continue;
+        }
         if let Some(agents) = agent_store {
             let _ = agents.release_lease_for_task(&t.id, "Worker shutdown/cancel cleanup");
         }
@@ -1603,6 +1616,11 @@ pub(crate) fn release_preassign_if_bound(
         task.status,
         cas_types::TaskStatus::Closed | cas_types::TaskStatus::AwaitingMerge
     ) {
+        return;
+    }
+    if let Err(e) = cas_store::release_qa_claim_for_reviewer(cas_dir, task_id, worker_name) {
+        tracing::error!(task_id, worker_name, error = %e,
+            "cas-3172: QA claim release failed; retaining aborted preassignment for retry");
         return;
     }
     if let Ok(agents) = open_agent_store(cas_dir) {
@@ -5336,7 +5354,203 @@ mod tests {
         assert!(!worker_has_open_tasks(&cas_dir, "agent-d"));
     }
 
+    fn claimed_qa_fixture(cas_dir: &std::path::Path) -> cas_types::QaPass {
+        let store = open_task_store(cas_dir).unwrap();
+        let mut task = task_with("cas-qa3172", Some("dead-reviewer"), TaskStatus::InProgress);
+        task.labels.push("qa-pass".to_string());
+        task.notes = "prior review evidence".into();
+        task.branch = Some("factory/prior-review".into());
+        store.add(&task).unwrap();
+        let now = chrono::Utc::now();
+        let opened = cas_store::open_qa_pass(
+            cas_dir,
+            &cas_store::NewQaPass {
+                task_id: "cas-delivery3172",
+                implementer_agent_id: "implementer",
+                branch: "factory/implementer",
+                bound_head: "aaaa1111",
+                deadline_at: now + chrono::Duration::minutes(45),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap();
+        let cas_store::QaPassOpen::Dispatched(pass) = opened else {
+            panic!("new round");
+        };
+        cas_store::set_qa_task(cas_dir, &pass.id, "cas-qa3172").unwrap();
+        cas_store::claim_qa_pass(cas_dir, "cas-delivery3172", "dead-reviewer", now).unwrap()
+    }
+
+    fn assert_pending_qa(cas_dir: &std::path::Path, before: &cas_types::QaPass) {
+        let pass = cas_store::latest_qa_pass(cas_dir, &before.task_id, chrono::Utc::now()).unwrap().unwrap();
+        assert_eq!(pass.id, before.id);
+        assert_eq!(pass.round, before.round);
+        assert_eq!(pass.deadline_at, before.deadline_at);
+        assert_eq!(pass.state, cas_types::QaPassState::Pending);
+        assert!(pass.reviewer_agent_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_workers_replaces_dead_qa_reviewer_same_round_cas_3172() {
+        use cas_store::SpawnQueueStore;
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut guard = crate::test_env_guard::TestEnvGuard::temp_home();
+        let bin = guard.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::test_paths::warm_stub(
+            &bin.join("codex"),
+            "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n",
+        );
+        let auth = guard.home().join(".codex/auth.json");
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(auth, "{}").unwrap();
+        guard.set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let before = claimed_qa_fixture(&cas_dir);
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents
+            .register(&cas_types::Agent::new_with_role(
+                "supervisor-id".into(),
+                "supervisor".into(),
+                cas_types::AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let service = crate::mcp::CasService::new(core, None);
+        let req = serde_json::from_value(serde_json::json!({"action":"spawn_workers", "task_id":"cas-qa3172", "count":1, "cli":"codex"})).unwrap();
+        service.factory_request(Parameters(req)).await.expect("MCP accepts replacement spawn");
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let queued = queue.peek(1).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].task_id.as_deref(), Some("cas-qa3172"));
+        // The PTY boot is omitted; invoke exactly the preassignment seam that
+        // early registration and finish_worker_spawn call with the queued id.
+        assert!(assign_task_to_new_worker(&cas_dir, queued[0].task_id.as_deref().unwrap(), "replacement-reviewer"));
+        assert_pending_qa(&cas_dir, &before);
+        let task = open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap();
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.assignee.as_deref(), Some("replacement-reviewer"));
+        assert!(task.notes.contains("prior review evidence"));
+        assert!(task.notes.contains("force-released"));
+        assert_eq!(task.branch.as_deref(), Some("factory/prior-review"));
+        agents
+            .register(&cas_types::Agent::new_with_role(
+                "replacement-id".into(),
+                "replacement-reviewer".into(),
+                cas_types::AgentRole::Worker,
+            ))
+            .unwrap();
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("replacement-id".into());
+        core.cas_task_start(Parameters(crate::mcp::tools::IdRequest {
+            id: "cas-qa3172".into(),
+        }))
+        .await
+        .expect("replacement starts same round now, not at deadline");
+        let pass = cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(pass.id, before.id);
+        assert_eq!(pass.deadline_at, before.deadline_at);
+        assert_eq!(pass.reviewer_agent_id.as_deref(), Some("replacement-reviewer"));
+    }
+
+    #[test]
+    fn qa_claim_tracks_shutdown_and_aborted_preassignment_cas_3172() {
+        for aborted in [false, true] {
+            let (_temp, cas_dir) = seeded_cas_dir();
+            let before = claimed_qa_fixture(&cas_dir);
+            if aborted { release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"); }
+            else { assert_eq!(release_worker_task_bindings(&cas_dir, "dead-reviewer"), 1); }
+            assert_pending_qa(&cas_dir, &before);
+            assert_eq!(open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap().assignee, None);
+        }
+    }
+
+    #[test]
+    fn qa_claim_survives_live_holder_and_mismatched_cleanup_cas_3172() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let before = claimed_qa_fixture(&cas_dir);
+        open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&cas_types::Agent::new_with_role(
+                "live-id".into(),
+                "dead-reviewer".into(),
+                cas_types::AgentRole::Worker,
+            ))
+            .unwrap();
+        assert!(!assign_task_to_new_worker(
+            &cas_dir,
+            "cas-qa3172",
+            "replacement"
+        ));
+        release_preassign_if_bound(&cas_dir, "cas-qa3172", "other-worker");
+        let pass = cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now()).unwrap().unwrap();
+        assert_eq!(pass.state, cas_types::QaPassState::Claimed);
+        assert_eq!(pass.reviewer_agent_id.as_deref(), Some("dead-reviewer"));
+    }
+
     // --- cas-6913 / cas-7a94: spawn-time task pre-assignment ------------
+
+    #[test]
+    fn failed_qa_release_keeps_binding_for_retry_cas_3172() {
+        for recovery in ["spawn", "shutdown", "abort"] {
+            let (_temp, cas_dir) = seeded_cas_dir();
+            let before = claimed_qa_fixture(&cas_dir);
+            let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_qa_release BEFORE UPDATE ON qa_passes
+                WHEN OLD.state = 'claimed' AND NEW.state = 'pending'
+                BEGIN SELECT RAISE(ABORT, 'injected QA release failure'); END;",
+            )
+            .unwrap();
+            let recover = || match recovery {
+                "spawn" => {
+                    assign_task_to_new_worker(&cas_dir, "cas-qa3172", "replacement");
+                }
+                "shutdown" => {
+                    release_worker_task_bindings(&cas_dir, "dead-reviewer");
+                }
+                _ => release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"),
+            };
+            recover();
+            let task = open_task_store(&cas_dir)
+                .unwrap()
+                .get("cas-qa3172")
+                .unwrap();
+            assert_eq!(
+                task.assignee.as_deref(),
+                Some("dead-reviewer"),
+                "{recovery}"
+            );
+            assert_eq!(task.status, TaskStatus::InProgress, "{recovery}");
+            assert_eq!(
+                cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now())
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            conn.execute_batch("DROP TRIGGER reject_qa_release;")
+                .unwrap();
+            recover();
+            assert_pending_qa(&cas_dir, &before);
+            let task = open_task_store(&cas_dir)
+                .unwrap()
+                .get("cas-qa3172")
+                .unwrap();
+            assert_eq!(task.status, TaskStatus::Open);
+            assert_ne!(task.assignee.as_deref(), Some("dead-reviewer"));
+        }
+    }
 
     /// AC3: `spawn_workers task_id=<id>` must result in the task's assignee
     /// being the newly spawned worker's display name — the same field

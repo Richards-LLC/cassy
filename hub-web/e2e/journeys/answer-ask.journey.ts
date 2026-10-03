@@ -382,12 +382,12 @@ test("HUB-J7 a double tap on the folded question opens it without answering it (
     const box = (await bar.boundingBox())!;
     const before = hub.sends.length;
     await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
-    await expect(yes).toBeVisible();
-    // The opened card's choice sits under the tap point (the reason for this guard).
-    const under = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.textContent?.trim() ?? null, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
     await page.waitForTimeout(600);
-    expect(hub.sends.length, `a double tap sent nothing (the second tap landed on: ${under})`).toBe(before);
+    expect(hub.sends.map((send) => send.text).slice(before), "a double tap on the bar sends no answer").toEqual([]);
     await expect(yes).toBeVisible();
+    // The opened card's choice does sit under the tap point: the guard, not the layout, keeps it unanswered.
+    const under = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.textContent?.trim() ?? null, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+    expect(under).toBe("Yes, go ahead");
   });
   await journey.stage("A deliberate tap on Yes afterwards answers it", async () => {
     const sent = hub.nextSend();

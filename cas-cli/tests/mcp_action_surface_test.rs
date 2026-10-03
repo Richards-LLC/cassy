@@ -1018,6 +1018,7 @@ fn published_action(tool: &str) -> serde_json::Value {
 fn top_level_dispatch_literals(source: &str, tool: &str) -> Vec<String> {
     let start = source
         .find(&format!("pub async fn {tool}("))
+        .or_else(|| source.find(&format!("async fn {tool}(")))
         .unwrap_or_else(|| panic!("missing {tool} dispatch function"));
     let function = &source[start..];
     // Take whichever dispatch form comes FIRST after this function's start.
@@ -1107,6 +1108,18 @@ fn published_action_enums_equal_their_dispatch_tables() {
     use std::collections::BTreeSet;
 
     let source = service_source();
+    // The handler table coordination() and factory() share.
+    let coordination_handlers: BTreeSet<String> =
+        top_level_dispatch_literals(&source, "coordination_dispatch")
+            .into_iter()
+            .collect();
+    let aliases_of = |name: &str| -> &'static [(&'static str, &'static str)] {
+        match name {
+            "task" => TASK_ACTION_ALIASES,
+            "coordination" => COORDINATION_ACTION_ALIASES,
+            _ => &[],
+        }
+    };
     let proxy_only = [
         "proxy_add",
         "proxy_remove",
@@ -1128,16 +1141,36 @@ fn published_action_enums_equal_their_dispatch_tables() {
             .map(|value| value.as_str().expect("enum values are strings").to_string())
             .collect();
 
-        let mut dispatched: BTreeSet<String> = top_level_dispatch_literals(&source, &name)
-            .into_iter()
-            .filter(|action| cfg!(feature = "mcp-proxy") || !proxy_only.contains(&action.as_str()))
-            .collect();
-        let aliases: &[(&str, &str)] = match name.as_str() {
-            "task" => TASK_ACTION_ALIASES,
-            "coordination" => COORDINATION_ACTION_ALIASES,
-            _ => &[],
+        // cas-2d86: coordination() and factory() route on the registry list
+        // they publish (cas-269ab), so their own match holds no literals. What
+        // they can dispatch is that list, narrowed to the actions that reach a
+        // handler arm in the shared `coordination_dispatch` table.
+        let mut dispatched: BTreeSet<String> = match shared_registry_routing(&name) {
+            Some(registry) => {
+                let routing = tool_function(&source, &name);
+                let membership = format!("cas_mcp::actions::{}.contains(", registry.0);
+                assert!(
+                    routing.contains(&membership),
+                    "{name} must route on the registry it publishes ({membership}...)"
+                );
+                registry
+                    .1
+                    .iter()
+                    .filter(|action| coordination_handlers.contains(**action))
+                    .map(|action| (*action).to_string())
+                    .filter(|action| {
+                        !aliases_of(&name).iter().any(|(alias, _)| alias == action)
+                    })
+                    .collect()
+            }
+            None => top_level_dispatch_literals(&source, &name)
+                .into_iter()
+                .filter(|action| {
+                    cfg!(feature = "mcp-proxy") || !proxy_only.contains(&action.as_str())
+                })
+                .collect(),
         };
-        for (alias, canonical) in aliases {
+        for (alias, canonical) in aliases_of(&name) {
             assert!(
                 dispatched.contains(*canonical),
                 "{name} alias {alias} points at an undispatched action {canonical}"
@@ -1158,6 +1191,38 @@ fn published_action_enums_equal_their_dispatch_tables() {
         checked, 15,
         "every multi-action tool publishes an action enum"
     );
+    // cas-2d86: and the reverse: every handler arm in the shared table is
+    // published by coordination or factory, so nothing dispatchable hides.
+    let shared: BTreeSet<String> = cas_mcp::actions::COORDINATION_ACTIONS
+        .iter()
+        .chain(cas_mcp::actions::FACTORY_ACTIONS)
+        .map(|action| (*action).to_string())
+        .collect();
+    let unpublished: Vec<&String> = coordination_handlers.difference(&shared).collect();
+    assert!(
+        unpublished.is_empty(),
+        "coordination_dispatch handles unpublished actions: {unpublished:?}"
+    );
+}
+
+/// cas-2d86: tools that route on a `cas_mcp::actions` registry list instead
+/// of literal arms, with the list they publish.
+fn shared_registry_routing(tool: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match tool {
+        "coordination" => Some(("COORDINATION_ACTIONS", cas_mcp::actions::COORDINATION_ACTIONS)),
+        "factory" => Some(("FACTORY_ACTIONS", cas_mcp::actions::FACTORY_ACTIONS)),
+        _ => None,
+    }
+}
+
+/// The source of one `#[tool]` function, up to the next tool attribute.
+fn tool_function<'a>(source: &'a str, tool: &str) -> &'a str {
+    let start = source
+        .find(&format!("pub async fn {tool}("))
+        .unwrap_or_else(|| panic!("missing {tool} tool function"));
+    let rest = &source[start..];
+    let end = rest[1..].find("#[tool(").map_or(rest.len(), |end| end + 1);
+    &rest[..end]
 }
 
 #[test]

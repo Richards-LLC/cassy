@@ -8,6 +8,17 @@
 | Machine output | `--json`: one array of `{name, status, group, message, remediation, duration_ms, phase}`; nothing else on stdout. |
 | Omitted | Per-check timings, the slow-phase table, and instances beyond the first of a repeated finding — all under `--verbose`; detailed payload sections remain in the SessionStart references. |
 
+## Read-only queue diagnostics (cas-d6b9)
+
+The `supervisor relay` and `delivery retries` checks inspect an existing SQLite
+queue through a dedicated read-only connection. Missing queue tables or columns
+produce the existing warning findings with the exact missing schema named; they
+do not initialize or migrate the database, or report an absent queue as healthy.
+Populated and empty queues retain their existing health messages and JSON shape.
+No renderer, palette, grouping or output flag changes. The assembled binary owns
+the attributed `doctor_snapshot` regeneration and terminal captures; worker
+regressions prove schema/count preservation and the diagnostic verdicts.
+
 ## GitHub origin diagnostic (cas-28c8)
 
 The `GitHub origin` integration row warns when GitHub resolves the explicit origin

@@ -505,6 +505,93 @@ test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'conn
   });
 });
 
+// cas-d1fa (WCAG 2.1.2): the terminal input took every Tab, so a keyboard
+// user who landed in it could never leave. Without control the terminal
+// cannot use Tab at all, so Tab and Shift+Tab move focus on; in control, Tab
+// is the program's, and Ctrl+Alt+M (or the header's Leave terminal) leaves,
+// as the header says, outside the terminal, so no program row is covered.
+const offBody = (page: Page) => page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body);
+const terminalInput = (page: Page) => page.locator(".t3-ghostty-input");
+
+test("HUB-J12 network switch: without control, Tab and Shift+Tab leave the terminal input and reach Re-pair (cas-d1fa)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("A refused pairing in Terminal view: Tab and Shift+Tab leave the terminal and reach Re-pair", async () => {
+    const { hub, clock } = await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    // cas-c945 tells the outage once: the controls' reason no longer repeats the banner's machine sentence.
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
+    await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
+    const input = terminalInput(page);
+    await input.focus();
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Tab lands on a real control, not the page").toBe(true);
+    await input.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Shift+Tab lands on a real control, not the page").toBe(true);
+    // From the terminal, the keyboard reaches Re-pair.
+    await input.focus();
+    let reached = false;
+    for (let press = 0; press < 40 && !reached; press++) {
+      await page.keyboard.press("Tab");
+      reached = await page.evaluate(() => /Re-pair/.test((document.activeElement as HTMLElement | null)?.innerText ?? ""));
+    }
+    expect(reached, "Tab from the terminal reaches Re-pair").toBe(true);
+  });
+});
+
+test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M or Leave terminal leaves it, with no program row covered (cas-d1fa)", journeyPart, async ({ page, journey }) => {
+  const input = terminalInput(page);
+  const leave = page.getByRole("button", { name: "Leave terminal", exact: true });
+  const hintText = "Tab goes to the terminal. Ctrl+Alt+M leaves it.";
+  await journey.stage("In control, the header says how the keyboard leaves the terminal, covering no program row", async () => {
+    await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    await input.focus();
+    // QA round 1 F09: nothing is drawn over the terminal. No visible element
+    // other than the canvas (and what contains it) overlaps the band that
+    // holds its last program rows, the bottom 48px with its padding. Measured
+    // by geometry, not hit-testing: the round-1 hint ignored the pointer.
+    const covered = await input.evaluate((field) => {
+      const canvas = field.parentElement!.querySelector<HTMLCanvasElement>(".t3-ghostty-canvas")!;
+      const box = canvas.getBoundingClientRect();
+      const band = { top: box.bottom - 48, bottom: box.bottom, left: box.left, right: box.right };
+      return [...document.querySelectorAll<HTMLElement>("body *")].filter((element) => {
+        if (element === canvas || element.contains(canvas)) return false;
+        if (!element.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1 && rect.left < band.right && rect.right > band.left && rect.top < band.bottom && rect.bottom > band.top;
+      }).map((element) => `${element.tagName}.${element.className}`);
+    });
+    expect(covered, "no element covers the terminal's last row").toEqual([]);
+    await expect(leave).toBeVisible();
+    await expect(leave).toHaveAttribute("aria-keyshortcuts", "Control+Alt+M");
+    await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
+    await expect(input).toHaveAccessibleDescription(hintText);
+  });
+  await journey.stage("Tab stays in the terminal; Ctrl+Alt+M leaves it for the next control", async () => {
+    await input.focus();
+    await page.keyboard.press("Tab");
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Control+Alt+m");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Ctrl+Alt+M lands on a real control, not the page").toBe(true);
+  });
+  await journey.stage("The header's Leave terminal takes focus out of the terminal too", async () => {
+    await input.focus();
+    await leave.click();
+    await expect(input).not.toBeFocused();
+    await expect(leave).toBeFocused();
+  });
+});
+
 // cas-f698: the old two-machine journey hid this behind the healthy STUDIO.
 // Exact failure: footer .machine-badge-state still says "Reconnecting" after
 // ATLAS alone reaches Needs pairing; the footer must use the same machine words.

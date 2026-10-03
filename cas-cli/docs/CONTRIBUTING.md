@@ -90,6 +90,38 @@ silently reintroduce fixed bugs.
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
 
+### Factory worker MCP and credential access
+
+Declare resources that stay on the supervisor in `.cas/config.toml`:
+
+```toml
+[factory]
+supervisor_only_mcp = ["vercel", "neon"]
+supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY"]
+```
+
+Both lists default to empty and appear in `cas config list`. Server names are
+exact. These denials override project proxy credential grants and read-only
+server declarations for every worker harness. The supervisor's configuration
+and environment are preserved. Spawn diagnostics record denied names only.
+
+Configured workers get a private, materialized project `.mcp.json`. Claude
+uses `--strict-mcp-config` so local and user scopes cannot add servers; allowed
+direct servers must be declared in the project file. Cassy remains available
+even if it was registered only in local scope. Shared-cwd workers use a separate
+file under `.cas/worker-mcp/`. Codex disables the named native MCP servers, and
+its Cassy proxy filters those upstreams before startup and reload. Worker
+snapshots cannot overwrite the supervisor's shared proxy catalog/health.
+Listed environment names are removed from inherited and explicitly granted
+values, including machine credential bootstrap. Invalid configuration or a
+failed materialization refuses the worker launch.
+
+Deployment and production operations needing denied resources run through the
+supervisor. Workers never source an interactive shell to obtain operator
+credentials. Existing explicit project grants and the operator-provisioned
+read-only GitHub token remain available unless denied here; this policy adds
+no credentials to any harness.
+
 ### Factory worker account selection
 
 `coordination action=spawn_workers` accepts an optional `config_dir` for all

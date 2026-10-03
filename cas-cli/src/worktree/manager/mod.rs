@@ -713,7 +713,8 @@ impl WorktreeManager {
 /// the compiler required by the vendored Ghostty build.
 ///
 /// Safe to call on worktrees where the files are already present (tracked in git):
-/// existing paths are silently skipped.
+/// existing paths are silently skipped, except `.mcp.json`, which is privately
+/// materialized when supervisor-only resources are configured.
 pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
     #[cfg(unix)]
     {
@@ -722,8 +723,11 @@ pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
         // .mcp.json — MCP server definitions (Cassy, Context7, etc.)
         let mcp_src = repo_root.join(".mcp.json");
         let mcp_dst = worktree_path.join(".mcp.json");
-        if mcp_src.exists() && !mcp_dst.exists() {
-            let _ = symlink(&mcp_src, &mcp_dst);
+        match cas_mux::worker_resources::provision_project_mcp(repo_root, worktree_path) {
+            Ok(true) => {}
+            Ok(false) if mcp_src.exists() && !mcp_dst.exists() => { let _ = symlink(&mcp_src, &mcp_dst); }
+            Ok(false) => {}
+            Err(_) => tracing::warn!("worker MCP configuration isolation failed; worker launch will refuse until it is repaired"),
         }
 
         // .claude/ — settings, permissions, skills, agents, hooks

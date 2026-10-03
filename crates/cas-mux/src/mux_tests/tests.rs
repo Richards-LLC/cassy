@@ -46,6 +46,8 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
         "context7": {"command": "context7-fixture"}
     }}).to_string()).unwrap();
     let before = std::fs::read(&source).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&source, worktree.join(".mcp.json")).unwrap();
     for name in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
         env.set(name, "operator-fixture");
     }
@@ -72,6 +74,7 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
         let materialized: serde_json::Value = serde_json::from_slice(
             &std::fs::read(worktree.join(".mcp.json")).unwrap()
         ).unwrap();
+        assert!(!std::fs::symlink_metadata(worktree.join(".mcp.json")).unwrap().file_type().is_symlink());
         assert!(materialized["mcpServers"].get("vercel").is_none());
         assert!(materialized["mcpServers"].get("neon").is_none());
         assert!(materialized["mcpServers"].get("context7").is_some());
@@ -87,6 +90,67 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
         }
         assert!(!supervisor.args.iter().any(|arg| arg == "--strict-mcp-config"));
         assert_eq!(std::fs::read(&source).unwrap(), before, "supervisor config is untouched");
+    }
+}
+
+/// The real PTY command builder must remove inherited AND explicitly granted
+/// credentials; a configuration-only assertion cannot prove that boundary.
+#[tokio::test]
+async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_env = [\"DEPLOY_FIXTURE_TOKEN\"]\n").unwrap();
+    env.set("DEPLOY_FIXTURE_TOKEN", "inherited-fixture");
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(cas_root.clone()), workers: 1,
+            worker_cli: cli, include_director: false, ..Default::default()
+        });
+        let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        // Replace only the harness executable with a local probe, retaining
+        // the generated environment and the production Pty::spawn path.
+        worker.command = "/bin/sh".into();
+        worker.args = vec!["-c".into(), "test -z \"${DEPLOY_FIXTURE_TOKEN+x}\" && printf 'worker-env-isolated\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("resource-probe", worker).unwrap();
+        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("PTY ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded local probe");
+        assert!(String::from_utf8_lossy(&events).contains("worker-env-isolated"));
+    }
+    assert!(std::env::var_os("DEPLOY_FIXTURE_TOKEN").is_some());
+}
+
+#[test]
+fn invalid_worker_resource_policy_refuses_launch_before_execution_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    for policy in [
+        "[factory]\nsupervisor_only_mcp = 'not-a-list'\n",
+        "[factory]\nsupervisor_only_mcp = ['vercel']\n",
+    ] {
+        std::fs::write(cas_root.join("config.toml"), policy).unwrap();
+        std::fs::write(project.path().join(".mcp.json"), "invalid JSON fixture").unwrap();
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(cas_root.clone()), workers: 1,
+            include_director: false, ..Default::default()
+        });
+        let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        worker.command = "/bin/sh".into();
+        worker.args = vec!["-c".into(), "exit 0".into()];
+        assert!(crate::pty::Pty::spawn("refused-worker", worker).is_err());
     }
 }
 

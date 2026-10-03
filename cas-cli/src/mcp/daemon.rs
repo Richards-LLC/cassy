@@ -488,11 +488,7 @@ impl EmbeddedDaemon {
 
         eprintln!("[Cassy] Proxy config changed, reloading...");
 
-        let cfg = cmcp_core::config::Config::load_merged(if proxy_path.exists() {
-            Some(&proxy_path)
-        } else {
-            None
-        });
+        let cfg = crate::mcp::server::load_proxy_config_for_process(&self.config.cas_root);
 
         match cfg {
             Ok(cfg) => {

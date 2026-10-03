@@ -4,6 +4,18 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     // FACTORY SECTION
     // ============================================================
+    for (key, name, description) in [
+        ("factory.supervisor_only_mcp", "Supervisor-only MCP Servers", "Exact MCP server names excluded from worker project configuration, inherited Claude MCP scopes, native Codex servers and proxy connections. Supervisors retain them; empty keeps existing policy."),
+        ("factory.supervisor_only_env", "Supervisor-only Environment", "Environment variable names removed from every worker, even when a project proxy grants them. Machine credential bootstrap cannot restore them. Supervisors retain them; empty keeps existing credential protections."),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description,
+            value_type: ConfigType::StringList, default: "", constraint: Constraint::None,
+            advanced: false, requires_feature: None,
+            keywords: &["factory", "worker", "supervisor", "mcp", "credentials", "environment"],
+            use_cases: &["Keep deployment and production database access on the supervisor"],
+        });
+    }
     registry.register(ConfigMeta {
         key: "factory.artifacts_root",
         section: "factory",

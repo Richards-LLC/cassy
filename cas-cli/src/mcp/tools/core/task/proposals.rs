@@ -914,22 +914,60 @@ mod tests {
         assert_eq!(store.get(&task.id).unwrap().title, "Wire the relay retry");
     }
 
-    /// cas-2b9f: every field Task serializes, sent as null, still decodes:
+    /// Every field name `Task` deserializes, read from serde itself, so the
+    /// test below covers fields added later and the `Option`s that a default
+    /// task skips when it serializes.
+    fn task_field_names() -> &'static [&'static str] {
+        struct Fields(Option<&'static [&'static str]>);
+        #[derive(Debug)]
+        struct Stop;
+        impl std::fmt::Display for Stop {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("stop")
+            }
+        }
+        impl std::error::Error for Stop {}
+        impl serde::de::Error for Stop {
+            fn custom<T: std::fmt::Display>(_: T) -> Self {
+                Stop
+            }
+        }
+        impl<'de> serde::Deserializer<'de> for &mut Fields {
+            type Error = Stop;
+            fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Stop> {
+                Err(Stop)
+            }
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Stop> {
+                self.0 = Some(fields);
+                Err(Stop)
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map enum identifier ignored_any
+            }
+        }
+        let mut fields = Fields(None);
+        let _ = <cas_types::Task as serde::Deserialize>::deserialize(&mut fields);
+        fields.0.expect("Task deserializes as a struct")
+    }
+
+    /// cas-2b9f: every field Task deserializes, sent as null, still decodes:
     /// Options read as none and defaulted fields keep their defaults.
     #[test]
     fn accepted_proposal_with_null_for_every_task_field_materializes() {
-        let defaults = serde_json::to_value(cas_types::Task::new(
-            "cas-0123456789abcdef".to_string(),
-            "Every field null".to_string(),
-        ))
-        .unwrap();
         let mut all_null = serde_json::Map::new();
-        for key in defaults.as_object().unwrap().keys() {
-            all_null.insert(key.clone(), serde_json::Value::Null);
+        for key in task_field_names() {
+            all_null.insert((*key).to_string(), serde_json::Value::Null);
         }
         all_null.insert("title".to_string(), serde_json::json!("Every field null"));
         assert!(
-            all_null.len() > 20,
+            all_null.len() > 30,
             "the probe covers Task's fields: {}",
             all_null.len()
         );

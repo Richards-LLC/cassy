@@ -2520,16 +2520,18 @@ function persistArrivals(): void {
 }
 
 /**
- * cas-adfc: conversations whose draft is over the store's bound, so it lives
- * only in this page; the composer says so while it shows that conversation.
+ * cas-adfc, cas-f657: conversations whose draft lives only in this page, and
+ * why: over the store's bound, or refused by a full localStorage. The draft
+ * stays in memory (conversationDrafts); the composer says so while it shows
+ * that conversation.
  */
-const draftsTooLongToKeep = new Set<string>();
+const draftsNotKept = new Map<string, "too-long" | "not-saved">();
 
-/** The composer's too-long note, for the conversation it is showing. */
+/** The composer's draft note, for the conversation it is showing. */
 function paintDraftNote(): void {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   const key = composer?.dataset.threadKey;
-  applyDraftNote(document, !!key && draftsTooLongToKeep.has(key));
+  applyDraftNote(document, (key && draftsNotKept.get(key)) || false);
 }
 
 /** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
@@ -2537,7 +2539,7 @@ function rememberDraft(key: string, draft: Draft | undefined): void {
   if (draft) conversationDrafts.set(key, draft); else conversationDrafts.delete(key);
   const machineId = key.slice(0, key.indexOf(":"));
   const saved = drafts.save(key, conversationPersistenceBlocked.has(machineId) ? undefined : draft);
-  if (saved === "too-long") draftsTooLongToKeep.add(key); else draftsTooLongToKeep.delete(key);
+  if (saved === "too-long" || saved === "not-saved") draftsNotKept.set(key, saved); else draftsNotKept.delete(key);
   paintDraftNote();
 }
 
@@ -2553,7 +2555,7 @@ function purgeMachineConversations(machineId: string, options: { forgetInMemory:
   for (const key of [...storedArrivals.keys()]) if (key.startsWith(`${machineId}:`)) storedArrivals.delete(key);
   if (options.forgetInMemory) {
     for (const key of [...conversationDrafts.keys()]) if (key.startsWith(`${machineId}:`)) conversationDrafts.delete(key);
-    for (const key of [...draftsTooLongToKeep]) if (key.startsWith(`${machineId}:`)) draftsTooLongToKeep.delete(key);
+    for (const key of [...draftsNotKept.keys()]) if (key.startsWith(`${machineId}:`)) draftsNotKept.delete(key);
   }
 }
 
@@ -4448,7 +4450,8 @@ function renderAttention(): void {
     act: performAttentionAction,
     copy: async (payload) => {
       await navigator.clipboard.writeText(payload);
-      toast("Event payload copied");
+      // cas-177c: Copy copies the Details text (readable since cas-ed87), so say so.
+      toast("Details copied");
     },
   }, {
     animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,

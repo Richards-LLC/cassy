@@ -148,8 +148,9 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
 
 
 for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+  test.describe(`phone ${viewport.width}×${viewport.height}`, () => {
+  test.use({ viewport });
   test(`HUB-J17 phone ${viewport.width}×${viewport.height}: operate each machine from its own conversation`, journeyPart, async ({ page, journey }) => {
-    await page.setViewportSize(viewport);
     const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"], studio: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet(), [OTTER]: fleet() } });
     const rail = page.locator("#status-view");
     const agent = (name: string) => rail.locator(".status-agent", { hasText: name });
@@ -218,5 +219,6 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       expect(hub.operations.at(-1)).toMatchObject({ machine: "studio", session: OTTER, status: 409 });
       await page.keyboard.press("Escape"); await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeFocused();
     });
+  });
   });
 }

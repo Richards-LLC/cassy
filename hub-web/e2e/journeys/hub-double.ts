@@ -69,6 +69,24 @@ export type DoubleOptions = {
   scopes?: Record<string, string[]>;
   /** New session (cas-0f51): what each machine's /v1/projects, /v1/projects/browse and POST /v1/sessions answer. */
   launch?: Record<string, LaunchWorld>;
+  /** cas-a474: each session's fleet, as GET /v1/sessions/<s>/status serves it, mutated by POST /v1/sessions/<s>/operations. */
+  fleet?: Record<string, FleetWorld>;
+};
+
+/** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
+export type FleetWorld = {
+  agents: Array<{ name: string; status: string; current_task?: string | null; generation: number; role?: string; latest_activity?: { summary: string } }>;
+  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string }>;
+  epics: Array<{ id: string; title?: string }>;
+  focused_epic: string | null;
+  /** Names new workers get, in order. */
+  spawnNames: string[];
+};
+
+/** The scope each operation needs, as the brief's S1-S3 hub checks it. */
+const OPERATION_SCOPE: Record<string, string> = {
+  request_merge: "message-send", focus_epic: "factory-operate", spawn_workers: "factory-operate", set_worker_hold: "factory-operate",
+  assign_task: "factory-operate", recycle_worker: "factory-manage", shutdown_workers: "factory-manage",
 };
 
 /** GET /v1/projects rows as the real hub serves them (hub/projects.rs). */
@@ -162,6 +180,9 @@ export class HubDouble {
   readonly upstreamRefusals: string[] = [];
   /** Refusal frames actually delivered, distinct from sends received/refused. */
   readonly deliveredRefusals: string[] = [];
+  /** POST /v1/sessions/<s>/operations calls, in order, with what the double answered (cas-a474). */
+  readonly operations: Array<{ machine: string; session: string; body: Record<string, unknown>; status: number }> = [];
+  private readonly operationOutcomes = new Map<string, Record<string, unknown>>();
   /** DELETE /v1/sessions/<name> calls, in order, with the scopes they carried (cas-55a4). */
   readonly ends: Array<{ machine: string; session: string; scopes: string[] }> = [];
   /** POST /v1/sessions bodies, in order (cas-0f51). */
@@ -294,6 +315,79 @@ export class HubDouble {
     await page.route("https://*.test/**", (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
     await page.routeWebSocket(/\.test\/v1\//, (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
+  }
+
+  private fleetStatus(fleet: FleetWorld): Record<string, unknown> {
+    return {
+      agents: fleet.agents,
+      tasks_in_progress: fleet.tasks.filter((task) => task.status !== "open"),
+      tasks_ready: fleet.tasks.filter((task) => task.status === "open"),
+      epics: fleet.epics.map((epic) => ({ ...epic, focused: epic.id === fleet.focused_epic })),
+      focused_epic: fleet.focused_epic,
+    };
+  }
+
+  /** The brief's operations endpoint: scope, op_id dedupe, `expected` preconditions (409 stale), effects, FleetChanged. */
+  private async operation(route: Route, machineId: string, session: string): Promise<void> {
+    const body = route.request().postDataJSON() as { op_id: string; op: Record<string, unknown>; expected: Record<string, unknown> };
+    const answer = async (status: number, json: Record<string, unknown>) => {
+      this.operations.push({ machine: machineId, session, body, status });
+      this.observed();
+      await route.fulfill({ status, json });
+    };
+    const fleet = this.options.fleet?.[session];
+    if (!fleet) return answer(404, { error: "unknown_session" });
+    const kind = String(body.op?.kind ?? "");
+    const scope = OPERATION_SCOPE[kind];
+    if (!scope) return answer(400, { error: "invalid_operation", detail: `unknown operation ${kind}` });
+    if (!this.scopesFor(machineId).includes(scope)) return answer(403, { error: "scope_denied", required_scope: scope.replace("-", ":") });
+    const previous = this.operationOutcomes.get(body.op_id);
+    if (previous) return answer(200, { op_id: body.op_id, outcome: previous });
+    const worker = typeof body.op.worker === "string" ? body.op.worker : Array.isArray(body.op.workers) ? String(body.op.workers[0]) : undefined;
+    const agent = worker ? fleet.agents.find((item) => item.name === worker) : undefined;
+    const stale = (current: Record<string, unknown>, detail: string) => answer(409, { error: "stale", detail, current });
+    if (worker) {
+      if (!agent) return stale({ exists: false }, `${worker} is gone`);
+      if (body.expected.generation !== undefined && body.expected.generation !== agent.generation) return stale({ generation: agent.generation }, `${worker} restarted`);
+      if (kind === "set_worker_hold" && (agent.status === "held") === Boolean(body.op.hold)) return stale({ held: agent.status === "held" }, `${worker} already ${agent.status}`);
+    }
+    const task = typeof body.op.task_id === "string" ? fleet.tasks.find((item) => item.id === body.op.task_id) : undefined;
+    if (kind === "assign_task") {
+      if (!task) return answer(404, { error: "unknown_task" });
+      if ((task.assignee ?? null) !== (body.expected.assignee ?? null)) return stale({ assignee: task.assignee ?? null, updated_at: task.updated_at }, "assignee changed");
+    }
+    if (kind === "request_merge" && task?.status !== "awaiting_merge") return stale({ status: task?.status ?? null }, "no longer awaiting merge");
+    if (kind === "focus_epic" && (body.expected.epic_id ?? null) !== fleet.focused_epic) return stale({ epic_id: fleet.focused_epic }, "focus changed");
+    let outcome: Record<string, unknown> = { kind };
+    if (kind === "set_worker_hold" && agent) agent.status = body.op.hold ? "held" : "active";
+    if (kind === "recycle_worker" && agent) { agent.generation += 1; agent.status = "active"; }
+    if (kind === "shutdown_workers" && agent) {
+      fleet.agents.splice(fleet.agents.indexOf(agent), 1);
+      // Its work in progress goes back to ready; a delivery waiting for merge stays where it is.
+      for (const owned of fleet.tasks) if (owned.assignee === agent.name && owned.status === "in_progress") { owned.assignee = null; owned.status = "open"; }
+    }
+    if (kind === "assign_task" && task) {
+      task.assignee = (body.op.assignee as string | null) ?? null;
+      task.status = task.assignee ? "in_progress" : "open";
+      task.updated_at = this.stamp(0);
+      const assignee = fleet.agents.find((item) => item.name === task.assignee);
+      if (assignee) assignee.current_task = task.id;
+      for (const other of fleet.agents) if (other.name !== task.assignee && other.current_task === task.id) other.current_task = null;
+    }
+    if (kind === "focus_epic") fleet.focused_epic = String(body.op.epic_id);
+    if (kind === "spawn_workers") {
+      const names = fleet.spawnNames.splice(0, Number(body.op.count ?? 1));
+      for (const name of names) fleet.agents.push({ name, status: "active", generation: 1, current_task: (body.op.task_id as string | undefined) ?? null });
+      outcome = { kind, workers: names };
+    }
+    if (kind === "request_merge") outcome = { kind, notification_id: 7000 + this.operations.length };
+    this.operationOutcomes.set(body.op_id, outcome);
+    await answer(200, { op_id: body.op_id, outcome });
+    // FleetChanged: every connected device refetches status.
+    await this.page.evaluate(
+      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
+      [`${machineId}.test`, JSON.stringify({ kind: "fleet_changed", session })] as const,
+    ).catch(() => undefined);
   }
 
   /**
@@ -642,8 +736,12 @@ export class HubDouble {
     }
     if (path.endsWith("/lease")) return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
     if (path.endsWith("/status")) {
+      const session = decodeURIComponent(path.split("/")[3] ?? "");
+      const fleet = this.options.fleet?.[session];
+      if (fleet) return route.fulfill({ json: this.fleetStatus(fleet) });
       return route.fulfill({ json: { tasks_in_progress: [{ id: "task-journey", title: "Journey suite", status: "in_progress" }], tasks_ready: [], agents: [] } });
     }
+    if (path.endsWith("/operations") && method === "POST") return this.operation(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
     return route.fulfill({ json: {} });
   }
 

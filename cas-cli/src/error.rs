@@ -194,7 +194,7 @@ impl CasError {
             ),
             CasError::Search(_) => Some(
                 "Search index error. Try:\n\
-                 - Run 'cas reindex --bm25' to rebuild the search index",
+                 - run the reindex maintenance action (`mcp__cas__system action=reindex bm25=true`) from an agent session",
             ),
             CasError::Embedding(_) | CasError::ModelLoad(_) => Some(
                 "Embedding model error. Try:\n\

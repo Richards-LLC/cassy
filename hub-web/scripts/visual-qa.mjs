@@ -38,6 +38,7 @@ export const FIXTURE_NAMES = [
   "conversation-mic-listening",
   "conversation-mic-unavailable",
   "conversation-draft-too-long",
+  "conversation-unconfirmed-dismissed",
   "conversations-loading",
   "conversations-unpaired",
   "launch-form",

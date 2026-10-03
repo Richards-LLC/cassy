@@ -4418,9 +4418,10 @@ document.addEventListener("keydown", (event) => {
 // (machines that aren't connected first) for its next opening; while it was
 // open, status ticks left its rows where they were.
 document.addEventListener("close", (event) => {
-  if ((event.target as Element | null)?.id !== "paired-machines-dialog") return;
+  const dialog = event.target as HTMLDialogElement | null;
+  if (dialog?.id !== "paired-machines-dialog") return;
   renderMachineRegister();
-  restorePairedMachinesOpener();
+  restorePairedMachinesOpener(dialog);
 }, true);
 
 /**
@@ -4429,14 +4430,16 @@ document.addEventListener("close", (event) => {
  * browser's own focus restoration has no live opener to return to and focus
  * fell to the page. When it did, focus goes back to the control that opened
  * the register, or the footer's Paired machines control when that one is gone
- * (the palette's entry closes with the palette). A close that hands focus on
+ * (the palette's entry closes with the palette). Focus still on a control
+ * inside the closed dialog (the re-shown dialog's ×) counts as lost: the
+ * browser drops it to the page a moment later. A close that hands focus on
  * (Pair a machine opens its own dialog) is left alone.
  */
-function restorePairedMachinesOpener(): void {
+function restorePairedMachinesOpener(dialog: HTMLDialogElement): void {
   const opener = pairedMachinesOpener;
   pairedMachinesOpener = undefined;
   const active = document.activeElement;
-  if (active && active !== document.body && active.isConnected) return;
+  if (active && active !== document.body && active.isConnected && !dialog.contains(active)) return;
   if (document.querySelector("dialog[open]")) return;
   const visible = (element: HTMLElement | null): element is HTMLElement => element !== null && element.getClientRects().length > 0;
   const fromOpener = opener ? document.getElementById(opener) : null;

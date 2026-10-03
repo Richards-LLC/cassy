@@ -586,6 +586,14 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M o
       await expect(leave.locator("kbd"), `Ctrl+Alt+M on screen at ${viewport.width}`).toBeVisible();
       await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
       expect(await leave.locator("kbd").evaluate((key) => key.getBoundingClientRect().width), `the key has room at ${viewport.width}`).toBeGreaterThan(20);
+      // On one line with the control, inside the pane's own header.
+      const placed = await leave.evaluate((button) => {
+        const box = button.getBoundingClientRect();
+        const key = button.querySelector("kbd")!.getBoundingClientRect();
+        const header = button.closest("header")!.getBoundingClientRect();
+        return { oneLine: key.top >= box.top - 1 && key.bottom <= box.bottom + 1, inHeader: key.top >= header.top - 1 && key.bottom <= header.bottom + 1 };
+      });
+      expect(placed, `Ctrl+Alt+M sits on the control's line inside the pane header at ${viewport.width}`).toEqual({ oneLine: true, inHeader: true });
       await expect(leave).toHaveAccessibleName("Leave terminal");
     }
     await page.setViewportSize({ width: 1280, height: 720 });

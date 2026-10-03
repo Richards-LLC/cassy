@@ -353,3 +353,168 @@ fn record_focus_epic_event(
     .with_session(factory_session);
     let _ = event_store.record(&event);
 }
+
+/// What a fleet operation acts with: the factory session, whose workers it
+/// may touch, whether it holds supervisor authority, and whose account dirs a
+/// spawned worker inherits. MCP callers derive it from their environment;
+/// the hub builds it for an operator (cas-9b08).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FleetContext {
+    pub(crate) factory_session: Option<String>,
+    /// `None` means no ownership filter.
+    pub(crate) owned_workers: Option<std::collections::HashSet<String>>,
+    pub(crate) supervisor_authorized: bool,
+    /// Spawned workers inherit this process's account dirs (an MCP
+    /// supervisor). An operator's spawn uses the daemon's defaults instead.
+    pub(crate) requester_from_env: bool,
+}
+
+impl FleetContext {
+    /// An operator acting on one session through the hub. The hub has
+    /// already checked the device's scope; the operator stands in for the
+    /// session's supervisor over that session's workers.
+    pub(crate) fn operator(factory_session: &str) -> Self {
+        Self {
+            factory_session: Some(factory_session.to_string()),
+            owned_workers: None,
+            supervisor_authorized: true,
+            requester_from_env: false,
+        }
+    }
+}
+
+/// The spawn generation of `worker` in `factory_session`: the id of its live
+/// registration, which a restart replaces. `None` when it is not live.
+pub(crate) fn worker_generation(
+    cas_dir: &Path,
+    factory_session: &str,
+    worker: &str,
+) -> Result<Option<String>, OperationError> {
+    use cas_types::{AgentRole, AgentStatus};
+    let agents = crate::store::open_agent_store(cas_dir)
+        .and_then(|store| store.list(None))
+        .map_err(|error| OperationError::Failed(format!("agent store unavailable: {error}")))?;
+    Ok(agents
+        .into_iter()
+        .filter(|agent| {
+            agent.role == AgentRole::Worker
+                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                && agent.name == worker
+                && agent.visible_to_factory_session(Some(factory_session))
+        })
+        .max_by_key(|agent| agent.registered_at)
+        .map(|agent| agent.id))
+}
+
+/// What the operator saw of a worker (brief: worker preconditions).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct WorkerExpected {
+    pub worker: String,
+    #[serde(default)]
+    pub generation: Option<String>,
+}
+
+/// Refuse as stale unless `worker` still has the generation `expected` names.
+pub(crate) fn check_worker_generation(
+    cas_dir: &Path,
+    factory_session: &str,
+    worker: &str,
+    expected: &WorkerExpected,
+) -> Result<(), OperationError> {
+    if expected.worker != worker {
+        return Err(OperationError::Invalid(format!(
+            "expected names worker {}, but the operation targets {worker}",
+            expected.worker
+        )));
+    }
+    let current = worker_generation(cas_dir, factory_session, worker)?;
+    if current != expected.generation {
+        return Err(OperationError::Stale(serde_json::json!({
+            "worker": worker,
+            "generation": current,
+        })));
+    }
+    Ok(())
+}
+
+/// O3, O4, O6 and O7 (brief S2): the worker lifecycle operations.
+#[derive(Debug, Clone)]
+pub(crate) enum WorkerOperation {
+    Spawn { count: u8, task_id: Option<String> },
+    Hold { worker: String, hold: bool },
+    Recycle { worker: String },
+    Shutdown { worker: String, force: bool },
+}
+
+/// Run a worker operation through the same `CasService` body its MCP action
+/// runs, with an operator [`FleetContext`]. Returns the action's reply text.
+pub(crate) async fn run_worker_operation(
+    cas_dir: &Path,
+    factory_session: &str,
+    operation: WorkerOperation,
+) -> Result<String, OperationError> {
+    let core = crate::mcp::CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::tools::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::tools::CasService::new(core);
+    let ctx = FleetContext::operator(factory_session);
+    let request = |value: serde_json::Value| {
+        serde_json::from_value::<cas_mcp::FactoryRequest>(value)
+            .map_err(|error| OperationError::Invalid(format!("bad operation fields: {error}")))
+    };
+    let result = match operation {
+        WorkerOperation::Spawn { count, task_id } => {
+            let mut fields = serde_json::json!({"action": "spawn_workers", "count": count});
+            if let Some(task_id) = task_id {
+                fields["task_id"] = serde_json::Value::String(task_id);
+            }
+            service.factory_spawn_workers_in(&ctx, request(fields)?).await
+        }
+        WorkerOperation::Hold { worker, hold } => {
+            let action = if hold { "hold_worker" } else { "release_worker" };
+            service
+                .factory_set_worker_hold_in(
+                    &ctx,
+                    request(serde_json::json!({"action": action, "target": worker}))?,
+                    hold,
+                )
+                .await
+        }
+        WorkerOperation::Recycle { worker } => {
+            service
+                .factory_recycle_worker_in(
+                    &ctx,
+                    request(serde_json::json!({"action": "recycle_worker", "target": worker}))?,
+                )
+                .await
+        }
+        WorkerOperation::Shutdown { worker, force } => {
+            service
+                .factory_shutdown_workers_in(
+                    &ctx,
+                    request(serde_json::json!({
+                        "action": "shutdown_workers",
+                        "worker_names": worker,
+                        "force": force,
+                    }))?,
+                )
+                .await
+        }
+    };
+    match result {
+        Ok(reply) => Ok(reply
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")),
+        Err(error)
+            if error.code == rmcp::model::ErrorCode::INVALID_PARAMS
+                || error.code == rmcp::model::ErrorCode::INVALID_REQUEST =>
+        {
+            Err(OperationError::Invalid(error.message.to_string()))
+        }
+        Err(error) => Err(OperationError::Failed(error.message.to_string())),
+    }
+}

@@ -1396,6 +1396,17 @@ fn spawn_warning_for_request(
     }
 }
 
+/// The factory context an MCP caller acts in: this process's factory
+/// session, supervisor ownership and role, and its own account dirs.
+fn mcp_fleet_context() -> crate::ops::fleet::FleetContext {
+    crate::ops::fleet::FleetContext {
+        factory_session: current_factory_session(),
+        owned_workers: supervisor_owned_workers(),
+        supervisor_authorized: crate::harness_policy::is_supervisor_from_env(),
+        requester_from_env: true,
+    }
+}
+
 fn current_factory_session() -> Option<String> {
     std::env::var("CAS_FACTORY_SESSION")
         .ok()
@@ -2183,6 +2194,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_spawn_workers_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_spawn_workers`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_spawn_workers_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
@@ -2497,8 +2519,14 @@ impl CasService {
         // harness; a Claude supervisor's profile must never become a Codex
         // worker's CODEX_HOME (or vice versa).
         for spec in &mut specs {
-            spec.requester_config_dir = requester_account_dir(spec.cli);
-            spec.requester_secure_storage_dir = requester_secure_storage_dir(spec.cli);
+            spec.requester_config_dir = ctx
+                .requester_from_env
+                .then(|| requester_account_dir(spec.cli))
+                .flatten();
+            spec.requester_secure_storage_dir = ctx
+                .requester_from_env
+                .then(|| requester_secure_storage_dir(spec.cli))
+                .flatten();
             if spec.cli == cas_mux::SupervisorCli::Codex
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
@@ -2644,7 +2672,7 @@ impl CasService {
             .map(|warning| format!("\nWARNING — SHARED-CLONE SUPERVISOR OVERLAP: {warning}"))
             .unwrap_or_default();
 
-        let factory_session = current_factory_session();
+        let factory_session = ctx.factory_session.clone();
         if let Some(delivery_mode) = requested_delivery_mode {
             let session = factory_session.as_deref().ok_or_else(|| {
                 Self::error(
@@ -2757,7 +2785,7 @@ impl CasService {
             .as_deref()
             .and_then(|task_id| task_store.get(task_id).ok())
             .or_else(|| {
-                let session = current_factory_session()?;
+                let session = ctx.factory_session.clone()?;
                 let raw = std::fs::read_to_string(metadata_path(&session)).ok()?;
                 let metadata =
                     serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok()?;
@@ -2805,6 +2833,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_shutdown_workers_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_shutdown_workers`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_shutdown_workers_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_store::SpawnLifecycleState;
         use cas_types::{AgentRole, AgentStatus};
@@ -2834,8 +2873,8 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
-        let owned = supervisor_owned_workers();
-        let factory_session = current_factory_session();
+        let owned = ctx.owned_workers.clone();
+        let factory_session = ctx.factory_session.clone();
         let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -3167,6 +3206,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_recycle_worker_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_recycle_worker`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_recycle_worker_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_types::{AgentRole, AgentStatus};
 
@@ -3181,8 +3231,8 @@ impl CasService {
                     "recycle_worker requires target=<worker-name>",
                 )
             })?;
-        let factory_session = current_factory_session();
-        let owned = supervisor_owned_workers();
+        let factory_session = ctx.factory_session.clone();
+        let owned = ctx.owned_workers.clone();
         if let Some(owned) = owned.as_ref() {
             if !owned.contains(worker_name) {
                 return Err(Self::error(
@@ -3388,7 +3438,18 @@ impl CasService {
         req: FactoryRequest,
         held: bool,
     ) -> Result<CallToolResult, McpError> {
-        use crate::harness_policy::is_supervisor_from_env;
+        self.factory_set_worker_hold_in(&mcp_fleet_context(), req, held).await
+    }
+
+    /// [`Self::factory_set_worker_hold`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_set_worker_hold_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        held: bool,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_reminder_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_worker_hold_at};
         use cas_types::{AgentRole, AgentStatus};
@@ -3398,10 +3459,10 @@ impl CasService {
         } else {
             "release_worker"
         };
-        worker_hold_role_gate(is_supervisor_from_env(), action)
+        worker_hold_role_gate(ctx.supervisor_authorized, action)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
-        let factory_session = current_factory_session().ok_or_else(|| {
+        let factory_session = ctx.factory_session.clone().ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_REQUEST,
                 format!(
@@ -3427,7 +3488,7 @@ impl CasService {
                 format!("Failed to open agent store: {error}"),
             )
         })?;
-        let owned = supervisor_owned_workers();
+        let owned = ctx.owned_workers.clone();
         let worker = agent_store
             .list(None)
             .map_err(|error| {

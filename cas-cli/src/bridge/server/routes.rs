@@ -319,6 +319,9 @@ pub(crate) fn handle_session_routes(
                 .into_iter()
                 .filter(|a| allowed.contains(&a.name))
                 .map(|a| AgentSummaryJson {
+                    generation: crate::ops::fleet::worker_generation(&cas_root, &session.name, &a.name)
+                        .ok()
+                        .flatten(),
                     id: a.id,
                     name: a.name,
                     status: format!("{:?}", a.status).to_lowercase(),

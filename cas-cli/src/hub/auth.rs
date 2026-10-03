@@ -1205,6 +1205,23 @@ impl AuthStore {
         context: &AuthContext,
         now: DateTime<Utc>,
     ) -> Result<BTreeSet<Scope>> {
+        self.grant_own_scope(context, Scope::SessionLaunch, now)
+    }
+
+    /// The one-time in-browser grants a control device may give itself:
+    /// session launch, and (cas-9b08) `factory:operate`. Destructive
+    /// `factory:manage` and `hub:admin` come only from a pairing invitation.
+    pub fn grant_own_scope(
+        &self,
+        context: &AuthContext,
+        scope: Scope,
+        now: DateTime<Utc>,
+    ) -> Result<BTreeSet<Scope>> {
+        let action = match scope {
+            Scope::SessionLaunch => "self_grant_session_launch",
+            Scope::FactoryOperate => "self_grant_factory_operate",
+            _ => anyhow::bail!("scope {} cannot be self-granted", scope.as_str()),
+        };
         let mut state = self.lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         let device = state
@@ -1221,7 +1238,7 @@ impl AuthStore {
                 .all(|scope| device.scopes.contains(&scope)),
             "scope denied"
         );
-        if device.scopes.contains(&Scope::SessionLaunch) {
+        if device.scopes.contains(&scope) {
             return Ok(device.scopes.clone());
         }
         // The audit must succeed before the capability becomes durable.
@@ -1231,8 +1248,8 @@ impl AuthStore {
             machine_id: &self.0.machine_id,
             request_id: &context.request_id,
             outcome: "allowed",
-            action: "self_grant_session_launch",
-            required_scope: Some(Scope::SessionLaunch.as_str()),
+            action,
+            required_scope: Some(scope.as_str()),
             device_id: Some(&context.device_id),
             credential_id: Some(&context.credential_id),
             device_label: Some(&context.device_label),
@@ -1247,9 +1264,9 @@ impl AuthStore {
             detail: None,
         };
         let written = append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record);
-        self.record_audit_outcome("self_grant_session_launch", now, written.as_ref().err());
+        self.record_audit_outcome(action, now, written.as_ref().err());
         written?;
-        device.scopes.insert(Scope::SessionLaunch);
+        device.scopes.insert(scope);
         let scopes = device.scopes.clone();
         self.persist(&state)?;
         Ok(scopes)

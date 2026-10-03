@@ -7,15 +7,20 @@
 // scripts/journey-eval.sh adds trace.zip, trace-actions.txt and bundle.json,
 // the cas-qa-craft evidence-bundle shape with producer "journey".
 import { test as base, expect, type Page } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
 import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
+import { claimReceiptDirectory } from "./receipt-directory.mjs";
 
 export { expect };
 
-export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? fileURLToPath(new URL("../.results/journeys", import.meta.url)));
+// The default receipt root sits inside the Playwright output directory
+// (JOURNEY_OUTPUT or e2e/.results), which Playwright empties at the start of
+// every run, so a rerun never finds the previous run's receipt claims.
+// journey-eval.sh passes its own fresh JOURNEY_RECEIPTS directory.
+export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? join(process.env.JOURNEY_OUTPUT ?? fileURLToPath(new URL("../.results", import.meta.url)), "journeys"));
 
 type Stage = { title: string; slug: string; ms: number; screenshot: string };
 
@@ -62,7 +67,7 @@ export const test = base.extend<{ journey: Journey }>({
       ? testInfo.title.replace(/^[A-Z]+-J[0-9]+\s*/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96)
       : undefined;
     const dir = part ? join(RECEIPTS, id, "parts", part) : join(RECEIPTS, id);
-    mkdirSync(dir, { recursive: true });
+    claimReceiptDirectory(dir, testInfo.title);
     const stages: Stage[] = [];
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));

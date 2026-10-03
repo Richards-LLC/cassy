@@ -292,7 +292,7 @@ fn test_configure_codex_creates_config() {
         serde_json::from_str(&std::fs::read_to_string(hooks_path).unwrap()).unwrap();
     assert_eq!(
         hooks.pointer("/hooks/PreToolUse/0/matcher"),
-        Some(&serde_json::json!("^Bash$"))
+        Some(&serde_json::json!("^(Bash|apply_patch)$"))
     );
     assert_eq!(
         hooks.pointer("/hooks/PreToolUse/0/hooks/0/command"),
@@ -470,7 +470,7 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
     );
     assert_eq!(
         pre_tool[1].get("matcher"),
-        Some(&serde_json::json!("^Bash$"))
+        Some(&serde_json::json!("^(Bash|apply_patch)$"))
     );
     assert_eq!(
         pre_tool[1].pointer("/hooks/0/command"),

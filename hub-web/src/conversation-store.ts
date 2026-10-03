@@ -26,6 +26,7 @@ export class ConversationStore<T> {
   readonly key: string;
   private readonly maxConversations: number;
   private readonly maxValueChars: number;
+  private readCleanupAttempted = false;
 
   constructor(
     private readonly storage: StorageLike | undefined,
@@ -73,26 +74,40 @@ export class ConversationStore<T> {
   }
 
   private read(): Map<string, Record_<T>> {
-    const records = new Map<string, Record_<T>>();
+    let records = new Map<string, Record_<T>>();
     let raw: string | null = null;
-    try { raw = this.storage?.getItem(this.key) ?? null; } catch { return records; }
-    if (!raw) return records;
+    try { raw = this.storage?.getItem(this.key) ?? null; } catch { this.cleanupRead(records); return records; }
+    if (raw === null) return records;
     let parsed: unknown;
-    try { parsed = JSON.parse(raw); } catch { return records; }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return records;
+    try { parsed = JSON.parse(raw); } catch { this.cleanupRead(records); return records; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { this.cleanupRead(records); return records; }
+    let dropped = false;
     for (const [conversation, entry] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!entry || typeof entry !== "object") continue;
+      if (!entry || typeof entry !== "object") { dropped = true; continue; }
       const { value, updatedAt } = entry as { value?: unknown; updatedAt?: unknown };
-      // cas-8f19: the bounds `set` keeps are kept on read too. A value this
-      // page could not have written (corrupted, or written by something
-      // else) is dropped, never acted on.
-      if (JSON.stringify(value ?? null).length > this.maxValueChars) continue;
-      const narrowed = this.validate(value);
-      if (narrowed === undefined) continue;
-      records.set(conversation, { value: narrowed, updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0 });
+      // The bounds kept on write also apply to storage planted by another
+      // page. Unreadable or invalid values never act on this conversation.
+      try {
+        if (JSON.stringify(value ?? null).length > this.maxValueChars) { dropped = true; continue; }
+        const narrowed = this.validate(value);
+        if (narrowed === undefined) { dropped = true; continue; }
+        records.set(conversation, { value: narrowed, updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0 });
+      } catch { dropped = true; }
     }
-    if (records.size <= this.maxConversations) return records;
-    return new Map([...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt).slice(-this.maxConversations));
+    if (records.size > this.maxConversations) {
+      records = new Map([...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt).slice(-this.maxConversations));
+      dropped = true;
+    }
+    if (dropped) this.cleanupRead(records);
+    return records;
+  }
+
+  /** Repair once per load, including a failed attempt, so denied storage does
+   * not turn every get/entries call into another quota-consuming write. */
+  private cleanupRead(records: Map<string, Record_<T>>): void {
+    if (this.readCleanupAttempted) return;
+    this.readCleanupAttempted = true;
+    this.write(records);
   }
 
   private write(records: Map<string, Record_<T>>): void {

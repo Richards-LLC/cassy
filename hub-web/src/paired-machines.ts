@@ -34,9 +34,11 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // are unsteady, as the header and the row say, not reconnecting.
   const unsteady = retryable.length > 0 && labels.every(label => label === UNSTEADY || label === NEEDS_PAIRING);
   // cas-0739 (journey F10): with some machines connected and some not, name
-  // the one that isn't ("Shed NAS can't be reached"), not "5 connected".
+  // the one that isn't ("Can't reach Shed NAS"), not "5 connected". The
+  // outage words lead, so the phone footer's end ellipsis shortens the name
+  // and never the verb ("Can't reach Build Server Ra…").
   const down = rows.filter(row => !row.connected);
-  const partial = down.length === 1 ? `${shortMachineName(down[0]!.label)} ${outageWords(down[0]!.connection)}` : `${down.length} not connected`;
+  const partial = down.length === 1 ? `${outageWords(down[0]!.connection)} ${shortMachineName(down[0]!.label)}` : `${down.length} not connected`;
   const state = loading ? 'Loading…' : connected ? (connected === rows.length ? 'Connected' : partial)
     : !rows.length ? 'Not paired'
     : !retryable.length ? labels[0]
@@ -54,13 +56,14 @@ function shortMachineName(label: string): string {
   return label.split(' · ')[0]?.trim() || label.trim();
 }
 
-/** A machine's connection in the footer's words: "can't be reached", "reconnecting", "needs pairing" (cas-0739). */
+/** A machine's connection in the footer's words, put before its name: "Can't reach", "Reconnecting to", "Needs pairing:" (cas-0739). */
 function outageWords(connection: string): string {
-  if (connection === CANT_REACH_RETRYING || connection === 'Unreachable') return "can't be reached";
-  if (connection === NEEDS_PAIRING) return 'needs pairing';
-  if (connection === UNSTEADY) return 'unsteady';
-  if (connection.startsWith('Connecting') || connection === 'Idle') return 'connecting';
-  return connection.toLowerCase();
+  if (connection === CANT_REACH_RETRYING || connection === 'Unreachable') return "Can't reach";
+  if (connection === NEEDS_PAIRING) return 'Needs pairing:';
+  if (connection === UNSTEADY) return 'Unsteady:';
+  if (connection === 'Reconnecting') return 'Reconnecting to';
+  if (connection.startsWith('Connecting') || connection === 'Idle') return 'Connecting to';
+  return `${connection}:`;
 }
 
 /**

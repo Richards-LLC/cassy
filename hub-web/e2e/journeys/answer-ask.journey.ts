@@ -242,6 +242,13 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     // A tap on the bar opens the question.
     await bar.click();
     await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
+    // cas-8674 (journey F6): the card's body scrolls inside about a quarter of
+    // this short screen, and the question itself comes last, under the
+    // preamble. Opened, the card shows the Ask line beside its choices, never
+    // two answers to a question scrolled out of sight.
+    const askLine = pinned.locator(".obj-body li", { hasText: "open the PR to main and cut a release?" });
+    await expect(askLine).toBeInViewport({ ratio: 1 });
+    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeInViewport();
     await page.setViewportSize({ width: 390, height: 844 });
     // Swiped off on a touch screen, it unpins; the thread copy says so and keeps its choices.
     await swipeAway(page, ".pinned-ask", -260);

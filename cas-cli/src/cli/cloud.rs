@@ -9238,6 +9238,47 @@ mod purge_foreign_safety_tests {
     }
 
     #[test]
+    fn purge_queue_non_overlapping_changes_proceed_and_survive_delete() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute_batch(
+            "INSERT INTO tasks VALUES ('kept-task', 'local work', 'test-project');
+             INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
+                ('task', 'kept-task', 'update'),
+                ('rule', 'cas-0001', 'update'),
+                ('task_dependency', 'kept-task:kept-peer:blocks', 'upsert');",
+        ).unwrap();
+        let delete_set = collect_purge_delete_set(&conn, "test-project").unwrap();
+        let pending = pending_content_pushes_excluding(&conn, &delete_set).unwrap();
+        let refusals = evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7);
+        assert!(refusals.is_empty(), "unrelated queued changes must survive safely: {refusals:?}");
+        assert_eq!(delete_purge_rows(&mut conn, &delete_set).unwrap(), 5);
+        let queued: usize = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
+        assert_eq!(queued, 3);
+        let title: String = conn.query_row("SELECT title FROM tasks WHERE id = 'kept-task'", [], |row| row.get(0)).unwrap();
+        assert_eq!(title, "local work");
+    }
+
+    #[test]
+    fn purge_queue_overlapping_changes_refuse_without_losing_work() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute_batch(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
+                ('Task', 'cas-0001', 'update'),
+                ('rule', 'r1', 'update'),
+                ('skill', 's1', 'update');",
+        ).unwrap();
+        let delete_set = collect_purge_delete_set(&conn, "test-project").unwrap();
+        let pending = pending_content_pushes_excluding(&conn, &delete_set).unwrap();
+        let refusals = evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7);
+        assert!(matches!(refusals.as_slice(), [PurgeRefusal::UnpushedRows { pending: 3, .. }]), "{refusals:?}");
+        assert!(!refusals[0].is_hard(), "--force must retain its explicit recoverability override");
+        let tasks: usize = conn.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0)).unwrap();
+        assert_eq!(tasks, 1, "the guard must leave the store untouched");
+    }
+
+    #[test]
     fn pending_purge_rows_do_not_block_but_real_local_edit_still_does() {
         let conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);

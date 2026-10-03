@@ -23,6 +23,9 @@ pub enum MachineEventKind {
     DaemonDisconnected,
     ControllerChanged,
     DaemonError,
+    /// A structured fleet operation changed the session's fleet (cas-566b);
+    /// devices refetch its status.
+    FleetChanged,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

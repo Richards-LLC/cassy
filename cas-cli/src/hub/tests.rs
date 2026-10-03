@@ -3749,3 +3749,308 @@ fn last_activity_names_parties_without_device_labels() {
         "terminal → supervisor"
     );
 }
+
+// --- cas-566b: structured fleet operations (fleet-operations brief, S1) ----
+
+const OPS_SESSION: &str = "factory-ops";
+const OPS_TASK: &str = "cas-ops1";
+const OPS_TIP: &str = "0123456789abcdef0123456789abcdef01234567";
+
+struct OpsFixture {
+    _temp: tempfile::TempDir,
+    hub_root: std::path::PathBuf,
+    cas_dir: std::path::PathBuf,
+    app: axum::Router,
+    events: MachineEventBus,
+    signing: p256::ecdsa::SigningKey,
+    credential: String,
+    device_id: String,
+}
+
+/// A paired device holding `scopes`, a live session whose project has one
+/// awaiting-merge task, and the hub router over them.
+fn ops_fixture(scopes: std::collections::BTreeSet<Scope>) -> OpsFixture {
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = private_tempdir();
+    let hub_root = temp.path().join("hub");
+    let auth = AuthStore::open(&hub_root, "machine-test").unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+    let mut task = cas_types::Task::new(OPS_TASK.to_string(), "Ship the ops facade".to_string());
+    task.status = cas_types::TaskStatus::AwaitingMerge;
+    task.assignee = Some("swift-lark-3".to_string());
+    task.deliverables.parked_branch = Some("factory/swift-lark-3-cas-ops1".to_string());
+    task.deliverables.factory_branch_anchor = Some(OPS_TIP.to_string());
+    crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+
+    let mut session = fixture_session(OPS_SESSION);
+    session.project_dir = Some(project.display().to_string());
+    let events = MachineEventBus::new(16);
+    let app = router(
+        HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+            Arc::new(PreAuthAuthorizer),
+            MachineIdentity {
+                id: "machine-test".into(),
+            },
+            DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+            events.clone(),
+        )
+        .with_auth(auth.clone())
+        .with_effective_origin("https://controller.example"),
+    );
+    let now = chrono::Utc::now();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing("https://controller.example", scopes.clone(), now)
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        scopes,
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    OpsFixture {
+        _temp: temp,
+        hub_root,
+        cas_dir,
+        app,
+        events,
+        signing,
+        device_id: credential.device_id.clone(),
+        credential: credential.credential,
+    }
+}
+
+impl OpsFixture {
+    async fn call(&self, method: &str, uri: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+        let proof = sign_dpop(
+            &self.signing,
+            &self.credential,
+            method,
+            uri,
+            chrono::Utc::now(),
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", self.credential))
+            .header("dpop", proof)
+            .header("content-type", "application/json")
+            .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+            .unwrap();
+        let response = self.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    async fn operate(&self, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        self.call("POST", &format!("/v1/sessions/{OPS_SESSION}/operations"), Some(body)).await
+    }
+
+    fn audit(&self, action: &str) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(self.hub_root.join(AUDIT_LOG_FILE))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|row| row["action"] == action)
+            .collect()
+    }
+
+    fn queued(&self) -> Vec<cas_store::QueuedPrompt> {
+        crate::store::open_prompt_queue_store(&self.cas_dir)
+            .unwrap()
+            .peek_all(50)
+            .unwrap()
+    }
+}
+
+fn request_merge(op_id: &str, tip: &str) -> serde_json::Value {
+    serde_json::json!({
+        "op_id": op_id,
+        "op": {"kind": "request_merge", "task_id": OPS_TASK},
+        "expected": {"status": "awaiting_merge", "tip": tip},
+    })
+}
+
+fn control_scopes() -> std::collections::BTreeSet<Scope> {
+    [
+        Scope::MachineRead,
+        Scope::SessionRead,
+        Scope::PaneRead,
+        Scope::MessageSend,
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// O1: the hub's "ask the supervisor to merge" reaches the supervisor as the
+/// same queue row an MCP `coordination message` produces (target, text,
+/// session, summary, priority, urgency), stamped with the device that asked,
+/// with requested and outcome audit rows and a FleetChanged event.
+#[tokio::test]
+async fn operations_request_merge_reuses_message_send() {
+    let fixture = ops_fixture(control_scopes());
+    let mut events = fixture.events.subscribe();
+
+    let (status, body) = fixture
+        .operate(request_merge("6f1c2d3e-0000-4000-8000-000000000001", OPS_TIP))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], "done", "{body}");
+
+    let rows = fixture.queued();
+    assert_eq!(rows.len(), 1, "exactly one supervisor message: {rows:?}");
+    let hub = &rows[0];
+    let expected_text = crate::ops::fleet::request_merge_text(
+        OPS_TASK,
+        "Ship the ops facade",
+        Some("factory/swift-lark-3-cas-ops1"),
+        Some(OPS_TIP),
+    );
+    assert!(hub.prompt.contains(OPS_TASK) && hub.prompt.contains(OPS_TIP), "{}", hub.prompt);
+    assert_eq!(hub.prompt, expected_text);
+
+    // Parity with the row an MCP coordination message to the supervisor makes.
+    let mcp_id = crate::store::open_prompt_queue_store(&fixture.cas_dir)
+        .unwrap()
+        .enqueue_urgent_with_outcome(
+            "supervisor",
+            "supervisor",
+            &expected_text,
+            Some(OPS_SESSION),
+            hub.summary.as_deref(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .id();
+    let mcp = fixture
+        .queued()
+        .into_iter()
+        .find(|row| row.id == mcp_id)
+        .unwrap();
+    assert_eq!(hub.target, mcp.target);
+    assert_eq!(hub.prompt, mcp.prompt);
+    assert_eq!(hub.factory_session, mcp.factory_session);
+    assert_eq!(hub.summary, mcp.summary);
+    assert_eq!(hub.priority, mcp.priority);
+    assert_eq!(hub.urgent, mcp.urgent);
+    let stamp = hub.operator.as_ref().expect("the device's operator stamp");
+    assert!(stamp.verified);
+    assert_eq!(stamp.device_id, fixture.device_id);
+
+    let audit = fixture.audit("operation:request_merge");
+    let outcomes: Vec<_> = audit.iter().map(|row| row["outcome"].as_str().unwrap()).collect();
+    assert_eq!(outcomes, ["requested", "allowed"], "{audit:?}");
+    assert!(audit.iter().all(|row| row["target_session"] == OPS_SESSION && row["required_scope"] == "message:send"));
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("FleetChanged is emitted")
+        .unwrap();
+    assert_eq!(event.kind, MachineEventKind::FleetChanged);
+    assert_eq!(event.session.as_deref(), Some(OPS_SESSION));
+}
+
+/// A retried `op_id` returns the first outcome and sends nothing twice.
+#[tokio::test]
+async fn operations_op_id_is_idempotent() {
+    let fixture = ops_fixture(control_scopes());
+    let op_id = "6f1c2d3e-0000-4000-8000-000000000002";
+
+    let first = fixture.operate(request_merge(op_id, OPS_TIP)).await;
+    let retry = fixture.operate(request_merge(op_id, OPS_TIP)).await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(retry, first, "a retry returns the first outcome");
+    assert_eq!(fixture.queued().len(), 1, "a retry never sends twice");
+    assert_eq!(
+        fixture
+            .audit("operation:request_merge")
+            .iter()
+            .filter(|row| row["outcome"] == "requested")
+            .count(),
+        1,
+        "a replay runs nothing, so it requests nothing"
+    );
+
+    let another = fixture
+        .operate(request_merge("6f1c2d3e-0000-4000-8000-000000000003", OPS_TIP))
+        .await;
+    assert_eq!(another.0, StatusCode::OK);
+    assert_eq!(fixture.queued().len(), 2, "a new op_id is a new operation");
+}
+
+/// An `expected` precondition the fleet no longer meets returns 409 stale
+/// with the current state, and nothing is sent or emitted.
+#[tokio::test]
+async fn operations_stale_expected_returns_409_without_side_effects() {
+    let fixture = ops_fixture(control_scopes());
+    let mut events = fixture.events.subscribe();
+
+    let (status, body) = fixture
+        .operate(request_merge(
+            "6f1c2d3e-0000-4000-8000-000000000004",
+            "ffffffffffffffffffffffffffffffffffffffff",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "stale");
+    assert_eq!(body["current"]["status"], "awaiting_merge");
+    assert_eq!(body["current"]["tip"], OPS_TIP);
+
+    let stale_status = fixture
+        .operate(serde_json::json!({
+            "op_id": "6f1c2d3e-0000-4000-8000-000000000005",
+            "op": {"kind": "request_merge", "task_id": OPS_TASK},
+            "expected": {"status": "in_progress", "tip": OPS_TIP},
+        }))
+        .await;
+    assert_eq!(stale_status.0, StatusCode::CONFLICT, "{}", stale_status.1);
+
+    assert!(fixture.queued().is_empty(), "a stale operation sends nothing");
+    let outcomes: Vec<_> = fixture
+        .audit("operation:request_merge")
+        .iter()
+        .map(|row| row["outcome"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(outcomes, ["requested", "stale", "requested", "stale"]);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
+            .await
+            .is_err(),
+        "a stale operation changes nothing, so it emits nothing"
+    );
+}
+
+/// End session was the one Commander mutation with no audit row (brief O8).
+#[tokio::test]
+async fn end_session_writes_audit_row() {
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+
+    let (status, _) = fixture
+        .call("DELETE", "/v1/sessions/factory-gone-566b", None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let audit = fixture.audit("session_end");
+    let outcomes: Vec<_> = audit.iter().map(|row| row["outcome"].as_str().unwrap()).collect();
+    assert_eq!(outcomes, ["requested", "not_found"], "{audit:?}");
+    for row in &audit {
+        assert_eq!(row["target_session"], "factory-gone-566b");
+        assert_eq!(row["required_scope"], "factory:manage");
+        assert_eq!(row["device_id"], fixture.device_id.as_str());
+    }
+}

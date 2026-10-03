@@ -7233,7 +7233,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_queue_check_names_retry_push_purge_and_exact_blocking_counts() {
+    fn doctor_queue_check_names_retry_push_purge_and_exact_queued_counts() {
         use rusqlite::Connection;
 
         let temp = TempDir::new().unwrap();

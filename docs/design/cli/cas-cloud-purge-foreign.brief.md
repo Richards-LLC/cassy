@@ -18,7 +18,15 @@ purge the operator store.
 
 ## Critique
 
-Pending compiled regression output. The added line uses default foreground,
-ASCII and a bounded integer count, and its longest integer form fits 80 columns.
-Full-command real-build terminal QA belongs to supervisor assembly: factory
-workers may compile and execute capped named tests but may not build the CLI.
+The scoped compiled regressions pass: 51 purge-safety and doctor queue tests.
+The incident fixture exercises the real inspection and deletion paths, reports
+364 preserved rows and keeps the queued work. The snapshot asserts the exact
+ASCII info line and checks zero, 364 and the largest integer at 80 columns.
+The human caller writes that helper in the default foreground; dry-run and apply
+JSON both serialize the same inspection count as a number.
+
+Full-command terminal QA is **not verified** here. It belongs to supervisor
+assembly against the freshly built CLI and a disposable store: factory workers
+may execute capped named tests but may not build the CLI. The existing command
+header and unmodified report layout have not been scored or redesigned as part
+of this queue-safety fix.

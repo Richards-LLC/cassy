@@ -263,8 +263,8 @@ pub struct CloudPurgeForeignArgs {
     pub include_unknown: bool,
 
     /// Proceed even when the cloud pull baseline is stale, missing or unreadable.
-    /// Classifier hard stops for a task majority or proven rule cannot be overridden. Destructive — the
-    /// refusal reason is still printed.
+    /// Classifier hard stops for a task majority or proven rule cannot be
+    /// overridden. Destructive — the refusal reason is still printed.
     #[arg(long)]
     pub force: bool,
 

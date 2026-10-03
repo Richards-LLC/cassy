@@ -143,6 +143,9 @@ table, a progress line, an error) is designed under the `cas-cli-craft` builtin 
 and both Solarized palettes plus piped, `NO_COLOR` and `LC_ALL=C` runs, and fails on wrapped rows,
 split tokens, colour under 3:1 (marks) or 4.5:1 (text), truncation with no escape flag, glyphs on a
 C locale, SGR under `NO_COLOR`, redraws in a pipe, and a `--json` stream that is not one document.
+BSD/macOS and util-linux `script` are supported. Empty captures fail; unavailable runners
+exit 2 without retaining a PASS receipt. Diagnostic stderr is captured and checked, while
+JSON stdout stays separate. Expected nonzero command exits do not fail rendering QA.
 
 ```bash
 node scripts/terminal-qa.mjs --label cas-doctor --escape-flag --verbose --json-flag --json -- cas doctor

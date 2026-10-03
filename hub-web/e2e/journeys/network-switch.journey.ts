@@ -502,6 +502,65 @@ test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'conn
   });
 });
 
+// cas-d1fa (WCAG 2.1.2): the terminal input took every Tab, so a keyboard
+// user who landed in it could never leave. Without control the terminal
+// cannot use Tab at all, so Tab and Shift+Tab move focus on; in control, Tab
+// is the program's, and Ctrl+M leaves, as the visible hint says.
+const offBody = (page: Page) => page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body);
+const terminalInput = (page: Page) => page.locator(".t3-ghostty-input");
+
+test("HUB-J12 network switch: without control, Tab and Shift+Tab leave the terminal input and reach Re-pair (cas-d1fa)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("A refused pairing in Terminal view: Tab and Shift+Tab leave the terminal and reach Re-pair", async () => {
+    const { hub, clock } = await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
+    const input = terminalInput(page);
+    await input.focus();
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Tab lands on a real control, not the page").toBe(true);
+    await input.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Shift+Tab lands on a real control, not the page").toBe(true);
+    // From the terminal, the keyboard reaches Re-pair.
+    await input.focus();
+    let reached = false;
+    for (let press = 0; press < 40 && !reached; press++) {
+      await page.keyboard.press("Tab");
+      reached = await page.evaluate(() => /Re-pair/.test((document.activeElement as HTMLElement | null)?.innerText ?? ""));
+    }
+    expect(reached, "Tab from the terminal reaches Re-pair").toBe(true);
+  });
+});
+
+test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+M leaves it, as the visible hint says (cas-d1fa)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("In control, Tab stays in the terminal; Ctrl+M leaves, and the terminal says so", async () => {
+    await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    const input = terminalInput(page);
+    await input.focus();
+    const hint = page.locator(".t3-ghostty-escape-hint");
+    await expect(hint).toBeVisible();
+    await expect(hint).toHaveText("Tab goes to the terminal. Ctrl+M leaves it.");
+    await expect(input).toHaveAccessibleDescription("Tab goes to the terminal. Ctrl+M leaves it.");
+    await page.keyboard.press("Tab");
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Control+m");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Ctrl+M lands on a real control, not the page").toBe(true);
+    await expect(hint).toBeHidden();
+  });
+});
+
 // cas-f698: the old two-machine journey hid this behind the healthy STUDIO.
 // Exact failure: footer .machine-badge-state still says "Reconnecting" after
 // ATLAS alone reaches Needs pairing; the footer must use the same machine words.

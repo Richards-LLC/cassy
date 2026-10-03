@@ -342,3 +342,29 @@ test('the command line takes --journey', async () => {
   const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
   assert.equal(report.journeyRuns.length, 3);
 });
+
+test('text a vertical scroller reaches is not clipped; a fixed-height hidden box still is (cas-0d16)', async () => {
+  const run = (name) => mkdtemp(join(tmpdir(), `visual-qa-${name}-`)).then((artifactDir) => runVisualQa({
+    urls: [fixture(`${name}.html`)],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  }));
+
+  // overflow-x: hidden; overflow-y: auto inside an overflow: hidden panel:
+  // the keys below the fold are reachable by scrolling.
+  const reachable = await run('scroller-reachable');
+  assert.deepEqual(reachable.findings.filter((finding) => finding.type === 'clipped-content'), []);
+  assert.equal(reachable.status, 'PASS', JSON.stringify(reachable.findings, null, 2));
+
+  const clipped = await run('clip-box');
+  assert.equal(clipped.status, 'FAIL');
+  assert.ok(
+    clipped.findings.some((finding) => finding.type === 'clipped-content' && finding.reason === 'text-bounds-exceed-overflow-ancestor'),
+    JSON.stringify(clipped.findings, null, 2),
+  );
+});

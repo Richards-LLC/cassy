@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      /* cas-0d16: a fixed-height box that truly clips. Nothing scrolls it into
+         view, so the lines below its edge are lost. */
+      .clip { height: 44px; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Notes</h1>
+      <div class="clip" id="clip">
+        <p>First line stays visible inside the box.</p>
+        <p>This second line is cut off by the fixed height.</p>
+        <p>This third line is never reachable.</p>
+      </div>
+    </main>
+  </body>
+</html>

@@ -468,6 +468,15 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
+            "qa.terminal_interaction_paths" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.terminal_interaction_paths = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|glob| !glob.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
             "qa.user_facing_paths" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.user_facing_paths = value

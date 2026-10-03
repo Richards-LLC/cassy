@@ -161,9 +161,9 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         key: "qa.terminal_render_paths",
         section: "qa",
         name: "Terminal Rendering Paths",
-        description: "Comma-separated repo-relative globs. A demo-only (non-web) delivery whose diff touches one changes terminal rendering and needs a cas-cli-craft terminal-qa PASS receipt under the task artifacts dir, in addition to its evidence ledger.",
+        description: "Comma-separated repo-relative globs for terminal output. A demo-only delivery touching one needs terminal-qa PASS plus its real-build ledger, except for interactive surfaces in qa.terminal_interaction_paths. CLI command paths still need terminal-qa.",
         value_type: ConfigType::String,
-        default: "**/ui/**,**/tui/**,**/*render*,**/*output*,**/*theme*,**/*progress*",
+        default: "**/cli/**,**/ui/**,**/tui/**,**/*render*,**/*output*,**/*theme*,**/*progress*",
         constraint: Constraint::None,
         advanced: true,
         requires_feature: None,
@@ -171,6 +171,23 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         use_cases: &[
             "Name the modules that draw your CLI or TUI output",
             "Leave empty to never require a terminal-qa receipt",
+        ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "qa.terminal_interaction_paths",
+        section: "qa",
+        name: "Interactive Terminal Paths",
+        description: "Comma-separated repo-relative globs for interactive TUI and PTY surfaces. These require a fresh real-build PASS ledger instead of a command stdout terminal-qa receipt. Other output paths in a mixed delivery and CLI command paths still need terminal-qa. Leave empty to require receipts for every terminal_render_paths match.",
+        value_type: ConfigType::String,
+        default: "**/ui/factory/**,**/cas-pty/**,**/cas-mux/**",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["qa", "terminal", "tui", "pty", "input", "geometry", "ledger"],
+        use_cases: &[
+            "Exercise input and PTY geometry through the real interactive application",
+            "Name interactive modules separately from command output modules",
         ],
     });
 

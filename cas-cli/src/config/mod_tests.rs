@@ -46,6 +46,25 @@ fn test_config_defaults() {
 }
 
 #[test]
+fn terminal_interaction_config_round_trips_and_resets_cas_266e() {
+    let temp = TempDir::new().unwrap();
+    let mut config: Config = toml::from_str("[qa]\nevidence_gate = true\n").unwrap();
+    let key = "qa.terminal_interaction_paths";
+    let default = config.get(key).unwrap();
+    assert!(default.contains("**/ui/factory/**"));
+    assert_eq!(meta::registry().get(key).unwrap().default, default);
+    config.set(key, "src/tui/**, src/pty/**").unwrap();
+    config.save(temp.path()).unwrap();
+    let mut loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.get(key).as_deref(), Some("src/tui/**,src/pty/**"));
+    assert!(loaded.list().contains(&(key.into(), "src/tui/**,src/pty/**".into())));
+    loaded.set(key, "").unwrap();
+    assert!(loaded.qa().terminal_interaction_paths.is_empty());
+    loaded.set(key, meta::registry().get(key).unwrap().default).unwrap();
+    assert_eq!(loaded.get(key), Some(default));
+}
+
+#[test]
 fn qa_user_facing_labels_default_and_round_trip() {
     let temp = TempDir::new().unwrap();
     let mut config = Config::default();

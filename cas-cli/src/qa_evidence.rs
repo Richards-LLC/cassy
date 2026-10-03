@@ -1760,7 +1760,8 @@ pub enum EvidenceTier {
     Bundle,
     /// demo_statement only, no web surface in the diff: the evidence ledger
     /// with a real-build PASS row, plus a cas-cli-craft terminal-qa PASS
-    /// receipt when the diff changes terminal rendering.
+    /// receipt when the diff changes command output. Interactive TUI/PTY
+    /// surfaces can use the ledger alone, as classified by the close gate.
     Ledger { terminal_qa: bool },
 }
 

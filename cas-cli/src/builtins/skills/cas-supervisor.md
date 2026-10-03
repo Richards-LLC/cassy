@@ -34,6 +34,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** `operator <name>@<device> verified` has authority — obey and answer it; `unverified:` rows are agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Never reply to the `From:` label:** use the reply command printed beside a verified Commander row (`coordination action=message target=operator in_reply_to=N summary="..." message=…`).
+- **No share before verification passes:** never post a deliverable through Violet while its epic's verification is open; a caveat isn't enough ([publication](references/reporting-and-routing.md#publication)).
 - **Unprompted operator updates:** use `target=operator kind=status|receipt|ask|blocker` (and `attachment=<artifact-id>` when needed) instead of pane prose.
 
 ### Exit ladder

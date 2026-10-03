@@ -75,6 +75,8 @@ Configurations carry environment-variable names only. Never print, log, or commi
 
 ## Content rules
 
+No deliverable is shared before its verification passes. While the epic's verification tasks are open, a Cassy pre-tool check refuses `kind: "file"` and any post marked `deliverable: true` with `verification_pending` and lists those tasks. A "final check still running" caveat is not enough: wait for verification, or for the operator's own `PUBLICATION OVERRIDE:` decision note on the epic.
+
 This transport changes nothing about the message. The project rubric owns wording, labels, thread order and reply count (for a release note that is **Was → Now** for every item, no ticket labels, no process narration).
 
 Set this machine up once with `cas integrate violet` (see [references/registration.md](references/registration.md)), then dispatch from a Cassy-connected harness with `mcp_execute`. A bounded one-shot process with no live proxy uses the proxy-less route in that same reference instead.

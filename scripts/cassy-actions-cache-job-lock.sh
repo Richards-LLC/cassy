@@ -176,12 +176,19 @@ holder_main() {
     done
 }
 
+release_start_locks() {
+    [[ "$cache_lock_transferred" == true ]] || flock -u 9
+    flock -u 8
+}
+
 start_job() {
-    local stale holder_pid token holder_start owner_pid owner_start owner record attempt
+    local stale holder_pid token holder_start launched_start snapshot owner_pid owner_start owner record attempt
     lock_slot
     owner="$(worker_identity)" || fail 'job hook has no live owning Runner.Worker'
     read -r owner_pid owner_start <<<"$owner"
     exec 9>>"$lock_file"
+    cache_lock_transferred=false
+    trap release_start_locks EXIT
     flock -s -w "$lock_wait_seconds" 9 ||
         fail "timed out waiting for the cache prune barrier after $lock_wait_seconds seconds"
     "$mount_guard_bin" 8>&- || fail 'runner cache mount guard rejected job start'
@@ -210,6 +217,8 @@ start_job() {
     RUNNER_TRACKING_ID= nohup "$self" --hold "$slot" "$token" "$owner_pid" "$owner_start" 8>&- 9>&9 \
         >>"$state_root/slot-$slot.log" 2>&1 &
     holder_pid=$!
+    snapshot="$(process_snapshot "$holder_pid" 2>/dev/null || true)"
+    read -r _ launched_start _ <<<"$snapshot"
     for attempt in $(seq 1 100); do
         record="$(read_record 2>/dev/null || true)"
         read -r _ _ holder_start _ <<<"$record"
@@ -217,6 +226,7 @@ start_job() {
             holder_matches "$holder_pid" "$token" "$holder_start"; then
             # fd9 deliberately transfers its shared open description to the
             # holder. LOCK_UN here would also unlock the holder's barrier.
+            cache_lock_transferred=true
             exec 9>&-
             printf 'runner slot %s acquired the shared cache lock (pid %s)\n' "$slot" "$holder_pid"
             return 0
@@ -224,8 +234,8 @@ start_job() {
         kill -0 "$holder_pid" 2>/dev/null || break
         sleep 0.05
     done
-    if [[ -n "$holder_start" ]]; then
-        stop_holder "$holder_pid" "$holder_start" "$token" || true
+    if [[ -n "$launched_start" ]]; then
+        stop_holder "$holder_pid" "$launched_start" "$token" || true
     fi
     fail "slot $slot cache lock holder did not become ready"
 }

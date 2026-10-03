@@ -337,11 +337,12 @@ jobs:
         id: runner-lock-diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           comparison_base="$BASE_SHA"
           if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]] \
             || ! git rev-parse --verify --quiet "$comparison_base^{commit}" >/dev/null; then
-            comparison_base="$(git merge-base HEAD origin/${{ github.event.repository.default_branch }})"
+            comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
           fi
           changed=false
           if [[ -n "$(git diff --name-only "$comparison_base" HEAD -- \
@@ -531,11 +532,12 @@ jobs:
         if: github.event_name != 'push' && steps.pr-dedupe.outputs.covered != 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           comparison_base="$BASE_SHA"
           if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]] \
             || ! git rev-parse --verify --quiet "$comparison_base^{commit}" >/dev/null; then
-            comparison_base="$(git merge-base HEAD origin/${{ github.event.repository.default_branch }})"
+            comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
           fi
           changed=false
           if [[ -n "$(git diff --name-only "$comparison_base" HEAD -- \

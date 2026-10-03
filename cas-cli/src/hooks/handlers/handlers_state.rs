@@ -96,8 +96,8 @@ pub(crate) fn current_agent_id(input: &HookInput) -> String {
     // Codex's native hook `session_id` is its thread UUID, not Cassy's
     // registered factory-agent ID. Factory hook processes inherit the
     // canonical Cassy session ID from the worker environment.
-    if std::env::var("CAS_FACTORY_MODE").as_deref() == Ok("1") {
-        if let Ok(session_id) = std::env::var("CAS_SESSION_ID") {
+    if cas_core::env_overlay::var("CAS_FACTORY_MODE").as_deref() == Ok("1") {
+        if let Ok(session_id) = cas_core::env_overlay::var("CAS_SESSION_ID") {
             if !session_id.is_empty() {
                 return session_id;
             }

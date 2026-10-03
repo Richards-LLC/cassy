@@ -478,6 +478,17 @@ pub(super) fn merge_tip_content_presence(
             {
                 continue;
             }
+            // cas-f38ca: another lane's commit can mention this task as
+            // context ("dep_add no longer strands cas-940f") and reach the
+            // tip through a merge of the epic. Its subject names the task
+            // that owns it; a body mention does not make its lines ours.
+            let subject = fields[2].trim().lines().next().unwrap_or("");
+            if !identity.matches_known_commit(fields[0])
+                && !message_references_task(subject, id)
+                && references_foreign_task(subject, identity)
+            {
+                continue;
+            }
             let Ok(epoch) = fields[1].parse::<i64>() else {
                 continue;
             };

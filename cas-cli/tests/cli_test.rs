@@ -1428,9 +1428,11 @@ fn test_knowledge_read_of_unknown_page_fails_loudly() {
 /// store, `cd` into the copy, and run a MUTATING command while `CAS_ROOT` (as a
 /// factory session exports it) still points at the live store.
 ///
-/// The write must still land in the CAS_ROOT store (precedence is deliberately
-/// unchanged — factory workers in clones depend on it), but the operator must be
-/// told, on stderr, that the store under their feet lost.
+/// The operator must be told, on stderr, that the two stores differ. Since
+/// cas-e1c7 a config write no longer lands silently in the CAS_ROOT store: it
+/// is refused before writing until `--store` picks one, and with
+/// `--store cas-root` CAS_ROOT still wins (precedence is unchanged for every
+/// other command — factory workers in clones depend on it).
 #[test]
 fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
     let temp = TempDir::new().unwrap();
@@ -1468,11 +1470,11 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
     // (1) Both roots named, winner stated.
     assert!(
         stderr.contains(&live_root.display().to_string()),
-        "stderr must name the winning CAS_ROOT store.\nstderr: {stderr}"
+        "stderr must name the CAS_ROOT store.\nstderr: {stderr}"
     );
     assert!(
         stderr.contains(&copy_root.display().to_string()),
-        "stderr must name the working-directory store that lost.\nstderr: {stderr}"
+        "stderr must name the working-directory store.\nstderr: {stderr}"
     );
     assert!(
         stderr.contains("CAS_ROOT wins"),
@@ -1485,17 +1487,124 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
         "the notice must never reach stdout.\nstdout: {stdout}"
     );
 
-    // (2) Precedence itself is unchanged: the write really did land in the
-    // CAS_ROOT store, which is exactly why the notice has to exist.
+    // (2) cas-e1c7: refused, and neither store was written.
+    assert!(
+        !output.status.success(),
+        "a config write across differing stores must refuse.\nstderr: {stderr}"
+    );
+    let live_config = std::fs::read_to_string(live_root.join("config.toml")).unwrap();
+    let copy_config = std::fs::read_to_string(copy_root.join("config.toml")).unwrap();
+    assert!(
+        !live_config.contains("min_helpful = 7"),
+        "live config: {live_config}"
+    );
+    assert!(
+        !copy_config.contains("min_helpful = 7"),
+        "copy config: {copy_config}"
+    );
+
+    // With --store cas-root the CAS_ROOT store is written, as before.
+    cas_cmd(temp.path())
+        .current_dir(&copy)
+        .env("CAS_ROOT", &live_root)
+        .args([
+            "config",
+            "set",
+            "sync.min_helpful",
+            "7",
+            "--store",
+            "cas-root",
+        ])
+        .assert()
+        .success();
     let live_config = std::fs::read_to_string(live_root.join("config.toml")).unwrap();
     let copy_config = std::fs::read_to_string(copy_root.join("config.toml")).unwrap();
     assert!(
         live_config.contains("min_helpful = 7"),
-        "CAS_ROOT must keep winning.\nlive config: {live_config}"
+        "--store cas-root writes the CAS_ROOT store.\nlive config: {live_config}"
     );
     assert!(
         !copy_config.contains("min_helpful = 7"),
         "the working-directory store must be untouched.\ncopy config: {copy_config}"
+    );
+}
+
+/// cas-e1c7: `cas cloud project set`, run inside another project from a shell
+/// whose CAS_ROOT names a different store, rewrote the CAS_ROOT project's
+/// canonical_id and only warned beside the success line. It now refuses before
+/// writing (and before sign-in), naming both stores and the flags to pick one;
+/// `--store here` writes the working-directory project.
+#[test]
+fn cloud_project_set_across_differing_stores_refuses_and_writes_nothing() {
+    let temp = TempDir::new().unwrap();
+    let cas_src = temp.path().join("cas-src");
+    let violet = temp.path().join("violet_ps");
+    std::fs::create_dir_all(&cas_src).unwrap();
+    std::fs::create_dir_all(&violet).unwrap();
+    for dir in [&cas_src, &violet] {
+        cas_cmd(temp.path())
+            .current_dir(dir)
+            .args(["init", "--yes"])
+            .assert()
+            .success();
+    }
+    let cas_src_root = cas_src.join(".cas");
+    let violet_root = violet.join(".cas");
+    let before_cas_src = std::fs::read_to_string(cas_src_root.join("config.toml")).unwrap();
+    let before_violet = std::fs::read_to_string(violet_root.join("config.toml")).unwrap();
+
+    let output = cas_cmd(temp.path())
+        .current_dir(&violet)
+        .env("CAS_ROOT", &cas_src_root)
+        .args([
+            "cloud",
+            "project",
+            "set",
+            "github.com/richards-llc/violet_ps",
+        ])
+        .output()
+        .expect("cas cloud project set must run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "must refuse.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("canonical id set"),
+        "no success line.\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("`cas cloud project set` not run"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "CAS_ROOT store:          {}",
+            cas_src_root.display()
+        )),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "this directory's store:  {}",
+            violet_root.canonicalize().unwrap().display()
+        )),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("Nothing was written"), "stderr: {stderr}");
+    assert!(stderr.contains("--store here"), "stderr: {stderr}");
+    assert!(stderr.contains("--store cas-root"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(cas_src_root.join("config.toml")).unwrap(),
+        before_cas_src,
+        "the CAS_ROOT store is untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(violet_root.join("config.toml")).unwrap(),
+        before_violet,
+        "the working-directory store is untouched"
     );
 }
 

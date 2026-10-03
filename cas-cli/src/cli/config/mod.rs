@@ -67,6 +67,10 @@ pub struct ConfigSetArgs {
 
     /// Value to set
     pub value: String,
+
+    /// cas-e1c7: which store to write when CAS_ROOT and this directory differ.
+    #[command(flatten)]
+    pub store: crate::cli::store_choice::StoreChoiceArgs,
 }
 
 #[derive(Parser)]
@@ -105,6 +109,10 @@ pub struct ConfigResetArgs {
     /// Skip confirmation for reset all
     #[arg(short, long)]
     pub force: bool,
+
+    /// cas-e1c7: which store to write when CAS_ROOT and this directory differ.
+    #[command(flatten)]
+    pub store: crate::cli::store_choice::StoreChoiceArgs,
 }
 
 #[derive(Parser)]
@@ -130,6 +138,10 @@ pub struct ConfigImportArgs {
     /// Dry run - show what would change
     #[arg(long)]
     pub dry_run: bool,
+
+    /// cas-e1c7: which store to write when CAS_ROOT and this directory differ.
+    #[command(flatten)]
+    pub store: crate::cli::store_choice::StoreChoiceArgs,
 }
 
 #[derive(Parser)]

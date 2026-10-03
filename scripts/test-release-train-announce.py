@@ -17,6 +17,14 @@ spec = importlib.util.spec_from_file_location("announce", SCRIPT)
 announce = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(announce)
 
+# Compatibility fixtures use the reviewed manifest, preserving installed-host aliases.
+LEGACY_TOKEN_PREFIX = announce.load_report_adapter().LEGACY_TOKEN_PREFIX
+LEGACY_ENV_PREFIX = LEGACY_TOKEN_PREFIX.split("_", 1)[0] + "_"
+TOKEN_A = LEGACY_TOKEN_PREFIX + "_A"
+TOKEN_B = LEGACY_TOKEN_PREFIX + "_B"
+TOKEN_MISSING = LEGACY_TOKEN_PREFIX + "_MISSING"
+TOKEN_OTHER_HOST = LEGACY_TOKEN_PREFIX + "_OTHER_HOST"
+
 BODIES = (
     "*Live on production — User — Cassy v9.99.8*\n"
     "Was: changes took longer. → Now: checks finish sooner.",
@@ -183,7 +191,7 @@ class TokenPreflight(unittest.TestCase):
         self.worktree.mkdir()
         self.run = self.root / "artifacts/v9.99.8-release"
         self.env = {name: value for name, value in os.environ.items()
-                    if not name.startswith(("VIOLET_", "MECHA_", "CAS_RELEASE_"))}
+                    if not name.startswith(("VIOLET_", LEGACY_ENV_PREFIX, "CAS_RELEASE_"))}
         self.env.update(
             CLAUDE_CONFIG_DIR=str(self.root),
             CAS_CREDENTIALS_FILE=str(self.root / "credentials.env"),
@@ -196,9 +204,9 @@ class TokenPreflight(unittest.TestCase):
             CAS_RELEASE_TRAIN_ASSEMBLE_CMD='printf "assemble reached\\n"; exit 1',
             CAS_RELEASE_ENV_FILE=str(self.worktree / "release.env"),
             CAS_RELEASE_GATE_HOME_DIR=str(self.root / "scratch"),
-            MECHA_SLACK_TOKEN_A="sentinel-secret-alpha",
-            MECHA_SLACK_TOKEN_B="sentinel-secret-beta",
         )
+        self.env.update({TOKEN_A: "sentinel-secret-alpha",
+                         TOKEN_B: "sentinel-secret-beta"})
         self.git("init", "-q", "-b", "release/9.99.8")
         self.git("config", "user.name", "Token Preflight Test")
         self.git("config", "user.email", "test@example.invalid")
@@ -245,8 +253,8 @@ class TokenPreflight(unittest.TestCase):
         result, output = self.cut()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("BLOCKER announce-token:", output)
-        self.assertIn("MECHA_SLACK_TOKEN_A", output)
-        self.assertIn("MECHA_SLACK_TOKEN_B", output)
+        self.assertIn(TOKEN_A, output)
+        self.assertIn(TOKEN_B, output)
         self.assertIn("set VIOLET_SLACK_TOKEN_ENV", output)
         self.assertNotIn("assemble reached", output)
         self.assertFalse((self.run / "stage.preflight.done").exists())
@@ -258,22 +266,22 @@ class TokenPreflight(unittest.TestCase):
         self.assertTrue((self.run / "stage.preflight.done").is_file())
 
     def test_explicit_selector_unblocks_cut(self):
-        self.env["VIOLET_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_A"
+        self.env["VIOLET_SLACK_TOKEN_ENV"] = TOKEN_A
         self.assert_preflight_passes()
 
     def test_missing_explicit_token_blocks_cut(self):
-        self.env["VIOLET_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_MISSING"
+        self.env["VIOLET_SLACK_TOKEN_ENV"] = TOKEN_MISSING
         _, output = self.cut()
         self.assertIn("BLOCKER announce-token:", output)
-        self.assertIn("credential variable MECHA_SLACK_TOKEN_MISSING is unset or empty", output)
+        self.assertIn(f"credential variable {TOKEN_MISSING} is unset or empty", output)
         self.assertNotIn("assemble reached", output)
 
     def test_credential_file_ambiguity_blocks_cut(self):
-        del self.env["MECHA_SLACK_TOKEN_A"]
-        del self.env["MECHA_SLACK_TOKEN_B"]
+        del self.env[TOKEN_A]
+        del self.env[TOKEN_B]
         Path(self.env["CAS_CREDENTIALS_FILE"]).write_text(
-            'export MECHA_SLACK_TOKEN_A="sentinel-secret-alpha"\n'
-            'MECHA_SLACK_TOKEN_B=sentinel-secret-beta\n')
+            f'export {TOKEN_A}="sentinel-secret-alpha"\n'
+            f'{TOKEN_B}=sentinel-secret-beta\n')
         _, output = self.cut()
         self.assertIn("BLOCKER announce-token:", output)
         self.assertIn("multiple Violet token variables found", output)
@@ -281,26 +289,26 @@ class TokenPreflight(unittest.TestCase):
 
     def test_default_proxy_selects_canonical_alias_from_credentials(self):
         proxy = self.worktree / ".cas/proxy.toml"
-        proxy.write_text('auth = "env:MECHA_SLACK_TOKEN_A"\n')
+        proxy.write_text(f'auth = "env:{TOKEN_A}"\n')
         self.git("add", ".")
         self.git("-c", "commit.gpgsign=false", "commit", "-qm", "proxy")
-        del self.env["MECHA_SLACK_TOKEN_A"]
+        del self.env[TOKEN_A]
         Path(self.env["CAS_CREDENTIALS_FILE"]).write_text(
             'VIOLET_SLACK_TOKEN_A=sentinel-secret-alpha\n')
         self.assert_preflight_passes()
 
     def test_unavailable_proxy_token_falls_back_to_machine_registration(self):
         proxy = self.root / "other-host-proxy.toml"
-        proxy.write_text('auth = "env:MECHA_SLACK_TOKEN_OTHER_HOST"\n')
+        proxy.write_text(f'auth = "env:{TOKEN_OTHER_HOST}"\n')
         self.env["CAS_RELEASE_TRAIN_PROXY_TOML"] = str(proxy)
         (self.root / ".claude.json").write_text(json.dumps({
             "mcpServers": {"violet": {"headers": {
-                "Authorization": "Bearer ${MECHA_SLACK_TOKEN_A}"}}}}))
+                "Authorization": f"Bearer ${{{TOKEN_A}}}"}}}}))
         self.assert_preflight_passes()
 
     def test_absent_tokens_block_cut(self):
-        del self.env["MECHA_SLACK_TOKEN_A"]
-        del self.env["MECHA_SLACK_TOKEN_B"]
+        del self.env[TOKEN_A]
+        del self.env[TOKEN_B]
         _, output = self.cut()
         self.assertIn("BLOCKER announce-token:", output)
         self.assertIn("no Violet token found", output)
@@ -317,7 +325,7 @@ class TokenPreflight(unittest.TestCase):
 
     def test_check_token_never_creates_a_network_client(self):
         adapter = announce.load_report_adapter()
-        self.env["VIOLET_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_A"
+        self.env["VIOLET_SLACK_TOKEN_ENV"] = TOKEN_A
         with patch.dict(os.environ, self.env, clear=True), \
                 patch.object(announce, "load_report_adapter", return_value=adapter), \
                 patch.object(adapter, "McpClient") as client:

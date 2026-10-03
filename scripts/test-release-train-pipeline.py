@@ -11,6 +11,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent
 TRAIN = ROOT / "release-train.sh"
+COMPATIBILITY = json.loads((ROOT.parent / "crates/cas-types/src/violet-compatibility.json").read_text())
+LEGACY_ENV_PREFIX = COMPATIBILITY["legacy_token_prefix"].split("_", 1)[0] + "_"
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -93,7 +95,7 @@ class Pipeline(unittest.TestCase):
         gate.write_text("#!/bin/sh\nprintf 'PASS fixture\\n'\n")
         gate.chmod(0o755)
         self.env = {name: value for name, value in os.environ.items()
-                    if not name.startswith(("CAS_", "VIOLET_", "MECHA_"))}
+                    if not name.startswith(("CAS_", "VIOLET_", LEGACY_ENV_PREFIX))}
         self.env.update(
             CAS_RELEASE_ARTIFACTS_ROOT=str(self.root / "artifacts"),
             CAS_RELEASE_TRAIN_CAS="/usr/bin/false",

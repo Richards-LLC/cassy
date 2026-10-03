@@ -23499,7 +23499,8 @@ mod merge_state_gate_tests {
         std::fs::write(dir.path().join("a.rs"), "// a\n").unwrap();
         git(dir.path(), &["add", "a.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: a"]);
-        let expected_tip = rev_parse_local(dir.path(), "factory/worker");
+        let expected_tip = resolve_branch_sha(dir.path(), "factory/worker")
+            .expect("factory branch tip should resolve");
 
         let task = worker_task("worker");
         let req = base_req(&task.id);

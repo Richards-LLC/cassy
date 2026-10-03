@@ -315,6 +315,9 @@ pub enum DeliveryHold {
     BlockerNote,
     /// An independent QA pass is pending or claimed for the delivery.
     QaPassOpen,
+    /// A decision note recorded after the delivery last parked holds its
+    /// merge (cas-58d3), e.g. "the merge is held until after the cut".
+    SupervisorDecision,
 }
 
 /// Marker the close gate writes each time a delivery parks for merge.
@@ -338,6 +341,129 @@ pub(crate) fn blocker_note_after_park(notes: &str) -> bool {
         }
     }
     held
+}
+
+/// Prefix the notes tool writes for a decision note.
+const DECISION_NOTE_MARKER: &str = "✅ DECISION";
+
+/// Whether a note line opens a new entry: the notes tool and the close gate
+/// both start each entry with a `[YYYY-MM-DD HH:MM]` timestamp. A note body
+/// may span lines; continuation lines belong to the entry above them.
+fn opens_note_entry(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 18
+        && bytes[0] == b'['
+        && bytes[17] == b']'
+        && bytes[1..5].iter().all(u8::is_ascii_digit)
+        && bytes[5] == b'-'
+}
+
+fn words_lowercase(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether a decision entry holds the delivery's merge: it says the merge is
+/// held, on hold, or holding. "Changes requested" decisions reopen the task
+/// and never reach this check, since only parked deliveries are classified.
+fn decision_holds_merge(entry: &str) -> bool {
+    words_lowercase(entry)
+        .iter()
+        .any(|word| matches!(word.as_str(), "hold" | "holds" | "held" | "holding"))
+}
+
+/// Whether a decision entry lifts an earlier hold ("hold lifted", "unhold",
+/// "no longer held"). Checked before [`decision_holds_merge`], so a lift
+/// that mentions the hold it lifts still counts as a lift.
+fn decision_lifts_hold(entry: &str) -> bool {
+    let words = words_lowercase(entry);
+    words.iter().any(|word| {
+        matches!(word.as_str(), "lift" | "lifts" | "lifted" | "lifting" | "unhold" | "unheld")
+    }) || words
+        .windows(3)
+        .any(|w| w[0] == "no" && w[1] == "longer" && matches!(w[2].as_str(), "held" | "hold"))
+}
+
+/// cas-58d3: whether the task's notes carry a decision, recorded after the
+/// latest park, that holds the merge. A newer park line means the delivery
+/// came back for merge, and a later decision that lifts the hold clears it.
+/// As with [`blocker_note_after_park`], a hold with no park line at all is
+/// the latest word on the delivery.
+pub(crate) fn hold_decision_after_park(notes: &str) -> bool {
+    let mut held = false;
+    let mut entry = String::new();
+    let settle = |entry: &str, held: &mut bool| {
+        if entry.contains(PARKED_FOR_MERGE_MARKER) {
+            *held = false;
+        } else if entry.contains(DECISION_NOTE_MARKER) {
+            if decision_lifts_hold(entry) {
+                *held = false;
+            } else if decision_holds_merge(entry) {
+                *held = true;
+            }
+        }
+    };
+    for line in notes.lines() {
+        if opens_note_entry(line) && !entry.is_empty() {
+            settle(&entry, &mut held);
+            entry.clear();
+        }
+        entry.push_str(line);
+        entry.push('\n');
+    }
+    if !entry.is_empty() {
+        settle(&entry, &mut held);
+    }
+    held
+}
+
+/// cas-58d3: the branch and commit a merge-now alert names for a parked task.
+///
+/// The worker's own `factory/<worker>` branch is only a fallback: a worker
+/// that parked on a per-task branch has later tasks' commits on its base
+/// branch. Candidates, in order: the per-task branch, the branch recorded at
+/// park, then `factory/<worker>`. With a delivery anchor, the first
+/// candidate whose tip contains the anchor wins and the anchor is the named
+/// commit; without one, the first candidate that resolves wins and its tip
+/// is named.
+pub(crate) fn task_delivery_ref(
+    task_id: &str,
+    worker: &str,
+    parked_branch: Option<&str>,
+    anchor: Option<&str>,
+    mut resolve_tip: impl FnMut(&str) -> Option<String>,
+    mut contains: impl FnMut(&str, &str) -> bool,
+) -> (String, Option<String>) {
+    let worker_branch = format!("factory/{worker}");
+    let mut candidates = vec![crate::factory_isolation::worker_task_branch(worker, task_id)];
+    candidates.extend(
+        parked_branch
+            .map(str::trim)
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string),
+    );
+    candidates.push(worker_branch.clone());
+    candidates.dedup();
+    let anchor = anchor.map(str::trim).filter(|anchor| !anchor.is_empty());
+    let resolved: Vec<(String, String)> = candidates
+        .into_iter()
+        .filter_map(|branch| resolve_tip(&branch).map(|tip| (branch, tip)))
+        .collect();
+    if let Some(anchor) = anchor {
+        if let Some((branch, _)) = resolved.iter().find(|(_, tip)| contains(anchor, tip)) {
+            return (branch.clone(), Some(anchor.to_string()));
+        }
+        return match resolved.into_iter().next() {
+            Some((branch, _)) => (branch, Some(anchor.to_string())),
+            None => (worker_branch, Some(anchor.to_string())),
+        };
+    }
+    match resolved.into_iter().next() {
+        Some((branch, tip)) => (branch, Some(tip)),
+        None => (worker_branch, None),
+    }
 }
 
 /// Compute the highest-priority concrete next step for the focused epic.
@@ -386,6 +512,7 @@ pub(crate) fn supervisor_actionable_state_with_merge_classifier(
         Option<&str>,
     ) -> Option<MergedCloseBlockedTask>,
 ) -> Option<SupervisorActionableState> {
+    let mut resolve_branch_tip = resolve_branch_tip;
     supervisor_actionable_state_with_classifiers(
         data,
         focused_epic_id,
@@ -393,7 +520,11 @@ pub(crate) fn supervisor_actionable_state_with_merge_classifier(
         held_workers,
         now,
         idle_after_secs,
-        resolve_branch_tip,
+        |_, worker| {
+            let branch = format!("factory/{worker}");
+            let tip = resolve_branch_tip(&branch);
+            (branch, tip)
+        },
         classify_merged_close_blocked,
         |_, _| None,
     )
@@ -403,6 +534,8 @@ pub(crate) fn supervisor_actionable_state_with_merge_classifier(
 /// classifier: production consults the task notes and the QA pass store to
 /// say whether a parked delivery is deliberately waiting on a decision
 /// (GH #896). A held worker is always a hold, with or without the classifier.
+/// `resolve_delivery` names each parked task's delivery branch and commit
+/// (production: [`task_delivery_ref`] over the task store, cas-58d3).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn supervisor_actionable_state_with_classifiers(
     data: &DirectorData,
@@ -411,7 +544,7 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
     held_workers: &HashSet<String>,
     now: DateTime<Utc>,
     idle_after_secs: u64,
-    mut resolve_branch_tip: impl FnMut(&str) -> Option<String>,
+    mut resolve_delivery: impl FnMut(&TaskSummary, &str) -> (String, Option<String>),
     mut classify_merged_close_blocked: impl FnMut(
         &TaskSummary,
         &str,
@@ -450,8 +583,7 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
         if held_workers.contains(worker) || classify_delivery_hold(task, worker).is_some() {
             continue;
         }
-        let branch = format!("factory/{worker}");
-        let tip = resolve_branch_tip(&branch);
+        let (branch, tip) = resolve_delivery(task, worker);
         if let Some(target) = merge_target_for_task(data, task)
             && let Some(merged) = classify_merged_close_blocked(
                 task,

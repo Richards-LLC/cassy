@@ -15,8 +15,9 @@ use super::director::{
     DeliveryHold, DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     MergeAlertFreshness, MergedCloseBlockedTask, PanelAreas, Prompt, SidecarFocus, ViewMode,
     blocker_note_after_park, check_merge_alert_freshness, generate_prompt_at,
-    prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
-    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
+    hold_decision_after_park, prompt_is_still_deliverable,
+    revalidate_event_for_delivery_with_context, revalidate_event_for_delivery_with_focus,
+    supervisor_actionable_state_with_classifiers, task_delivery_ref,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -1476,6 +1477,34 @@ impl FactoryApp {
         })
     }
 
+    /// cas-58d3: the delivery branch and commit a merge-now alert names for a
+    /// parked task, from its per-task branch, recorded parked branch and
+    /// delivery anchor rather than the worker's base branch.
+    fn resolve_task_delivery(
+        &self,
+        task: &crate::ui::factory::director::TaskSummary,
+        worker: &str,
+        repo_root: &Path,
+    ) -> (String, Option<String>) {
+        let parked = self
+            .director_stores
+            .as_ref()
+            .and_then(|stores| stores.task_store.get(&task.id).ok());
+        let deliverables = parked.as_ref().map(|parked| &parked.deliverables);
+        task_delivery_ref(
+            &task.id,
+            worker,
+            deliverables.and_then(|d| d.parked_branch.as_deref()),
+            deliverables.and_then(|d| d.factory_branch_anchor.as_deref()),
+            |branch| {
+                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                    repo_root, branch,
+                )
+            },
+            |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
+        )
+    }
+
     /// GH #896 (cas-e4f8): whether a parked delivery is deliberately waiting
     /// on a decision, so the stall relay leaves it out of "merge now". Reads
     /// only: the task's notes (a blocker raised after it last parked) and
@@ -1488,9 +1517,14 @@ impl FactoryApp {
     ) -> Option<DeliveryHold> {
         if let Some(stores) = self.director_stores.as_ref()
             && let Ok(parked) = stores.task_store.get(&task.id)
-            && blocker_note_after_park(&parked.notes)
         {
-            return Some(DeliveryHold::BlockerNote);
+            if blocker_note_after_park(&parked.notes) {
+                return Some(DeliveryHold::BlockerNote);
+            }
+            // cas-58d3: a supervisor decision holding the merge.
+            if hold_decision_after_park(&parked.notes) {
+                return Some(DeliveryHold::SupervisorDecision);
+            }
         }
         let now = Utc::now();
         cas_store::list_qa_passes(&self.cas_dir, &task.id)
@@ -1619,12 +1653,7 @@ impl FactoryApp {
             &held_workers,
             now,
             self.supervisor_stall_after_secs,
-            |branch| {
-                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
-                    &repo_root,
-                    branch,
-                )
-            },
+            |task, worker| self.resolve_task_delivery(task, worker, &repo_root),
             |task, factory_branch, target_branch, factory_tip| {
                 self.classify_merged_close_blocked_task(
                     task,
@@ -1711,12 +1740,7 @@ impl FactoryApp {
             &held_workers,
             Utc::now(),
             self.supervisor_stall_after_secs,
-            |branch| {
-                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
-                    &repo_root,
-                    branch,
-                )
-            },
+            |task, worker| self.resolve_task_delivery(task, worker, &repo_root),
             |task, factory_branch, target_branch, factory_tip| {
                 self.classify_merged_close_blocked_task(
                     task,

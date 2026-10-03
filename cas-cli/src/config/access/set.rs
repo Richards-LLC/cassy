@@ -70,6 +70,14 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.prompt_retention_days" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.prompt_retention_days = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.prompt_retention_days: {value}"
+                    ))
+                })?;
+            }
             "factory.message_max_chars" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.message_max_chars = value.parse().map_err(|_| {

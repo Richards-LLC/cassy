@@ -6677,9 +6677,11 @@ impl CasService {
             }
         }
 
-        // Clear prompt queue only when explicitly forced.
+        // Prompt-queue remediation only when explicitly forced.
         let mut cleared_prompts = 0usize;
         let mut expired_prompts = 0usize;
+        let mut prompt_episode_rows_retained = 0usize;
+        let mut prompt_retention_note = String::new();
         if req.force.unwrap_or(false) {
             let prompt_queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
                 Self::error(
@@ -6690,13 +6692,34 @@ impl CasService {
             if let Some(older_than_secs) = prompt_expiry_age {
                 // Targeted poison-queue remediation: preserve forensic rows
                 // and terminally abandon only pending entries older than the
-                // explicit cutoff. Omitting the cutoff retains the legacy
-                // force-clear behavior.
+                // explicit cutoff.
                 expired_prompts = prompt_queue
                     .abandon_pending_older_than(older_than_secs)
                     .unwrap_or(0);
             } else {
-                cleared_prompts = prompt_queue.clear().unwrap_or(0);
+                // cas-9d8a: retention, not an all-history clear. Recent
+                // forensics, pending rows and relay episode keys survive.
+                let retention_days = crate::config::Config::load(&self.inner.cas_root)
+                    .map(|config| config.factory().prompt_retention_days)
+                    .unwrap_or_else(|_| crate::config::default_prompt_retention_days());
+                if retention_days == 0 {
+                    prompt_retention_note =
+                        " (factory.prompt_retention_days=0: retention disabled)".to_string();
+                } else {
+                    match prompt_queue
+                        .prune_terminal_older_than(i64::from(retention_days) * 24 * 60 * 60)
+                    {
+                        Ok(sweep) => {
+                            cleared_prompts = sweep.pruned;
+                            prompt_episode_rows_retained = sweep.retained_episode_rows;
+                            prompt_retention_note =
+                                format!(" (terminal rows older than {retention_days} days)");
+                        }
+                        Err(error) => {
+                            prompt_retention_note = format!(" (retention sweep failed: {error})");
+                        }
+                    }
+                }
             }
         }
 
@@ -6773,7 +6796,7 @@ impl CasService {
         };
 
         let mut output = format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}\nOrphan processes killed: {}\nStale server registrations cleared: {}\nOrphan candidates spared or refused: {}",
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries pruned: {cleared_prompts}{prompt_retention_note}\nPrompt queue episode rows retained: {prompt_episode_rows_retained}\nStale skill markers removed: {stale_skill_markers_removed}\nOrphan processes killed: {}\nStale server registrations cleared: {}\nOrphan candidates spared or refused: {}",
             unverifiable_process_groups.len(),
             orphan_process_summary.killed.len(),
             orphan_process_summary.records_cleared.len(),

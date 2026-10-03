@@ -50,6 +50,16 @@ const WORKER_PEER_MESSAGE_BURST_WINDOW_SECS: i64 = 60;
 /// delivery that motivated this bound.
 pub const PROMPT_QUEUE_STALE_TTL_SECS: i64 = 24 * 60 * 60;
 
+/// What one terminal-row retention sweep did (cas-9d8a).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptRetentionSweep {
+    /// Terminal rows older than the window that were deleted.
+    pub pruned: usize,
+    /// Terminal rows older than the window kept because they carry a relay
+    /// episode key (`dedupe_key`): they are the idempotency ledger.
+    pub retained_episode_rows: usize,
+}
+
 /// Structural idempotency marker for the sender-side delivery-stalled notice.
 ///
 /// This is intentionally not inferred from `source`: prompt sources are free
@@ -2296,6 +2306,17 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: &str,
         older_than_secs: i64,
     ) -> Result<usize>;
+
+    /// Retention sweep (cas-9d8a): delete terminal rows (`processed_at` set)
+    /// processed more than `older_than_secs` ago, with their per-recipient
+    /// seen/transport receipts, in one IMMEDIATE transaction.
+    ///
+    /// Never touches a pending row. Rows carrying a `dedupe_key` are kept:
+    /// that unique key is what makes a relay episode enqueue idempotent, so
+    /// deleting it would let a re-detected episode wake the supervisor again.
+    /// `AUTOINCREMENT` ids are never reused, so id-ordered cursors and keys
+    /// built from ids stay valid after a sweep.
+    fn prune_terminal_older_than(&self, older_than_secs: i64) -> Result<PromptRetentionSweep>;
 
     /// Clear all prompts (for cleanup)
     fn clear(&self) -> Result<usize>;
@@ -5640,6 +5661,48 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
             )?;
             Ok(rows)
+        })
+    }
+
+    fn prune_terminal_older_than(&self, older_than_secs: i64) -> Result<PromptRetentionSweep> {
+        if older_than_secs <= 0 {
+            return Err(StoreError::Other(
+                "prune_terminal_older_than requires a positive window".to_string(),
+            ));
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let retained_episode_rows: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM prompt_queue
+                 WHERE processed_at IS NOT NULL AND processed_at < ?
+                   AND dedupe_key IS NOT NULL",
+                params![cutoff],
+                |row| row.get(0),
+            )?;
+            let pruned = tx.execute(
+                "DELETE FROM prompt_queue
+                 WHERE processed_at IS NOT NULL AND processed_at < ?
+                   AND dedupe_key IS NULL",
+                params![cutoff],
+            )?;
+            for table in ["prompt_queue_recipient_seen", "prompt_queue_recipient_transport"] {
+                tx.execute(
+                    &format!(
+                        "DELETE FROM {table}
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM prompt_queue WHERE prompt_queue.id = {table}.prompt_id
+                         )"
+                    ),
+                    [],
+                )?;
+            }
+            tx.commit()?;
+            Ok(PromptRetentionSweep {
+                pruned,
+                retained_episode_rows: retained_episode_rows as usize,
+            })
         })
     }
 
@@ -11215,6 +11278,80 @@ mod tests {
             peer.iter().any(|prompt| prompt.id == broadcast),
             "worker A polling and acknowledging a broadcast must not hide it from worker B"
         );
+    }
+
+    /// cas-9d8a: the retention sweep contract. Terminal rows inside the
+    /// window survive and older ones are pruned with their receipts; pending
+    /// rows are never touched; relay episode keys keep deduplicating; ids and
+    /// counts stay consistent.
+    #[test]
+    fn retention_sweep_prunes_only_aged_terminal_rows_and_keeps_episodes_cas_9d8a() {
+        let (_temp, store) = create_test_store();
+        let window = 7 * 24 * 60 * 60;
+        let aged = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let recent = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+
+        let old_terminal = store.enqueue("supervisor", "worker-a", "old").unwrap();
+        let recent_terminal = store.enqueue("supervisor", "worker-a", "recent").unwrap();
+        let old_pending = store.enqueue("supervisor", "worker-b", "still pending").unwrap();
+        let episode_key = "lifecycle-relay:cas-x:episode-1";
+        let episode = match store
+            .enqueue_idempotent("daemon", "supervisor", "relay", Some("s"), None, None, episode_key, None)
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) => id,
+            other => panic!("first relay must be created: {other:?}"),
+        };
+        {
+            let conn = store.conn.lock().unwrap();
+            for (id, at) in [(old_terminal, &aged), (recent_terminal, &recent), (episode, &aged)] {
+                conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![at, id])
+                    .unwrap();
+            }
+            conn.execute("UPDATE prompt_queue SET created_at = ? WHERE id = ?", params![aged, old_pending])
+                .unwrap();
+            for table in ["prompt_queue_recipient_seen", "prompt_queue_recipient_transport"] {
+                let column = if table.ends_with("seen") { "seen_at" } else { "delivered_at" };
+                for id in [old_terminal, recent_terminal] {
+                    conn.execute(
+                        &format!("INSERT INTO {table} (prompt_id, recipient, {column}) VALUES (?, 'worker-a', ?)"),
+                        params![id, recent],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        let pending_before = store.pending_count().unwrap();
+        let max_before = old_pending.max(episode);
+
+        assert!(store.prune_terminal_older_than(0).is_err(), "a zero window is refused");
+        let sweep = store.prune_terminal_older_than(window).unwrap();
+        assert_eq!(sweep, PromptRetentionSweep { pruned: 1, retained_episode_rows: 1 });
+
+        let conn_ids = |table: &str, column: &str| -> Vec<i64> {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn.prepare(&format!("SELECT {column} FROM {table} ORDER BY {column}")).unwrap();
+            stmt.query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .map(|id| id.unwrap())
+                .collect()
+        };
+        assert_eq!(conn_ids("prompt_queue", "id"), vec![recent_terminal, old_pending, episode]);
+        for table in ["prompt_queue_recipient_seen", "prompt_queue_recipient_transport"] {
+            assert_eq!(conn_ids(table, "prompt_id"), vec![recent_terminal], "{table}");
+        }
+        assert_eq!(store.pending_count().unwrap(), pending_before, "pending rows are untouched");
+        assert_eq!(store.message_status(old_pending).unwrap(), Some(MessageStatus::Pending));
+
+        // The aged episode row still deduplicates a replay of the same episode.
+        let replay = store
+            .enqueue_idempotent("daemon", "supervisor", "relay", Some("s"), None, None, episode_key, None)
+            .unwrap();
+        assert_eq!(replay, EnqueueIdempotentResult::AlreadyExists(episode));
+        // Ids are never reused after a sweep.
+        assert!(store.enqueue("supervisor", "worker-a", "next").unwrap() > max_before);
+        // A second sweep has nothing left to prune.
+        assert_eq!(store.prune_terminal_older_than(window).unwrap().pruned, 0);
     }
 
     #[test]

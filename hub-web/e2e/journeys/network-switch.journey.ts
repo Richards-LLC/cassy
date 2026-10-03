@@ -576,6 +576,20 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M o
     await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
     await expect(input).toHaveAccessibleDescription(hintText);
   });
+  await journey.stage("The escape key is on screen beside Leave at 1280 and on a phone", async () => {
+    // cas-7d25: a compact Leave control still shows its key, so a sighted
+    // keyboard user can learn it without hovering.
+    for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await input.focus();
+      await expect(leave).toBeVisible();
+      await expect(leave.locator("kbd"), `Ctrl+Alt+M on screen at ${viewport.width}`).toBeVisible();
+      await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
+      expect(await leave.locator("kbd").evaluate((key) => key.getBoundingClientRect().width), `the key has room at ${viewport.width}`).toBeGreaterThan(20);
+      await expect(leave).toHaveAccessibleName("Leave terminal");
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+  });
   await journey.stage("Tab stays in the terminal; Ctrl+Alt+M leaves it for the next control", async () => {
     await input.focus();
     await page.keyboard.press("Tab");

@@ -114,7 +114,7 @@ export function shownTimes(events: readonly ConversationEvent[], now: number): A
     // a time it observed; only a later turn pulling it back marks it, beside
     // the mark the visit gave it. Any other turn is marked when its machine
     // stamp reads a different minute from the time shown.
-    const measured = event.seenLive ? own : stamp;
+    const measured = event.seenLive ? own : event.at ?? stamp;
     shown[index] = { at: floor, clockAhead: event.clockAhead === true || Math.floor(measured / 60_000) !== Math.floor(floor / 60_000) };
   }
   return shown;

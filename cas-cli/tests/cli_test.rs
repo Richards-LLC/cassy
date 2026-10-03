@@ -1589,7 +1589,7 @@ fn cloud_project_set_across_differing_stores_refuses_and_writes_nothing() {
     assert!(
         stderr.contains(&format!(
             "this directory's store:  {}",
-            violet_root.display()
+            violet_root.canonicalize().unwrap().display()
         )),
         "stderr: {stderr}"
     );

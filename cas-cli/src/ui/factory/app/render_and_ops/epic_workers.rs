@@ -5835,8 +5835,11 @@ mod tests {
     fn retired_worker(cas_dir: &std::path::Path) -> cas_types::Agent {
         let mut agent = cas_types::Agent::new("raven-old-session".into(), "wise-raven".into());
         agent.role = cas_types::AgentRole::Worker;
-        // A pid that cannot be alive, so the worker reads as retired.
+        // A pid that cannot be alive, so the worker reads as retired. Stamped
+        // like every pid assignment (cas-389c); a dead pid has no starttime,
+        // so the stamp records nothing and the row stays unfingerprinted.
         agent.pid = Some(u32::MAX - 1);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, u32::MAX - 1);
         crate::store::open_agent_store(cas_dir).unwrap().register(&agent).unwrap();
         agent
     }

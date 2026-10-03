@@ -1061,6 +1061,27 @@ fn effective_command(pty: &crate::pty::PtyConfig) -> &str {
 }
 
 #[test]
+fn effective_command_parses_nice_layouts_cas_046c() {
+    for (command, args, expected) in [
+        ("codex", vec!["--model", "large", "--effort", "high"], "codex"),
+        ("nice", vec!["-n", "10", "codex", "--model", "large", "--effort", "high"], "codex"),
+        ("nice", vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex"),
+        ("nice", vec!["-n10", "claude", "--model", "codex"], "claude"),
+        ("nice", vec!["--", "codex", "--model", "large"], "codex"),
+        ("nice", vec!["claude", "--model", "codex"], "claude"),
+        ("nice", vec!["-n"], "nice"),
+        ("nice", vec!["-n", "not-a-number", "codex"], "nice"),
+        ("nice", vec!["--unknown", "codex"], "nice"),
+    ] {
+        let config = crate::pty::PtyConfig {
+            command: command.into(), args: args.into_iter().map(str::to_string).collect(),
+            ..Default::default()
+        };
+        assert_eq!(effective_command(&config), expected, "command={command}, args={:?}", config.args);
+    }
+}
+
+#[test]
 fn factory_pane_configs_uses_per_worker_specs() {
     // worker-1 → Codex, worker-2 → Claude, but MuxConfig.worker_cli is Claude.
     // resolved_worker_specs must override the singular default per worker.

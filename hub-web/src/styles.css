@@ -1812,6 +1812,44 @@ main {
 
 .status-identifier { color: var(--text-hi); }
 
+/* cas-a474 (fleet-operations brief S5): each row's one trailing control, its
+   menu, the inline confirmation and the ask-to-merge preview. Destructive
+   items sit last, after a rule, in the danger ink; a control this pairing
+   cannot use stays focusable and says why beneath it. */
+.status-agent, .status-task { position: relative; }
+.fleet-ops { display: grid; gap: var(--space-1); justify-items: start; }
+/* Only the ⋯ trigger sits in the row's corner; its menu, confirmation and
+   notes flow inside the row, so they push the next row down instead of
+   lying over it. */
+.status-agent > .fleet-ops { justify-items: stretch; }
+.status-agent > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
+.status-agent .status-line { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+.fleet-ops button:not(.primary), .fleet-ops-header button:not(.primary) { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
+.fleet-ops .fleet-ops-trigger { min-width: var(--rail-item-min); padding: 0; font-size: var(--fs-md); }
+.fleet-ops button[aria-disabled="true"], .fleet-ops-header button[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
+.fleet-ops button.danger { color: var(--state-crit); }
+.fleet-ops .primary, .fleet-ops-header .primary { width: auto; min-height: var(--rail-item-min); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); cursor: pointer; }
+.fleet-ops-menu { display: grid; gap: var(--space-1); min-width: 12rem; padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); z-index: 2; }
+.fleet-ops-menu [role="menuitem"] { justify-self: stretch; text-align: left; border-color: transparent; }
+.fleet-ops-separator { height: var(--line-width); margin: var(--space-1) 0; background: var(--line-subtle); }
+.fleet-ops-reason { display: block; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.fleet-ops-confirm, .fleet-ops-preview { display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+.fleet-ops-question, .fleet-ops-preview-lead { margin: 0; color: var(--text-hi); }
+.fleet-ops-preview-text { margin: 0; padding: var(--space-2); border-left: 3px solid var(--line-strong); color: var(--text-hi); white-space: pre-wrap; overflow-wrap: anywhere; }
+.fleet-ops-confirm-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.fleet-ops-progress, .fleet-ops-note, .fleet-ops-asked { margin: 0; color: var(--text-mid); }
+.fleet-ops-note--error, .fleet-ops-note--stale { color: var(--state-warn); }
+.fleet-ops-header { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-2); }
+.fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
+.fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
+.fleet-ops-undo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); }
+.fleet-ops-undo button { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: 999px; background: var(--bg-panel); color: var(--text-hi); cursor: pointer; }
+@media (forced-colors: active) {
+  .fleet-ops-menu, .fleet-ops-confirm, .fleet-ops-preview { border-color: Highlight; }
+  .fleet-ops button:focus-visible, .fleet-ops-header button:focus-visible { outline: 2px solid Highlight; }
+}
+
 /* Workers & Tasks: identifiers and state stay mono on one line, the sentence
    about what the agent is doing reads as prose beneath it. */
 .status-section-label {
@@ -3971,6 +4009,8 @@ button.chip:disabled { cursor: default; }
 .fleet-permission[data-allowed="false"] .fleet-permission-state { color: var(--state-warn); }
 .paired-machine .fleet-permission-control[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
 .fleet-permission-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
+/* cas-d382 QA F01: Copy command is one line, beside or under the command, never wrapped. */
+.fleet-permission-command .fleet-permission-copy { flex: none; white-space: nowrap; }
 .commander-mark .cloud-brand > span { display: none; }
 .commander-mark .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
 #pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }

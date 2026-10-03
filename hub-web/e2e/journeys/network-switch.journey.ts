@@ -1048,8 +1048,8 @@ test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journe
     // No automatic reconnect is claimed on any visible surface.
     await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
     await expect(banner).toMatchAriaSnapshot("- text: Lost connection to Atlas · Linux. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
-    await page.locator("#session-back").click();
-    await page.locator("#paired-machines-toggle").click();
+    await page.keyboard.press("Control+k");
+    await page.locator("#palette-paired-machines").click();
     await expect(page.locator("#paired-machines-list .paired-machine-state")).toHaveText("Unreachable");
   });
 });

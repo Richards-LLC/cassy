@@ -141,5 +141,19 @@ and never captures transcript text into attribution or memory stores.
 `cas doctor` reports recent observed prompt-hook misses from these receipts;
 missing attribution rows alone are not evidence because supervisors omit them
 intentionally. Recovery needs a readable Claude transcript; missing or foreign
-transcripts do not authorize context delivery. Explicit PostToolUse matcher
+transcripts do not authorize context delivery. Custom PostToolUse matcher
 filters still apply, while the generated default covers all tools.
+
+Project matcher defaults and their compatibility projection live in
+`config/hooks.rs`. The hook writer used by `cas init`, `cas hook configure`
+and `cas update --sync` recognizes saved legacy default sets and emits the
+current defaults in canonical order, without rewriting `.cas/config.toml`.
+The old PostToolUse set (`Write`, `Edit`, `Bash`) becomes `*` so the first
+Read or MCP result can recover context (cas-b8f6). The old PreToolUse defaults
+gain Slack policy, `AskUserQuestion` and `Agent`: their factory guards in
+`handlers_events/pre_tool.rs` must still receive calls (cas-afe9 and the
+supervisor worktree-spawn guard). Sets that differ from those historical
+defaults retain their custom filters. Disabled hooks retain their behavior;
+Slack policy remains independent of ordinary PreToolUse enablement. Factory
+role settings and Codex's Bash-only tool-hook projection keep their own
+harness-specific coverage.

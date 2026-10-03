@@ -19,6 +19,7 @@ export const FIXTURE_NAMES = [
   "conversations-session-end-error",
   "conversation-needs-pairing",
   "fleet-populated",
+  "fleet-twins",
   "fleet-empty",
   "session-canvas",
   "session-workers",

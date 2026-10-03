@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+      }
+      /* GH #1081 controls: real defects the exemptions must not hide. */
+      .box { height: 44px; overflow: hidden; }
+      .alert { position: absolute; width: 120px; height: 20px; overflow: hidden; clip: rect(0, 120px, 20px, 0); white-space: nowrap; }
+      .lost { position: absolute; left: -400px; top: 120px; width: 200px; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Defects</h1>
+      <div class="box" id="box">
+        <p>First line of a note that does not fit.</p>
+        <p>Second line, cut by the fixed height without an ellipsis.</p>
+      </div>
+      <div class="alert" role="alert">The visible alert loses most of this sentence.</div>
+    </main>
+    <button class="lost" id="lost">Keyboard reaches this button</button>
+  </body>
+</html>

@@ -368,3 +368,27 @@ test('text a vertical scroller reaches is not clipped; a fixed-height hidden box
     JSON.stringify(clipped.findings, null, 2),
   );
 });
+
+test('visually hidden helpers, an intentional ellipsis and closed drawers pass strict; real defects still fail (GH #1081)', async () => {
+  const run = (name) => mkdtemp(join(tmpdir(), `visual-qa-${name}-`)).then((artifactDir) => runVisualQa({
+    urls: [fixture(`${name}.html`)],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  }));
+
+  const hidden = await run('hidden-helpers');
+  assert.equal(hidden.status, 'PASS', JSON.stringify(hidden.findings, null, 2));
+  assert.equal(hidden.findings.length, 0);
+
+  const real = await run('real-defects');
+  assert.equal(real.status, 'FAIL');
+  const has = (type, selector) => real.findings.some((finding) => finding.type === type && finding.elementPath.includes(selector));
+  assert.ok(has('content-overflow', 'div:nth-of-type(1)') || real.findings.some((finding) => finding.type === 'content-overflow' && finding.selector === '#box'), JSON.stringify(real.findings, null, 2));
+  assert.ok(real.findings.some((finding) => finding.type === 'clipped-content' && finding.elementPath.includes('div.alert')), JSON.stringify(real.findings, null, 2));
+  assert.ok(real.findings.some((finding) => finding.type === 'outside-viewport' && finding.selector === '#lost'), JSON.stringify(real.findings, null, 2));
+});

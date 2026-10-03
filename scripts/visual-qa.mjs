@@ -231,11 +231,42 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       return overflow === 'auto' || overflow === 'scroll';
     });
     const ariaHidden = (element) => ancestors(element).some((current) => current.getAttribute('aria-hidden') === 'true');
+    // GH #1081: a visually-hidden helper keeps a positioned box of at most one
+    // pixel and clips what it holds, so screen readers still read it. Its text
+    // can never fit that box by design, whatever class names it carries.
+    const visuallyHiddenBox = (current) => {
+      const style = getComputedStyle(current);
+      if (style.position !== 'absolute' && style.position !== 'fixed') return false;
+      const rect = current.getBoundingClientRect();
+      if (rect.width > 1.5 || rect.height > 1.5) return false;
+      return (style.clip && style.clip !== 'auto') || /inset\(\s*50%/.test(style.clipPath || '') || ['hidden', 'clip'].includes(style.overflowX) || ['hidden', 'clip'].includes(style.overflowY);
+    };
+    // A closed off-canvas drawer is moved fully off the screen and holds
+    // nothing a keyboard can reach; its text is not on the page for anyone.
+    // An off-screen subtree a keyboard CAN reach is still reported.
+    const focusableSelector = 'a[href], button, input, select, textarea, summary, iframe, [tabindex], [contenteditable=""], [contenteditable="true"]';
+    const reachable = (element) => !element.disabled && element.tabIndex >= 0 && !element.closest('[inert]') && visibility(element).hidden === false;
+    const offCanvasCache = new Map();
+    const closedOffCanvas = (element) => {
+      for (const current of ancestors(element)) {
+        if (current === document.documentElement || current === document.body) continue;
+        if (!offCanvasCache.has(current)) {
+          const rect = current.getBoundingClientRect();
+          const off = rect.width > 0 && rect.height > 0 && (rect.right <= boxTolerance || rect.left >= window.innerWidth - boxTolerance || rect.bottom <= boxTolerance);
+          const keyboard = off && !current.closest('[inert]') && [current, ...current.querySelectorAll(focusableSelector)].some((candidate) => candidate.matches(focusableSelector) && reachable(candidate));
+          offCanvasCache.set(current, off && !keyboard);
+        }
+        if (offCanvasCache.get(current)) return true;
+      }
+      return false;
+    };
     const nonVisualReason = (element) => {
       if (!element) return null;
       if (ariaHidden(element)) return 'aria-hidden';
       if (element.closest('svg title, svg desc')) return 'svg-accessibility-text';
-      if (element.closest('.skip, .sr, .sr-only, .visually-hidden, .visuallyHidden, [data-visual-qa-hidden]')) return 'accessibility-helper';
+      if (element.closest('.skip, .sr, .sr-only, .visually-hidden, .visuallyHidden, .nuxt-route-announcer, [data-visual-qa-hidden]')) return 'accessibility-helper';
+      if (ancestors(element).some(visuallyHiddenBox)) return 'visually-hidden';
+      if (closedOffCanvas(element)) return 'closed-off-canvas';
       return null;
     };
     const visibility = (element) => {
@@ -370,7 +401,9 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const overflowY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const contentExceedsBorder = element !== document.documentElement && element !== document.body && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance);
       const clipped = (overflowX && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
-      if (clipped) {
+      // GH #1081: an explicit single-line ellipsis is the design, not lost text.
+      const intentionalEllipsis = overflowX && style.textOverflow === 'ellipsis' && element.scrollHeight <= element.clientHeight + boxTolerance;
+      if (clipped && !intentionalEllipsis) {
         add('content-overflow', item, { reason: 'content-exceeds-clipped-border-box', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         add('clipped-content', item, { reason: 'scroll-size-exceeds-client-size', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         if (style.textOverflow !== 'ellipsis' && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance)) add('truncated-container', item, { reason: 'overflow-without-ellipsis', textOverflow: style.textOverflow, scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
@@ -403,7 +436,8 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         const scrollsY = checkY && (style.overflowY === 'auto' || style.overflowY === 'scroll');
         if (clipsX || clipsY || scrollsY) {
           const ancestorBox = ancestor.getBoundingClientRect();
-          const outsideX = clipsX && (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance);
+          const ellipsisX = clipsX && style.textOverflow === 'ellipsis' && ancestor.scrollHeight <= ancestor.clientHeight + boxTolerance;
+          const outsideX = clipsX && !ellipsisX && (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance);
           const outsideY = clipsY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
           if (outsideX || outsideY) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
           if (scrollsY) {

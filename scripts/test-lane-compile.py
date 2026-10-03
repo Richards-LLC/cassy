@@ -48,9 +48,19 @@ cwd = pathlib.Path.cwd().resolve()
 assert cwd.is_relative_to(root / 'worktrees')
 assert args[-1] in ['--lib', '--tests']
 with open(os.environ['LANE_FIXTURE_LOG'], 'a') as log:
-    log.write(json.dumps({'args': args, 'cwd': str(cwd), 'zig': os.environ.get('ZIG')}) + '\\n')
+    log.write(json.dumps({'args': args, 'cwd': str(cwd), 'zig': os.environ.get('ZIG'),
+                          'continues': os.environ.get('CAS_WORKER_CHECK_CONTINUES_PASS')}) + '\\n')
 if args[-1] == os.environ.get('LANE_FIXTURE_FAIL'):
     sys.exit(7)
+# cas-f616: the load the --lib step raised is above the cap when --tests starts;
+# like worker-check, refuse unless this step continues a fresh PASS here.
+if args[-1] == '--tests' and os.environ.get('LANE_FIXTURE_LOAD_AFTER_LIB'):
+    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    key = hashlib.sha256(os.fsencode(cwd)).hexdigest()
+    passed = (root / 'worker-checks' / key / (head + '.json')).is_file()
+    if not (os.environ.get('CAS_WORKER_CHECK_CONTINUES_PASS') == '1' and passed):
+        sys.stderr.write('Worker check refused: 1-minute load 41.50 exceeds 32 CPUs; retry later\\n')
+        sys.exit(1)
 if args[-1] == '--tests' and os.environ.get('LANE_FIXTURE_MOVE'):
     subprocess.check_call(['git', 'update-ref', 'refs/heads/target', os.environ['LANE_FIXTURE_MOVE']])
 if args[-1] == '--tests' and os.environ.get('LANE_FIXTURE_DIRTY'):
@@ -207,6 +217,18 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
         self.assertFalse(any(Path(call["cwd"]).exists() for call in calls))
         self.assertNotIn("lane-compile-", self.git("worktree", "list", "--porcelain"))
         self.assertEqual(json.loads(path.read_text())["targets"], ["--lib", "--tests"])
+
+    def test_load_raised_by_lib_step_does_not_refuse_its_tests_step_cas_f616(self):
+        self.rust_lane()
+        result = self.run_check("--prove", env=dict(self.env, LANE_FIXTURE_LOAD_AFTER_LIB="1"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual([call["args"][-1] for call in calls], ["--lib", "--tests"])
+        # Only the continuation asks to carry the admission; the first step is gated.
+        self.assertEqual([call["continues"] for call in calls], [None, "1"])
+        proof = json.loads(lane.receipt_path(self.repo, lane.merged_tree(self.repo, "target", "factory/lane")[2]).read_text())
+        self.assertEqual(proof["targets"], ["--lib", "--tests"])
+        self.assertEqual(proof["capped_runner"], "cas factory worker-check")
 
     def test_failed_retry_erases_earlier_pass(self):
         self.rust_lane()

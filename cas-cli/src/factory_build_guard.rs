@@ -26,11 +26,20 @@ impl BuildGuardSnapshot {
     /// A spawn is refused when it would leave more builders than configured,
     /// or when the host's one-minute load is already above CPU capacity.
     pub(crate) fn violations(&self) -> Vec<String> {
+        self.admission_violations(false)
+    }
+
+    /// [`Self::violations`], optionally without the host-load reading
+    /// (cas-f616). A lane proof's second capped step carries its first
+    /// step's admission: the load that step raised must not refuse its own
+    /// continuation. The builder cap is never waived.
+    pub(crate) fn admission_violations(&self, load_admitted: bool) -> Vec<String> {
         if self.disabled {
             return Vec::new();
         }
         let mut violations = Vec::new();
-        if let Some(load) = self.load_1m
+        if !load_admitted
+            && let Some(load) = self.load_1m
             && load > self.cpu_count as f64
         {
             violations.push(format!(

@@ -213,6 +213,48 @@ fn valid_bundle_passes() {
     assert_eq!(receipt.passed_expects, 1);
 }
 
+/// GH #1061: a long-running close service can retain a flat-path citation
+/// after PreToolUse has switched new writes to the project namespace.
+#[test]
+fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let mut fx = Fixture::new();
+    let cas_root = fx.repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let base = fx.task_dir.parent().unwrap().to_path_buf();
+    std::fs::write(cas_root.join("config.toml"), format!(
+        "[factory]\nartifacts_root = {:?}\n[qa]\nuser_facing_paths = [\"web/**\"]\n",
+        base.display().to_string()
+    )).unwrap();
+    let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, TASK);
+    std::fs::remove_dir(&fx.task_dir).unwrap();
+    fx.task_dir = scoped.clone();
+    let bundle = scoped.join("qa/bundle.json");
+    let input = cas_core::hooks::types::HookInput {
+        session_id: "qa-path-contract".into(),
+        cwd: fx.repo.display().to_string(),
+        hook_event_name: "PreToolUse".into(),
+        tool_name: Some("Write".into()),
+        tool_input: Some(serde_json::json!({"file_path": bundle, "content": "bundle"})),
+        ..Default::default()
+    };
+    let out = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
+    let decision = serde_json::to_value(out.hook_specific_output.unwrap()).unwrap();
+    assert_eq!(decision["permissionDecision"], "allow", "{decision}");
+    fx.write_bundle(|_| {});
+    assert!(!legacy.exists(), "no flat directory exists in the reported incident");
+    let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
+    for citation in [bundle.clone(), legacy.join("qa/bundle.json")] {
+        task.notes = format!("qa-bundle: {}", citation.display());
+        let notes = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+            &cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()])
+        ).unwrap_or_else(|error| panic!("citation {}: {error}", citation.display()));
+        assert!(notes.iter().any(|note| note.contains(bundle.to_str().unwrap())
+            && note.contains("1 passing Expect")), "{notes:?}");
+    }
+}
+
 #[test]
 fn missing_citation_names_the_note_command() {
     let fx = Fixture::new();

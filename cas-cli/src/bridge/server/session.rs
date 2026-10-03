@@ -67,6 +67,29 @@ pub(crate) fn allowed_agent_names(
     s
 }
 
+/// One task of a session's status. An awaiting-merge task also carries its
+/// delivery tip, read from the task store (cas-566b).
+pub(crate) fn task_summary_json(
+    t: cas_factory::TaskSummary,
+    task_store: Option<&dyn cas_store::TaskStore>,
+) -> TaskSummaryJson {
+    let tip = (t.status == cas_types::TaskStatus::AwaitingMerge)
+        .then(|| task_store?.get(&t.id).ok()?.deliverables.factory_branch_anchor)
+        .flatten();
+    TaskSummaryJson {
+        id: t.id,
+        title: t.title,
+        status: format!("{:?}", t.status).to_lowercase(),
+        priority: t.priority.0,
+        assignee: t.assignee,
+        task_type: format!("{:?}", t.task_type).to_lowercase(),
+        epic: t.epic,
+        branch: t.branch,
+        updated_at: t.updated_at.map(|at| at.to_rfc3339()),
+        tip,
+    }
+}
+
 pub(crate) fn build_status_json(
     session: &crate::ui::factory::SessionInfo,
     cas_root: &std::path::Path,
@@ -104,16 +127,8 @@ pub(crate) fn build_status_json(
         })
         .collect();
 
-    let to_task = |t: cas_factory::TaskSummary| TaskSummaryJson {
-        id: t.id,
-        title: t.title,
-        status: format!("{:?}", t.status).to_lowercase(),
-        priority: t.priority.0,
-        assignee: t.assignee,
-        task_type: format!("{:?}", t.task_type).to_lowercase(),
-        epic: t.epic,
-        branch: t.branch,
-    };
+    let task_store = crate::store::open_task_store(cas_root).ok();
+    let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, task_store.as_deref());
 
     let queue = open_prompt_queue_store(cas_root)?;
     let pending = queue.pending_count()?;

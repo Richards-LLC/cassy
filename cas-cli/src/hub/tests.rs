@@ -3905,7 +3905,8 @@ async fn operations_request_merge_reuses_message_send() {
         .operate(request_merge("6f1c2d3e-0000-4000-8000-000000000001", OPS_TIP))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["outcome"], "done", "{body}");
+    assert_eq!(body["outcome"]["kind"], "request_merge", "{body}");
+    assert_eq!(body["op_id"], "6f1c2d3e-0000-4000-8000-000000000001");
 
     let rows = fixture.queued();
     assert_eq!(rows.len(), 1, "exactly one supervisor message: {rows:?}");
@@ -3960,6 +3961,17 @@ async fn operations_request_merge_reuses_message_send() {
         .unwrap();
     assert_eq!(event.kind, MachineEventKind::FleetChanged);
     assert_eq!(event.session.as_deref(), Some(OPS_SESSION));
+
+    // A kind the wire contract reserves for a later slice answers in JSON.
+    let (status, body) = fixture
+        .operate(serde_json::json!({
+            "op_id": "6f1c2d3e-0000-4000-8000-0000000000ff",
+            "op": {"kind": "spawn_workers", "count": 1},
+            "expected": {},
+        }))
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(body["error"], "not_implemented");
 }
 
 /// A retried `op_id` returns the first outcome and sends nothing twice.

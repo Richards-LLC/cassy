@@ -849,9 +849,37 @@ struct OperationReplay {
 #[derive(Debug, Deserialize)]
 struct OperationRequest {
     op_id: String,
-    op: FleetOperation,
+    /// Parsed by [`parse_fleet_operation`] so an unknown or not-yet-built
+    /// kind gets a JSON error, not the extractor's plain-text 422.
+    op: serde_json::Value,
     #[serde(default)]
     expected: serde_json::Value,
+}
+
+/// Operation kinds the wire contract names for later slices (S2, S3).
+const LATER_FLEET_OPERATIONS: &[&str] = &[
+    "spawn_workers",
+    "set_worker_hold",
+    "recycle_worker",
+    "shutdown_workers",
+    "assign_task",
+];
+
+enum ParsedOperation {
+    Ready(FleetOperation),
+    NotYet(String),
+    Invalid(String),
+}
+
+fn parse_fleet_operation(op: serde_json::Value) -> ParsedOperation {
+    let kind = op.get("kind").and_then(serde_json::Value::as_str).map(str::to_owned);
+    match serde_json::from_value::<FleetOperation>(op) {
+        Ok(operation) => ParsedOperation::Ready(operation),
+        Err(_) if kind.as_deref().is_some_and(|kind| LATER_FLEET_OPERATIONS.contains(&kind)) => {
+            ParsedOperation::NotYet(kind.unwrap_or_default())
+        }
+        Err(error) => ParsedOperation::Invalid(error.to_string()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -909,7 +937,32 @@ async fn session_operation<R: SessionReadModel>(
     Json(request): Json<OperationRequest>,
 ) -> Response {
     let uri = format!("/v1/sessions/{session}/operations");
-    let scope = request.op.scope();
+    let operation = match parse_fleet_operation(request.op) {
+        ParsedOperation::Ready(operation) => operation,
+        ParsedOperation::NotYet(kind) => {
+            // Authenticated first, so the reply discloses nothing to a stranger.
+            if let Err(error) =
+                authorize(&state, HubAction::Mutation, Scope::SessionRead, &headers, "POST", &uri)
+            {
+                return with_cors(unauthorized_for(&error), &headers);
+            }
+            return with_cors(
+                launch_error(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_implemented",
+                    &format!("{kind} arrives with a later fleet-operations slice"),
+                ),
+                &headers,
+            );
+        }
+        ParsedOperation::Invalid(detail) => {
+            return with_cors(
+                launch_error(StatusCode::BAD_REQUEST, "invalid_operation", &detail),
+                &headers,
+            );
+        }
+    };
+    let scope = operation.scope();
     let context = match authorize(&state, HubAction::Mutation, scope, &headers, "POST", &uri) {
         Ok(Some(context)) => context,
         Ok(None) => return with_cors(unauthorized(), &headers),
@@ -963,8 +1016,8 @@ async fn session_operation<R: SessionReadModel>(
             &headers,
         );
     }
-    let action = request.op.action();
-    let subject = request.op.subject();
+    let action = operation.action();
+    let subject = operation.subject();
     if let Err(error) =
         auth.audit_operation(&context, "requested", action, scope, &session, Some(subject.clone()), now)
     {
@@ -976,8 +1029,9 @@ async fn session_operation<R: SessionReadModel>(
 
     let attribution = verified_attribution(&context);
     let operation_session = session.clone();
+    let expected = request.expected;
     let outcome = tokio::task::spawn_blocking(move || {
-        run_fleet_operation(&cas_dir, &operation_session, request.op, request.expected, &attribution)
+        run_fleet_operation(&cas_dir, &operation_session, operation, expected, &attribution)
     })
     .await
     .unwrap_or_else(|error| Err(crate::ops::fleet::OperationError::Failed(error.to_string())));
@@ -986,7 +1040,7 @@ async fn session_operation<R: SessionReadModel>(
     let (status, body, audit_outcome, detail) = match outcome {
         Ok(result) => (
             StatusCode::OK,
-            serde_json::json!({"op_id": op_id, "outcome": "done", "result": result}),
+            serde_json::json!({"op_id": op_id, "outcome": result}),
             "allowed",
             subject,
         ),
@@ -1054,7 +1108,11 @@ fn run_fleet_operation(
                 })?;
             let notification_id =
                 fleet::request_merge(cas_dir, session, &task_id, &expected, attribution)?;
-            Ok(serde_json::json!({"notification_id": notification_id, "task_id": task_id}))
+            Ok(serde_json::json!({
+                "kind": "request_merge",
+                "task_id": task_id,
+                "notification_id": notification_id,
+            }))
         }
         FleetOperation::FocusEpic { epic_id, clear } => {
             #[derive(Deserialize)]
@@ -1084,7 +1142,11 @@ fn run_fleet_operation(
             };
             let cas_root = cas_dir;
             let text = fleet::focus_epic(cas_root, session, request)?;
-            Ok(serde_json::json!({"epic_id": fleet::pinned_epic(session), "detail": text}))
+            Ok(serde_json::json!({
+                "kind": "focus_epic",
+                "epic_id": fleet::pinned_epic(session),
+                "detail": text,
+            }))
         }
     }
 }

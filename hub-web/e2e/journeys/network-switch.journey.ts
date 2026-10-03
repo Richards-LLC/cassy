@@ -533,6 +533,44 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
   });
 });
 
+// cas-460a: a pairing revoked while Paired machines is open rebuilds the shell
+// under the dialog. Escape must still hand focus back to the footer control
+// that opened it, not to the page; Enter on that control opens it again.
+test("HUB-J12 network switch: Paired machines returns focus to its footer opener across a revoked pairing (cas-460a)", journeyPart, async ({ page, journey }) => {
+  const footer = page.locator("#paired-machines-toggle");
+  const dialog = page.getByRole("dialog", { name: "Paired machines" });
+  let revoke: () => Promise<void> = async () => {};
+  await journey.stage("Open Paired machines from the footer by keyboard while the machine is live", async () => {
+    const { hub, clock, header } = await connected(page);
+    revoke = async () => {
+      hub.refuseProofs("atlas", 1_000, "revoked", false);
+      await hub.down("atlas", { sockets: "close" });
+      await hub.up("atlas");
+      await clock.advance(1_000);
+      await expect(header).toHaveText(" · Needs pairing");
+    };
+    await footer.focus();
+    await expect(footer).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+  });
+  await journey.stage("The pairing is revoked while it is open; Escape returns to the footer", async () => {
+    await revoke();
+    await expect(dialog.locator(".paired-machine-state").first()).toContainText("Needs pairing");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#paired-machines-toggle")).toBeFocused();
+  });
+  await journey.stage("Enter on the footer opens it again, and Escape returns there again", async () => {
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#paired-machines-toggle")).toBeFocused();
+  });
+});
+
 // cas-7752: drafts are kept on disk per conversation, so a revoked pairing
 // must take them with it — and the renders after it must not write them back.
 test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (cas-7752)", journeyPart, async ({ page, journey }) => {

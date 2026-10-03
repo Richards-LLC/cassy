@@ -8,14 +8,14 @@ import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./co
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView, emptyActivityText } from "./conversation-view";
+import { ConversationView, emptyActivityText, terminalOfferReason } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
+import { applyTerminalOffer, arrangeConversationShell, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -283,6 +283,8 @@ let commandPaletteOpen = false;
  * land to read, not in the reply box: that would keep the keyboard up over
  * the conversation. Ctrl/Cmd+K and mouse opens mean a hardware keyboard. */
 let commandPaletteOpenedByTouch = false;
+/** The control that opened Paired machines, by id, so its close can hand focus back (cas-460a). */
+let pairedMachinesOpener: string | undefined;
 let speechCapability: SpeechInputCapability | undefined;
 let speechDetectionStarted = false;
 let speechController: SpeechDictationController | undefined;
@@ -4021,6 +4023,28 @@ function keepConversationListPlace(container: HTMLElement, selectedKey: string |
   conversationListScroll = container.scrollTop;
 }
 
+/**
+ * Back from a conversation (a phone's list and thread take turns): the list
+ * is where the operator left it, and focus returns to the row that was open,
+ * brought into view if it is not, instead of the first row, whose focus
+ * scrolled the list back to its top (cas-f50f). With that row gone, the
+ * first row takes focus where the list already is.
+ */
+function returnToConversationRow(openedKey: string | undefined): void {
+  const container = document.querySelector<HTMLElement>("#conversation-list");
+  const rows = [...document.querySelectorAll<HTMLButtonElement>("#conversation-list .conversation-row")];
+  const row = rows.find((node) => node.dataset.threadKey === openedKey) ?? rows[0];
+  if (!row) return;
+  if (container && container.scrollTop !== conversationListScroll) container.scrollTop = conversationListScroll;
+  row.focus({ preventScroll: true });
+  if (!container) return;
+  const box = container.getBoundingClientRect();
+  const rect = row.getBoundingClientRect();
+  if (rect.top < box.top) container.scrollTop += rect.top - box.top;
+  else if (rect.bottom > box.bottom) container.scrollTop += rect.bottom - box.bottom;
+  conversationListScroll = container.scrollTop;
+}
+
 function renderConversationList(): void {
   renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
@@ -4095,6 +4119,7 @@ function renderConversationList(): void {
       const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
       state.replaceChildren(separator, label);
     }
+    applyTerminalOffer(document, terminalOfferReason(label, machines.get(selectedMachineId)?.label));
   }
   // The state's width changes the room the machine · codename line has.
   fitConversationHost(document);
@@ -4480,8 +4505,34 @@ document.addEventListener("keydown", (event) => {
 // (machines that aren't connected first) for its next opening; while it was
 // open, status ticks left its rows where they were.
 document.addEventListener("close", (event) => {
-  if ((event.target as Element | null)?.id === "paired-machines-dialog") renderMachineRegister();
+  const dialog = event.target as HTMLDialogElement | null;
+  if (dialog?.id !== "paired-machines-dialog") return;
+  renderMachineRegister();
+  restorePairedMachinesOpener(dialog);
 }, true);
+
+/**
+ * cas-460a: a shell rebuild while Paired machines is open (a pairing revoked,
+ * a machine added) replaces the footer and re-shows the dialog, so the
+ * browser's own focus restoration has no live opener to return to and focus
+ * fell to the page. When it did, focus goes back to the control that opened
+ * the register, or the footer's Paired machines control when that one is gone
+ * (the palette's entry closes with the palette). Focus still on a control
+ * inside the closed dialog (the re-shown dialog's ×) counts as lost: the
+ * browser drops it to the page a moment later. A close that hands focus on
+ * (Pair a machine opens its own dialog) is left alone.
+ */
+function restorePairedMachinesOpener(dialog: HTMLDialogElement): void {
+  const opener = pairedMachinesOpener;
+  pairedMachinesOpener = undefined;
+  const active = document.activeElement;
+  if (active && active !== document.body && active.isConnected && !dialog.contains(active)) return;
+  if (document.querySelector("dialog[open]")) return;
+  const visible = (element: HTMLElement | null): element is HTMLElement => element !== null && element.getClientRects().length > 0;
+  const fromOpener = opener ? document.getElementById(opener) : null;
+  const target = visible(fromOpener) ? fromOpener : document.getElementById("paired-machines-toggle");
+  if (visible(target)) target.focus();
+}
 
 // A layer that was over the sheet (the palette) has closed: focus goes back
 // into the sheet, to the control it left, rather than to the page.
@@ -4737,9 +4788,19 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
   if (sheetClose) sheetClose.onclick = closeAttentionSheet;
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
-  if (conversationBack) conversationBack.onclick = () => { attentionSheetOpen = false; if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
+  if (conversationBack) conversationBack.onclick = () => {
+    attentionSheetOpen = false;
+    // cas-f50f: back to the row that was open, not the list's first row.
+    const opened = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+    if (selectedMachineId) commitSelection({ machineId: selectedMachineId });
+    render();
+    queueMicrotask(() => returnToConversationRow(opened));
+  };
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
-  if (terminal) terminal.onclick = (event) => { attentionSheetOpen = false; hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
+  if (terminal) terminal.onclick = (event) => {
+    const unavailable = terminal.dataset.disabledReason;
+    if (unavailable) { toast(unavailable); return; }
+    attentionSheetOpen = false; hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
   if (returning) returning.onclick = (event) => {
     hubPresentation = "conversation";
@@ -5266,9 +5327,9 @@ function renderMachineRegister(): void {
   if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).
-  const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
+  const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
   for (const id of ['paired-machines-toggle', 'palette-paired-machines']) {
-    const button = document.getElementById(id); if (button) button.onclick = open;
+    const button = document.getElementById(id); if (button) button.onclick = () => open(id);
   }
   document.getElementById('paired-machines-close')!.onclick = () => dialog.close();
   document.getElementById('paired-machines-add')!.onclick = () => { dialog.close(); document.querySelector<HTMLDialogElement>('#pair-dialog')?.showModal(); };

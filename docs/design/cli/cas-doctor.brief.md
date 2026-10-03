@@ -8,6 +8,20 @@
 | Machine output | `--json`: one array of `{name, status, group, message, remediation, duration_ms, phase}`; nothing else on stdout. |
 | Omitted | Per-check timings, the slow-phase table, and instances beyond the first of a repeated finding — all under `--verbose`; detailed payload sections remain in the SessionStart references. |
 
+## Read-only queue diagnostics (cas-d6b9)
+
+The `supervisor relay` and `delivery retries` checks inspect an existing SQLite
+queue through a dedicated read-only connection, and never initialize or migrate
+the database. A project that has never queued anything has no `prompt_queue`
+table; that is healthy: `[OK] supervisor relay  no relays yet` and
+`[OK] delivery retries  none queued` (cas-5b0b). A queue that exists but can't be
+read warns in plain words with no SQL text: in use by another process, from an
+older cas (run `cas update --schema-only`), damaged, or not openable.
+Populated and empty queues retain their existing health messages and JSON shape.
+No renderer, palette, grouping or output flag changes. The assembled binary owns
+the attributed `doctor_snapshot` regeneration and terminal captures; worker
+regressions prove schema/count preservation and the diagnostic verdicts.
+
 ## GitHub origin diagnostic (cas-28c8)
 
 The `GitHub origin` integration row warns when GitHub resolves the explicit origin

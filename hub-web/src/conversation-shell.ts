@@ -384,6 +384,36 @@ export function fitConversationHost(root: ParentNode): void {
   fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0));
 }
 
+/**
+ * cas-6b75 (journey F03): while the connection is lost, the header's
+ * Terminal view says why it can't open, as the empty card stops offering it,
+ * instead of offering a terminal it cannot reach. It stays focusable; a
+ * click or Enter says the reason.
+ */
+export function applyTerminalOffer(root: Document, reason: string | undefined): void {
+  const button = root.querySelector<HTMLButtonElement>("#conversation-terminal");
+  if (!button) return;
+  const note = root.querySelector<HTMLElement>("#conversation-terminal-reason");
+  if (reason === undefined) {
+    if (button.dataset.disabledReason === undefined) return;
+    delete button.dataset.disabledReason;
+    button.removeAttribute("aria-disabled");
+    button.removeAttribute("aria-describedby");
+    button.removeAttribute("title");
+    note?.remove();
+    return;
+  }
+  if (button.dataset.disabledReason === reason && note) return;
+  button.dataset.disabledReason = reason;
+  button.setAttribute("aria-disabled", "true");
+  button.setAttribute("aria-describedby", "conversation-terminal-reason");
+  button.title = reason;
+  const line = note ?? root.createElement("span");
+  line.id = "conversation-terminal-reason"; line.className = "sr-only";
+  if (line.textContent !== reason) line.textContent = reason;
+  if (!note) button.after(line);
+}
+
 export function arrangeConversationShell(app: HTMLElement, model: ConversationShellModel): void {
   const old = app.querySelector<HTMLElement>(".shell");
   if (!old) return;

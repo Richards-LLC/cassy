@@ -134,6 +134,9 @@ pub enum Scope {
     PaneInput,
     MessageSend,
     PaneInterrupt,
+    /// Reversible and additive fleet operations: focus an epic, add, pause
+    /// and resume workers, assign tasks (fleet-operations brief, cas-9b08).
+    FactoryOperate,
     FactoryManage,
     HubAdmin,
 }
@@ -154,6 +157,7 @@ impl Scope {
             "pane:input" | "pane-input" => Self::PaneInput,
             "message:send" | "message-send" => Self::MessageSend,
             "pane:interrupt" | "pane-interrupt" => Self::PaneInterrupt,
+            "factory:operate" | "factory-operate" => Self::FactoryOperate,
             "factory:manage" | "factory-manage" => Self::FactoryManage,
             "hub:admin" | "hub-admin" => Self::HubAdmin,
             _ => anyhow::bail!("unknown Commander scope '{value}'"),
@@ -170,6 +174,7 @@ impl Scope {
             Self::PaneInput => "pane-input",
             Self::MessageSend => "message-send",
             Self::PaneInterrupt => "pane-interrupt",
+            Self::FactoryOperate => "factory-operate",
             Self::FactoryManage => "factory-manage",
             Self::HubAdmin => "hub-admin",
         }
@@ -184,6 +189,7 @@ impl Scope {
             Self::PaneInput => "pane:input",
             Self::MessageSend => "message:send",
             Self::PaneInterrupt => "pane:interrupt",
+            Self::FactoryOperate => "factory:operate",
             Self::FactoryManage => "factory:manage",
             Self::HubAdmin => "hub:admin",
         }
@@ -1199,6 +1205,23 @@ impl AuthStore {
         context: &AuthContext,
         now: DateTime<Utc>,
     ) -> Result<BTreeSet<Scope>> {
+        self.grant_own_scope(context, Scope::SessionLaunch, now)
+    }
+
+    /// The one-time in-browser grants a control device may give itself:
+    /// session launch, and (cas-9b08) `factory:operate`. Destructive
+    /// `factory:manage` and `hub:admin` come only from a pairing invitation.
+    pub fn grant_own_scope(
+        &self,
+        context: &AuthContext,
+        scope: Scope,
+        now: DateTime<Utc>,
+    ) -> Result<BTreeSet<Scope>> {
+        let action = match scope {
+            Scope::SessionLaunch => "self_grant_session_launch",
+            Scope::FactoryOperate => "self_grant_factory_operate",
+            _ => anyhow::bail!("scope {} cannot be self-granted", scope.as_str()),
+        };
         let mut state = self.lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         let device = state
@@ -1215,7 +1238,7 @@ impl AuthStore {
                 .all(|scope| device.scopes.contains(&scope)),
             "scope denied"
         );
-        if device.scopes.contains(&Scope::SessionLaunch) {
+        if device.scopes.contains(&scope) {
             return Ok(device.scopes.clone());
         }
         // The audit must succeed before the capability becomes durable.
@@ -1225,8 +1248,8 @@ impl AuthStore {
             machine_id: &self.0.machine_id,
             request_id: &context.request_id,
             outcome: "allowed",
-            action: "self_grant_session_launch",
-            required_scope: Some(Scope::SessionLaunch.as_str()),
+            action,
+            required_scope: Some(scope.as_str()),
             device_id: Some(&context.device_id),
             credential_id: Some(&context.credential_id),
             device_label: Some(&context.device_label),
@@ -1241,9 +1264,9 @@ impl AuthStore {
             detail: None,
         };
         let written = append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record);
-        self.record_audit_outcome("self_grant_session_launch", now, written.as_ref().err());
+        self.record_audit_outcome(action, now, written.as_ref().err());
         written?;
-        device.scopes.insert(Scope::SessionLaunch);
+        device.scopes.insert(scope);
         let scopes = device.scopes.clone();
         self.persist(&state)?;
         Ok(scopes)
@@ -1436,6 +1459,26 @@ impl AuthStore {
         )
     }
 
+    /// One row of a structured fleet operation (cas-566b): `requested`
+    /// before it runs, then its outcome. `detail` names the operation's
+    /// subject (task, epic) and, on failure, why.
+    #[allow(clippy::too_many_arguments)]
+    pub fn audit_operation(
+        &self,
+        context: &AuthContext,
+        outcome: &str,
+        action: &str,
+        required_scope: Scope,
+        target_session: &str,
+        detail: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.write_audit_record(
+            Some(context), outcome, action, Some(required_scope), Some(target_session),
+            None, None, None, None, None, detail, now,
+        )
+    }
+
     /// A denied authentication, with its reason (cas-d636).
     fn audit_refusal(
         &self,
@@ -1465,6 +1508,28 @@ impl AuthStore {
         refusal: Option<AuthRefusal>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.write_audit_record(
+            context, outcome, action, required_scope, target_session, project,
+            supervisor_cli, profile, placement, refusal, None, now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_audit_record(
+        &self,
+        context: Option<&AuthContext>,
+        outcome: &str,
+        action: &str,
+        required_scope: Option<Scope>,
+        target_session: Option<&str>,
+        project: Option<&str>,
+        supervisor_cli: Option<&str>,
+        profile: Option<&str>,
+        placement: Option<&str>,
+        refusal: Option<AuthRefusal>,
+        detail: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let record = AuditRecord {
             timestamp: now,
             machine_id: &self.0.machine_id,
@@ -1483,7 +1548,7 @@ impl AuthStore {
             profile,
             placement,
             reason: refusal.map(AuthRefusal::code),
-            detail: refusal.and_then(AuthRefusal::detail),
+            detail: detail.or_else(|| refusal.and_then(AuthRefusal::detail)),
         };
         let written = self
             .lock()

@@ -257,6 +257,34 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   bubble.focus({ preventScroll: true });
 }
 
+/** The header's connection label, as the empty thread and Terminal view's offer read it. */
+function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "reconnecting" | "unreachable" {
+  return label === undefined || label === "Live" ? "live"
+    : label === "Degraded" ? "degraded"
+      : label === NEEDS_PAIRING ? "pairing"
+        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
+          : "unreachable";
+}
+
+/**
+ * Why the conversation header's Terminal view can't open now, or nothing
+ * when it can (cas-6b75, journey F03). The empty card stops offering
+ * Terminal view once the connection is lost; the header says the same
+ * instead of offering a terminal it cannot reach. A first connection
+ * ("Connecting", "Idle") is on its way, not lost, so it is still offered.
+ */
+export function terminalOfferReason(connection: string | undefined, machine: string | undefined): string | undefined {
+  if (connection === "Connecting" || connection === "Idle") return undefined;
+  const where = machine || "this machine";
+  const subjectMachine = machine || "This machine";
+  switch (connectionKind(connection)) {
+    case "pairing": return `${subjectMachine} needs pairing again before Terminal view can open.`;
+    case "reconnecting": return `Reconnecting to ${where} — Terminal view opens once it's back.`;
+    case "unreachable": return `${subjectMachine} can't be reached — Terminal view opens once it's back.`;
+    default: return undefined;
+  }
+}
+
 /**
  * What the empty thread says (cas-010f), from the header's connection label
  * and whether this session's first history page has resolved:
@@ -273,11 +301,7 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
   const where = input.machine || "this machine";
   const subjectMachine = input.machine || "This machine";
   const label = input.connection;
-  const kind = label === undefined || label === "Live" ? "live"
-    : label === "Degraded" ? "degraded"
-      : label === NEEDS_PAIRING ? "pairing"
-        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
-          : "unreachable";
+  const kind = connectionKind(label);
   const none = `No messages from ${subject} in this session yet`;
   if (!input.resolved) {
     if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "", terminal: false };

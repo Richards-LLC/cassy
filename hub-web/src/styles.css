@@ -983,6 +983,21 @@ main {
   white-space: nowrap;
 }
 
+/* cas-d1fa: while this browser is in control the terminal keeps Tab; its
+   header says how the keyboard leaves it, outside the drawing area. */
+.pane-layout-controls .pane-leave[hidden] { display: none; }
+.pane-layout-controls .pane-leave kbd { margin-left: var(--space-1); padding: 0 var(--space-1); color: var(--text-mid); font: inherit; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+/* The key shows where the pane header has room for it; narrower, the pane's
+   own name keeps that room and the key is in the control's tooltip, its
+   aria-keyshortcuts and the terminal input's description. */
+.pane-header { container: pane-header / inline-size; }
+@container pane-header (max-width: 1040px) {
+  .pane-layout-controls .pane-leave kbd { display: none; }
+}
+@container pane-header (max-width: 960px) {
+  .pane-layout-controls .pane-leave { font-size: 0; }
+  .pane-layout-controls .pane-leave::after { content: "⇥"; font-size: var(--fs-md); }
+}
 .pane-layout-controls button:hover:not(:disabled),
 .pane-layout-controls button:focus-visible { color: var(--text-hi); background: var(--bg-hover); }
 
@@ -3047,6 +3062,7 @@ dialog form > *,
   .pane-grid.pane-layout .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
+  .pane-grid.pane-layout .pane-leave::after { content: "⇥"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .make-primary::after { content: "★"; font-size: var(--fs-meta); }
   .pane-grid.pane-layout .move-earlier::after { content: "←"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .move-later::after { content: "→"; font-size: var(--fs-md); }
@@ -3401,8 +3417,10 @@ dialog form > *,
 .conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }
 .conversation-identity .host-sep { flex: none; white-space: pre; }
 .conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
-.conversation-identity .host-where.os-dropped .host-os { display: none; }
-.conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { display: none; }
+/* cas-8526: what steps aside is hidden from sight only (the .sr-only
+   technique), never display:none, so the line is heard whole at any width. */
+.conversation-identity .host-where.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
+.conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
@@ -3754,8 +3772,8 @@ button.chip:disabled { cursor: default; }
 .thread .empty .proj2.machine-long > .proj2-machine { min-width: 16ch; }
 .thread .empty .proj2-sep { flex: none; white-space: pre; }
 .thread .empty .proj2-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
-.thread .empty .proj2.os-dropped .host-os { display: none; }
-.thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { display: none; }
+.thread .empty .proj2.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
+.thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .thread .empty .proj2.codename-squeezed > .proj2-machine { min-width: 0; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
@@ -3960,7 +3978,9 @@ button.chip:disabled { cursor: default; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }
-  .conversation-identity .conversation-host { display: none; }
+  /* cas-8526: off the short landscape header, not out of its spoken name or
+     its connection status. */
+  .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
   .conversation-identity { gap: var(--space-2); }
   .conversation-composer { padding-top: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
   .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); padding-top: 10px; padding-bottom: 10px; }
@@ -4249,6 +4269,12 @@ button.chip:disabled { cursor: default; }
 .thread .empty .empty-terminal { display: inline-flex; align-items: center; min-height: 24px; padding: 0 2px; border: 0; background: none; color: var(--ink-mid); font: inherit; text-decoration: underline; text-decoration-color: var(--line-subtle); text-underline-offset: 3px; cursor: pointer; }
 .thread .empty .empty-terminal:hover { color: var(--ink); text-decoration-color: currentColor; }
 .thread .empty .empty-terminal:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
+/* cas-6b75: on a phone or any coarse pointer, Terminal view is a full
+   44 px target; the line centres the activity text on it. */
+@media (max-width: 53rem), (pointer: coarse) {
+  .thread .empty .empty-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; }
+  .thread .empty .empty-terminal { min-height: 44px; min-width: 44px; padding: 0 var(--space-2); }
+}
 @media (max-width: 720px) {
   .thread .earlier-sessions { margin: 10px 14px 0; }
 }

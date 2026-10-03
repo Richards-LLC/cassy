@@ -615,18 +615,20 @@ impl ShutdownWorkerSnapshot {
     }
 
     fn render(&self) -> String {
+        format!("{}; {}", self.render_state(), self.worktree_cleanup_verdict)
+    }
+
+    /// Tasks and worktree state without the shutdown cleanup verdict, which
+    /// does not apply to a recycle (it keeps the worktree).
+    fn render_state(&self) -> String {
         let tasks = if self.task_states.is_empty() {
             "none".to_string()
         } else {
             self.task_states.join(", ")
         };
         format!(
-            "{} (id={}): tasks=[{}]; {}; {}",
-            self.worker_name,
-            self.worker_id,
-            tasks,
-            self.worktree_state,
-            self.worktree_cleanup_verdict
+            "{} (id={}): tasks=[{}]; {}",
+            self.worker_name, self.worker_id, tasks, self.worktree_state
         )
     }
 }
@@ -1393,6 +1395,17 @@ fn spawn_warning_for_request(
         spawn_spec_warning(model_explicit, effort_explicit, spec_json)
     } else {
         spawn_specs_warning(model_explicit, effort_explicit, specs)
+    }
+}
+
+/// The factory context an MCP caller acts in: this process's factory
+/// session, supervisor ownership and role, and its own account dirs.
+fn mcp_fleet_context() -> crate::ops::fleet::FleetContext {
+    crate::ops::fleet::FleetContext {
+        factory_session: current_factory_session(),
+        owned_workers: supervisor_owned_workers(),
+        supervisor_authorized: crate::harness_policy::is_supervisor_from_env(),
+        requester_from_env: true,
     }
 }
 
@@ -2183,6 +2196,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_spawn_workers_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_spawn_workers`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_spawn_workers_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
@@ -2497,8 +2521,14 @@ impl CasService {
         // harness; a Claude supervisor's profile must never become a Codex
         // worker's CODEX_HOME (or vice versa).
         for spec in &mut specs {
-            spec.requester_config_dir = requester_account_dir(spec.cli);
-            spec.requester_secure_storage_dir = requester_secure_storage_dir(spec.cli);
+            spec.requester_config_dir = ctx
+                .requester_from_env
+                .then(|| requester_account_dir(spec.cli))
+                .flatten();
+            spec.requester_secure_storage_dir = ctx
+                .requester_from_env
+                .then(|| requester_secure_storage_dir(spec.cli))
+                .flatten();
             if spec.cli == cas_mux::SupervisorCli::Codex
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
@@ -2644,7 +2674,7 @@ impl CasService {
             .map(|warning| format!("\nWARNING — SHARED-CLONE SUPERVISOR OVERLAP: {warning}"))
             .unwrap_or_default();
 
-        let factory_session = current_factory_session();
+        let factory_session = ctx.factory_session.clone();
         if let Some(delivery_mode) = requested_delivery_mode {
             let session = factory_session.as_deref().ok_or_else(|| {
                 Self::error(
@@ -2757,7 +2787,7 @@ impl CasService {
             .as_deref()
             .and_then(|task_id| task_store.get(task_id).ok())
             .or_else(|| {
-                let session = current_factory_session()?;
+                let session = ctx.factory_session.clone()?;
                 let raw = std::fs::read_to_string(metadata_path(&session)).ok()?;
                 let metadata =
                     serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok()?;
@@ -2805,6 +2835,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_shutdown_workers_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_shutdown_workers`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_shutdown_workers_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_store::SpawnLifecycleState;
         use cas_types::{AgentRole, AgentStatus};
@@ -2834,8 +2875,8 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
-        let owned = supervisor_owned_workers();
-        let factory_session = current_factory_session();
+        let owned = ctx.owned_workers.clone();
+        let factory_session = ctx.factory_session.clone();
         let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -3167,6 +3208,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_recycle_worker_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_recycle_worker`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_recycle_worker_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_types::{AgentRole, AgentStatus};
 
@@ -3181,8 +3233,8 @@ impl CasService {
                     "recycle_worker requires target=<worker-name>",
                 )
             })?;
-        let factory_session = current_factory_session();
-        let owned = supervisor_owned_workers();
+        let factory_session = ctx.factory_session.clone();
+        let owned = ctx.owned_workers.clone();
         if let Some(owned) = owned.as_ref() {
             if !owned.contains(worker_name) {
                 return Err(Self::error(
@@ -3246,12 +3298,19 @@ impl CasService {
             local_merge_delivery,
             pinned_epic_branch.as_deref(),
         );
-        if snapshot.requires_force() {
+        // cas-a622: a recycle keeps the worktree and every task binding (the
+        // daemon respawns the same name and re-delivers the in-progress
+        // brief), so holding work is no reason to refuse. Only work that
+        // exists nowhere but this checkout is, and no flag overrides that.
+        if snapshot.unsafe_worktree {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "recycle_worker refused: selected worker state requires force=true, but recycling never force-destroys work.\n- {}",
-                    snapshot.render()
+                    "recycle_worker refused: {worker_name} has work that is only in its worktree. \
+                     Have it commit and push its branch (or get it merged, for local delivery), \
+                     then retry; recycling keeps the worktree and task bindings but never \
+                     restarts a worker over unsaved work.\n- {}",
+                    snapshot.render_state()
                 ),
             ));
         }
@@ -3314,7 +3373,8 @@ impl CasService {
         );
 
         Ok(Self::success(format!(
-            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe."
+            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe. Its task bindings are kept and its open work is re-delivered as a resume brief.\n- {}",
+            snapshot.render_state()
         )))
     }
 
@@ -3388,7 +3448,18 @@ impl CasService {
         req: FactoryRequest,
         held: bool,
     ) -> Result<CallToolResult, McpError> {
-        use crate::harness_policy::is_supervisor_from_env;
+        self.factory_set_worker_hold_in(&mcp_fleet_context(), req, held).await
+    }
+
+    /// [`Self::factory_set_worker_hold`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_set_worker_hold_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        held: bool,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_reminder_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_worker_hold_at};
         use cas_types::{AgentRole, AgentStatus};
@@ -3398,10 +3469,10 @@ impl CasService {
         } else {
             "release_worker"
         };
-        worker_hold_role_gate(is_supervisor_from_env(), action)
+        worker_hold_role_gate(ctx.supervisor_authorized, action)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
-        let factory_session = current_factory_session().ok_or_else(|| {
+        let factory_session = ctx.factory_session.clone().ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_REQUEST,
                 format!(
@@ -3427,7 +3498,7 @@ impl CasService {
                 format!("Failed to open agent store: {error}"),
             )
         })?;
-        let owned = supervisor_owned_workers();
+        let owned = ctx.owned_workers.clone();
         let worker = agent_store
             .list(None)
             .map_err(|error| {
@@ -6433,12 +6504,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
-        use crate::store::open_task_store;
-        use crate::ui::factory::{
-            metadata_path, persist_session_metadata_delivery_mode_at,
-            persist_session_metadata_pinned_epic_id_at,
-        };
-        use cas_types::{TaskStatus, TaskType};
+        use crate::ops::fleet::{FocusEpic, OperationError, focus_epic};
 
         let factory_session = current_factory_session().ok_or_else(|| {
             Self::error(
@@ -6451,129 +6517,37 @@ impl CasService {
 
         let clear = req.clear.unwrap_or(false);
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let metadata_path = metadata_path(&factory_session);
-
-        if clear {
-            persist_session_metadata_pinned_epic_id_at(&metadata_path, None).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to clear pinned epic focus: {e}"),
-                )
-            })?;
-            self.record_focus_epic_event(&factory_session, None, None);
-            return Ok(Self::success(format!(
-                "Cleared pinned epic focus for factory session {factory_session}"
-            )));
-        }
-
-        let Some(epic_id) = epic_id else {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "focus_epic requires `id=<epic-id>` or `clear=true`",
-            ));
-        };
-
-        let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open task store: {e}"),
-            )
-        })?;
-
-        let mut epic = task_store.get(epic_id).map_err(|e| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("Task not found: {epic_id}: {e}"),
-            )
-        })?;
-
-        if epic.task_type != TaskType::Epic {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "focus_epic: task {epic_id} is not an Epic (task_type={:?}). \
-                     This action only operates on Epic-type tasks.",
-                    epic.task_type
-                ),
-            ));
-        }
-        if epic.status == TaskStatus::Closed {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "focus_epic: task {epic_id} is Closed. \
-                     Closed epics cannot be pinned as the active factory focus.",
-                ),
-            ));
-        }
-
-        let delivery_mode = requested_delivery_mode.unwrap_or(epic.delivery_mode);
-        if requested_delivery_mode.is_some() {
-            epic.delivery_mode = delivery_mode;
-            task_store.update(&epic).map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to persist epic delivery mode: {error}"),
-                )
-            })?;
-        }
-
-        persist_session_metadata_pinned_epic_id_at(&metadata_path, Some(epic_id)).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to persist pinned epic focus: {e}"),
-            )
-        })?;
-        persist_session_metadata_delivery_mode_at(&metadata_path, delivery_mode).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to persist factory delivery mode: {e}"),
-            )
-        })?;
-        self.record_focus_epic_event(&factory_session, Some(epic_id), Some(delivery_mode));
-
-        Ok(Self::success(format!(
-            "Pinned epic focus to {epic_id} for factory session {factory_session} (delivery_mode={delivery_mode})"
-        )))
-    }
-
-    fn record_focus_epic_event(
-        &self,
-        factory_session: &str,
-        epic_id: Option<&str>,
-        delivery_mode: Option<cas_types::DeliveryMode>,
-    ) {
-        use crate::store::open_event_store;
-        use cas_types::{Event, EventEntityType, EventType};
-
-        let Ok(event_store) = open_event_store(&self.inner.cas_root) else {
-            return;
-        };
-
-        let summary = match epic_id {
-            Some(epic_id) => format!("Pinned factory epic focus to {epic_id}"),
-            None => "Cleared factory epic focus pin".to_string(),
-        };
-        let entity_type = if epic_id.is_some() {
-            EventEntityType::Task
+        let request = if clear {
+            FocusEpic::Clear
         } else {
-            EventEntityType::Session
+            let Some(epic_id) = epic_id else {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "focus_epic requires `id=<epic-id>` or `clear=true`",
+                ));
+            };
+            FocusEpic::Pin {
+                epic_id,
+                delivery_mode: requested_delivery_mode,
+            }
         };
-        let entity_id = epic_id.unwrap_or(factory_session);
-        let metadata = serde_json::json!({
-            "factory_session": factory_session,
-            "epic_id": epic_id,
-            "delivery_mode": delivery_mode.map(|mode| mode.to_string()),
-        });
-        let event = Event::new(
-            EventType::SupervisorInjected,
-            entity_type,
-            entity_id,
-            summary,
-        )
-        .with_metadata(metadata)
-        .with_session(factory_session);
-        let _ = event_store.record(&event);
+
+        // cas-566b: the body is the operator facade the Commander hub also
+        // calls; this arm keeps MCP's request parsing and error codes.
+        focus_epic(&self.inner.cas_root, &factory_session, request)
+            .map(|text| Self::success(text))
+            .map_err(|error| match error {
+                OperationError::Failed(message) => {
+                    Self::error(ErrorCode::INTERNAL_ERROR, message)
+                }
+                OperationError::NotFound(message)
+                | OperationError::Invalid(message) => {
+                    Self::error(ErrorCode::INVALID_PARAMS, message)
+                }
+                stale @ OperationError::Stale(_) => {
+                    Self::error(ErrorCode::INVALID_PARAMS, stale.to_string())
+                }
+            })
     }
 
     pub(super) async fn factory_gc_cleanup(

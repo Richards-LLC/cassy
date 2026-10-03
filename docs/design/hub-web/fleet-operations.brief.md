@@ -277,6 +277,8 @@ Then:
 - write the missing End session audit row;
 - keep MCP behaviour byte-identical.
 
+Deviation (cas-566b, supervisor-approved): O1 does not call MCP `message_send`, whose sender comes from the MCP caller's registered agent, which a hub device lacks. It goes through the Commander lane, `ops::fleet::enqueue_commander_message`, and its row is pinned for parity with the MCP message row.
+
 **demo_statement:** "A paired device asks the supervisor to merge an
 awaiting-merge task through the hub. The supervisor receives the same message
 an MCP `message` call sends, `audit.jsonl` has requested and outcome rows, and

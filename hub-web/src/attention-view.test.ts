@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { renderAttentionPanel } from "./attention-view";
+import { createAttentionItem } from "./attention";
+import { NOTICE_KIND, planNotice } from "./operator-notices";
 import type { AttentionItem } from "./types";
 
 const now = Date.parse("2026-09-07T12:00:00Z");
@@ -220,5 +222,44 @@ describe("Attention notice labels (cas-7cb3)", () => {
     const root = document.createElement("div");
     renderAttentionPanel(root, [{ ...event("fallback"), session: "f98e41d1-c544-443a-8256-22360ddf3701" }], callbacks(), { now });
     expect(root.querySelector(".attention-group-label")?.textContent).toBe("Workstation · Session unavailable");
+  });
+});
+
+// cas-ed87: a delivery notice's Details reads as the message, never as the
+// {summary, message} object cas-7cb3 keeps for it.
+describe("delivery notice Details (cas-ed87)", () => {
+  const SUMMARY = "Supervisor hasn't seen: worker died: daring-robin-43 (9m)";
+  const MESSAGE = "The supervisor (happy-cheetah-1, Codex) was told 9 minutes ago that worker died: daring-robin-43, and the message never reached it.";
+  const notice = (summary: string, message: string) => {
+    const plan = planNotice("atlas", "Accounting-rapid-gazelle-52", { notification_id: 901, reply_to: null, message, summary, device_id: "*", notice: { source: "relay-watchdog", subject: 890 } }, () => false);
+    if (plan.action !== "raise") throw new Error("expected a raised notice");
+    return createAttentionItem({ id: "notice-901", machineId: "atlas", machineLabel: "Atlas", session: "Accounting-rapid-gazelle-52", kind: NOTICE_KIND, createdAt: "2026-09-06T17:49:00Z" }, plan.content);
+  };
+  const opened = (item: AttentionItem) => {
+    const root = document.createElement("div");
+    const calls = callbacks();
+    renderAttentionPanel(root, [item], calls, { now });
+    root.querySelector<HTMLButtonElement>("[data-role=copy]")!.click();
+    return { text: root.querySelector(".attention-payload pre")?.textContent ?? "", copied: calls.copy.mock.calls[0]?.[0] as string };
+  };
+
+  it("shows the summary once and then the message as plain text, and Copy copies the same", () => {
+    const { text, copied } = opened(notice(SUMMARY, MESSAGE));
+    expect(text).toBe(`${SUMMARY}\n\n${MESSAGE}`);
+    expect(text).not.toMatch(/^\s*[{[]|"summary"|"message"/);
+    expect(copied).toBe(text);
+  });
+
+  it("shows only the message when the summary is empty or already in it", () => {
+    expect(opened(notice("", MESSAGE)).text).toBe(MESSAGE);
+    expect(opened(notice("  ", MESSAGE)).text).toBe(MESSAGE);
+    expect(opened(notice("worker died: daring-robin-43", MESSAGE)).text).toBe(MESSAGE);
+  });
+
+  it("reads a notice persisted before cas-7cb3, with no payload, as its message", () => {
+    const legacy = createAttentionItem({ id: "old", machineId: "atlas", machineLabel: "Atlas", session: "s", kind: NOTICE_KIND, createdAt: "2026-09-06T17:49:00Z" }, { headline: SUMMARY, detail: MESSAGE, severity: "warning", action: "view_pane" });
+    const { text } = opened(legacy);
+    expect(text).not.toMatch(/"summary"|"message"|^\s*\{/);
+    expect(text).toContain(MESSAGE);
   });
 });

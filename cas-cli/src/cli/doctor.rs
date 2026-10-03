@@ -16,7 +16,7 @@ use crate::migration::{
 };
 use crate::store::{
     StoreType, detect_store_type, open_agent_store, open_rule_store, open_store,
-    open_task_store,
+    open_task_store, PromptQueueStore,
 };
 use crate::types::RuleStatus;
 use crate::ui::components::{Formatter, Verdict};
@@ -1861,6 +1861,156 @@ fn session_start_budget_check() -> Check {
     session_start_budget_check_for(crate::builtins::supervisor_guidance().len())
 }
 
+// Queue diagnostics never initialize or migrate the database they inspect
+// (cas-d6b9). A project that has never queued anything has no prompt_queue
+// table yet: that is health, not a fault (cas-5b0b). A queue that exists but
+// can't be read is still a warning, said in plain words without SQL text.
+
+/// Whether the prompt queue has never been created, asked read-only. An
+/// unreadable database answers `false`, so the caller reports the failure.
+fn prompt_queue_absent(cas_root: &Path) -> bool {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        cas_root.join("cas.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|tables| tables == 0)
+    .unwrap_or(false)
+}
+
+/// Why the prompt queue couldn't be read, in the operator's words.
+fn prompt_queue_read_failure(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("locked") || error.contains("busy") {
+        "the database is in use by another process; run cas doctor again in a moment"
+    } else if error.contains("no such table") || error.contains("no such column") {
+        "the prompt queue is from an older cas; run 'cas update --schema-only'"
+    } else if error.contains("not a database") || error.contains("malformed") {
+        "the database file looks damaged"
+    } else if error.contains("unable to open") {
+        "the database could not be opened"
+    } else {
+        "the prompt queue could not be read"
+    }
+}
+
+fn supervisor_relay_check(cas_root: &Path) -> Check {
+    if prompt_queue_absent(cas_root) {
+        return Check {
+            name: "supervisor relay".to_string(),
+            status: CheckStatus::Ok,
+            message: "no relays yet".to_string(),
+        };
+    }
+    match crate::store::SqlitePromptQueueStore::open_read_only(cas_root)
+        .map_err(|e| e.to_string())
+        .and_then(|queue| {
+            queue
+                .list_undelivered_lifecycle_relays(50)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(relays) if relays.is_empty() => Check {
+            name: "supervisor relay".to_string(),
+            status: CheckStatus::Ok,
+            message: "no undelivered lifecycle relays".to_string(),
+        },
+        Ok(relays) => {
+            let sample = relays
+                .iter()
+                .take(3)
+                .filter_map(|relay| relay.summary.as_deref())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Check {
+                name: "supervisor relay".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "{} lifecycle relay(s) expired without ever reaching the supervisor{}{}. \
+                     Those lanes may still be waiting — open each task directly.",
+                    relays.len(),
+                    if sample.is_empty() { "" } else { ": " },
+                    sample
+                ),
+            }
+        }
+        // Fail loud rather than silently reporting health: this check
+        // exists precisely because an unreadable failure signal reads as
+        // success.
+        Err(e) => Check {
+            name: "supervisor relay".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "cannot check undelivered lifecycle relays: {}",
+                prompt_queue_read_failure(&e)
+            ),
+        },
+    }
+}
+
+fn delivery_retries_check(cas_root: &Path) -> Check {
+    const RETRY_WARN_THRESHOLD: u32 = 3;
+    if prompt_queue_absent(cas_root) {
+        return Check {
+            name: "delivery retries".to_string(),
+            status: CheckStatus::Ok,
+            message: "none queued".to_string(),
+        };
+    }
+    match crate::store::SqlitePromptQueueStore::open_read_only(cas_root)
+        .map_err(|e| e.to_string())
+        .and_then(|queue| {
+            queue
+                .list_most_retried_pending(RETRY_WARN_THRESHOLD, 5)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(rows) if rows.is_empty() => Check {
+            name: "delivery retries".to_string(),
+            status: CheckStatus::Ok,
+            message: format!("no pending message has spent {RETRY_WARN_THRESHOLD}+ attempts"),
+        },
+        Ok(rows) => {
+            let worst = rows
+                .iter()
+                .take(3)
+                .map(|row| {
+                    format!(
+                        "#{} -> {} ({} attempts{})",
+                        row.prompt_id,
+                        row.target,
+                        row.delivery_attempts,
+                        row.reason.map(|r| format!(", {r}")).unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            Check {
+                name: "delivery retries".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "{} pending message(s) have spent {RETRY_WARN_THRESHOLD}+ transport \
+                     attempts: {worst}. The recipient is likely unreachable — check the \
+                     pane before the row exhausts its budget.",
+                    rows.len()
+                ),
+            }
+        }
+        Err(e) => Check {
+            name: "delivery retries".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "cannot check delivery retry counts: {}",
+                prompt_queue_read_failure(&e)
+            ),
+        },
+    }
+}
+
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let started = Instant::now();
     let mut checks = Vec::new();
@@ -2086,48 +2236,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // reached. Surfacing it here — as a WARNING, not an Ok line — is what
     // makes "the relay is silent" distinguishable from "there was nothing to
     // relay".
-    {
-        match crate::store::open_prompt_queue_store(&cas_root)
-            .map_err(|e| e.to_string())
-            .and_then(|queue| {
-                queue
-                    .list_undelivered_lifecycle_relays(50)
-                    .map_err(|e| e.to_string())
-            }) {
-            Ok(relays) if relays.is_empty() => checks.push(Check {
-                name: "supervisor relay".to_string(),
-                status: CheckStatus::Ok,
-                message: "no undelivered lifecycle relays".to_string(),
-            }),
-            Ok(relays) => {
-                let sample = relays
-                    .iter()
-                    .take(3)
-                    .filter_map(|relay| relay.summary.as_deref())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                checks.push(Check {
-                    name: "supervisor relay".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "{} lifecycle relay(s) expired without ever reaching the supervisor{}{}. \
-                         Those lanes may still be waiting — open each task directly.",
-                        relays.len(),
-                        if sample.is_empty() { "" } else { ": " },
-                        sample
-                    ),
-                });
-            }
-            // Fail loud rather than silently reporting health: this check
-            // exists precisely because an unreadable failure signal reads as
-            // success.
-            Err(e) => checks.push(Check {
-                name: "supervisor relay".to_string(),
-                status: CheckStatus::Warning,
-                message: format!("cannot check undelivered lifecycle relays: {e}"),
-            }),
-        }
-    }
+    checks.push(supervisor_relay_check(&cas_root));
 
     // Every active factory session needs exactly one live durable supervisor
     // row. Otherwise logical handoffs and verification recovery have nowhere
@@ -2166,53 +2275,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // pending after several spent attempts is the earliest honest signal that
     // a recipient is unreachable — visible here BEFORE the row exhausts its
     // budget and dies, which is the only window in which anyone can act.
-    {
-        const RETRY_WARN_THRESHOLD: u32 = 3;
-        match crate::store::open_prompt_queue_store(&cas_root)
-            .map_err(|e| e.to_string())
-            .and_then(|queue| {
-                queue
-                    .list_most_retried_pending(RETRY_WARN_THRESHOLD, 5)
-                    .map_err(|e| e.to_string())
-            }) {
-            Ok(rows) if rows.is_empty() => checks.push(Check {
-                name: "delivery retries".to_string(),
-                status: CheckStatus::Ok,
-                message: format!("no pending message has spent {RETRY_WARN_THRESHOLD}+ attempts"),
-            }),
-            Ok(rows) => {
-                let worst = rows
-                    .iter()
-                    .take(3)
-                    .map(|row| {
-                        format!(
-                            "#{} -> {} ({} attempts{})",
-                            row.prompt_id,
-                            row.target,
-                            row.delivery_attempts,
-                            row.reason.map(|r| format!(", {r}")).unwrap_or_default()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                checks.push(Check {
-                    name: "delivery retries".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "{} pending message(s) have spent {RETRY_WARN_THRESHOLD}+ transport \
-                         attempts: {worst}. The recipient is likely unreachable — check the \
-                         pane before the row exhausts its budget.",
-                        rows.len()
-                    ),
-                });
-            }
-            Err(e) => checks.push(Check {
-                name: "delivery retries".to_string(),
-                status: CheckStatus::Warning,
-                message: format!("cannot check delivery retry counts: {e}"),
-            }),
-        }
-    }
+    checks.push(delivery_retries_check(&cas_root));
 
     recorder.mark("message handoff", &checks);
     // Check 3b: Schema details (tables and columns). An unreadable schema is a
@@ -5638,6 +5701,182 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn doctor_preserves_database_schema_without_prompt_queue_cas_d6b9() {
+        use clap::Parser;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set_current_dir(&project);
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS prompt_queue_recipient_seen;
+                     DROP TABLE IF EXISTS prompt_queue_recipient_transport;
+                     DROP TABLE IF EXISTS prompt_queue;",
+        )
+        .unwrap();
+        let schema = || {
+            let mut stmt = conn
+                .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        let counts = || {
+            get_schema_summary(&root)
+                .unwrap()
+                .tables
+                .into_iter()
+                .map(|table| (table.name, table.columns, table.row_count))
+                .collect::<Vec<_>>()
+        };
+        let before = schema();
+        let counts_before = counts();
+        let cli = Cli::parse_from(["cas", "--json", "doctor"]);
+        let Some(crate::cli::Commands::Doctor(args)) = &cli.command else {
+            panic!("doctor arguments");
+        };
+        // Findings may make the command return an error. Diagnosing them may
+        // not change the database whose health is being reported.
+        let result = execute(args, &cli, Some(&root));
+        assert_eq!(schema(), before, "doctor result: {result:?}");
+        assert_eq!(
+            counts(),
+            counts_before,
+            "doctor must preserve table, column and row counts"
+        );
+    }
+
+    #[test]
+    fn doctor_queue_checks_read_an_absent_queue_as_healthy_without_creating_it_cas_5b0b() {
+        // cas-5b0b: a project that has never queued anything has no
+        // prompt_queue table. That reads as healthy, and doctor still creates
+        // nothing in the database it inspects (cas-d6b9).
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('retained');",
+            )
+            .unwrap();
+        let before = fs::read(&db).unwrap();
+        let relay = supervisor_relay_check(temp.path());
+        assert!(matches!(relay.status, CheckStatus::Ok), "{}", relay.message);
+        assert_eq!(relay.message, "no relays yet");
+        let retries = delivery_retries_check(temp.path());
+        assert!(
+            matches!(retries.status, CheckStatus::Ok),
+            "{}",
+            retries.message
+        );
+        assert_eq!(retries.message, "none queued");
+        assert_eq!(fs::read(&db).unwrap(), before);
+    }
+
+    #[test]
+    fn doctor_queue_checks_warn_in_plain_words_when_the_queue_cannot_be_read_cas_5b0b() {
+        // A queue that exists but can't be read is still a warning, said
+        // without SQL error text: here an older queue missing the columns the
+        // checks read.
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE prompt_queue(id INTEGER PRIMARY KEY);")
+            .unwrap();
+        let before = fs::read(&db).unwrap();
+        for check in [
+            supervisor_relay_check(temp.path()),
+            delivery_retries_check(temp.path()),
+        ] {
+            assert!(
+                matches!(check.status, CheckStatus::Warning),
+                "{}",
+                check.message
+            );
+            assert!(
+                check.message.ends_with("run 'cas update --schema-only'"),
+                "{}",
+                check.message
+            );
+            for sql in ["no such", "database error", "SELECT", "sqlite"] {
+                assert!(!check.message.contains(sql), "{}", check.message);
+            }
+        }
+        assert_eq!(fs::read(&db).unwrap(), before);
+        assert_eq!(
+            prompt_queue_read_failure("database is locked"),
+            "the database is in use by another process; run cas doctor again in a moment"
+        );
+        assert_eq!(
+            prompt_queue_read_failure("file is not a database"),
+            "the database file looks damaged"
+        );
+    }
+
+    #[test]
+    fn doctor_queue_checks_keep_relay_and_retry_health_cas_d6b9() {
+        use crate::store::SqlitePromptQueueStore;
+        use cas_store::PendingReason;
+        let temp = TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(matches!(
+            supervisor_relay_check(temp.path()).status,
+            CheckStatus::Ok
+        ));
+        assert!(matches!(
+            delivery_retries_check(temp.path()).status,
+            CheckStatus::Ok
+        ));
+        let lost = queue
+            .enqueue_with_summary(
+                "lifecycle-wake:42",
+                "supervisor",
+                "lost relay",
+                None,
+                Some("cas-d6b9"),
+            )
+            .unwrap();
+        queue
+            .mark_undelivered_lifecycle_relay(lost, Some("recipient unavailable"))
+            .unwrap();
+        let retry = queue.enqueue("supervisor", "worker", "pending").unwrap();
+        for _ in 0..3 {
+            queue
+                .record_pending_reason(retry, PendingReason::TargetUnavailable, None)
+                .unwrap();
+        }
+        let relay_check = supervisor_relay_check(temp.path());
+        assert!(matches!(relay_check.status, CheckStatus::Warning));
+        assert!(
+            relay_check.message.contains("1 lifecycle relay(s)"),
+            "{}",
+            relay_check.message
+        );
+        assert!(relay_check.message.contains("cas-d6b9"));
+        let retry_check = delivery_retries_check(temp.path());
+        assert!(matches!(retry_check.status, CheckStatus::Warning));
+        assert!(
+            retry_check.message.contains("1 pending message(s)"),
+            "{}",
+            retry_check.message
+        );
+        assert!(retry_check.message.contains("3 attempts"));
+        assert_eq!(queue.list_most_retried_pending(3, 10).unwrap().len(), 1);
+    }
 
     #[cfg(unix)]
     #[test]

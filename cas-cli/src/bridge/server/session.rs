@@ -67,6 +67,29 @@ pub(crate) fn allowed_agent_names(
     s
 }
 
+/// One task of a session's status. An awaiting-merge task also carries its
+/// delivery tip, read from the task store (cas-566b).
+pub(crate) fn task_summary_json(
+    t: cas_factory::TaskSummary,
+    task_store: Option<&dyn cas_store::TaskStore>,
+) -> TaskSummaryJson {
+    let tip = (t.status == cas_types::TaskStatus::AwaitingMerge)
+        .then(|| task_store?.get(&t.id).ok()?.deliverables.factory_branch_anchor)
+        .flatten();
+    TaskSummaryJson {
+        id: t.id,
+        title: t.title,
+        status: format!("{:?}", t.status).to_lowercase(),
+        priority: t.priority.0,
+        assignee: t.assignee,
+        task_type: format!("{:?}", t.task_type).to_lowercase(),
+        epic: t.epic,
+        branch: t.branch,
+        updated_at: t.updated_at.map(|at| at.to_rfc3339()),
+        tip,
+    }
+}
+
 pub(crate) fn build_status_json(
     session: &crate::ui::factory::SessionInfo,
     cas_root: &std::path::Path,
@@ -92,6 +115,9 @@ pub(crate) fn build_status_json(
         .into_iter()
         .filter(|a| allowed.contains(&a.name))
         .map(|a| AgentSummaryJson {
+            generation: crate::ops::fleet::worker_generation(cas_root, &session.name, &a.name)
+                .ok()
+                .flatten(),
             id: a.id,
             name: a.name,
             status: format!("{:?}", a.status).to_lowercase(),
@@ -104,16 +130,8 @@ pub(crate) fn build_status_json(
         })
         .collect();
 
-    let to_task = |t: cas_factory::TaskSummary| TaskSummaryJson {
-        id: t.id,
-        title: t.title,
-        status: format!("{:?}", t.status).to_lowercase(),
-        priority: t.priority.0,
-        assignee: t.assignee,
-        task_type: format!("{:?}", t.task_type).to_lowercase(),
-        epic: t.epic,
-        branch: t.branch,
-    };
+    let task_store = crate::store::open_task_store(cas_root).ok();
+    let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, task_store.as_deref());
 
     let queue = open_prompt_queue_store(cas_root)?;
     let pending = queue.pending_count()?;
@@ -127,6 +145,7 @@ pub(crate) fn build_status_json(
         tasks_ready: data.ready_tasks.into_iter().map(to_task).collect(),
         tasks_in_progress: data.in_progress_tasks.into_iter().map(to_task).collect(),
         epics: data.epic_tasks.into_iter().map(to_task).collect(),
+        focused_epic: crate::ops::fleet::pinned_epic(&session.name),
     })
 }
 
@@ -159,4 +178,54 @@ pub(crate) fn wait_for_supervisor_ack(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod focused_epic_tests {
+    use super::*;
+
+    /// cas-9b08: status names the session's pinned epic (null when
+    /// unpinned), so Commander can state it as focus_epic's precondition.
+    #[test]
+    fn status_reports_the_pinned_epic_or_null_cas_9b08() {
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let parent = std::env::temp_dir().canonicalize().unwrap();
+        let project = tempfile::tempdir_in(parent).unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let name = "factory-focus-9b08";
+        let metadata = crate::ui::factory::create_metadata(
+            name,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            Some(project.path().to_str().unwrap()),
+            None,
+        );
+        let path = crate::ui::factory::metadata_path(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&metadata).unwrap()).unwrap();
+        let session = crate::ui::factory::SessionInfo {
+            name: name.to_string(),
+            metadata,
+            is_running: true,
+            socket_exists: false,
+        };
+
+        let status_json = || {
+            serde_json::to_value(build_status_json(&session, &cas_root, 20).unwrap()).unwrap()
+        };
+        let status = status_json();
+        assert!(
+            status.get("focused_epic").is_some_and(serde_json::Value::is_null),
+            "{status}"
+        );
+
+        crate::ui::factory::persist_session_metadata_pinned_epic_id_at(
+            &path,
+            Some("cas-epic-9b08"),
+        )
+        .unwrap();
+        assert_eq!(status_json()["focused_epic"], "cas-epic-9b08");
+    }
 }

@@ -75,6 +75,7 @@ pub mod migration;
 pub mod notifications;
 pub mod orchestration;
 pub mod otel;
+pub(crate) mod ops;
 pub mod qa_evidence;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;

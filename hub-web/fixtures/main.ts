@@ -6,7 +6,7 @@ import { attentionCounts, createAttentionItem } from "../src/attention";
 import { renderAttentionPanel } from "../src/attention-view";
 import { renderConnectionSurfaceInto } from "../src/connection-state-view";
 import { DeferredRenderScheduler } from "../src/deferred-render";
-import { renderFleetBoardInto, type FleetBoardModel } from "../src/fleet-board";
+import { FleetBoardRenderer, renderFleetBoardInto, type FleetBoardModel } from "../src/fleet-board";
 import { pairingDialogCancellationActive } from "../src/pairing-dialog";
 import { pairingExchangeFailure } from "../src/pairing-messages";
 import { pairDialogMarkup } from "../src/pair-dialog-markup";
@@ -23,11 +23,12 @@ export const FIXTURE_NAMES = [
   "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-machine-label-overlong", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
-  "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
+  "conversation-attachment", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard",
   "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
   "conversations-session-ended",
   "conversation-needs-pairing",
   "fleet-populated",
+  "fleet-twins",
   "fleet-empty",
   "session-canvas",
   "session-workers",
@@ -95,6 +96,19 @@ function session(name: string, supervisor: string, workers: string[], liveness: 
 }
 
 function fleetModel(): FleetBoardModel {
+  if (fixtureName === "fleet-twins") {
+    const machines = [
+      { id: "atlas", label: "Atlas · Linux", state: "live", phase: "Live", selected: true },
+      { id: "attic", label: "Attic · Linux", state: "live", phase: "Live", selected: false },
+      { id: "atlas2", label: "Atlas2 · Linux", state: "live", phase: "Live", selected: false },
+    ];
+    const names = ["brisk-otter-5", "patient-pelican-19", "patient-pelican-9"];
+    return { machines, sessions: machines.flatMap((machine, index) =>
+      (index === 0 ? names : index === 1 ? names.slice(0, 2) : names.slice(2)).map((name) => ({
+        machineId: machine.id, machineLabel: machine.label, session: name, supervisor: name,
+        project: "cas-src", role: "supervisor" as const, workerCount: 0, status: "live", current: false,
+      }))) };
+  }
   const machines = [
     { id: "atlas", label: "Atlas laptop", state: "live", phase: "Live", selected: true },
     { id: "forge", label: "Forge desktop", state: "degraded", phase: "Unsteady", selected: false },
@@ -513,11 +527,12 @@ function renderShell(): void {
   shell.append(renderRail(machineCount, drawerOpen));
   const main = element("main");
   main.append(renderHeader(openSession));
-  if (fixtureName === "fleet-populated") {
+  if (fixtureName === "fleet-populated" || fixtureName === "fleet-twins") {
     const grid = element("section", "pane-grid");
     const board = element("div", "fleet-board");
     board.setAttribute("aria-label", "Fleet");
-    renderFleetBoardInto(board, fleetModel(), { open: () => {} });
+    if (fixtureName === "fleet-twins") new FleetBoardRenderer().render(board, fleetModel(), { open: () => {} });
+    else renderFleetBoardInto(board, fleetModel(), { open: () => {} });
     grid.append(board);
     main.append(grid);
   } else if (fixtureName === "fleet-empty") {

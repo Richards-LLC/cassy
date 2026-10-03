@@ -20,6 +20,7 @@ mount_guard_bin="${CASSY_ACTIONS_MOUNT_GUARD_BIN:-$production_guard}"
 lock_wait_seconds="${CASSY_ACTIONS_LOCK_WAIT_SECONDS:-300}"
 slot="${CASSY_ACTIONS_RUNNER_SLOT:-}"
 self="$(realpath -e -- "$0")"
+# shellcheck source=scripts/cassy-actions-process-identity.sh
 source "$(dirname -- "$self")/cassy-actions-process-identity.sh"
 
 case "${1:-}" in
@@ -130,7 +131,7 @@ PYSIGNAL
 retire_holder() {
     local holder_pid="$1" holder_token="$2" holder_start="$3" attempt
     stop_holder "$holder_pid" "$holder_start" "$holder_token" || fail "could not stop slot $slot cache lock holder"
-    for attempt in $(seq 1 100); do
+    for ((attempt = 0; attempt < 100; attempt++)); do
         if ! process_matches "$holder_pid" "$holder_start"; then
             # A killed holder may not run its trap. The caller holds the slot
             # guard, and no new holder can publish a record yet.
@@ -214,12 +215,12 @@ start_job() {
     fi
 
     token="$(printf '%s-%s-%s\n' "$$" "$(date +%s%N)" "$RANDOM" | sha256sum | awk '{print $1}')"
-    RUNNER_TRACKING_ID= nohup "$self" --hold "$slot" "$token" "$owner_pid" "$owner_start" 8>&- 9>&9 \
+    RUNNER_TRACKING_ID='' nohup "$self" --hold "$slot" "$token" "$owner_pid" "$owner_start" 8>&- 9>&9 \
         >>"$state_root/slot-$slot.log" 2>&1 &
     holder_pid=$!
     snapshot="$(process_snapshot "$holder_pid" 2>/dev/null || true)"
     read -r _ launched_start _ <<<"$snapshot"
-    for attempt in $(seq 1 100); do
+    for ((attempt = 0; attempt < 100; attempt++)); do
         record="$(read_record 2>/dev/null || true)"
         read -r _ _ holder_start _ <<<"$record"
         if [[ "$record" == "$holder_pid $token $holder_start $owner_pid $owner_start" ]] &&

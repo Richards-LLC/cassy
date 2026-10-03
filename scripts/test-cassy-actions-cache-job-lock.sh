@@ -6,6 +6,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 job_lock="$script_dir/cassy-actions-cache-job-lock.sh"
 pruner="$script_dir/prune-cassy-actions-cache.sh"
 "$script_dir/test-cassy-actions-process-identity.sh"
+# shellcheck source=scripts/cassy-actions-process-identity.sh
 source "$script_dir/cassy-actions-process-identity.sh"
 if [[ "$(uname -s)" != Linux ]]; then
     printf 'SKIP job lock integration: Linux /proc and util-linux flock required; owner comparison tested above\n'
@@ -167,6 +168,41 @@ run_completed
 holder_started=0
 run_pruner --now >/dev/null
 printf 'ok   job-lifetime shared lock excludes scheduled and forced pruning\n'
+
+# A late completed hook from another Worker must not release this job's lock.
+run_started >/dev/null
+holder_started=1
+read -r live_holder _ <"$state_root/slot-1.pid"
+if env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 python3 - "$completed_hook" <<'PYOTHER'
+import ctypes
+import subprocess
+import sys
+ctypes.CDLL(None).prctl(15, b"Runner.Worker", 0, 0, 0)
+sys.exit(subprocess.run([sys.argv[1]]).returncode)
+PYOTHER
+then
+    printf 'FAIL another Worker completed the live job\n' >&2
+    exit 1
+fi
+kill -0 "$live_holder"
+run_completed
+holder_started=0
+printf 'ok   completion from another Worker never releases the live owner lock\n'
+
+# Deployment may encounter the previous two-field record. Do not reclaim a
+# live legacy holder without ownership evidence; its completed hook still works.
+run_started >/dev/null
+holder_started=1
+read -r legacy_holder legacy_token _ <"$state_root/slot-1.pid"
+printf '%s %s\n' "$legacy_holder" "$legacy_token" >"$state_root/slot-1.pid"
+if run_started >/dev/null 2>&1; then
+    printf 'FAIL start replaced a live legacy holder\n' >&2
+    exit 1
+fi
+run_completed
+holder_started=0
+run_pruner --now >/dev/null
+printf 'ok   live legacy records fail closed and complete normally\n'
 
 # The Worker dies, but the old detached holder (and shared flock) survives.
 run_started >/dev/null

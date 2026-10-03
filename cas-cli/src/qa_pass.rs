@@ -785,26 +785,111 @@ pub struct LedgerFinding {
     pub text: String,
 }
 
-/// The "F10 NORMAL: <text>" lines of a ledger's pre-existing section.
-pub fn ledger_pre_existing_findings(_ledger: &str) -> Vec<LedgerFinding> {
-    Vec::new()
+/// The "F10 NORMAL: <text>" lines of a ledger's pre-existing section
+/// (cas-2849). The section is the first "## " heading naming pre-existing
+/// findings; a finding line is a finding id, one severity word, a colon and
+/// its text, optionally bulleted. Prose lines are skipped.
+pub fn ledger_pre_existing_findings(ledger: &str) -> Vec<LedgerFinding> {
+    let mut findings = Vec::new();
+    let mut in_section = false;
+    for line in ledger.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            let heading = heading.to_ascii_lowercase();
+            in_section = heading.contains("pre-existing") || heading.contains("preexisting");
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let line = line.trim().trim_start_matches(['-', '*']).trim();
+        let Some((head, text)) = line.split_once(':') else {
+            continue;
+        };
+        let words: Vec<&str> = head.split_whitespace().collect();
+        let [id, severity] = words.as_slice() else {
+            continue;
+        };
+        let is_id = id.len() > 1
+            && id.starts_with(['F', 'f'])
+            && id[1..].bytes().all(|byte| byte.is_ascii_digit());
+        let text = text.trim();
+        if is_id && severity.chars().all(char::is_alphabetic) && !text.is_empty() {
+            findings.push(LedgerFinding {
+                id: id.to_ascii_uppercase(),
+                severity: severity.to_ascii_lowercase(),
+                text: text.to_string(),
+            });
+        }
+    }
+    findings
 }
 
-/// Fill each pre-existing issue's missing problem from the ledger, and refuse
-/// one that still has no text.
+/// Fill each pre-existing issue's missing problem from the ledger's
+/// "F10 NORMAL: <text>" line for its id, and refuse one that still has no
+/// text: a follow-up titled "defect recorded by independent QA" with
+/// "Problem: (not described)" is unactionable (cas-2849).
 pub fn complete_pre_existing_issues(
-    _issues: &mut [PreExistingIssue],
-    _ledger: &str,
+    issues: &mut [PreExistingIssue],
+    ledger: &str,
 ) -> Result<(), String> {
+    let findings = ledger_pre_existing_findings(ledger);
+    for (index, issue) in issues.iter_mut().enumerate() {
+        if issue.problem.is_empty()
+            && let Some(finding) = findings
+                .iter()
+                .find(|finding| !issue.id.is_empty() && finding.id.eq_ignore_ascii_case(&issue.id))
+        {
+            issue.problem = finding.text.clone();
+            if issue.severity.is_empty() {
+                issue.severity = finding.severity.clone();
+            }
+        }
+        if issue.problem.is_empty() {
+            let named = if issue.id.is_empty() {
+                format!("pre-existing issue {}", index + 1)
+            } else {
+                format!("pre-existing issue {} ({})", index + 1, issue.id)
+            };
+            return Err(format!(
+                "{named} has no problem text, so its follow-up task would say nothing. Give it a \
+                 \"problem\" (or \"title\"/\"description\") in issues, or give it an \"id\" and write \
+                 the line \"{id} <SEVERITY>: <what is wrong>\" in the ledger's ## Pre-existing \
+                 section, then record the verdict again.",
+                id = if issue.id.is_empty() { "F<n>" } else { issue.id.as_str() },
+            ));
+        }
+    }
     Ok(())
 }
 
-/// The existing task a pre-existing issue already names as its follow-up.
+/// The existing task a pre-existing issue already names as its follow-up
+/// ("existing follow-up cas-2a33"), so qa_record does not file a duplicate
+/// (cas-2849). The delivery's own id never counts.
 pub fn tracked_follow_up(
-    _issue: &PreExistingIssue,
-    _delivery_id: &str,
-    _exists: impl Fn(&str) -> bool,
+    issue: &PreExistingIssue,
+    delivery_id: &str,
+    exists: impl Fn(&str) -> bool,
 ) -> Option<String> {
+    let text = format!("{} {} {}", issue.title, issue.problem, issue.suggestion).to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find("cas-") {
+        let start = offset + found;
+        let digits = bytes[start + 4..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_hexdigit())
+            .count();
+        let end = start + 4 + digits;
+        offset = start + 4;
+        let boundary = bytes.get(end).is_none_or(|byte| !byte.is_ascii_alphanumeric());
+        if !(4..=8).contains(&digits) || !boundary {
+            continue;
+        }
+        let id = &text[start..end];
+        if !id.eq_ignore_ascii_case(delivery_id) && exists(id) {
+            return Some(id.to_string());
+        }
+    }
     None
 }
 
@@ -832,12 +917,26 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
         };
         let scope = text("scope").to_ascii_lowercase().replace(['_', ' '], "-");
         if matches!(scope.as_str(), "pre-existing" | "preexisting") {
+            // cas-2849: reviewers also write id/title/description/evidence,
+            // as cas-d1fa round 1 did; read those rather than dropping them.
+            let first = |keys: &[&str]| {
+                keys.iter()
+                    .map(|key| text(key))
+                    .find(|value| !value.is_empty())
+                    .unwrap_or_default()
+            };
+            let title = text("title");
+            let mut problem = first(&["problem", "description", "summary"]);
+            if problem.is_empty() {
+                problem = title.clone();
+            }
             pre_existing.push(PreExistingIssue {
+                id: text("id"),
+                title,
                 severity: text("severity"),
-                problem: text("problem"),
-                suggestion: text("suggestion"),
-                evidence: text("file"),
-                ..Default::default()
+                problem,
+                suggestion: first(&["suggestion", "fix"]),
+                evidence: first(&["file", "evidence"]),
             });
         } else {
             delivery += 1;
@@ -876,7 +975,8 @@ pub fn follow_up_priority(severity: &str) -> cas_types::Priority {
 pub fn follow_up_title(delivery: &Task, issue: &PreExistingIssue) -> String {
     // The first sentence of the first line: "Footer contrast 3.1:1. Base too."
     // titles as "Footer contrast 3.1:1".
-    let first_line = issue.problem.lines().next().unwrap_or_default();
+    let source = if issue.title.is_empty() { &issue.problem } else { &issue.title };
+    let first_line = source.lines().next().unwrap_or_default();
     let mut problem = first_line
         .split(". ")
         .next()

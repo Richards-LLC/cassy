@@ -5639,6 +5639,54 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn doctor_preserves_database_schema_without_prompt_queue_cas_d6b9() {
+        use clap::Parser;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set_current_dir(&project);
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS prompt_queue_recipient_seen;
+                 DROP TABLE IF EXISTS prompt_queue_recipient_transport;
+                 DROP TABLE IF EXISTS prompt_queue;",
+        )
+        .unwrap();
+        let schema = || {
+            let mut stmt = conn
+                .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        let before = schema();
+        let counts_before = serde_json::to_value(get_schema_summary(&root).unwrap()).unwrap();
+        let cli = Cli::parse_from(["cas", "--json", "doctor"]);
+        let Some(crate::cli::Commands::Doctor(args)) = &cli.command else {
+            panic!("doctor arguments");
+        };
+        // Findings may make the command return an error. Diagnosing them may
+        // not change the database whose health is being reported.
+        let result = execute(args, &cli, Some(&root));
+        assert_eq!(schema(), before, "doctor result: {result:?}");
+        assert_eq!(
+            serde_json::to_value(get_schema_summary(&root).unwrap()).unwrap(),
+            counts_before,
+            "doctor must preserve table, column and row counts"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn github_origin_doctor_warns_on_move_and_preserves_json_remedy_cas_28c8() {

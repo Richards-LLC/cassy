@@ -14221,7 +14221,8 @@ mod declined_wake_retry_tests_cas_913c {
     use super::{
         ClaudeRedelivery, DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, PaneWakeState,
         ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome, claude_redelivery_decision_after_turn,
-        claude_turn_aware_retry, deferred_inbox_drain_phase, deferred_inbox_outcome,
+        RecipientWakeEvidence, claude_turn_aware_retry, claude_turn_aware_retry_with_evidence,
+        deferred_inbox_drain_phase, deferred_inbox_outcome,
         idle_unacked_relay_due, wake_retry_due_to_turn_end,
     };
     use chrono::{Duration as Chrono, TimeZone, Utc};

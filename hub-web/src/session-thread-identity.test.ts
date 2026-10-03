@@ -283,7 +283,9 @@ describe("grouped project sessions (cas-55a4)", () => {
     const retry = control.querySelector<HTMLButtonElement>(".conversation-end-ask")!;
     const error = control.querySelector<HTMLElement>(".conversation-end-error")!;
     expect(error.textContent).toBe("Could not end noble-cheetah-84 on Atlas. Try End session again. If it still fails, check the session on Atlas.");
-    expect(error.getAttribute("role")).toBe("alert");
+    // cas-9ae6: focus is back on End session, which reads the failure as its
+    // description; the line is not also an alert, so it is said once.
+    expect(error.hasAttribute("role")).toBe(false);
     expect(document.activeElement).toBe(retry);
     expect(retry.getAttribute("aria-describedby")).toBe(error.id);
     expect(error.id).not.toBe("");
@@ -316,6 +318,8 @@ describe("grouped project sessions (cas-55a4)", () => {
     await Promise.resolve();
     expect(document.activeElement).toBe(elsewhere);
     expect(container.querySelector(".conversation-end-error")?.textContent).toContain("Try End session again.");
+    // Focus stayed elsewhere, so nothing reads the description: the failure is an alert (cas-9ae6).
+    expect(container.querySelector(".conversation-end-error")?.getAttribute("role")).toBe("alert");
     expect(container.querySelectorAll(".conversation-row")).toHaveLength(1);
   });
 

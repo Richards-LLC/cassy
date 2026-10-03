@@ -1763,9 +1763,8 @@ impl CasCore {
             } else {
                 None
             };
-            if let Some(target) = retarget.as_ref() {
-                refuse_retarget_of_parked_delivery(&task, epic_id, target)?;
-            }
+            // A parked or recorded delivery never reaches here: the guard
+            // above refuses `epic=` for it with the proof_scope_fix route.
             let already_matches = match replacement.as_ref() {
                 Some(dep) => {
                     existing_parent_deps.len() == 1 && existing_parent_deps[0].to_id == dep.to_id
@@ -2150,9 +2149,10 @@ pub(crate) fn known_epics(task_store: &dyn cas_store::TaskStore) -> Vec<Task> {
         .collect()
 }
 
-/// cas-6fb6: re-parenting must not silently move a delivery that is already
-/// parked for merge: its branch, anchor and proof were measured against the
-/// current target. Refuse, naming the explicit correction.
+/// cas-6fb6: `dep_add parent` must not silently move a delivery that is
+/// already parked for merge: its branch, anchor and proof were measured
+/// against the current target. Refuse, naming the explicit correction, as the
+/// `update epic=` guard does.
 pub(crate) fn refuse_retarget_of_parked_delivery(
     task: &Task,
     epic_id: &str,
@@ -2866,15 +2866,19 @@ mod epic_move_work_target_tests {
         .unwrap();
         let refused = core.cas_task_update(Parameters(req)).await.unwrap_err().message.to_string();
         assert!(
-            refused.contains("RE-PARENT REFUSED") && refused.contains("proof_scope_fix=true")
-                && refused.contains("target_branch=epic/new"),
+            refused.contains("DELIVERY PROOF SCOPE LOCKED") && refused.contains("proof_scope_fix")
+                && refused.contains("epic/new"),
             "{refused}"
         );
         assert_eq!(branch_of(&store, &parked.id), "epic/old");
         assert_eq!(parent_of(&store, &parked.id), vec!["cas-6fb6-old".to_string()]);
 
         let refused = add_parent(&core, &parked.id, "cas-6fb6-new").await.unwrap_err();
-        assert!(refused.contains("RE-PARENT REFUSED"), "{refused}");
+        assert!(
+            refused.contains("RE-PARENT REFUSED") && refused.contains("proof_scope_fix=true")
+                && refused.contains("target_branch=epic/new"),
+            "{refused}"
+        );
         assert_eq!(branch_of(&store, &parked.id), "epic/old");
         assert_eq!(parent_of(&store, &parked.id), vec!["cas-6fb6-old".to_string()]);
     }
@@ -2884,7 +2888,6 @@ mod epic_move_work_target_tests {
     /// trunk target. It now follows the epic, as `update epic=` does.
     #[tokio::test]
     async fn dep_add_parent_moves_a_trunk_fallback_onto_a_lane_targeted_epic_cas_6fb6() {
-        let root = TempDir::new().unwrap();
         let repo = TempDir::new().unwrap();
         let git = |args: &[&str]| {
             let status = std::process::Command::new("git")
@@ -2896,17 +2899,27 @@ mod epic_move_work_target_tests {
             assert!(status.success(), "git {args:?}");
         };
         git(&["init", "-q", "-b", "main"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
-        std::fs::create_dir_all(repo.path().join(".cas")).unwrap();
+        std::fs::write(repo.path().join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["branch", "epic/f29b"]);
+        let cas_dir = repo.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
         std::fs::write(
-            repo.path().join(".cas/config.toml"),
-            "[factory]\nepic_base_branch = \"main\"\n",
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-6fb6-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\n",
         )
         .unwrap();
-        let selector = repo.path().to_str().unwrap().to_string();
-        let at = |branch: &str| WorkTarget { repo_selector: selector.clone(), target_branch: branch.into() };
+        let at = |branch: &str| WorkTarget {
+            repo_selector: "project:cas-6fb6-fixture".into(),
+            target_branch: branch.into(),
+        };
+        assert!(
+            crate::mcp::tools::core::task::repo_context::resolve_repo_context(&cas_dir, &at("main")).is_ok(),
+            "precondition: the fixture project resolves"
+        );
 
-        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();
         let mut lane_epic = Task::new("cas-6fb6-f29b".into(), "lane-targeted epic".into());

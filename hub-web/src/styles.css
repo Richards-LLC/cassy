@@ -3981,6 +3981,16 @@ button.chip:disabled { cursor: default; }
 .paired-machine-address { font-family: var(--font-mono); }
 .paired-machine button { margin-top: var(--space-2); min-height: var(--rail-item-min); }
 #paired-machines-error { color: var(--state-crit); }
+/* cas-d382: each pairing's fleet permissions, in words; a missing one names
+   its state and the command (or the one-time grant) beside it. */
+.paired-machine-fleet { margin-top: var(--space-3); }
+.fleet-permissions-title { margin: 0 0 var(--space-1); font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-ui); color: var(--text-hi); }
+.fleet-permission { padding: var(--space-1) 0; }
+.paired-machine .fleet-permission-head { margin: 0; color: var(--text-hi); }
+.fleet-permission-state { color: var(--text-mid); }
+.fleet-permission[data-allowed="false"] .fleet-permission-state { color: var(--state-warn); }
+.paired-machine .fleet-permission-control[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
+.fleet-permission-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
 .commander-mark .cloud-brand > span { display: none; }
 .commander-mark .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
 #pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }

@@ -1,4 +1,6 @@
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
+import { fleetControlGate } from '../src/fleet-permissions';
+import type { Scope } from '../src/types';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView, terminalOfferReason } from '../src/conversation-view';
@@ -159,7 +161,21 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // The footer counts conversations, not machines: it must equal the rows rendered above.
   app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, listRows.length, 'fixture', loading);
   app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
-  renderPairedMachines(app.querySelector('#paired-machines-list')!, machines, async () => {});
+  // cas-d382: the register names each pairing's fleet permissions: one holds
+  // both, one is a control pairing (may allow managing workers, Stop and
+  // restart is not allowed), one is read-only (commands for both).
+  const fleetScopes: Scope[][] = [
+    ['machine-read', 'session-read', 'pane-read', 'pane-input', 'message-send', 'pane-interrupt', 'factory-operate', 'factory-manage'],
+    ['machine-read', 'session-read', 'pane-read', 'pane-input', 'message-send', 'pane-interrupt'],
+    ['machine-read', 'session-read', 'pane-read'],
+  ];
+  const registerRows = state === 'paired-machines'
+    ? machines.map((machine, index) => {
+      const scopes = fleetScopes[index % fleetScopes.length]!;
+      return { ...machine, fleet: { operate: fleetControlGate(scopes, 'add-workers', 'https://commander.example'), manage: fleetControlGate(scopes, 'stop-worker', 'https://commander.example') } };
+    })
+    : machines;
+  renderPairedMachines(app.querySelector('#paired-machines-list')!, registerRows, async () => {});
   const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;
   app.querySelector<HTMLElement>('#paired-machines-toggle')!.onclick = () => dialog.showModal();
   app.querySelector<HTMLElement>('#paired-machines-close')!.onclick = () => dialog.close();

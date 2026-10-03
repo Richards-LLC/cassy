@@ -1,4 +1,5 @@
-import { CONTROL_CAPABILITY, READ_CAPABILITY, scopeSummary } from "./pairing-scopes";
+import { CONTROL_CAPABILITY, FACTORY_MANAGE_CAPABILITY, FACTORY_OPERATE_CAPABILITY, READ_CAPABILITY, canEnableFactoryOperate, scopeGrantCommand, scopeSummary } from "./pairing-scopes";
+import { NOT_ALLOWED_ON_PAIRING, fleetControlGate, fleetOperationScope, type FleetOperation } from "./fleet-permissions";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
@@ -362,7 +363,68 @@ describe("plain capability summary beside the exact scopes (cas-8051 F7)", () =>
 
   it("names any scope outside those two sets as itself", () => {
     expect(scopeSummary(["machine-read", "hub-admin"])).toEqual(["See this machine", "Administer the hub"]);
-    expect(scopeSummary(["factory-manage"])).toEqual(["Manage the factory"]);
+    // cas-d382: the brief's plain words, not "Manage the factory".
+    expect(scopeSummary(["factory-manage"])).toEqual(["Stop and restart workers and sessions"]);
     expect(scopeSummary([])).toEqual([]);
+  });
+});
+
+describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
+  const CONTROL: Scope[] = [...PAIRING_SCOPES];
+  it("reads factory:operate and factory:manage from an invitation, in either spelling", () => {
+    expect(parseGrantedScopes("machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage")).toEqual([...PAIRING_SCOPES, "factory-manage"]);
+    expect(parseGrantedScopes("machine-read,factory-operate")).toEqual(["machine-read", "factory-operate"]);
+    // hub:admin is still pairing-only and not offered by this build.
+    expect(parseGrantedScopes("machine:read,hub:admin")).toBeUndefined();
+    const { invitation } = fragment(`#pair=${TOKEN}&hub=machine-uuid&scopes=machine:read,session:read,pane:read,factory:manage`);
+    expect(invitation?.scopes).toEqual(["machine-read", "session-read", "pane-read", "factory-manage"]);
+  });
+
+  it("says what they allow in plain words, beside the exact scopes", () => {
+    expect(scopeSummary([...CONTROL, "factory-operate"])).toEqual([READ_CAPABILITY, CONTROL_CAPABILITY, "Manage workers and tasks"]);
+    expect(scopeSummary([...CONTROL, "factory-manage"])).toEqual([READ_CAPABILITY, CONTROL_CAPABILITY, "Stop and restart workers and sessions"]);
+    expect(FACTORY_OPERATE_CAPABILITY).toBe("Manage workers and tasks");
+    expect(FACTORY_MANAGE_CAPABILITY).toBe("Stop and restart workers and sessions");
+  });
+
+  it("offers a fleet scope's box only when the invitation grants it, ticked", () => {
+    const granted: Scope[] = [...CONTROL, "factory-manage"];
+    const choices = scopeChoices(granted, granted);
+    expect(choices.map((choice) => choice.scope)).toEqual(granted);
+    expect(choices.find((choice) => choice.scope === "factory-manage")).toMatchObject({ label: "factory:manage", granted: true, checked: true });
+    expect(scopeChoices(CONTROL, CONTROL).map((choice) => choice.scope)).not.toContain("factory-manage");
+    expect(scopeChoices(CONTROL, CONTROL).map((choice) => choice.scope)).not.toContain("factory-operate");
+  });
+
+  it("gates each operation by the operator's decision: Stop, Restart and End session need factory:manage", () => {
+    const expected: Record<FleetOperation, Scope> = {
+      "ask-merge": "message-send", "focus-epic": "factory-operate", "add-workers": "factory-operate", "pause-worker": "factory-operate",
+      "assign-task": "factory-operate", "restart-worker": "factory-manage", "stop-worker": "factory-manage", "end-session": "factory-manage",
+    };
+    for (const [operation, scope] of Object.entries(expected) as [FleetOperation, Scope][]) expect(fleetOperationScope(operation), operation).toBe(scope);
+  });
+
+  it("says a missing scope in words and names the command that adds it to the current pairing", () => {
+    const stop = fleetControlGate(CONTROL, "stop-worker", ORIGIN);
+    expect(stop).toMatchObject({ allowed: false, scope: "factory-manage", state: NOT_ALLOWED_ON_PAIRING, grantable: false });
+    if (stop.allowed) throw new Error("unreachable");
+    expect(stop.state).toBe("Not allowed on this pairing");
+    expect(stop.reason).toBe("Needs the Stop and restart workers and sessions permission (factory:manage).");
+    expect(stop.command).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage");
+    expect(fleetControlGate([...CONTROL, "factory-manage"], "stop-worker", ORIGIN)).toEqual({ allowed: true, scope: "factory-manage" });
+    expect(fleetControlGate([...CONTROL, "factory-manage"], "end-session", ORIGIN).allowed).toBe(true);
+    // factory:manage is never self-granted, even with control scopes.
+    expect(fleetControlGate([...CONTROL, "factory-operate"], "restart-worker", ORIGIN)).toMatchObject({ allowed: false, grantable: false });
+  });
+
+  it("offers the one-time Allow managing workers grant only to a control pairing", () => {
+    expect(canEnableFactoryOperate(CONTROL)).toBe(true);
+    expect(canEnableFactoryOperate(READ_ONLY_PAIRING_SCOPES)).toBe(false);
+    expect(fleetControlGate(CONTROL, "add-workers", ORIGIN)).toMatchObject({ allowed: false, scope: "factory-operate", grantable: true });
+    const readOnly = fleetControlGate(READ_ONLY_PAIRING_SCOPES, "pause-worker", ORIGIN);
+    expect(readOnly).toMatchObject({ allowed: false, grantable: false });
+    if (!readOnly.allowed) expect(readOnly.command).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,factory:operate");
+    expect(fleetControlGate([...CONTROL, "factory-operate"], "assign-task", ORIGIN).allowed).toBe(true);
+    expect(scopeGrantCommand(ORIGIN, ["machine-read", "factory-operate"], "factory-operate")).toBe("cas hub pair --origin https://commander.example --scopes machine:read,factory:operate");
   });
 });

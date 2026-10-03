@@ -33,6 +33,8 @@ mod init_watchdog_budget_test;
 mod integrate_lifecycle_test;
 #[path = "../jail_guard_test.rs"]
 mod jail_guard_test;
+#[path = "../worker_isolation_hook_test.rs"]
+mod worker_isolation_hook_test;
 #[path = "../mcp_protocol_test.rs"]
 mod mcp_protocol_test;
 #[path = "../mcp_proxy_test.rs"]

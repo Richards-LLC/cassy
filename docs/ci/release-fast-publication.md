@@ -33,7 +33,7 @@ bytes that already exist.
 
 ## The architecture
 
-```
+```text
 release PR merges to main
         |
         v
@@ -76,6 +76,14 @@ not produced both assets. Every other degraded input — no run, a partial run,
 expired artifacts, an API outage — also reports `found=false` with the same
 loud cold-build signal. The prebuild is an accelerator; it can never be the
 reason a release cannot ship.
+
+When you run the lookup by hand without `GITHUB_REPOSITORY`, it takes the
+repository from `gh repo view` (the gh default repository) and then from the
+`origin` remote. It never uses another remote, because `upstream` here is a
+different project, and it names the repository it chose on stderr. If neither
+source names exactly one GitHub repository, the lookup exits 2 with an error and
+prints no `found=` line, so a hand check can't mistake it for a missing
+prebuild. CI always sets `GITHUB_REPOSITORY`, so this never happens there.
 
 Publication is the opposite. `release` requires exactly one complete supply
 path: either the prebuild was adopted **and both platform builds were skipped**,
@@ -123,7 +131,7 @@ only `contents: write` token in the release and stays on `ubuntu-latest`.
 
 Enabling and disabling the routing is a repository-variable change:
 
-```
+```bash
 gh variable set CASSY_RELEASE_SELF_HOSTED --body enabled    # opt in
 gh variable set CASSY_RELEASE_SELF_HOSTED --body disabled   # before box maintenance
 ```
@@ -165,7 +173,7 @@ workflow warning.
 
 Two receipts, both gates rather than reports:
 
-```
+```bash
 scripts/release-published-receipt.sh vX.Y.Z    # what shipped: digests, both assets
 scripts/release-latency-receipt.sh   vX.Y.Z    # how fast: tag push -> published
 ```

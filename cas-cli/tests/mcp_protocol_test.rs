@@ -83,6 +83,70 @@ struct JsonRpcError {
 /// nextest kill, so a wedge can never again consume the slow-timeout.
 const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// How much of the child's stderr and of the server log a timeout diagnostic
+/// carries (cas-5eb9). Bounded so a chatty server can neither bloat memory
+/// nor bury the CI log; enough for the last few dozen lines.
+const DIAGNOSTIC_TAIL_BYTES: usize = 4096;
+
+/// The tracing-log directory of the `cas serve` this command will start: the
+/// default `logs/` under the `CAS_ROOT` it is pinned to (`CasSandbox` always
+/// pins one).
+fn server_log_dir(cmd: &Command) -> Option<std::path::PathBuf> {
+    cmd.get_envs()
+        .find_map(|(key, value)| (key == "CAS_ROOT").then_some(value).flatten())
+        .map(|root| std::path::Path::new(root).join("logs"))
+}
+
+/// A byte buffer that keeps only its last `cap` bytes.
+#[derive(Debug)]
+struct BoundedTail {
+    bytes: std::collections::VecDeque<u8>,
+    cap: usize,
+}
+
+impl BoundedTail {
+    fn new(cap: usize) -> Self {
+        Self {
+            bytes: std::collections::VecDeque::with_capacity(cap),
+            cap,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        let chunk = &chunk[chunk.len().saturating_sub(self.cap)..];
+        let overflow = (self.bytes.len() + chunk.len()).saturating_sub(self.cap);
+        self.bytes.drain(..overflow);
+        self.bytes.extend(chunk);
+    }
+
+    fn render(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.iter().copied().collect::<Vec<u8>>()).into_owned()
+    }
+}
+
+/// The last `cap` bytes of the newest `cas-*.log` in `log_dir`, the daily
+/// tracing log `cas serve` writes under its store (`logging::init`).
+fn newest_log_tail(log_dir: &std::path::Path, cap: usize) -> Option<(std::path::PathBuf, String)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let newest = std::fs::read_dir(log_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("cas-") && name.ends_with(".log") && !name.starts_with("cas-serve-")
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .max_by_key(|(modified, _)| *modified)?
+        .1;
+    let mut file = std::fs::File::open(&newest).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(cap as u64))).ok()?;
+    let mut bytes = Vec::with_capacity(cap);
+    file.take(cap as u64).read_to_end(&mut bytes).ok()?;
+    Some((newest, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 /// Why a request failed to produce a usable response. Returned by
 /// [`McpTestClient::try_send_request`] so tests can assert on the failure
 /// shape instead of relying on a panic message.
@@ -95,6 +159,12 @@ enum TransportError {
         id: u64,
         waited: std::time::Duration,
         child_status: Option<std::process::ExitStatus>,
+        /// Last [`DIAGNOSTIC_TAIL_BYTES`] of the child's stderr (cas-5eb9).
+        stderr_tail: String,
+        /// Last [`DIAGNOSTIC_TAIL_BYTES`] of the server's own tracing log,
+        /// where `MCP call_tool START ... id=<id>` is written: its presence
+        /// shows the request was read (cas-5eb9).
+        server_log_tail: Option<(std::path::PathBuf, String)>,
     },
     /// The server closed stdout (or exited) without answering.
     Closed { method: String, id: u64 },
@@ -108,18 +178,38 @@ impl std::fmt::Display for TransportError {
                 id,
                 waited,
                 child_status,
-            } => write!(
-                f,
-                "no JSON-RPC response to method '{method}' (id {id}) within {}s; \
-                 cas serve child status: {}. The request path produced no response; \
-                 this alone cannot distinguish a request that was never read, a \
-                 handler that never completed, or a response that was never flushed.",
-                waited.as_secs(),
-                match child_status {
-                    Some(status) => format!("exited {status}"),
-                    None => "still running".to_string(),
+                stderr_tail,
+                server_log_tail,
+            } => {
+                write!(
+                    f,
+                    "no JSON-RPC response to method '{method}' (id {id}) within {}s; \
+                     cas serve child status: {}. The request path produced no response; \
+                     this alone cannot distinguish a request that was never read, a \
+                     handler that never completed, or a response that was never flushed. \
+                     A server-log line `MCP call_tool START ... id={id}` below means the \
+                     request was read.",
+                    waited.as_secs(),
+                    match child_status {
+                        Some(status) => format!("exited {status}"),
+                        None => "still running".to_string(),
+                    }
+                )?;
+                write!(
+                    f,
+                    "\n--- cas serve stderr (last {DIAGNOSTIC_TAIL_BYTES} bytes) ---\n{}",
+                    if stderr_tail.is_empty() { "<empty>" } else { stderr_tail }
+                )?;
+                match server_log_tail {
+                    Some((path, tail)) => write!(
+                        f,
+                        "\n--- cas serve log {} (last {DIAGNOSTIC_TAIL_BYTES} bytes) ---\n{}",
+                        path.display(),
+                        if tail.is_empty() { "<empty>" } else { tail }
+                    ),
+                    None => write!(f, "\n--- cas serve log: none found ---"),
                 }
-            ),
+            }
             TransportError::Closed { method, id } => write!(
                 f,
                 "cas serve closed stdout without responding to method '{method}' (id {id})"
@@ -141,6 +231,11 @@ struct McpTestClient {
     /// dedicated thread so the child can never wedge on a full stderr pipe
     /// mid-test (the same unbounded-blocking class as the stdout read).
     stderr_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    /// The last [`DIAGNOSTIC_TAIL_BYTES`] of stderr, kept for every child so
+    /// a timeout can say what the server last printed (cas-5eb9).
+    stderr_tail: std::sync::Arc<std::sync::Mutex<BoundedTail>>,
+    /// The server's tracing-log directory, when known.
+    server_log_dir: Option<std::path::PathBuf>,
     next_id: u64,
     response_timeout: std::time::Duration,
 }
@@ -153,19 +248,23 @@ impl McpTestClient {
 
     fn spawn_command(mut cmd: Command) -> Self {
         cmd.arg("serve");
+        let server_log_dir = server_log_dir(&cmd);
         let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Piped and drained into a bounded tail, never left undrained
+            // (a full pipe would wedge the server) nor unbounded (cas-5eb9).
+            .stderr(Stdio::piped())
             .spawn()
             .expect("Failed to spawn cas serve");
 
-        Self::from_child(child, false)
+        Self::from_child(child, false, server_log_dir)
     }
 
     fn spawn_capturing_stderr(sandbox: &CasSandbox) -> Self {
         let mut cmd = sandbox.command();
         cmd.arg("serve");
+        let server_log_dir = server_log_dir(&cmd);
         let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -173,11 +272,17 @@ impl McpTestClient {
             .spawn()
             .expect("Failed to spawn cas serve");
 
-        Self::from_child(child, true)
+        Self::from_child(child, true, server_log_dir)
     }
 
-    /// Wire a spawned child up to the draining reader threads.
-    fn from_child(mut child: std::process::Child, capture_stderr: bool) -> Self {
+    /// Wire a spawned child up to the draining reader threads. A piped
+    /// stderr is always drained into the bounded tail; `capture_stderr`
+    /// additionally keeps all of it for [`Self::stop_and_read_stderr`].
+    fn from_child(
+        mut child: std::process::Child,
+        capture_stderr: bool,
+        server_log_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         let stdin = child.stdin.take().expect("Failed to get stdin");
         let stdout = child.stdout.take().expect("Failed to get stdout");
 
@@ -199,30 +304,42 @@ impl McpTestClient {
             }
         });
 
-        let stderr_buf = if capture_stderr {
-            let pipe = child.stderr.take().expect("Failed to get stderr");
-            let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-            let sink = std::sync::Arc::clone(&buf);
+        let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(BoundedTail::new(
+            DIAGNOSTIC_TAIL_BYTES,
+        )));
+        let stderr_buf = capture_stderr
+            .then(|| std::sync::Arc::new(std::sync::Mutex::new(String::new())));
+        if let Some(mut pipe) = child.stderr.take() {
+            let tail = std::sync::Arc::clone(&stderr_tail);
+            let full = stderr_buf.clone();
             std::thread::spawn(move || {
-                let mut reader = BufReader::new(pipe);
+                use std::io::Read;
+                // Fixed-size reads: a newline-free flood cannot grow a line
+                // buffer without bound the way `read_line` would.
+                let mut chunk = [0u8; 4096];
                 loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
+                    match pipe.read(&mut chunk) {
                         Ok(0) | Err(_) => break,
-                        Ok(_) => sink.lock().expect("stderr buffer poisoned").push_str(&line),
+                        Ok(n) => {
+                            tail.lock().expect("stderr tail poisoned").push(&chunk[..n]);
+                            if let Some(full) = &full {
+                                full.lock()
+                                    .expect("stderr buffer poisoned")
+                                    .push_str(&String::from_utf8_lossy(&chunk[..n]));
+                            }
+                        }
                     }
                 }
             });
-            Some(buf)
-        } else {
-            None
-        };
+        }
 
         Self {
             child,
             stdin,
             stdout_lines,
             stderr_buf,
+            stderr_tail,
+            server_log_dir,
             next_id: 1,
             response_timeout: RESPONSE_TIMEOUT,
         }
@@ -287,6 +404,11 @@ impl McpTestClient {
                         id,
                         waited: started.elapsed(),
                         child_status: self.child.try_wait().ok().flatten(),
+                        stderr_tail: self.stderr_tail.lock().expect("stderr tail poisoned").render(),
+                        server_log_tail: self
+                            .server_log_dir
+                            .as_deref()
+                            .and_then(|dir| newest_log_tail(dir, DIAGNOSTIC_TAIL_BYTES)),
                     });
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -373,15 +495,28 @@ impl McpTestClient {
     /// wedge this harness for 600s. Used only by the regression test below.
     #[cfg(unix)]
     fn spawn_silent_stub(response_timeout: std::time::Duration) -> Self {
+        Self::spawn_hung_stub("cat >/dev/null", None, response_timeout)
+    }
+
+    /// A stand-in server that runs `script` under `sh` — which may write to
+    /// stderr or a log under `server_log_dir` — and never answers on stdout.
+    /// The script must keep stdout open (e.g. `exec 3>&1` before redirecting
+    /// a final command), or the client sees `Closed` rather than a timeout.
+    #[cfg(unix)]
+    fn spawn_hung_stub(
+        script: &str,
+        server_log_dir: Option<std::path::PathBuf>,
+        response_timeout: std::time::Duration,
+    ) -> Self {
         let child = Command::new("sh")
             .arg("-c")
-            .arg("cat >/dev/null")
+            .arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn silent stub");
-        let mut client = Self::from_child(child, false);
+            .expect("spawn hung stub");
+        let mut client = Self::from_child(child, false, server_log_dir);
         client.response_timeout = response_timeout;
         client
     }
@@ -901,6 +1036,71 @@ fn test_response_wait_is_bounded_when_server_never_answers() {
             && rendered.contains("cannot distinguish")
             && !rendered.contains("accepted the request"),
         "timeout diagnostic must identify the silent request without overclaiming: {rendered}"
+    );
+}
+
+/// cas-5eb9: a non-response must arrive with what the server last said.
+///
+/// 834 failed CI runs since the bounded wait landed carried no occurrence, and
+/// the one wedge on record had its stderr nulled, so nothing showed whether the
+/// request was ever read. The timeout diagnostic now carries a bounded tail of
+/// the child's stderr and of the server's tracing log (where `MCP call_tool
+/// START ... id=<id>` lands). This drives a deliberately hung child that floods
+/// stderr past the bound and logs a START, then asserts both tails reach the
+/// message and the stderr tail kept the end, not the start, within its bound.
+#[cfg(unix)]
+#[test]
+fn test_timeout_diagnostic_carries_bounded_stderr_and_server_log_tails() {
+    let log_dir = tempfile::tempdir().expect("server log dir");
+    let log_file = log_dir.path().join("cas-2026-10-03.log");
+    let script = format!(
+        "printf 'stub-first-words-cas-5eb9\\n' >&2; \
+         head -c {flood} /dev/zero | tr '\\000' x >&2; \
+         printf 'INFO MCP call_tool START method=\"tools/call\" tool=nonexistent_tool id=1\\n' > '{log}'; \
+         printf '\\nstub-last-words-cas-5eb9\\n' >&2; \
+         exec 3>&1; cat >/dev/null",
+        flood = DIAGNOSTIC_TAIL_BYTES * 5,
+        log = log_file.display(),
+    );
+    let mut client = McpTestClient::spawn_hung_stub(
+        &script,
+        Some(log_dir.path().to_path_buf()),
+        std::time::Duration::from_secs(3),
+    );
+
+    let err = match client.try_send_request("tools/call", Some(json!({"name": "nonexistent_tool"}))) {
+        Err(err) => err,
+        Ok(response) => panic!("hung stub must not produce a response: {response:?}"),
+    };
+    let rendered = err.to_string();
+    let TransportError::Timeout {
+        child_status,
+        stderr_tail,
+        server_log_tail,
+        ..
+    } = err
+    else {
+        panic!("expected a bounded timeout, got: {rendered}");
+    };
+
+    assert!(child_status.is_none(), "stub should still be running: {child_status:?}");
+    assert!(
+        stderr_tail.contains("stub-last-words-cas-5eb9"),
+        "the stderr tail keeps what the child printed last: {stderr_tail}"
+    );
+    assert!(
+        !stderr_tail.contains("stub-first-words-cas-5eb9") && stderr_tail.len() <= DIAGNOSTIC_TAIL_BYTES,
+        "the stderr tail is bounded to the last {DIAGNOSTIC_TAIL_BYTES} bytes, got {} bytes",
+        stderr_tail.len()
+    );
+    let (path, log_tail) = server_log_tail.expect("the server log tail is captured");
+    assert_eq!(path, log_file);
+    assert!(log_tail.contains("MCP call_tool START") && log_tail.contains("id=1"));
+    assert!(
+        rendered.contains("stub-last-words-cas-5eb9")
+            && rendered.contains("MCP call_tool START")
+            && rendered.contains("cannot distinguish"),
+        "both tails reach the timeout message: {rendered}"
     );
 }
 

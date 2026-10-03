@@ -53,7 +53,7 @@ pub enum PreToolUseHarness {
 
 impl PreToolUseHarness {
     fn current() -> Self {
-        if std::env::var("CAS_HOOK_HARNESS")
+        if crate::env_overlay::var("CAS_HOOK_HARNESS")
             .ok()
             .is_some_and(|value| value.eq_ignore_ascii_case("codex"))
         {

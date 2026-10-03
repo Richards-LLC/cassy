@@ -118,7 +118,8 @@ fn codex_routes_unified_exec_through_the_pre_tool_hook() {
         .expect("PreToolUse hook list");
 
     assert!(pre_tool.iter().any(|entry| {
-        entry["matcher"] == "^Bash$"
+        // cas-49c0: PreToolUse also matches apply_patch; Bash stays covered.
+        entry["matcher"] == "^(Bash|apply_patch)$"
             && entry["hooks"].as_array().is_some_and(|handlers| {
                 handlers
                     .iter()

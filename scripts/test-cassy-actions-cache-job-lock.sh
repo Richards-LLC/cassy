@@ -5,11 +5,26 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 job_lock="$script_dir/cassy-actions-cache-job-lock.sh"
 pruner="$script_dir/prune-cassy-actions-cache.sh"
+"$script_dir/test-cassy-actions-process-identity.sh"
+# shellcheck source=scripts/cassy-actions-process-identity.sh
+source "$script_dir/cassy-actions-process-identity.sh"
+if [[ "$(uname -s)" != Linux ]]; then
+    printf 'SKIP job lock integration: Linux /proc and util-linux flock required; owner comparison tested above\n'
+    exit 0
+fi
 fixture_root="$(mktemp -d)"
 holder_started=0
+worker_pid=''
+inherited_pid=''
 cleanup() {
     if (( holder_started )); then
         run_completed >/dev/null 2>&1 || true
+    fi
+    [[ -z "$worker_pid" ]] || kill -TERM "$worker_pid" 2>/dev/null || true
+    [[ -z "$inherited_pid" ]] || kill -TERM "$inherited_pid" 2>/dev/null || true
+    if [[ -s "$state_root/slot-1.pid" ]]; then
+        read -r remaining_pid _ <"$state_root/slot-1.pid"
+        kill -TERM "$remaining_pid" 2>/dev/null || true
     fi
     rm -rf "$fixture_root"
 }
@@ -28,8 +43,11 @@ printf 'Runner.Listener\n' >"$proc_root/102/comm"
 for slot in '' '-2'; do
     mkdir -p "$cache_root/cargo-target$slot" "$cache_root/sccache$slot"
 done
-ln -s "$job_lock" "$fixture_root/cache-job-started.sh"
-ln -s "$job_lock" "$fixture_root/cache-job-completed.sh"
+# Exercise the deployed companion layout, rather than sourcing from the repo.
+install -m 0755 "$job_lock" "$fixture_root/cache-job-lock.sh"
+install -m 0644 "$script_dir/cassy-actions-process-identity.sh" "$fixture_root/cassy-actions-process-identity.sh"
+ln -s cache-job-lock.sh "$fixture_root/cache-job-started.sh"
+ln -s cache-job-lock.sh "$fixture_root/cache-job-completed.sh"
 started_hook="$fixture_root/cache-job-started.sh"
 completed_hook="$fixture_root/cache-job-completed.sh"
 
@@ -44,6 +62,10 @@ EOF
 
 cat >"$fixture_root/mount-guard" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${TEST_INHERIT_LOCK:-}" == 1 ]]; then
+    sleep 30 &
+    printf '%s\n' "$!" >"$TEST_INHERITED_PID"
+fi
 if [[ "${TEST_BLOCK_GUARD:-}" == 1 ]]; then
     : >"$TEST_GUARD_ENTERED"
     while [[ ! -e "$TEST_GUARD_RELEASE" ]]; do sleep 0.02; done
@@ -59,13 +81,61 @@ common_env=(
     RUNNER_TRACKING_ID=runner-would-reap-this-holder
 )
 
-run_started() {
-    env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 "$started_hook"
+# A real process named Runner.Worker owns each hook through its ancestry.
+# Killing it leaves the detached holder alive, exactly as a runner crash does.
+cat >"$fixture_root/worker.py" <<'PYWORKER'
+import ctypes
+import pathlib
+import subprocess
+import sys
+import time
+ctypes.CDLL(None).prctl(15, b"Runner.Worker", 0, 0, 0)
+root = pathlib.Path(sys.argv[1])
+(root / "worker-ready").touch()
+while True:
+    request = root / "request"
+    if request.exists():
+        hook = request.read_text().strip()
+        request.unlink()
+        with (root / "hook-output").open("w") as output:
+            result = subprocess.run([hook], stdout=output, stderr=subprocess.STDOUT)
+        (root / "response").write_text(str(result.returncode))
+    time.sleep(0.01)
+PYWORKER
+
+start_worker() {
+    rm -f "$fixture_root/worker-ready" "$fixture_root/request" "$fixture_root/response"
+    env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 \
+        python3 "$fixture_root/worker.py" "$fixture_root" &
+    worker_pid=$!
+    for _ in $(seq 1 100); do
+        [[ -e "$fixture_root/worker-ready" ]] && return 0
+        sleep 0.02
+    done
+    printf 'FAIL fake Runner.Worker did not start\n' >&2
+    exit 1
 }
 
-run_completed() {
-    env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 "$completed_hook"
+run_hook() {
+    local hook="$1" result
+    rm -f "$fixture_root/response"
+    printf '%s\n' "$hook" >"$fixture_root/request.tmp"
+    mv "$fixture_root/request.tmp" "$fixture_root/request"
+    for _ in $(seq 1 500); do
+        if [[ -e "$fixture_root/response" ]]; then
+            result="$(cat "$fixture_root/response")"
+            cat "$fixture_root/hook-output"
+            return "$result"
+        fi
+        sleep 0.02
+    done
+    printf 'FAIL hook did not respond\n' >&2
+    return 1
 }
+
+run_started() { run_hook "$started_hook"; }
+run_completed() { run_hook "$completed_hook"; }
+start_worker
 
 run_pruner() {
     env "${common_env[@]}" \
@@ -102,6 +172,106 @@ holder_started=0
 run_pruner --now >/dev/null
 printf 'ok   job-lifetime shared lock excludes scheduled and forced pruning\n'
 
+# A late completed hook from another Worker must not release this job's lock.
+run_started >/dev/null
+holder_started=1
+read -r live_holder _ <"$state_root/slot-1.pid"
+if env "${common_env[@]}" CASSY_ACTIONS_RUNNER_SLOT=1 python3 - "$completed_hook" <<'PYOTHER'
+import ctypes
+import subprocess
+import sys
+ctypes.CDLL(None).prctl(15, b"Runner.Worker", 0, 0, 0)
+sys.exit(subprocess.run([sys.argv[1]]).returncode)
+PYOTHER
+then
+    printf 'FAIL another Worker completed the live job\n' >&2
+    exit 1
+fi
+kill -0 "$live_holder"
+run_completed
+holder_started=0
+printf 'ok   completion from another Worker never releases the live owner lock\n'
+
+# Deployment may encounter the previous two-field record. Do not reclaim a
+# live legacy holder without ownership evidence; its completed hook still works.
+run_started >/dev/null
+holder_started=1
+read -r legacy_holder legacy_token _ <"$state_root/slot-1.pid"
+printf '%s %s\n' "$legacy_holder" "$legacy_token" >"$state_root/slot-1.pid"
+if run_started >/dev/null 2>&1; then
+    printf 'FAIL start replaced a live legacy holder\n' >&2
+    exit 1
+fi
+run_completed
+holder_started=0
+run_pruner --now >/dev/null
+printf 'ok   live legacy records fail closed and complete normally\n'
+
+# The Worker dies, but the old detached holder (and shared flock) survives.
+run_started >/dev/null
+holder_started=1
+read -r orphan_pid _ <"$state_root/slot-1.pid"
+kill -KILL "$worker_pid"
+wait "$worker_pid" 2>/dev/null || true
+kill -0 "$orphan_pid"
+start_worker
+run_started
+read -r recovered_pid _ <"$state_root/slot-1.pid"
+[[ "$recovered_pid" != "$orphan_pid" ]]
+run_completed
+holder_started=0
+run_pruner --now >/dev/null
+printf 'PASS crashed Runner.Worker lock recovery with real /proc and flock\n'
+
+# A recycled owner PID must not keep a dead job alive, even if that PID exists.
+run_started >/dev/null
+holder_started=1
+read -r old_holder token holder_start owner_pid owner_start <"$state_root/slot-1.pid"
+printf '%s %s %s %s %s\n' "$old_holder" "$token" "$holder_start" "$owner_pid" \
+    "$((owner_start + 1))" >"$state_root/slot-1.pid"
+run_started >/dev/null
+read -r new_holder _ <"$state_root/slot-1.pid"
+[[ "$new_holder" != "$old_holder" ]]
+run_completed
+holder_started=0
+printf 'ok   owner PID reuse is detected by process start identity\n'
+
+# A stale detailed record naming an unrelated reused PID can be discarded,
+# but must never signal the new process at that PID.
+sleep 30 &
+reused_pid=$!
+snapshot="$(process_snapshot "$reused_pid")"
+read -r _ reused_start _ <<<"$snapshot"
+printf '%s %s %s %s %s\n' "$reused_pid" stale-token "$((reused_start + 1))" \
+    "$worker_pid" 1 >"$state_root/slot-1.pid"
+run_started >/dev/null
+holder_started=1
+kill -0 "$reused_pid"
+run_completed
+holder_started=0
+kill -TERM "$reused_pid"
+wait "$reused_pid" 2>/dev/null || true
+printf 'ok   holder PID reuse never signals an unrelated live process\n'
+
+# A mount guard descendant deliberately retains the shared open description.
+# Completing the job must LOCK_UN, rather than relying on fd close or exit.
+kill -TERM "$worker_pid"
+wait "$worker_pid" 2>/dev/null || true
+TEST_INHERIT_LOCK=1 TEST_INHERITED_PID="$fixture_root/inherited-pid" start_worker
+run_started >/dev/null
+holder_started=1
+inherited_pid="$(cat "$fixture_root/inherited-pid")"
+run_completed
+holder_started=0
+kill -0 "$inherited_pid"
+run_pruner --now >/dev/null
+kill -TERM "$inherited_pid"
+inherited_pid=''
+kill -TERM "$worker_pid"
+wait "$worker_pid" 2>/dev/null || true
+start_worker
+printf 'ok   explicit unlock releases the cache barrier across inherited descriptors\n'
+
 run_started >/dev/null
 holder_started=1
 read -r failed_holder_pid _ <"$state_root/slot-1.pid"
@@ -110,6 +280,11 @@ for _ in $(seq 1 100); do
     kill -0 "$failed_holder_pid" 2>/dev/null || break
     sleep 0.02
 done
+if run_started >/dev/null 2>&1; then
+    printf 'FAIL duplicate start ignored the live Worker after holder failure\n' >&2
+    exit 1
+fi
+printf 'ok   live Worker blocks duplicate start even after holder failure\n'
 mkdir -p "$proc_root/103"
 printf '103\n' >>"$cgroup_root/slot1/cgroup.procs"
 printf 'Runner.Worker\n' >"$proc_root/103/comm"
@@ -172,3 +347,5 @@ kill -TERM "$unrelated_pid"
 wait "$unrelated_pid" 2>/dev/null || true
 rm -f "$state_root/slot-1.pid"
 printf 'ok   completion never signals an unverified PID\n'
+
+printf 'PASS runner cache job lock lifecycle integration\n'

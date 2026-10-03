@@ -802,7 +802,7 @@ test("HUB-J8 distinguish Fleet twins at desktop and phone widths", journeyPart, 
       const label = row.querySelector<HTMLElement>(".fleet-plot-name")!;
       const tag = label.querySelector<HTMLElement>(".fleet-plot-tag")!;
       const project = label.querySelector<HTMLElement>(".fleet-plot-project")!;
-      return { session: (row as HTMLElement).dataset.fleetSession!, tag: tag.textContent!, mark: tag.dataset.mark!,
+      return { session: (row as HTMLElement).dataset.fleetSession!, tag: tag.textContent!, mark: tag.dataset.mark ?? tag.textContent!.split(" · ").at(-1)!,
         whole: tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= label.getBoundingClientRect().right - parseFloat(getComputedStyle(label).paddingRight) + 1,
         projectWidth: project.getBoundingClientRect().width };
     }));

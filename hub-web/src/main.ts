@@ -41,6 +41,7 @@ import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPa
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { TERMINAL_ESCAPE_HINT, TERMINAL_ESCAPE_HINT_ID } from "./terminal/ghostty/surface";
 import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { relativeTimestamp } from "./time";
@@ -2111,7 +2112,19 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         if (storage) savePaneLayout(storage, selectedKey, next);
         void renderSessionState(machineId, session, state);
       };
+      // cas-d1fa: while this browser is in control the terminal keeps Tab, so
+      // its own header says how the keyboard leaves it, outside the drawing
+      // area. Activated, it takes focus itself (Safari does not focus a
+      // clicked button), which also puts a phone's soft keyboard away.
+      const leave = button("Leave terminal", "pane-leave", () => leave.focus());
+      // A short visible word beside its key, so the pane's own name keeps its room.
+      leave.textContent = "Leave";
+      leave.setAttribute("aria-keyshortcuts", "Control+Alt+M");
+      leave.title = "Leave terminal (Ctrl+Alt+M)";
+      const leaveKey = document.createElement("kbd"); leaveKey.setAttribute("aria-hidden", "true"); leaveKey.textContent = "Ctrl+Alt+M";
+      leave.append(leaveKey);
       controls.append(
+        leave,
         button("Show terminal", "pane-view-toggle", () => {
           setPaneViewMode(selectedKey, paneViewMode(selectedKey) === "transcript" ? "terminal" : "transcript");
         }),
@@ -2180,6 +2193,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (makePrimary) makePrimary.disabled = pane.id === layout.primaryPaneId;
     if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
     if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
+    const leaveTerminal = card.querySelector<HTMLButtonElement>(".pane-leave");
+    if (leaveTerminal) leaveTerminal.hidden = leases.get(selectedKey)?.held_by_me !== true;
     const paneView = paneViewMode(selectedKey);
     const viewToggle = card.querySelector<HTMLButtonElement>(".pane-view-toggle");
     if (viewToggle) {
@@ -3710,7 +3725,7 @@ function render(captureDraft = true): void {
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerTooltip)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
-          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}" aria-describedby="session-controls-reason"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>` : ""}</div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}" aria-describedby="session-controls-reason"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>${lease?.held_by_me && hubPresentation === "terminal" ? `<span id="${TERMINAL_ESCAPE_HINT_ID}" class="sr-only">${TERMINAL_ESCAPE_HINT}</span>` : ""}` : ""}</div>
         </header>
         ${showSessionControls ? `<p id="session-controls-reason" class="session-controls-reason" role="note"${controlsNotice ? "" : " hidden"}>${escapeHtml(controlsNotice ?? "")}</p>` : ""}
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>

@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { journeyDay } from "./clock";
 import { ATLAS, PELICAN } from "./world";
 
@@ -189,5 +189,67 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await expect(note("art-cloud-down")).toHaveCount(0);
     await expect(note("art-local-draft")).toContainText("only saved on Atlas · Linux");
     expect(page.context().pages()).toHaveLength(1);
+  });
+});
+
+test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus on Load earlier (cas-d362)", journeyPart, async ({ page, journey }) => {
+  // The multiplex machine path rebuilds the conversation shell a few ms after
+  // the header turns Live. A reader who tabs to Load earlier in that window
+  // lost focus to the page, and Enter then asked for nothing (cas-d362).
+  const hub = await journey.hub({
+    machines: [ATLAS],
+    paired: ["atlas"],
+    multiplex: true,
+    history: {
+      [PELICAN]: [
+        { has_earlier: true, next_before: 20, messages: [you(21, "Is the release ready to cut?", journeyDay(0, 0, 1)), you(23, "Post the notes when it's out.", journeyDay(0, 0, 3)), you(25, "And close the epic.", journeyDay(0, 0, 5))], replies: [sup(22, 21, "Yes. The gate is green on the release branch.", journeyDay(0, 0, 2)), sup(24, 23, "Will do once the tag is pushed.", journeyDay(0, 0, 4)), sup(26, 25, "Closing it after the notes go out.", journeyDay(0, 0, 6))] },
+        { has_earlier: true, next_before: 10, messages: [you(11, "Start the QA epic tomorrow morning.", journeyDay(1))], replies: [sup(12, 11, "Scheduled for 09:00 with three workers.", journeyDay(1, 12, 6))] },
+        { has_earlier: false, messages: [you(1, "Draft the QA epic plan.", journeyDay(2, 6)), you(3, "Keep it to three lanes.", journeyDay(2, 6, 30))], replies: [sup(2, 1, "Drafted: three lanes, one gate.", journeyDay(2, 6, 6)), sup(4, 3, "Three lanes it is.", journeyDay(2, 6, 36))] },
+      ],
+    },
+  });
+  // The reader's Tab lands on Load earlier the moment the header says Live:
+  // inside the window before the shell rebuild, where a test's own focus()
+  // after waiting for Live would usually arrive too late to see it.
+  await page.addInitScript(() => {
+    new MutationObserver(() => {
+      const armed = window as unknown as { __focusLoadEarlierAtLive?: boolean };
+      if (!armed.__focusLoadEarlierAtLive) return;
+      if (document.querySelector("#conversation-connection")?.textContent !== " · Live") return;
+      armed.__focusLoadEarlierAtLive = false;
+      document.querySelector<HTMLElement>(".conversation-load-earlier")?.focus();
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+  const log = page.getByRole("log");
+  const header = page.locator("#conversation-connection");
+  const loadEarlier = page.getByRole("button", { name: "Load earlier" });
+
+  await journey.stage("Read mid-history, then move on to the composer", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
+    await loadEarlier.scrollIntoViewIfNeeded();
+    await loadEarlier.click();
+    await expect(log.getByText("Scheduled for 09:00 with three workers.")).toBeAttached();
+    await expect(loadEarlier).toBeEnabled();
+    await page.getByRole("textbox", { name: "Your message" }).focus();
+  });
+
+  await journey.stage("The machine reconnects as the reader tabs back to Load earlier", async () => {
+    await page.evaluate(() => { (window as unknown as { __focusLoadEarlierAtLive?: boolean }).__focusLoadEarlierAtLive = true; });
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toContainText("Reconnecting");
+    await hub.up("atlas");
+    await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+    // Past the rebuild: focus is still where the reader put it.
+    await page.waitForTimeout(500);
+    await expect(loadEarlier).toBeFocused();
+  });
+
+  await journey.stage("Enter loads the start of the conversation", async () => {
+    await page.keyboard.press("Enter");
+    await expect(log.getByText("Drafted: three lanes, one gate.")).toBeAttached();
+    expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
+    await expect(page.getByText("No earlier history")).toBeFocused();
   });
 });

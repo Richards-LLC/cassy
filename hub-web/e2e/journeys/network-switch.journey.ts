@@ -542,7 +542,7 @@ test("HUB-J12 network switch: without control, Tab and Shift+Tab leave the termi
 });
 
 test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+M leaves it, as the visible hint says (cas-d1fa)", journeyPart, async ({ page, journey }) => {
-  await journey.stage("In control, Tab stays in the terminal; Ctrl+M leaves, and the terminal says so", async () => {
+  await journey.stage("In control, the terminal says how the keyboard leaves it", async () => {
     await connected(page, true);
     await page.locator("#conversation-terminal").click();
     await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
@@ -553,6 +553,10 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+M leave
     await expect(hint).toHaveCount(1);
     await expect(hint).toHaveText("Tab goes to the terminal. Ctrl+M leaves it.");
     await expect(input).toHaveAccessibleDescription("Tab goes to the terminal. Ctrl+M leaves it.");
+  });
+  await journey.stage("Tab stays in the terminal; Ctrl+M leaves it for the next control", async () => {
+    const input = terminalInput(page);
+    const hint = page.locator(".t3-ghostty-escape-hint").filter({ visible: true });
     await page.keyboard.press("Tab");
     await expect(input).toBeFocused();
     await page.keyboard.press("Control+m");

@@ -33,6 +33,22 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator(".conversation-list-top #pair-toggle")).toBeVisible();
   };
   const filter = page.getByRole("searchbox", { name: "Filter commands" });
+  /**
+   * cas-d4a9: the name Chromium's accessibility tree gives a node, which is
+   * what a screen reader speaks. CSS generated content counts toward it unless
+   * it carries empty alternative text.
+   */
+  const spokenName = async (selector: string) => {
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+      const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector });
+      const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
+      return String(nodes[0]?.name?.value ?? "");
+    } finally {
+      await cdp.detach();
+    }
+  };
   // Ctrl/Cmd+K lands in the list search; pressed again from there, it opens
   // the command palette.
   const openPaletteFromKeyboard = async () => {
@@ -124,6 +140,12 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
       return points.filter(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit !== badge && !badge.contains(hit); }).length;
     });
     expect.soft(covered, "points of the unread count covered by the Enter hint").toBe(0);
+    // cas-d4a9: the "Enter ↵" hint is for the eye. The row is still heard by
+    // its own name and unread count, not "… Enter ↵ 1 unread"; the field's
+    // aria-activedescendant already says which row Enter opens.
+    const hinted = '.conversation-sidebar .conversation-row[data-enter-target="true"]';
+    expect(await spokenName(hinted), "the row's spoken name").not.toContain("Enter");
+    expect(await page.locator(hinted).ariaSnapshot(), "the row's aria snapshot").not.toContain("Enter");
     await search.fill(OTTER);
     await expect(list.getByRole("button")).toHaveCount(1);
     await expect(list.getByRole("button").first()).toContainText("gabber-studio");
@@ -248,7 +270,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(enterTarget).toHaveCount(1);
     await expect(enterTarget).toContainText("Jump to lighthouse");
     await expect(filter).toHaveAttribute("aria-activedescendant", (await enterTarget.getAttribute("id"))!);
-    expect(await enterTarget.evaluate((node) => getComputedStyle(node, "::after").content), "the Enter hint").toBe('"Enter ↵"');
+    // The hint is drawn with empty alternative text, so it is seen and not
+    // read into the command's name (cas-d4a9).
+    expect(await enterTarget.evaluate((node) => getComputedStyle(node, "::after").content), "the Enter hint").toBe('"Enter ↵" / ""');
+    expect(await spokenName('#command-palette .palette-command[data-enter-target="true"]'), "the command's spoken name").not.toContain("Enter");
+    expect(await enterTarget.ariaSnapshot(), "the command's aria snapshot").not.toContain("Enter");
     // A project name finds its session too, and the row names that project.
     const rows = palette.locator(".palette-command");
     await filter.fill("gabber");

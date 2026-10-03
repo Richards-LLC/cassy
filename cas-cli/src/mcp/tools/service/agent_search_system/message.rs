@@ -2292,23 +2292,27 @@ impl CasService {
             );
         }
 
-        // cas-85fd: release only the halt bound to an urgent that this worker
-        // demonstrably consumed and answered. `Confirmed` is the queue's
-        // existing proof: the urgent had a transport handoff + surfacing
-        // receipt and the worker's reply post-dated both. Do not clear a
-        // legacy/unbound halt or a newer halt that replaced this exchange.
+        // cas-85fd: release only the halt bound to the urgent this reply
+        // answers. cas-4a8e1 (GH #1064): any reply to the supervisor written
+        // after that urgent reached the worker discharges it — an interrupt
+        // is usually answered with an ordinary message, not message_ack, and
+        // requiring `Confirmed` left the halt to veto an unrelated close long
+        // after the exchange ended. Do not clear a legacy/unbound halt, a
+        // newer halt that replaced this exchange, or one whose urgent the
+        // worker could not yet have seen.
         if role == "worker" && target_is_supervisor {
             use crate::mcp::tools::core::task::lifecycle::stale_close_guard::{
-                clear_halt_metadata, halt_prompt_id,
+                clear_halt_metadata, halt_prompt_id, reply_discharges_halt,
             };
             use crate::store::open_agent_store;
             if let Ok(agent_store) = open_agent_store(&self.inner.cas_root)
                 && let Ok(mut agent) = agent_store.get(&source)
                 && let Some(prompt_id) = halt_prompt_id(&agent.metadata)
-                && matches!(
-                    queue.message_status(prompt_id),
-                    Ok(Some(cas_store::MessageStatus::Confirmed))
-                )
+                && queue
+                    .message_delivery_report(prompt_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|report| reply_discharges_halt(&report, reply_enqueued_at))
             {
                 clear_halt_metadata(&mut agent.metadata);
                 if let Err(error) = agent_store.update(&agent) {
@@ -2316,7 +2320,7 @@ impl CasService {
                         agent_id = %source,
                         prompt_id,
                         error = %error,
-                        "could not release confirmed urgent halt"
+                        "could not release answered urgent halt"
                     );
                 }
             }

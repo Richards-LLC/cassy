@@ -1026,3 +1026,25 @@ test("HUB-J12 network switch: kept messages show before the session attaches aft
     expect(sentTimes(hub, "Kept while the session is away")).toBe(1);
   });
 });
+
+
+test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("The stopped connection explains what to do", async () => {
+    const { hub, clock } = await connected(page);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".pane").first()).toBeVisible();
+    // Exercise the real fatal transport branch, after a successful connection.
+    // A missing required browser API cannot be fixed by another network retry.
+    await page.evaluate(() => { Object.defineProperty(AbortSignal, "timeout", { value: undefined, configurable: true }); });
+    await hub.down("atlas", { sockets: "close" });
+    await clock.advance(2_000);
+    const banner = page.locator(".terminal-disconnected-banner .banner-text");
+    await expect(banner).toHaveText("Lost connection to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
+    await expect(page.locator(".connection-summary")).toContainText("Unreachable");
+    await expect(page.locator(".status-stale").filter({ visible: true })).toHaveText(/^Not live — this browser cannot make this connection\./);
+    await expect(page.locator("#attention-panel .attention-card[data-kind=\"session_transport\"]")).toHaveCount(0);
+    // No automatic reconnect is claimed on any visible surface.
+    await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
+    await expect(banner).toMatchAriaSnapshot("- text: Lost connection to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
+  });
+});

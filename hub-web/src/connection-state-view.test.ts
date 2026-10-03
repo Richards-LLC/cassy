@@ -278,9 +278,14 @@ describe("a conversation opens behind one quiet line (cas-813a)", () => {
 });
 
 describe("one outage, one vocabulary (journey F9)", () => {
+  it("folds a fatal session failure into the machine outage (cas-99d7)", () => {
+    const fatal = snapshot({ phase: "failed", fatal: true });
+    expect(transportFailureNeedsAttention(fatal, snapshot({ phase: "failed", fatal: true }))).toBe(false);
+    expect(transportFailureNeedsAttention(fatal, snapshot({ phase: "live" }))).toBe(true);
+  });
   it("words the refusal and the disabled controls the way the banner does", () => {
     expect(lostConnectionBanner("Atlas · Linux", false)).toBe("Lost connection to Atlas · Linux. Reconnecting…");
-    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. Not retrying.");
+    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
     // cas-d15c: one session's link, the machine still connected.
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", false)).toBe("Reconnecting to cas-src… Atlas · Linux is still connected.");
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", true)).toBe("Lost the link to cas-src. Not retrying. Atlas · Linux is still connected.");

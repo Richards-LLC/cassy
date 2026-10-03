@@ -3874,6 +3874,7 @@ function renderRegions(context: RegionContext): void {
   }
   renderAttention();
   renderStatus(context.status);
+  syncConversationProgress(context.status);
   syncConversationContext();
   applyLiveRegions(app, context.liveRegions);
   if (context.selected && context.session && context.connectionSnapshot) {
@@ -4716,6 +4717,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     epics,
     currentEpic,
     asked: fleetAsked,
+    phone: phoneLayout(),
     relative: (at) => { const label = relativeTimestamp(at); return label === "now" ? "just now" : `${label} ago`; },
     on: {
       toggleMenu: (rowKey) => { const opening = fleetOps.menuFor !== rowKey; fleetOps.toggleMenu(rowKey); rerender(opening ? `${rowKey}:first-item` : `${rowKey}:trigger`); },
@@ -4750,7 +4752,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
-  const signature = JSON.stringify([selectedMachineId, selectedSession, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A different conversation starts with every menu closed and no stale notes.
@@ -4780,8 +4782,11 @@ function renderStatus(status?: Record<string, unknown>): void {
     const want = fleetFocusNext ?? hadFocus;
     fleetFocusNext = undefined;
     if (!want) return;
+    // A full-height phone picker opens on its search; a sheet on its first action (cas-5bef0).
     const target = want.endsWith(":first-item")
-      ? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
+      ? container.querySelector<HTMLElement>(".fleet-ops-sheet--full .fleet-ops-search")
+        ?? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
+        ?? container.querySelector<HTMLElement>('.fleet-ops-sheet [role="menuitem"]')
       : container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`);
     target?.focus({ preventScroll: false });
   };
@@ -4963,7 +4968,7 @@ function globalShortcut(event: KeyboardEvent): void {
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
   const attentionBadge = document.querySelector<HTMLButtonElement>("#conversation-attention");
-  if (attentionBadge) attentionBadge.onclick = openAttentionSheet;
+  if (attentionBadge) attentionBadge.onclick = () => openAttentionSheet("attention");
   const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
   if (sheetClose) sheetClose.onclick = closeAttentionSheet;
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");

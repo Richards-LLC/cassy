@@ -3869,7 +3869,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .context-meta:empty { display: none; }
 .conversation-context .context-tab { padding: 0; }
 /* cas-5c22: the badge and the sheet's Close belong to the phone. */
-#conversation-attention, .conversation-context .context-sheet-close { display: none; }
+#conversation-attention, #conversation-progress, .conversation-context .context-sheet-close { display: none; }
 .conversation-context .workers { display: none; }
 .conversation-welcome { margin: auto; padding: var(--space-8); max-width: 60ch; }
 .conversation-welcome h2 { font: var(--weight-medium) var(--fs-verdict)/1.2 var(--font-display); }
@@ -3941,6 +3941,33 @@ button.chip:disabled { cursor: default; }
   /* The rail, laid over the thread as a sheet holding only Attention. */
   .conversation-shell.thread-open.attention-sheet-open > .conversation-context { display: block; position: fixed; inset: 0; z-index: 20; padding: var(--space-4) var(--space-4) max(var(--space-6), env(safe-area-inset-bottom)); border: 0; background: var(--bg-root); overflow-y: auto; }
   .attention-sheet-open > .conversation-context .context-section:not([data-section="attention"]) { display: none; }
+  /* cas-5bef0 (fleet-operations brief S6): the same sheet holding Tasks &
+     progress and its fleet controls, opened from the header's Tasks. */
+  .attention-sheet-open.progress-sheet > .conversation-context .context-section[data-section="progress"]:not([hidden]) { display: block; }
+  .attention-sheet-open.progress-sheet > .conversation-context .context-section[data-section="attention"] { display: none; }
+  .conversation-heading:has(#conversation-progress:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
+  .conversation-heading:has(#conversation-progress:not([hidden])) #conversation-progress { grid-column: 3; }
+  .conversation-heading:has(#conversation-progress:not([hidden])) #conversation-terminal { grid-column: 4; }
+  .conversation-heading:has(#conversation-attention:not([hidden])):has(#conversation-progress:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto auto; }
+  .conversation-heading:has(#conversation-attention:not([hidden])):has(#conversation-progress:not([hidden])) #conversation-progress { grid-column: 4; }
+  .conversation-heading:has(#conversation-attention:not([hidden])):has(#conversation-progress:not([hidden])) #conversation-terminal { grid-column: 5; }
+  #conversation-progress:not([hidden]) { grid-row: 1; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 var(--space-2); border: 0; background: var(--color-transparent); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/1 var(--font-ui); }
+  #conversation-progress:hover:not(:disabled) { background: var(--bg-hover); }
+  /* Row controls: one 44×44 ⋯ each, opening a bottom action sheet; pickers
+     are full height; confirm is the sheet's second step, Cancel first and
+     full width, the destructive button last. Never a hover popover. */
+  .fleet-ops-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; gap: var(--space-1); max-height: 80dvh; overflow-y: auto; padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); background: var(--bg-panel); border-top: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pane) var(--radius-pane) 0 0; }
+  .fleet-ops-sheet--full { top: 0; max-height: none; border-radius: 0; align-content: start; }
+  .fleet-ops-sheet-title { margin: 0 0 var(--space-1); color: var(--text-hi); font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+  .fleet-ops-sheet .fleet-ops-menu { min-width: 0; padding: 0; border: 0; background: var(--color-transparent); }
+  .fleet-ops-sheet button, .fleet-ops-sheet [role="menuitem"] { width: 100%; min-height: 44px; justify-self: stretch; text-align: left; }
+  .fleet-ops-sheet .fleet-ops-confirm, .fleet-ops-sheet .fleet-ops-preview { border: 0; padding: 0; background: var(--color-transparent); }
+  .fleet-ops-sheet .fleet-ops-confirm-actions { flex-direction: column; }
+  .fleet-ops-sheet .fleet-ops-confirm-actions button { text-align: center; }
+  .fleet-ops-sheet-close { margin-top: var(--space-2); text-align: center !important; }
+  .fleet-ops-search { width: 100%; min-height: 44px; box-sizing: border-box; }
+  .progress-sheet .fleet-ops-undo { position: sticky; top: 0; z-index: 1; }
+  .progress-sheet .fleet-ops-header button { min-height: 44px; }
   .attention-sheet-open > .conversation-context .context-sheet-close { display: flex; align-items: center; justify-content: center; margin: 0 0 var(--space-2) auto; width: 44px; height: 44px; padding: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-regular) 26px/1 var(--font-ui); }
   #conversation-back:hover:not(:disabled), #conversation-terminal:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-identity h1 { flex-wrap: nowrap; }

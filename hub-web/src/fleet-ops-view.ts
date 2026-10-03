@@ -39,6 +39,12 @@ export interface FleetOpsViewContext {
   readonly asked: ReadonlyMap<string, number>;
   readonly relative: (at: number) => string;
   readonly on: FleetOpsHandlers;
+  /**
+   * cas-5bef0 (brief S6, 390): a phone. Each row's controls become one 44×44
+   * ⋯ opening a bottom action sheet; confirm is the sheet's second step; the
+   * pickers are full-height sheets with search.
+   */
+  readonly phone?: boolean;
 }
 
 export interface FleetOpsHandlers {
@@ -65,6 +71,38 @@ function button(document: Document, label: string, className: string, focusKey: 
   node.dataset.fleetFocus = focusKey;
   node.onclick = onclick;
   return node;
+}
+
+/**
+ * A phone sheet (cas-5bef0): laid over the rail from the bottom (or the whole
+ * height, for a picker), titled, with a full-width Close at its end. Never a
+ * hover popover.
+ */
+function sheet(document: Document, title: string, content: readonly Node[], close: () => void, closeKey: string, full = false): HTMLElement {
+  const box = document.createElement("div");
+  box.className = `fleet-ops-sheet${full ? " fleet-ops-sheet--full" : ""}`;
+  box.setAttribute("role", "group");
+  box.setAttribute("aria-label", title);
+  const heading = document.createElement("p");
+  heading.className = "fleet-ops-sheet-title";
+  heading.textContent = title;
+  box.append(heading, ...content, button(document, "Close", "fleet-ops-sheet-close", closeKey, () => close()));
+  return box;
+}
+
+/** A full-height picker's search: filters its items as the operator types. */
+function pickerSearch(document: Document, label: string, list: HTMLElement): HTMLInputElement {
+  const input = document.createElement("input");
+  input.type = "search";
+  input.className = "fleet-ops-search";
+  input.setAttribute("aria-label", label);
+  input.placeholder = label;
+  input.dataset.fleetFocus = "picker-search";
+  input.oninput = () => {
+    const query = input.value.trim().toLocaleLowerCase();
+    for (const item of list.querySelectorAll<HTMLElement>('[role="menuitem"]')) item.hidden = Boolean(query) && !(item.textContent ?? "").toLocaleLowerCase().includes(query);
+  };
+  return input;
 }
 
 /** A control the pairing cannot use: still focusable, saying why, never acting. */
@@ -188,8 +226,12 @@ export function agentControls(document: Document, context: FleetOpsViewContext, 
   trigger.setAttribute("aria-expanded", String(open));
   trigger.setAttribute("aria-label", `Actions for ${agent.name}`);
   wrap.append(trigger);
-  if (open) wrap.append(menu(document, context, rowKey, agentMenu(agent), `Actions for ${agent.name}`));
-  if (context.state.confirm?.rowKey === rowKey) wrap.append(confirmation(document, context, rowKey, context.state.confirm.action));
+  const actions = menu(document, context, rowKey, agentMenu(agent), `Actions for ${agent.name}`);
+  if (open) wrap.append(context.phone ? sheet(document, agent.name, [actions], () => context.on.toggleMenu(rowKey), `${rowKey}:sheet-close`) : actions);
+  if (context.state.confirm?.rowKey === rowKey) {
+    const confirm = confirmation(document, context, rowKey, context.state.confirm.action);
+    wrap.append(context.phone ? sheet(document, agent.name, [confirm], () => context.on.cancelConfirm(), `${rowKey}:sheet-close`) : confirm);
+  }
   const note = noteLine(document, context, rowKey);
   if (note) wrap.append(note);
   return wrap;
@@ -200,7 +242,12 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
   const rowKey = taskRowKey(task);
   const wrap = document.createElement("div");
   wrap.className = "fleet-ops";
-  if (awaitingMerge(task)) {
+  const merge = awaitingMerge(task);
+  if (!merge && !readyTask(task)) return undefined;
+  // On a phone the row's action sits behind one 44×44 ⋯ in a bottom sheet (cas-5bef0).
+  const rowActions: Node[] = [];
+  const place = (node: Node) => (context.phone ? rowActions.push(node) : wrap.append(node));
+  if (merge) {
     const gate = fleetControlGate(context.scopes, "ask-merge", context.origin);
     const asked = context.asked.get(task.id);
     if (asked !== undefined && context.state.preview?.rowKey !== rowKey) {
@@ -210,11 +257,12 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
       wrap.append(line);
     }
     const ask = button(document, asked !== undefined ? "Ask again" : "Ask supervisor to merge", "fleet-ops-ask", `${rowKey}:ask`, () => context.on.openPreview(rowKey, task));
+    if (context.phone) ask.setAttribute("role", "menuitem");
     const reasonId = `fleet-reason-${safeId(rowKey)}-ask`;
     gateDisabled(ask, gate, reasonId);
-    wrap.append(ask);
+    place(ask);
     const reason = reasonLine(document, gate, reasonId);
-    if (reason) wrap.append(reason);
+    if (reason) place(reason);
     if (context.state.preview?.rowKey === rowKey) {
       // The exact message, before it is sent.
       const preview = document.createElement("div");
@@ -229,31 +277,50 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
         button(document, "Send", "fleet-ops-send primary", `${rowKey}:send`, (event) => { if (event.detail > 1) return; context.on.sendMerge(rowKey, task); }),
       );
       preview.append(lead, quote, actions);
-      wrap.append(preview);
+      wrap.append(context.phone ? sheet(document, task.id, [preview], () => context.on.closePanels(), `${rowKey}:sheet-close`) : preview);
     }
-  } else if (readyTask(task)) {
+  } else {
     const gate = fleetControlGate(context.scopes, "assign-task", context.origin);
     const open = context.state.assignFor === rowKey;
     const assign = button(document, "Assign…", "fleet-ops-assign", `${rowKey}:assign`, () => context.on.toggleAssign(rowKey));
-    assign.setAttribute("aria-haspopup", "menu");
-    assign.setAttribute("aria-expanded", String(open));
+    if (context.phone) assign.setAttribute("role", "menuitem");
+    else {
+      assign.setAttribute("aria-haspopup", "menu");
+      assign.setAttribute("aria-expanded", String(open));
+    }
     assign.setAttribute("aria-label", `Assign ${task.id}`);
     const reasonId = `fleet-reason-${safeId(rowKey)}-assign`;
     gateDisabled(assign, gate, reasonId);
-    wrap.append(assign);
+    place(assign);
     const reason = reasonLine(document, gate, reasonId);
-    if (reason) wrap.append(reason);
+    if (reason) place(reason);
     if (open && gate.allowed) {
       const idle = idleWorkers(context.agents);
       const actions = idle.map((agent) => assignAction(task, agent.name));
-      if (actions.length) wrap.append(menu(document, context, rowKey, actions, `Assign ${task.id} to`));
-      else {
-        const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No idle worker. Add worker… starts one on this task.";
-        wrap.append(none);
-      }
+      const picker = actions.length ? menu(document, context, rowKey, actions, `Assign ${task.id} to`) : undefined;
+      const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No idle worker. Add worker… starts one on this task.";
+      if (context.phone) {
+        // A full-height picker with search (brief S6).
+        const content: Node[] = picker ? [pickerSearch(document, "Find a worker", picker), picker] : [none];
+        wrap.append(sheet(document, `Assign ${task.id} to`, content, () => context.on.toggleAssign(rowKey), `${rowKey}:sheet-close`, true));
+      } else wrap.append(picker ?? none);
     }
-  } else {
-    return undefined;
+  }
+  if (context.phone) {
+    const open = context.state.menuFor === rowKey;
+    const trigger = button(document, "⋯", "fleet-ops-trigger", `${rowKey}:trigger`, () => context.on.toggleMenu(rowKey));
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", String(open));
+    trigger.setAttribute("aria-label", `Actions for ${task.id}`);
+    wrap.prepend(trigger);
+    if (open) {
+      const list = document.createElement("div");
+      list.className = "fleet-ops-menu";
+      list.setAttribute("role", "menu");
+      list.setAttribute("aria-label", `Actions for ${task.id}`);
+      list.append(...rowActions);
+      wrap.append(sheet(document, task.id, [list], () => context.on.toggleMenu(rowKey), `${rowKey}:sheet-close`));
+    }
   }
   const note = noteLine(document, context, rowKey);
   if (note) wrap.append(note);
@@ -293,8 +360,10 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   }
   if (panel === "focus" && focusGate.allowed) {
     const actions = context.epics.filter((epic) => epic !== context.currentEpic).map((epic) => focusEpicAction(epic, context.currentEpic));
-    if (actions.length) wrap.append(menu(document, context, "header", actions, "Focus epic"));
-    else { const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No other epic to focus."; wrap.append(none); }
+    const picker = actions.length ? menu(document, context, "header", actions, "Focus epic") : undefined;
+    const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No other epic to focus.";
+    if (context.phone) wrap.append(sheet(document, "Focus epic", picker ? [pickerSearch(document, "Find an epic", picker), picker] : [none], () => context.on.toggleHeader("focus"), "header:sheet-close", true));
+    else wrap.append(picker ?? none);
   }
   const note = noteLine(document, context, "header");
   if (note) wrap.append(note);

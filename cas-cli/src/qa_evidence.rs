@@ -851,8 +851,59 @@ fn visual_qa_page(target: &str) -> String {
     }
 }
 
+/// Placeholder a per-render random id fragment is compared as.
+const RANDOM_ID_PLACEHOLDER: &str = "<uuid>";
+
+/// cas-7c15 (GH #1078): `text` with every UUID-shaped fragment
+/// (8-4-4-4-12 hex digits, either case) replaced by [`RANDOM_ID_PLACEHOLDER`].
+/// Frameworks mint such ids per render (Quasar's `#f_<uuid>` focus inputs),
+/// so the same element carries a different id in the delivered and the base
+/// run. A fragment glued to further hex digits is not UUID-shaped and stays.
+fn normalize_random_ids(text: &str) -> String {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    const LEN: usize = 36;
+    let bytes = text.as_bytes();
+    let is_uuid_at = |start: usize| {
+        if start + LEN > bytes.len() {
+            return false;
+        }
+        let mut at = start;
+        for (index, group) in GROUPS.iter().enumerate() {
+            if index > 0 {
+                if bytes[at] != b'-' {
+                    return false;
+                }
+                at += 1;
+            }
+            if !bytes[at..at + group].iter().all(u8::is_ascii_hexdigit) {
+                return false;
+            }
+            at += group;
+        }
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_hexdigit();
+        let after_ok = at == bytes.len() || !bytes[at].is_ascii_hexdigit();
+        before_ok && after_ok
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if is_uuid_at(index) {
+            out.push_str(&text[copied..index]);
+            out.push_str(RANDOM_ID_PLACEHOLDER);
+            index += LEN;
+            copied = index;
+        } else {
+            index += 1;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 /// What a finding is compared by across two runs: its type, element, the
-/// element it collides with, page, scheme and viewport.
+/// element it collides with, page, scheme and viewport. Per-render random
+/// ids are normalised first ([`normalize_random_ids`], cas-7c15).
 fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
     let text = |pointer: &str| {
         finding
@@ -875,6 +926,7 @@ fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
         text("/scheme"),
         viewport,
     ]
+    .map(|part| normalize_random_ids(&part))
     .join(" | ")
 }
 

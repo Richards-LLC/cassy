@@ -1,8 +1,8 @@
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
-import { ConversationView } from '../src/conversation-view';
-import { applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
+import { ConversationView, terminalOfferReason } from '../src/conversation-view';
+import { applyKeyboardViewport, applyTerminalOffer, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
 import { applyDraftNote, applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
 import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
@@ -104,6 +104,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     ? { id: 'studio-mac', label: 'Studio Mac', host: 'Studio Mac · macOS', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
     : state === 'conversation-empty'
       ? { id: 'bench-1', label: 'Bench', host: 'Bench · Linux', projectDir: '/projects/cas-hub-static', project: 'cas-hub-static' }
+    // cas-1451 / cas-6b75: an empty session on a machine with a long name, as
+    // HUB-J9's rack: the card keeps the machine whole ahead of the codename,
+    // and its Terminal view is a full target on a phone.
+    : state === 'conversation-empty-long-machine'
+      ? { id: 'bench-1', label: 'Build Server Rack Seven · Windows', host: 'Build Server Rack Seven · Windows', projectDir: '/projects/infra', project: 'infra' }
       : state === 'conversation-sessions' || state === 'conversation-earlier'
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
@@ -263,7 +268,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));
     history.acknowledge({ client_ref: 'report', notification_id: 70, target: supervisor, stamped: true });
     reply(71, 70, 'Gate green on all 14 targets. 3.26.0 is tagged and the brief is attached; the report card has the per-target timings.', 'receipt', at(9, 52), REPORT_CARD_ATTACHMENTS);
-  } else if (state === 'conversation-empty') {
+  } else if (state === 'conversation-empty' || state === 'conversation-empty-long-machine') {
     // empty.html: nothing in the thread, the last thing said as a faint echo.
     echo = 'Promoted the hub to production on Monday.';
   } else if (state === 'conversation-sessions' || state === 'conversation-earlier') {
@@ -313,10 +318,12 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
   const sessionFixture = state === 'conversation-sessions';
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture || state === 'conversation-empty-long-machine' ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
   // The earlier session the operator opened to read (cas-55a4).
   if (sessionFixture) { const open = view.element.querySelector<HTMLDetailsElement>('details.earlier-session'); if (open) open.open = true; }
+  // cas-6b75: the pairing is gone, so the header's Terminal view says why it can't open.
+  if (needsPairing) applyTerminalOffer(document, terminalOfferReason('Needs pairing', 'Atlas · Linux'));
   // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
   const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
   // Dictation writes interim words into the field while the mic listens.

@@ -37,6 +37,7 @@
     ],
     "skills/cas-cli-craft/references/critique-rubric.md": [
       "0817b4f5e829b383837634bed1d104c007dfc03d70912d8216d8efa06628e824",
+      "39b0688d5acf362f241d6ddd81e542a6950ae551f4742115190a179d4804091d",
       "4b3d7350ce5c9a702f2d5dd23cf1a7e3fa288b9e54fa67410aa035c54d052a51",
       "4c41548376e4a2153745084d632edc7c01073277f4130cd5ea1854218d25f87c",
       "ec510c35b05145302fdf0312842eb9a3bc332e86e8d52a112ff97beac54d1057"
@@ -64,7 +65,8 @@
     ],
     "skills/cas-cli-craft/scripts/terminal-qa.mjs": [
       "60821449e24fbf75b056f77e1880495acfc913ee3c9c50676df40be5e19c4b5d",
-      "80790072f81d7c4b2e4d3806aa62f6c57195c049fc7d421d1eca21bff6268fd5"
+      "80790072f81d7c4b2e4d3806aa62f6c57195c049fc7d421d1eca21bff6268fd5",
+      "f31246ee1bd8851fac86500808937bf76ce180dd8eea080bfb5f6064642dc4d8"
     ],
     "skills/cas-code-review/references/findings-schema.md": [
       "20380edc1e35446c3e796656a3be61b60b06531630c0e0b49c24a2a74b7b558c",

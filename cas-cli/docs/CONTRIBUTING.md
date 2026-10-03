@@ -396,6 +396,36 @@ not serialize. An existing `RUSTC_WRAPPER` wins; set
 `CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
 cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
 
+When a worker delivery parks awaiting merge or closes, Cassy keeps only
+`factory.target_cache_retention_count` warm parked check caches (default: 1).
+It prunes the other private `target/debug` outputs under the same per-worktree
+lane lock used by the capped runner, with a Cargo-lock and open-output check.
+Place durable check logs at `target/worker-check.log`, nextest reports under
+`target/nextest`, or in the task artifact directory; these survive pruning.
+The next check re-seeds missing debug outputs from the immutable baseline.
+Active builders and open test/output handles prevent reclamation. Source files,
+receipts and the baseline stay intact; concurrent workers keep independent targets.
+
+Lane compile previews carry provenance and a lifetime owner lock. Explicit
+`gc_cleanup force=true dry_run=false` removes stale owned detached previews,
+including their Git registration, after revalidating ownership, process liveness
+and `factory.target_cache_min_idle_secs`. Recent or live previews survive;
+previews created before provenance was recorded remain inventory-only. The
+`TARGET_CACHE_STATUS_JSON` report includes nested preview target sizes and
+`lane_previews` dispositions. The existing high/low watermark configuration
+controls cache pressure warnings; preview cleanup does not need disk pressure.
+On macOS, liveness uses NUL-delimited `lsof` field output and fails closed if
+that probe is unavailable or reports errors. Only the evictor's held Cargo-lock
+file descriptor is exempt; other same-process handles and executable/mapped
+artifacts preserve the cache. Linux also inspects `/proc/PID/exe` and `maps`,
+and unknown/inaccessible evidence keeps the cache; reclamation therefore needs
+a readable process table. Same-HEAD parks have distinct marker generations,
+so an older retention inventory cannot evict a newly parked warm cache.
+Interrupted `.cas-parked-debug-*` quarantines remain preserved for explicit
+whole-target GC once the worktree is inactive and the recency/pressure policy
+permits it. They are included in target byte inventory; automatic park-time
+cleanup does not retry a quarantine or delete proof logs to recover it.
+
 New isolated workers also seed their private `target/` from compiled artifacts
 hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
 small Cargo dep-info files are copied with their target root rebased. The release

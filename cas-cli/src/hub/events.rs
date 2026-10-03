@@ -290,6 +290,18 @@ impl MachineEventBus {
         );
     }
 
+    /// A structured fleet operation changed `session`'s fleet (cas-566b).
+    /// Devices refetch the session's status; nothing polls.
+    pub(crate) fn fleet_changed(&self, session: &str) {
+        self.emit(
+            MachineEventKind::FleetChanged,
+            Some(session.to_owned()),
+            None,
+            None,
+            None,
+        );
+    }
+
     pub(crate) fn controller_changed(&self, session: &str) {
         self.emit(
             MachineEventKind::ControllerChanged,

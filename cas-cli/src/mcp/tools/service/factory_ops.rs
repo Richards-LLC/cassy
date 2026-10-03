@@ -6433,12 +6433,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
-        use crate::store::open_task_store;
-        use crate::ui::factory::{
-            metadata_path, persist_session_metadata_delivery_mode_at,
-            persist_session_metadata_pinned_epic_id_at,
-        };
-        use cas_types::{TaskStatus, TaskType};
+        use crate::ops::fleet::{FocusEpic, OperationError, focus_epic};
 
         let factory_session = current_factory_session().ok_or_else(|| {
             Self::error(
@@ -6451,129 +6446,37 @@ impl CasService {
 
         let clear = req.clear.unwrap_or(false);
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let metadata_path = metadata_path(&factory_session);
-
-        if clear {
-            persist_session_metadata_pinned_epic_id_at(&metadata_path, None).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to clear pinned epic focus: {e}"),
-                )
-            })?;
-            self.record_focus_epic_event(&factory_session, None, None);
-            return Ok(Self::success(format!(
-                "Cleared pinned epic focus for factory session {factory_session}"
-            )));
-        }
-
-        let Some(epic_id) = epic_id else {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "focus_epic requires `id=<epic-id>` or `clear=true`",
-            ));
-        };
-
-        let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open task store: {e}"),
-            )
-        })?;
-
-        let mut epic = task_store.get(epic_id).map_err(|e| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("Task not found: {epic_id}: {e}"),
-            )
-        })?;
-
-        if epic.task_type != TaskType::Epic {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "focus_epic: task {epic_id} is not an Epic (task_type={:?}). \
-                     This action only operates on Epic-type tasks.",
-                    epic.task_type
-                ),
-            ));
-        }
-        if epic.status == TaskStatus::Closed {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "focus_epic: task {epic_id} is Closed. \
-                     Closed epics cannot be pinned as the active factory focus.",
-                ),
-            ));
-        }
-
-        let delivery_mode = requested_delivery_mode.unwrap_or(epic.delivery_mode);
-        if requested_delivery_mode.is_some() {
-            epic.delivery_mode = delivery_mode;
-            task_store.update(&epic).map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to persist epic delivery mode: {error}"),
-                )
-            })?;
-        }
-
-        persist_session_metadata_pinned_epic_id_at(&metadata_path, Some(epic_id)).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to persist pinned epic focus: {e}"),
-            )
-        })?;
-        persist_session_metadata_delivery_mode_at(&metadata_path, delivery_mode).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to persist factory delivery mode: {e}"),
-            )
-        })?;
-        self.record_focus_epic_event(&factory_session, Some(epic_id), Some(delivery_mode));
-
-        Ok(Self::success(format!(
-            "Pinned epic focus to {epic_id} for factory session {factory_session} (delivery_mode={delivery_mode})"
-        )))
-    }
-
-    fn record_focus_epic_event(
-        &self,
-        factory_session: &str,
-        epic_id: Option<&str>,
-        delivery_mode: Option<cas_types::DeliveryMode>,
-    ) {
-        use crate::store::open_event_store;
-        use cas_types::{Event, EventEntityType, EventType};
-
-        let Ok(event_store) = open_event_store(&self.inner.cas_root) else {
-            return;
-        };
-
-        let summary = match epic_id {
-            Some(epic_id) => format!("Pinned factory epic focus to {epic_id}"),
-            None => "Cleared factory epic focus pin".to_string(),
-        };
-        let entity_type = if epic_id.is_some() {
-            EventEntityType::Task
+        let request = if clear {
+            FocusEpic::Clear
         } else {
-            EventEntityType::Session
+            let Some(epic_id) = epic_id else {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "focus_epic requires `id=<epic-id>` or `clear=true`",
+                ));
+            };
+            FocusEpic::Pin {
+                epic_id,
+                delivery_mode: requested_delivery_mode,
+            }
         };
-        let entity_id = epic_id.unwrap_or(factory_session);
-        let metadata = serde_json::json!({
-            "factory_session": factory_session,
-            "epic_id": epic_id,
-            "delivery_mode": delivery_mode.map(|mode| mode.to_string()),
-        });
-        let event = Event::new(
-            EventType::SupervisorInjected,
-            entity_type,
-            entity_id,
-            summary,
-        )
-        .with_metadata(metadata)
-        .with_session(factory_session);
-        let _ = event_store.record(&event);
+
+        // cas-566b: the body is the operator facade the Commander hub also
+        // calls; this arm keeps MCP's request parsing and error codes.
+        focus_epic(&self.inner.cas_root, &factory_session, request)
+            .map(|text| Self::success(text))
+            .map_err(|error| match error {
+                OperationError::Failed(message) => {
+                    Self::error(ErrorCode::INTERNAL_ERROR, message)
+                }
+                OperationError::NotFound(message)
+                | OperationError::Invalid(message) => {
+                    Self::error(ErrorCode::INVALID_PARAMS, message)
+                }
+                stale @ OperationError::Stale(_) => {
+                    Self::error(ErrorCode::INVALID_PARAMS, stale.to_string())
+                }
+            })
     }
 
     pub(super) async fn factory_gc_cleanup(

@@ -246,6 +246,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
       const status = page.locator("#machine-tree .machine-row small").first();
       await expect(status).toHaveText("Reconnecting");
       expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth), `drawer status not clipped at ${width}`).toBe(true);
+      // cas-bad9: every row of the open drawer is on top where it is drawn.
+      // On a phone the expanded Attention panel used to paint over all but
+      // the first, and a tap there landed in the panel.
+      await expect.poll(() => page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#machine-tree .machine-row, #machine-tree .nav-item")].flatMap((row) => {
+        const box = row.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        return hit && row.contains(hit) ? [] : [`${row.innerText.split("\n")[0]} under ${hit ? `${hit.tagName.toLowerCase()}.${[...hit.classList].join(".")} in ${hit.closest("aside, main, section")?.className ?? "?"}` : "nothing"}`];
+      })), { message: `every drawer row is topmost at ${width}` }).toEqual([]);
       await page.getByRole("button", { name: "Close machines and sessions" }).click();
     }
     await page.setViewportSize({ width: 1280, height: 720 });

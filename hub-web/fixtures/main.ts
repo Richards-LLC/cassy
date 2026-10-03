@@ -32,6 +32,7 @@ export const FIXTURE_NAMES = [
   "transcript",
   "attention-0",
   "attention-12",
+  "drawer-attention-open",
   "operator-thread",
   "connection-failed-retry",
   "pairing-step-1",
@@ -115,8 +116,8 @@ function attentionItems(count: number): AttentionItem[] {
   }));
 }
 
-function renderRail(machineCount: number): HTMLElement {
-  const navigation = element("aside", "machine-navigation");
+function renderRail(machineCount: number, drawerOpen = false): HTMLElement {
+  const navigation = element("aside", `machine-navigation${drawerOpen ? " drawer-open" : ""}`);
   navigation.setAttribute("aria-label", "Machines and sessions");
   const rail = element("div", "machine-rail");
   const mark = button("", "rail-control commander-mark");
@@ -136,13 +137,32 @@ function renderRail(machineCount: number): HTMLElement {
   rail.append(pair);
   navigation.append(rail);
   const drawer = element("div", "machine-drawer");
-  drawer.setAttribute("aria-hidden", "true");
-  drawer.setAttribute("inert", "");
+  if (!drawerOpen) {
+    drawer.setAttribute("aria-hidden", "true");
+    drawer.setAttribute("inert", "");
+  }
   const drawerHeader = element("header", "drawer-header");
   drawerHeader.append(element("strong"), button("", "drawer-close"));
   const drawerTree = element("nav");
   drawerTree.id = "machine-tree";
   drawerTree.setAttribute("aria-label", "Machine sessions");
+  // cas-bad9: the open drawer lists every machine and the selected machine's
+  // sessions, in main.ts machineTreeGroup's markup, so a phone render shows
+  // whether anything paints over a row.
+  if (drawerOpen) {
+    for (const [index, machine] of ["Atlas laptop", "Forge desktop", "Studio Mac"].entries()) {
+      const group = element("section", `machine-group${index === 0 ? " active" : ""}`);
+      const row = button("", "machine-row");
+      row.append(element("span", `machine-state ${index === 1 ? "degraded" : "live"}`), element("strong", undefined, machine), element("small", undefined, index === 1 ? "Reconnecting" : "live"));
+      group.append(row);
+      if (index === 0) {
+        const sessions = element("div", "session-tree");
+        sessions.append(button("cas-src · bright-otter", "nav-item active"), button("gabber-studio · calm-otter", "nav-item"));
+        group.append(sessions);
+      }
+      drawerTree.append(group);
+    }
+  }
   drawer.append(drawerHeader, drawerTree);
   navigation.append(drawer);
   return navigation;
@@ -154,7 +174,7 @@ function renderHeader(openSession: boolean): HTMLElement {
   const heading = element("h1", openSession ? "toolbar-session-title" : undefined);
   const picker = button("", "session-picker-toggle");
   picker.append(
-    element("span", "session-picker-name", openSession ? (["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
+    element("span", "session-picker-name", openSession ? (["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "drawer-attention-open"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
     element("span", "session-picker-caret", "▾"),
   );
   picker.lastElementChild?.setAttribute("aria-hidden", "true");
@@ -450,8 +470,9 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
 
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
-  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry"].includes(fixtureName);
-  const shell = element("div", `shell ${["session-canvas", "session-workers", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}`);
+  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry", "drawer-attention-open"].includes(fixtureName);
+  const drawerOpen = fixtureName === "drawer-attention-open";
+  const shell = element("div", `shell ${["session-canvas", "session-workers", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}${drawerOpen ? " drawer-open" : ""}`);
   shell.dataset.fixture = fixtureName;
   const signature = shellSignature({
     machineId: machineCount ? "atlas" : undefined,
@@ -459,7 +480,7 @@ function renderShell(): void {
     machineIds: machineCount ? ["atlas", "forge"] : [],
     sessionKeys: openSession ? ["atlas/bright-otter"] : [],
     catalogLoaded: true,
-    drawerOpen: false,
+    drawerOpen,
     attentionCollapsed: false,
     contextTab: "attention",
     fleetEmpty: fixtureName === "fleet-empty",
@@ -477,7 +498,7 @@ function renderShell(): void {
   const scheduler = new DeferredRenderScheduler({ render: () => {}, afterGesture: (run) => run() });
   scheduler.settled();
   shell.dataset.renderSignature = signature;
-  shell.append(renderRail(machineCount));
+  shell.append(renderRail(machineCount, drawerOpen));
   const main = element("main");
   main.append(renderHeader(openSession));
   if (fixtureName === "fleet-populated") {
@@ -504,7 +525,7 @@ function renderShell(): void {
     secondary.append(collapsed, renderTerminalPlaceholder("steady-badger", "worker", true));
     grid.append(primary, secondary);
     main.append(grid);
-  } else if (["session-canvas", "attention-0", "attention-12", "operator-thread"].includes(fixtureName)) {
+  } else if (["session-canvas", "attention-0", "attention-12", "operator-thread", "drawer-attention-open"].includes(fixtureName)) {
     // The default view: supervisor only, with the hidden-workers line (cas-6261).
     const grid = element("section", "pane-grid pane-layout workers-hidden");
     const primary = element("div", "primary-pane-slot");
@@ -530,7 +551,7 @@ function renderShell(): void {
     main.append(grid);
   }
   shell.append(main);
-  if (["attention-0", "attention-12", "operator-thread"].includes(fixtureName)) shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
+  if (["attention-0", "attention-12", "operator-thread", "drawer-attention-open"].includes(fixtureName)) shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
   app.replaceChildren(shell);
   renderRestingToast();
   if (fixtureName.startsWith("pairing")) appendOpenPairingDialog(fixtureName as PairingFixture);

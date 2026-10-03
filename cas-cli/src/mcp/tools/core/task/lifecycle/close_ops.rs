@@ -10068,12 +10068,38 @@ impl CasCore {
             let _ = agent_store.release_lease_for_task(&task.id, "Task cancelled without delivery");
         }
 
+        // cas-7877: cancelling a QA work item is the supervisor deciding the
+        // review will not happen. Withdraw its round too, so the delivery is
+        // no longer gated on it and the next park does not re-open it.
+        let qa_withdrawn = if task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL) {
+            match cas_store::withdraw_qa_pass_for_qa_task(
+                &self.cas_root,
+                &task.id,
+                &format!("QA task {} cancelled: {reason}", task.id),
+                now,
+            ) {
+                Ok(Some(pass)) => format!(
+                    " Independent QA round {} (pass {}) for {} @{} withdrawn.",
+                    pass.round,
+                    pass.id,
+                    pass.task_id,
+                    pass.head8()
+                ),
+                Ok(None) => String::new(),
+                Err(error) => format!(
+                    " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
+                ),
+            }
+        } else {
+            String::new()
+        };
+
         let pointer = superseded_by
             .as_deref()
             .map(|value| format!("; superseded by {value}"))
             .unwrap_or_default();
         Ok(Self::success(format!(
-            "Cancelled task without delivery: {} - {} (reason: {}{})",
+            "Cancelled task without delivery: {} - {} (reason: {}{}){qa_withdrawn}",
             task.id, task.title, reason, pointer
         )))
     }

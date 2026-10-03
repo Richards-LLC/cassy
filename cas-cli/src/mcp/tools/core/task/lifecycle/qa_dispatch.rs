@@ -32,6 +32,9 @@ pub(crate) enum QaCloseGate {
 struct QaDispatchStatus {
     text: String,
     satisfied: Option<QaPass>,
+    /// cas-7877: no review is owed; an unreviewed round for an earlier tip
+    /// was withdrawn instead of being re-dispatched.
+    withdrawn: bool,
 }
 
 impl QaDispatchStatus {
@@ -39,6 +42,7 @@ impl QaDispatchStatus {
         Self {
             text,
             satisfied: None,
+            withdrawn: false,
         }
     }
 }
@@ -51,6 +55,24 @@ fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+/// The target ref to classify a delivery against (cas-3760, GH #1066): the
+/// fresher of the local branch and `origin/<target>`. A stale local target
+/// puts the merge-base before commits the delivery already absorbed, so an
+/// unrelated `.scss` change on the target counted as this task's and marked a
+/// CI-only delivery user-facing. The close gate reads origin the same way
+/// (`live_target_ref`); a local target ahead of origin (merged here, not yet
+/// pushed) is kept, so neither side's newer history is lost.
+pub(crate) fn freshest_target_ref(repo: &Path, target_branch: &str) -> String {
+    let origin = format!("origin/{target_branch}");
+    let Some(origin_sha) = super::close_ops::resolve_branch_sha(repo, &origin) else {
+        return target_branch.to_string();
+    };
+    match super::close_ops::resolve_branch_sha(repo, target_branch) {
+        Some(local_sha) if is_ancestor(repo, &origin_sha, &local_sha) => target_branch.to_string(),
+        _ => origin,
+    }
 }
 
 fn close_delivery_location<'a>(repo: &Path, head: &str, target: &'a str) -> QaDeliveryLocation<'a> {
@@ -405,7 +427,11 @@ impl CasCore {
         // The close gate has already selected this task's delivery tip. A
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
-        let changed = match changed_paths_for_delivery(repo, parent_branch, delivery_ref) {
+        let changed = match changed_paths_for_delivery(
+            repo,
+            &freshest_target_ref(repo, parent_branch),
+            delivery_ref,
+        ) {
             Ok(paths) => Some(paths),
             Err(error) => {
                 tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
@@ -506,7 +532,12 @@ impl CasCore {
                     task.id
                 )
             })?;
-        let changed = changed_paths_for_delivery(&repo_root, &target_branch, &head).ok();
+        let changed = changed_paths_for_delivery(
+            &repo_root,
+            &freshest_target_ref(&repo_root, &target_branch),
+            &head,
+        )
+        .ok();
         self.independent_qa_for_paths(
             task,
             &repo_root,
@@ -540,6 +571,16 @@ impl CasCore {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         let implementer = task.assignee.as_deref()?;
+        // cas-7877: the close backstop reaches here for a delivery that is not
+        // integrated yet, with no change set. Judging it from the demo alone
+        // re-dispatched a stale round as a "re-review" for a backend-only tip.
+        // Measure the tip's own diff against the fresh target instead.
+        let changed = changed.or_else(|| {
+            head.and_then(|head| {
+                changed_paths_for_delivery(repo, &freshest_target_ref(repo, parent_branch), head)
+                    .ok()
+            })
+        });
         let journeys = changed
             .as_deref()
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
@@ -559,6 +600,26 @@ impl CasCore {
             // branch already holding the reviewed change. Deciding afresh
             // left the merge refused with no round a reviewer could record.
             let prior = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            // cas-7877: rounds that never reached a verdict were opened for an
+            // earlier tip that looked user-facing (a lane stacked on another
+            // task's UI commit, say). They are not a review this tip owes.
+            // Withdraw the open one instead of re-dispatching it as a
+            // "re-review". A recorded verdict (passed, failed, waived) keeps
+            // the GH #1001 rule: the next park is reviewed again.
+            if changed.is_some()
+                && !prior.is_empty()
+                && !prior.iter().any(|pass| {
+                    !pass.is_withdrawn()
+                        && matches!(
+                            pass.state,
+                            cas_types::QaPassState::Passed
+                                | cas_types::QaPassState::Failed
+                                | cas_types::QaPassState::Waived
+                        )
+                })
+            {
+                return self.withdraw_unreviewed_qa_round(task, repo, head);
+            }
             if !crate::qa_pass::gate_applies(task, &qa, &prior) {
                 // cas-2ee2: a required GitHub check must still turn green for
                 // a delivery that needs no independent QA.
@@ -689,6 +750,66 @@ impl CasCore {
         Some(QaDispatchStatus {
             text: status,
             satisfied,
+            withdrawn: false,
+        })
+    }
+
+    /// cas-7877: the re-parked tip is not user-facing and no earlier round
+    /// reached a verdict. Withdraw the round still open for an earlier tip,
+    /// cancel its work item (telling a reviewer who claimed it to stop), and
+    /// report that no review is owed. `None` when there was nothing open.
+    fn withdraw_unreviewed_qa_round(
+        &self,
+        task: &Task,
+        repo: &Path,
+        head: Option<&str>,
+    ) -> Option<QaDispatchStatus> {
+        if let Some(head) = head {
+            crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
+        }
+        let tip = head.map(|head| head.get(..8).unwrap_or(head)).unwrap_or("this tip");
+        let reason = format!(
+            "re-parked at {tip}, which has no user-facing change; the round was opened for an earlier tip and never reviewed"
+        );
+        let pass = match cas_store::withdraw_open_qa_pass(
+            &self.cas_root,
+            &task.id,
+            &reason,
+            true,
+            chrono::Utc::now(),
+        ) {
+            Ok(Some(pass)) => pass,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, error = %error, "cas-7877: unreviewed QA round could not be withdrawn");
+                return Some(QaDispatchStatus::required(format!(
+                    "\n\nINDEPENDENT QA: this tip is not user-facing, but the round open for an earlier tip \
+                     could not be withdrawn ({error}). A supervisor can qa_waive it."
+                )));
+            }
+        };
+        let cancelled = self.cancel_withdrawn_qa_task(&pass, &reason);
+        let notified = pass
+            .reviewer_agent_id
+            .as_deref()
+            .map(|reviewer| {
+                self.notify_superseded_reviewer(
+                    &pass,
+                    reviewer,
+                    "no new round: the re-parked tip has no user-facing change",
+                )
+            })
+            .unwrap_or_default();
+        Some(QaDispatchStatus {
+            text: format!(
+                "\n\nINDEPENDENT QA WITHDRAWN: round {} (pass {}) for {} was opened for an earlier tip and \
+                 never reviewed; {tip} has no user-facing change, so no review is owed.{cancelled}{notified}",
+                pass.round,
+                pass.id,
+                pass.head8(),
+            ),
+            satisfied: None,
+            withdrawn: true,
         })
     }
 
@@ -987,6 +1108,11 @@ impl CasCore {
             location,
             None,
         );
+        if dispatch.as_ref().is_some_and(|status| status.withdrawn) {
+            // cas-7877: the only round was an unreviewed one for an earlier,
+            // user-facing-looking tip; the delivered change owes no review.
+            return QaCloseGate::Clear;
+        }
         if let Some(pass) = dispatch
             .as_ref()
             .and_then(|status| status.satisfied.as_ref())

@@ -1855,3 +1855,143 @@ fn gh_and_supervisor_scopes_restore_values_on_panic_cas_6651() {
     assert!(std::env::var_os("CAS_TEST_GH_HEAD").is_none());
     assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
 }
+
+/// cas-7877, the cas-4a8e1 shape: the first park was stacked on another
+/// task's UI commit and opened a round nobody reviewed. The worker re-parks
+/// from a backend-only tip. That tip owes no review, so the stale round is
+/// withdrawn (its work item cancelled) instead of re-dispatched as a
+/// "re-review after round 1".
+#[tokio::test]
+async fn a_backend_only_repark_withdraws_an_unreviewed_round_instead_of_re_reviewing_cas_7877() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let stale_qa_task = qa_task_id(&cas_dir, &task_id);
+
+    // The supervisor declines that delivery administratively (the lane was
+    // stacked on another task's UI commit)...
+    {
+        let supervisor = supervisor_core(&cas_dir);
+        let _role = SupervisorRole::enter(&mut test_env);
+        supervisor
+            .cas_task_request_changes(Parameters(TaskRequestChangesRequest {
+                id: task_id.clone(),
+                reason: "administrative: re-park from the backend-only cherry-pick".into(),
+            }))
+            .await
+            .expect("supervisor declines the stacked delivery");
+    }
+    // ...and the worker re-parks from a clean, backend-only per-task branch
+    // (cas-73b8); the UI commit stays behind on factory/test-agent.
+    core.cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
+        .await
+        .expect("restart after request_changes");
+    git(&repo, &["checkout", "-q", "-b", "factory/test-agent-cas-ui01", "main"]);
+    commit_file(&repo, "src/halt.rs", "pub fn halt() {}\n", "backend-only fix");
+    let reparked = close_text(&core, &task_id).await;
+    assert!(reparked.contains("MERGE REQUIRED"), "{reparked}");
+    assert!(!reparked.contains("re-review"), "{reparked}");
+    assert!(!reparked.contains("INDEPENDENT QA DISPATCHED"), "{reparked}");
+    assert!(!reparked.contains("INDEPENDENT QA PENDING"), "{reparked}");
+
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1, "no new round: {passes:?}");
+    assert!(passes[0].is_withdrawn(), "{:?}", passes[0]);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(tasks.get(&stale_qa_task).unwrap().status, TaskStatus::Cancelled);
+    assert!(
+        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/test-agent-cas-ui01")
+            .is_none(),
+        "the merge no longer waits on a review nobody owes"
+    );
+    let again = close_text(&core, &task_id).await;
+    assert!(!again.contains("INDEPENDENT QA"), "{again}");
+}
+
+/// cas-7877: a reviewed round still binds. After a recorded rejection, a
+/// backend-only re-park is reviewed again (GH #1001 / cas-627c), not withdrawn.
+#[tokio::test]
+async fn a_rejected_round_is_still_re_reviewed_after_a_backend_only_repark_cas_7877() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let _keep = &temp;
+    let _reviewer = reject_round_one(&core, &repo, &task_id).await;
+
+    // The new tip alone is backend-only.
+    git(&repo, &["checkout", "-q", "-b", "factory/test-agent-cas-ui01", "main"]);
+    commit_file(&repo, "src/fix.rs", "pub fn fix() {}\n", "backend fix for the rejection");
+    let reparked = close_text(&core, &task_id).await;
+    assert!(reparked.contains("re-review after round 1"), "{reparked}");
+    assert!(!reparked.contains("WITHDRAWN"), "{reparked}");
+}
+
+/// cas-7877: cancelling a QA work item withdraws its round, so the delivery is
+/// no longer gated on a review that will not happen.
+#[tokio::test]
+async fn cancelling_a_qa_work_item_withdraws_its_round_cas_7877() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+
+    let supervisor = supervisor_core(&cas_dir);
+    let _role = SupervisorRole::enter(&mut test_env);
+    let cancelled = extract_text(
+        supervisor
+            .cas_task_cancel(Parameters(TaskCancelRequest {
+                id: qa_task.clone(),
+                reason: "spurious round: the lane was stacked on another task's UI commit".into(),
+                superseded_by: None,
+            }))
+            .await
+            .expect("supervisor cancels the QA work item"),
+    );
+    assert!(cancelled.contains("withdrawn"), "{cancelled}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert!(passes[0].is_withdrawn(), "{:?}", passes[0]);
+    assert!(
+        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/test-agent")
+            .is_none(),
+        "a cancelled work item no longer gates the merge"
+    );
+}
+
+/// cas-3760 (GH #1066): the target gained an unrelated `.scss` commit that
+/// this checkout's local target branch has not caught up with. A CI-only
+/// delivery branched from the fresh target is classified against
+/// `origin/<target>`, so it is not user-facing and no round is dispatched.
+#[tokio::test]
+async fn a_stale_local_target_does_not_make_a_ci_only_delivery_user_facing_cas_3760() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    // origin/main moves on with someone else's stylesheet change...
+    git(&repo, &["checkout", "-q", "main"]);
+    let styled = commit_file(
+        &repo,
+        "apps/frontend/app/src/assets/styles/_auth-pages.scss",
+        ".auth{margin:0}\n",
+        "unrelated auth page styles",
+    );
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &styled]);
+    // ...while this checkout's local main stays behind it.
+    git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+    // The delivery branches from the fresh target and changes CI only.
+    git(&repo, &["checkout", "-q", "-B", "factory/test-agent", &styled]);
+    commit_file(&repo, ".github/workflows/ci.yml", "on: push\n", "ci only");
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(!parked.contains("INDEPENDENT QA"), "{parked}");
+    assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty());
+}

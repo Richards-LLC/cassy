@@ -959,6 +959,10 @@ main {
 }
 
 .pane-last-activity {
+  /* cas-7d25: when the header is short, the activity line gives way before
+     the pane's own name. */
+  flex: 0 1000 auto;
+  min-width: 0;
   margin-left: auto;
   overflow: hidden;
   color: var(--text-mid);

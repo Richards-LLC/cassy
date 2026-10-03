@@ -27705,39 +27705,6 @@ mod merge_state_gate_tests {
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
     }
 
-    #[test]
-    fn zz_diag_f38ca_replay() {
-        let root = crate::test_paths::workspace_root();
-        let repo = root.as_path();
-        let mut out = String::new();
-        for (id, assignee, anchor, olds, target, floor) in [
-            ("cas-940f", "wise-raven-87", "3e9121d3a", vec!["31a3c3519"], "59be03ce1", 1_791_000_000i64),
-            ("cas-6a96", "nimble-marten-87", "2333b09e7", vec!["2d9b3824d", "d0f02c3b8"], "5f04f2ea8", 1_791_000_000),
-            ("cas-cee5", "nimble-marten-87", "6143de642", vec!["bd75338c6"], "05be2b5da", 1_791_000_000),
-        ] {
-            let anchor = resolve_task_commit_receipt_sha(repo, anchor).unwrap();
-            let target = resolve_task_commit_receipt_sha(repo, target).unwrap();
-            let mut task = worker_task(assignee);
-            task.id = id.into();
-            task.status = TaskStatus::AwaitingMerge;
-            task.deliverables.factory_branch_anchor = Some(anchor.clone());
-            task.deliverables.historical_factory_branch_anchors = olds.iter().map(|o| resolve_task_commit_receipt_sha(repo, o).unwrap()).collect();
-            for (label, floor_epoch, reason, receipt) in [
-                ("plain", floor, None, None),
-                ("override+receipt", floor, Some("supervisor"), Some(anchor.as_str())),
-                ("floor0", 0, None, None),
-            ] {
-                let mut window = window_at(floor_epoch, "diag");
-                window.supervisor_override_reason = reason.map(str::to_string);
-                window.identity = TaskCommitIdentity { task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
-                let raw = task_attribution::merge_tip_content_presence(repo, &target, &anchor, Some(&window), &window.identity, receipt);
-                let outcome = anchored_delivery_content_gate(&task, repo, &anchor, &target, Some(&window), &window.identity, receipt, None);
-                out.push_str(&format!("\n== {id} {label}\nraw={raw:?}\noutcome={outcome:?}\n"));
-            }
-        }
-        panic!("{out}");
-    }
-
     /// Replays immutable production delivery anchors. Run explicitly in a
     /// checkout retaining the v34 history; normal shallow CI uses the fixtures.
     #[test]
@@ -27877,6 +27844,154 @@ mod merge_state_gate_tests {
                 assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}")
             }
             other => panic!("a bundle-only drop has no source proof: {other:?}"),
+        }
+    }
+
+    /// cas-f38ca fixture (the cas-940f shape): the worker's lane branches
+    /// off an older epic, the epic then lands another task's work on
+    /// `update.rs` (a commit whose subject claims cas-6fb6 but whose body
+    /// mentions this task as context, then a follow-up that deletes one of
+    /// its lines), and the worker merges that newer epic before handing off.
+    /// Returns the repo, the worker's handoff merge and the task commit.
+    fn epic_merge_lane_fixture(other_body: &str) -> (TempDir, String) {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let commit = |path: &str, content: &str, message: &str| {
+            std::fs::write(p.join(path), content).unwrap();
+            git(p, &["add", path]);
+            git(p, &["commit", "-q", "-m", message]);
+        };
+        git(p, &["checkout", "-q", "main"]);
+        commit("update.rs", "fn update() {\n    old();\n}\n", "seed update.rs");
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+        commit("worker.ts", "export const kept = 1;\n", "fix(hub): keep recorded times (cas-test1)");
+        git(p, &["checkout", "-q", "-b", "factory/other", "main"]);
+        commit(
+            "update.rs",
+            "fn update() {\n    moved();\n    refused();\n}\n",
+            &format!("fix(task): re-parenting moves a target (cas-6fb6)\n\n{other_body}"),
+        );
+        commit(
+            "update.rs",
+            "fn update() {\n    moved();\n}\n",
+            "test(task): parked re-parent refusals per path (cas-6fb6)",
+        );
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/other", "-m", "Merge branch 'factory/other-cas-6fb6'"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "merge: retain reviewed fix and sync epic (cas-test1)"]);
+        let handoff = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        (dir, handoff)
+    }
+
+    /// cas-f38ca: content the lane received from the epic through a merge is
+    /// not this task's delivery. `update.rs` is byte-identical on the anchor
+    /// and the target, the task never changed it, and a foreign commit's
+    /// contextual mention of the task does not make its lines the task's.
+    #[test]
+    fn epic_content_merged_into_the_lane_is_not_dropped_delivery_cas_f38ca() {
+        let (dir, handoff) = epic_merge_lane_fixture("Context: dep_add no longer strands cas-test1.");
+        let p = dir.path();
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Merge branch 'factory/worker'"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(handoff);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => {}
+            other => panic!("epic content merged into the lane is not a dropped delivery: {other:?}"),
+        }
+    }
+
+    /// cas-f38ca: the same shape still refuses an integration that discarded
+    /// the task's own delivery, and names only the task's path.
+    #[test]
+    fn epic_merge_lane_still_rejects_a_discarded_delivery_cas_f38ca() {
+        let (dir, handoff) = epic_merge_lane_fixture("Context: dep_add no longer strands cas-test1.");
+        let p = dir.path();
+        git(p, &["merge", "-q", "--no-ff", "-s", "ours", "factory/worker", "-m", "Merge branch 'factory/worker' (dropped)"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(handoff);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}");
+                assert!(message.contains("Dropped path(s): worker.ts"), "{message}");
+                assert!(!message.contains("update.rs"), "{message}");
+            }
+            other => panic!("a discarded delivery must still be refused: {other:?}"),
+        }
+    }
+
+    /// cas-f38ca: a path still attributed to the task (a commit with no task
+    /// claim of its own in the subject, mentioning only this task) whose
+    /// delivered blob is byte-identical on the target is present, not dropped.
+    #[test]
+    fn byte_identical_delivered_path_is_present_on_target_cas_f38ca() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("update.rs"), "keep();\n").unwrap();
+        git(p, &["add", "update.rs"]);
+        git(p, &["commit", "-q", "-m", "seed update.rs"]);
+        git(p, &["branch", "-f", "main", "HEAD"]);
+        std::fs::write(p.join("worker.ts"), "export const kept = 1;\n").unwrap();
+        git(p, &["add", "worker.ts"]);
+        git(p, &["commit", "-q", "-m", "fix(hub): worker change (cas-test1)"]);
+        git(p, &["checkout", "-q", "-b", "factory/other", "main"]);
+        std::fs::write(p.join("update.rs"), "keep();\nadded();\nremoved();\n").unwrap();
+        git(p, &["add", "update.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: shared helper\n\nUnblocks cas-test1."]);
+        std::fs::write(p.join("update.rs"), "keep();\nadded();\n").unwrap();
+        git(p, &["add", "update.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: trim helper"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/other", "-m", "Merge branch 'factory/other'"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "merge: sync epic (cas-test1)"]);
+        let handoff = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Merge branch 'factory/worker'"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(handoff);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Proceed => {}
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(!note.contains("regenerated build artifact"), "{note}")
+            }
+            other => panic!("a byte-identical delivered path is not dropped: {other:?}"),
+        }
+    }
+
+    /// cas-f38ca: byte identity alone never clears a delivery the task itself
+    /// reverted; the anchor and target both lack the file, exactly as the
+    /// task's base did, so the delivery is still refused (cas-0930).
+    #[test]
+    fn reverted_delivery_identical_to_base_still_rejects_cas_f38ca() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("copy.txt"), "delivery\n").unwrap();
+        git(p, &["add", "copy.txt"]);
+        git(p, &["commit", "-q", "-m", "feat: delivery (cas-test1)"]);
+        let delivery = rev_parse_local(p, "HEAD");
+        git(p, &["revert", "--no-edit", &delivery]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target.rs"), "target();\n").unwrap();
+        git(p, &["add", "target.rs"]);
+        git(p, &["commit", "-q", "-m", "advance target"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "sync target (cas-test1)"]);
+        let handoff = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "integrate"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(handoff);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("copy.txt"), "{message}")
+            }
+            other => panic!("a reverted delivery must still be refused: {other:?}"),
         }
     }
 

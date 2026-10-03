@@ -1701,7 +1701,8 @@ mod tests {
         let issue = PreExistingIssue {
             severity: "normal".to_string(),
             problem: "Footer contrast 3.1:1".to_string(),
-            ..Default::default()
+            suggestion: String::new(),
+            evidence: String::new(),
         };
         let round = pass("aaaa1111", cas_types::QaPassState::Passed);
         let follow_up = follow_up_task("cas-f011", &delivery, &round, &issue, "/a/LEDGER.md", Some(&parent));

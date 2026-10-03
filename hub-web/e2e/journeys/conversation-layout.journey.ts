@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
@@ -35,6 +35,7 @@ for (const colorScheme of ["light", "dark"] as const) {
           canvas.style.display = original;
           return { before, withoutCanvas, pageWidth: document.documentElement.scrollWidth, viewport: innerWidth };
         });
+        mkdirSync(testInfo.outputDir, { recursive: true });
         writeFileSync(join(testInfo.outputDir, "geometry.json"), JSON.stringify(geometry, null, 2));
         expect(geometry.before.hitInReadingSurface, "the reader, not the hidden terminal, receives the hit").toBe(true);
         expect(geometry.before.thread.scrollWidth).toBeLessThanOrEqual(geometry.before.thread.clientWidth + 1);

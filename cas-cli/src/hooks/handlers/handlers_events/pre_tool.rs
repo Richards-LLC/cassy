@@ -3766,6 +3766,8 @@ mod workspace_contract_tests {
                 );
             }
         }
+    }
+
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
     /// its sanctioned roots and stale Cassy runtime files (sockets, locks,
     /// pid and session files) under ~/.cas; the supervisor may also clear

@@ -1446,7 +1446,7 @@ impl FactoryApp {
         _factory_tip: Option<&str>,
         repo_root: &Path,
     ) -> Option<MergedCloseBlockedTask> {
-        let target_tip = crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+        let target_tip = crate::git_evidence::resolve_branch_sha(
             repo_root,
             target_branch,
         )?;
@@ -1459,7 +1459,7 @@ impl FactoryApp {
             .map(str::trim)
             .filter(|anchor| !anchor.is_empty())?;
         let anchor_sha =
-            crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+            crate::git_evidence::resolve_branch_sha(
                 repo_root, anchor,
             )?;
         if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
@@ -1497,7 +1497,7 @@ impl FactoryApp {
             deliverables.and_then(|d| d.parked_branch.as_deref()),
             deliverables.and_then(|d| d.factory_branch_anchor.as_deref()),
             |branch| {
-                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                crate::git_evidence::resolve_branch_sha(
                     repo_root, branch,
                 )
             },

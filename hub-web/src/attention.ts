@@ -207,6 +207,19 @@ export function machineEventAttention(kind: string, diagnostic: unknown, enrichm
   };
 }
 
+/** A watchdog's baked age belongs to its recorded diagnostic, not current prose. */
+export function deliveryNoticeAttention(summary: string, message: string): AttentionContent {
+  const worker = /worker (?:died|stopped):\s*([^\s,;]+)/i.exec(message)?.[1]
+    ?? /worker (?:died|stopped):\s*([^\s,;]+)/i.exec(summary)?.[1];
+  return {
+    headline: worker ? "The supervisor missed an update: a worker stopped" : "The supervisor missed an update",
+    detail: `${worker ? `Worker ${worker} stopped. ` : ""}The update did not reach the supervisor.`,
+    severity: "warning",
+    action: "view_pane",
+    payload: { summary, message },
+  };
+}
+
 function storedHeadline(item: AttentionItem): string {
   const stored = item.headline ?? item.message;
   if (!item.session) return stored;
@@ -229,6 +242,15 @@ export function attentionContent(item: AttentionItem): AttentionContent {
     }
   }
 
+  if (normalizedKind(item.kind) === "delivery_stall") {
+    // Re-derive old persisted notices too; retain their original diagnostic in Details.
+    const payload = asRecord(item.payload);
+    const content = deliveryNoticeAttention(
+      typeof payload?.summary === "string" ? payload.summary : stored,
+      typeof payload?.message === "string" ? payload.message : item.detail ?? item.message,
+    );
+    return { ...content, severity: severityForEvent(item.kind, item.severity), fingerprint: item.fingerprint };
+  }
   const severity = severityForEvent(item.kind, item.severity);
   const task = stored.match(TASK_PREFIX);
   const fallback = sentenceCase(normalizedKind(item.kind));
@@ -454,9 +476,24 @@ export function relativeTime(createdAt: string, now = Date.now()): string {
   return `${Math.floor(elapsed / 86_400_000)}d`;
 }
 
+/**
+ * A delivery notice's recorded diagnostic as the operator reads it (cas-ed87):
+ * the watchdog's summary once, when it says something the message does not,
+ * then the message. Plain text, never the {summary, message} object.
+ */
+function deliveryNoticeText(payload: unknown): string | undefined {
+  const record = asRecord(payload);
+  if (typeof record?.message !== "string") return undefined;
+  const message = record.message.trim();
+  const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+  return summary && !message.includes(summary) ? `${summary}\n\n${message}` : message;
+}
+
 export function attentionPayload(item: AttentionItem): string {
-  const payload = item.payload ?? item.message;
+  const payload = normalizedKind(item.kind) === "delivery_stall" ? attentionContent(item).payload : item.payload ?? item.message;
   if (typeof payload === "string") return payload;
+  const notice = normalizedKind(item.kind) === "delivery_stall" ? deliveryNoticeText(payload) : undefined;
+  if (notice !== undefined) return notice;
   try {
     return JSON.stringify(payload, null, 2);
   } catch {

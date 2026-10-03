@@ -1,4 +1,5 @@
 import "../src/styles.css";
+import { renderAttentionNoticeFixture } from "./attention-notice";
 import { renderConversationFixture } from "./conversations";
 import { attentionCounts, createAttentionItem } from "../src/attention";
 import { renderAttentionPanel } from "../src/attention-view";
@@ -21,7 +22,7 @@ export const FIXTURE_NAMES = [
   "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-machine-label-overlong", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
-  "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
+  "conversation-attachment", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard",
   "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
   "conversations-session-ended",
   "conversation-needs-pairing",
@@ -33,6 +34,7 @@ export const FIXTURE_NAMES = [
   "transcript",
   "attention-0",
   "attention-12",
+  "attention-notice-details",
   "drawer-attention-open",
   "operator-thread",
   "connection-failed-retry",
@@ -586,5 +588,6 @@ function renderShell(): void {
   }
 }
 
-if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines" || fixtureName === "paired-machines-down") renderConversationFixture(app, fixtureName);
+if (fixtureName === "attention-notice-details") renderAttentionNoticeFixture(app);
+else if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines" || fixtureName === "paired-machines-down") renderConversationFixture(app, fixtureName);
 else renderShell();

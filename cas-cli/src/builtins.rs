@@ -5545,6 +5545,34 @@ This is the body content."#;
         }
     }
 
+    /// cas-4e45 (GH #1062): a failed or partial read is never "no new
+    /// replies". Agents must check `ok` and `complete` before concluding a
+    /// thread has no answer, and know the include_threads failure mode.
+    #[test]
+    fn test_builtin_violet_skill_reads_check_ok_and_complete() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/violet/SKILL.md")
+                .unwrap_or_else(|| panic!("skills/violet/SKILL.md missing from {label}"));
+            for phrase in [
+                "\"No new replies\" needs `ok: true` and `complete: true`",
+                "never an empty channel",
+                "`complete: false` is a partial digest",
+                "`include_threads: false`",
+            ] {
+                assert!(
+                    skill.content.contains(phrase),
+                    "{label} violet SKILL.md must say {phrase:?} (cas-4e45)"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_builtin_violet_skill_body_under_12kb() {
         const MAX_BYTES: usize = 12 * 1024;

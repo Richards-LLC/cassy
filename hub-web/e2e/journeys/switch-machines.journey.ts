@@ -89,7 +89,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const toggle = page.locator("#session-picker-toggle");
     const palette = page.locator("#command-palette");
     // The list search and the Terminal view button name the palette chord the
-    // same way on this (Linux) browser: Ctrl K, not ⌘K (journey F16).
+    // same way on this browser, which declares Linux (cas-2a33): Ctrl K, not
+    // ⌘K (journey F16). The macOS part of HUB-J3 checks ⌘K.
     await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
     await page.locator("#conversation-terminal").click();
     await expect(toggle).toBeVisible();

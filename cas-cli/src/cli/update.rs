@@ -1729,8 +1729,9 @@ fn print_project_refresh_summary(
 }
 
 /// The compact (non-JSON) refresh summary: the project table, a details
-/// block under each project with a warned or failed phase (every project
-/// with `verbose`), the user-level line and skipped projects (cas-8030).
+/// block under each project with a warned, failed or dry-run planned phase
+/// (every project with `verbose`), the user-level line and skipped projects
+/// (cas-8030, cas-937a).
 fn render_project_refresh_summary(
     receipts: &[ProjectRefreshReceipt],
     user_level: &ProjectPhase,
@@ -1758,9 +1759,15 @@ fn render_project_refresh_summary(
             ]
             .into_iter()
             // cas-8030: a skipped phase ("not cloud-linked") is already
-            // explained by the table's note; only warnings and failures
-            // earn a details block in the compact view.
-            .any(|phase| matches!(phase, ProjectPhase::Warning(_) | ProjectPhase::Failed(_)));
+            // explained by the table's note, so it earns no details block.
+            // A dry run's planned phases do (cas-937a): their block is the
+            // only place the compact view says "DRY RUN" and what would run.
+            .any(|phase| {
+                matches!(
+                    phase,
+                    ProjectPhase::Warning(_) | ProjectPhase::Failed(_) | ProjectPhase::Planned(_)
+                )
+            });
         details.push((project, show_detail.then_some(detail)));
     }
     if !user_details.is_empty() {

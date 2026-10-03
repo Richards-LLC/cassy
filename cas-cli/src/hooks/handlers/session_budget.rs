@@ -578,27 +578,77 @@ mod tests {
     /// model the headings emitted by the production context builder.
     #[test]
     fn guidance_growth_compacts_static_listing_before_ambient_recall() {
-        let guidance_growth = "\nAdditional supervisor guidance retained for future policy edits."
-            .repeat(32);
+        // cas-0012: the fixture used to add a fixed ~2.1KB of "growth" to the
+        // real supervisor guidance, which left it under 128B of margin, so each
+        // routine guidance edit tripped it. Instead it now grows the guidance
+        // until the compacted payload (protected text, the compacted static
+        // listing and the full ambient recall) sits exactly
+        // GUIDANCE_GROWTH_FIXTURE_HEADROOM_BYTES under the budget. It fails
+        // only when the real guidance alone leaves less than that headroom: a
+        // real budget regression, reported in bytes.
+        const GUIDANCE_GROWTH_FIXTURE_HEADROOM_BYTES: usize = 512;
         let static_listing = (0..64)
             .map(|i| format!("- skill-{i:02}: a representative static skill listing row\n"))
             .collect::<String>();
-        let base = format!(
-            "## 📋 CAS Context\n**Session:** `7d3511aa-9cf5-44d8-921d-0289bd66fe0a`\n\n{}{}\n\n## Available Skills (64 skills, ~1.2k tk if expanded)\n{}",
-            crate::builtins::supervisor_guidance(),
-            guidance_growth,
-            static_listing,
-        );
-        let mut assembler = SessionContextAssembler::new(base);
         let ambient = "[ambient recall v1 role=supervisor]\nCurrent release recovery audit receipts preserve operator intent\n"
             .to_string();
-        assembler.append_degradable_with_priority(
-            "Ambient recall",
-            ambient.clone(),
-            "[ambient recall v1 role=supervisor] 1 evidence card; run `mcp__cas__search` for bodies"
-                .to_string(),
-            DegradationPriority::AmbientRecall,
+        let assembler = |guidance_growth: &str| {
+            let base = format!(
+                "## 📋 CAS Context\n**Session:** `7d3511aa-9cf5-44d8-921d-0289bd66fe0a`\n\n{}{}\n\n## Available Skills (64 skills, ~1.2k tk if expanded)\n{}",
+                crate::builtins::supervisor_guidance(),
+                guidance_growth,
+                static_listing,
+            );
+            let mut assembler = SessionContextAssembler::new(base);
+            assembler.append_degradable_with_priority(
+                "Ambient recall",
+                ambient.clone(),
+                "[ambient recall v1 role=supervisor] 1 evidence card; run `mcp__cas__search` for bodies"
+                    .to_string(),
+                DegradationPriority::AmbientRecall,
+            );
+            assembler
+        };
+
+        // Measure the real guidance: the payload with only the static listing
+        // compacted (it degrades first) and no added growth.
+        let ungrown = assembler("");
+        let ungrown_full = ungrown.full_len();
+        let ungrown_compacted = ungrown.with_budget(ungrown_full - 1).render();
+        assert!(
+            ungrown_compacted.contains("[SessionStart compacted: Available Skills")
+                && ungrown_compacted.contains(&ambient),
+            "measuring pass must compact only the static listing: {ungrown_compacted}"
         );
+        let room = SESSION_START_BUDGET_BYTES
+            .checked_sub(GUIDANCE_GROWTH_FIXTURE_HEADROOM_BYTES)
+            .unwrap();
+        assert!(
+            ungrown_compacted.len() <= room,
+            "real supervisor guidance leaves too little SessionStart headroom: the compacted \
+             payload (guidance, header, compacted skills listing, full ambient recall) is {}B, \
+             {}B over the {room}B line that keeps {}B of headroom under the {}B budget. Trim \
+             guidance or raise the budget deliberately.",
+            ungrown_compacted.len(),
+            ungrown_compacted.len() - room,
+            GUIDANCE_GROWTH_FIXTURE_HEADROOM_BYTES,
+            SESSION_START_BUDGET_BYTES
+        );
+        let headroom_now = SESSION_START_BUDGET_BYTES - ungrown_compacted.len();
+        eprintln!(
+            "guidance-growth headroom: compacted payload {}B of {SESSION_START_BUDGET_BYTES}B; \
+             {headroom_now}B free, {}B of it usable before the {GUIDANCE_GROWTH_FIXTURE_HEADROOM_BYTES}B \
+             headroom line",
+            ungrown_compacted.len(),
+            room - ungrown_compacted.len()
+        );
+
+        // Grow the guidance by exactly what is left above the headroom line.
+        let growth_len = room - ungrown_compacted.len();
+        let guidance_growth = "\nAdditional supervisor guidance retained for future policy edits."
+            .repeat(growth_len / 64 + 1)[..growth_len]
+            .to_string();
+        let assembler = assembler(&guidance_growth);
 
         let full_len = assembler.full_len();
         assert!(
@@ -614,9 +664,11 @@ mod tests {
         );
         assert!(
             payload.len() <= SESSION_START_BUDGET_BYTES,
-            "compacted payload is {}B, over the {}B budget",
+            "compacted payload is {}B, {}B over the {}B budget (fixture headroom {}B)",
             payload.len(),
-            SESSION_START_BUDGET_BYTES
+            payload.len().saturating_sub(SESSION_START_BUDGET_BYTES),
+            SESSION_START_BUDGET_BYTES,
+            GUIDANCE_GROWTH_FIXTURE_HEADROOM_BYTES
         );
         assert!(
             payload.contains("[SessionStart compacted: Available Skills"),

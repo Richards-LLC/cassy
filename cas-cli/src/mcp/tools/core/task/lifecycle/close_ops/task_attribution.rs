@@ -11,16 +11,7 @@ struct DeliveryRange {
     tip: String,
 }
 
-fn git_text(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
+use crate::git_evidence::git_text;
 
 fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     message
@@ -46,6 +37,53 @@ fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> 
         .as_deref()
         .is_some_and(|id| message_references_task(subject, id))
         && references_foreign_task(subject, identity)
+}
+
+/// cas-93db: what `branch`'s recent first-parent work claims, under the
+/// subject rule above. Returns the first commit claiming this task, if any,
+/// and the newest commit claiming only another task (its subject line), if
+/// any, among the last 50 non-merge first-parent commits. `None` when Git
+/// cannot read the branch.
+pub(super) fn branch_task_claims(
+    repo: &Path,
+    branch: &str,
+    identity: &TaskCommitIdentity,
+) -> Option<(Option<String>, Option<String>)> {
+    let history = git_text(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "--no-merges",
+            "-n",
+            "50",
+            "--format=%H%x1f%B%x1e",
+            branch,
+            "--",
+        ],
+    )?;
+    let mut own = None;
+    let mut foreign = None;
+    for record in history.split('\u{1e}') {
+        let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
+            continue;
+        };
+        if subject_claims_another_task(message, identity) {
+            if foreign.is_none() {
+                let subject = message.trim().lines().next().unwrap_or("").trim();
+                foreign = Some(format!("{} {subject}", &sha[..sha.len().min(9)]));
+            }
+        } else if own.is_none()
+            && (identity.matches_known_commit(sha)
+                || identity
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|id| message_references_task(message, id)))
+        {
+            own = Some(sha.to_string());
+        }
+    }
+    Some((own, foreign))
 }
 
 /// cas-f2eb: a lane merge is task delivery only when everything it brings in

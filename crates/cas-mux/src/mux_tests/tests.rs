@@ -13,6 +13,83 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+/// GH #1047: configured supervisor-only resources win over project proxy
+/// credential grants, and local-scope Claude entries cannot widen a worker.
+#[test]
+fn factory_supervisor_only_mcp_and_env_isolate_claude_and_codex_gh_1047() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    let worktree = project.path().join("worker");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(cas_root.join("config.toml"), r#"
+[factory]
+supervisor_only_mcp = ["vercel", "neon"]
+supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"]
+"#).unwrap();
+    std::fs::write(cas_root.join("proxy.toml"), r#"
+[servers.vercel]
+transport = "http"
+auth = "env:VERCEL_TOKEN"
+[servers.neon]
+transport = "http"
+auth = "env:NEON_API_KEY"
+[servers.context7]
+transport = "http"
+auth = "env:DEPLOY_FIXTURE_TOKEN"
+"#).unwrap();
+    let source = project.path().join(".mcp.json");
+    std::fs::write(&source, serde_json::json!({"mcpServers": {
+        "vercel": {"command": "vercel-fixture"},
+        "neon": {"command": "neon-fixture"},
+        "context7": {"command": "context7-fixture"}
+    }}).to_string()).unwrap();
+    let before = std::fs::read(&source).unwrap();
+    for name in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+        env.set(name, "operator-fixture");
+    }
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let config = MuxConfig {
+            cwd: project.path().into(),
+            cas_root: Some(cas_root.clone()),
+            workers: 1,
+            worker_names: vec!["worker-1".into()],
+            worker_cwds: [("worker-1".into(), worktree.clone())].into(),
+            worker_cli: cli,
+            include_director: false,
+            ..Default::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let (_, worker) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+        let (_, supervisor) = configs.iter().find(|(name, _)| name == &config.supervisor_name).unwrap();
+        for key in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+            assert!(worker.env_remove.iter().any(|name| name == key), "{cli:?} must remove {key}");
+            assert!(env_value(worker, key).is_none(), "{cli:?} must not grant {key}");
+            assert!(!supervisor.env_remove.iter().any(|name| name == key));
+            assert!(std::env::var_os(key).is_some(), "parent retains its credentials");
+        }
+        let materialized: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(worktree.join(".mcp.json")).unwrap()
+        ).unwrap();
+        assert!(materialized["mcpServers"].get("vercel").is_none());
+        assert!(materialized["mcpServers"].get("neon").is_none());
+        assert!(materialized["mcpServers"].get("context7").is_some());
+        assert!(materialized["mcpServers"].get("cas").is_some());
+        match cli {
+            SupervisorCli::Claude => assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config")),
+            SupervisorCli::Codex => {
+                for name in ["vercel", "neon"] {
+                    assert!(worker.args.iter().any(|arg| arg == &format!("mcp_servers.\"{name}\".enabled=false")));
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(!supervisor.args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert_eq!(std::fs::read(&source).unwrap(), before, "supervisor config is untouched");
+    }
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

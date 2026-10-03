@@ -2036,6 +2036,8 @@ mod tests {
 
     #[test]
     fn cas_b0c5_tagged_runtime_vs_docs_and_required_code_uses_real_git_evidence() {
+        let fixture_version = "9.99.7";
+        let fixture_tag = format!("v{fixture_version}");
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let output = Command::new("git")
@@ -2074,7 +2076,7 @@ mod tests {
         .unwrap();
         git(&["commit", "-qam", "release"]);
         let running = git(&["rev-parse", "HEAD"]);
-        git(&["tag", "-a", "v3.45.0", "-m", "release"]);
+        git(&["tag", "-a", &fixture_tag, "-m", "release"]);
         git(&["checkout", "-qb", "docs", &base]);
         std::fs::create_dir(repo.path().join(".claude")).unwrap();
         std::fs::write(repo.path().join(".claude/CODEMAP.md"), "updated map").unwrap();
@@ -2092,7 +2094,7 @@ mod tests {
             repo.path(),
             &source,
             &running[..7],
-            "3.45.0",
+            fixture_version,
             &probe,
             deadline,
         );
@@ -2117,42 +2119,56 @@ mod tests {
                 .any(|finding| finding.code == "binary.checkout_diverged")
         );
         assert_eq!(
-            probe_deployment_provenance(repo.path(), &base, &running, "3.45.0", &probe, deadline)
-                .relation,
+            probe_deployment_provenance(
+                repo.path(),
+                &base,
+                &running,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .relation,
             DeploymentRelation::Ahead
         );
         assert_eq!(
-            probe_deployment_provenance(repo.path(), &running, &base, "3.45.0", &probe, deadline)
-                .relation,
+            probe_deployment_provenance(
+                repo.path(),
+                &running,
+                &base,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .relation,
             DeploymentRelation::Behind
         );
 
-        git(&["tag", "-d", "v3.45.0"]);
+        git(&["tag", "-d", &fixture_tag]);
         assert!(
             !probe_deployment_provenance(
                 repo.path(),
                 &source,
                 &running,
-                "3.45.0",
+                fixture_version,
                 &probe,
                 deadline
             )
             .released
         );
-        git(&["tag", "v3.45.0", &base]);
+        git(&["tag", &fixture_tag, &base]);
         assert!(
             !probe_deployment_provenance(
                 repo.path(),
                 &source,
                 &running,
-                "3.45.0",
+                fixture_version,
                 &probe,
                 deadline
             )
             .released
         );
-        git(&["tag", "-d", "v3.45.0"]);
-        git(&["tag", "v3.45.0", &running]);
+        git(&["tag", "-d", &fixture_tag]);
+        git(&["tag", &fixture_tag, &running]);
         // Builtin guidance is embedded runtime input, not ordinary docs.
         std::fs::write(
             repo.path().join("cas-cli/src/skill.md"),
@@ -2162,8 +2178,14 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-qm", "required runtime input"]);
         let source = git(&["rev-parse", "HEAD"]);
-        let provenance =
-            probe_deployment_provenance(repo.path(), &source, &running, "3.45.0", &probe, deadline);
+        let provenance = probe_deployment_provenance(
+            repo.path(),
+            &source,
+            &running,
+            fixture_version,
+            &probe,
+            deadline,
+        );
         assert_eq!(provenance.relation, DeploymentRelation::DivergedRuntime);
         assert!(provenance.released);
         let mut facts = healthy_facts();
@@ -2183,8 +2205,15 @@ mod tests {
         git(&["commit", "-qm", "required embedded template"]);
         let source = git(&["rev-parse", "HEAD"]);
         assert_eq!(
-            probe_deployment_provenance(repo.path(), &source, &running, "3.45.0", &probe, deadline)
-                .relation,
+            probe_deployment_provenance(
+                repo.path(),
+                &source,
+                &running,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .relation,
             DeploymentRelation::DivergedRuntime,
             "documentation embedded by production code must not be exempted"
         );
@@ -2204,7 +2233,7 @@ mod tests {
             repo.path(),
             "1234567",
             "abcdef0",
-            "3.45.0",
+            env!("CARGO_PKG_VERSION"),
             &probe,
             deadline,
         );

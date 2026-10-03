@@ -123,7 +123,10 @@ fn invalid_explicit_deployment_pin_keeps_its_own_diagnostic_cas_b0c5() {
     let project = project(true);
     let home = TempDir::new().unwrap();
     let output = command(&project, &home)
-        .env("CAS_EXPECTED_DEPLOYMENT_SHA", "v3.45.0")
+        .env(
+            "CAS_EXPECTED_DEPLOYMENT_SHA",
+            concat!("v", env!("CARGO_PKG_VERSION")),
+        )
         .assert()
         .success()
         .get_output()

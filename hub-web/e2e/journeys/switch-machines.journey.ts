@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { journeyStamp } from "./clock";
-import { test, expect, expectWholeFocusRing } from "./journey";
+import { test, expect, expectWholeFocusRing, journeyPart } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
 
@@ -766,7 +766,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
         await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
         const rows = await read();
         expect(rows.every((row) => row.tagWhole), `${name} tags fit at ${width}px: ${JSON.stringify(rows)}`).toBe(true);
-        if (width === 1280) expect(rows.map((row) => row.tag).sort()).toEqual(marks.map((mark) => `${name.split("-").slice(-2).join("-")} · ${mark}`).sort());
+        if (width === 1280 && name === "brisk-otter-5") expect(rows.map((row) => row.tag).sort()).toEqual(marks.map((mark) => `${name.split("-").slice(-2).join("-")} · ${mark}`).sort());
         expect(rows.map((row) => row.mark).sort(), `${name} marks at ${width}px`).toEqual(marks);
         expect(rows.every((row) => row.tag === row.mark || row.tag.endsWith(` · ${row.mark}`)), `${name}: the machine mark is whole at ${width}px: ${JSON.stringify(rows)}`).toBe(true);
         expect(new Set(rows.map((row) => row.text)).size, `${name}: both rows read differently at ${width}px: ${JSON.stringify(rows)}`).toBe(2);
@@ -774,5 +774,53 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
       }
     }
     await page.setViewportSize(viewport);
+  });
+});
+
+// Keep Fleet fitting reachable independently of the broad HUB-J8 platform/pairing stages.
+test("HUB-J8 distinguish Fleet twins at desktop and phone widths", journeyPart, async ({ page, journey }) => {
+  const names = ["brisk-otter-5", "patient-pelican-19", PELICAN];
+  const machines: Machine[] = [
+    { id: "atlas", label: "Atlas · Linux", sessions: names.map((name) => ({ name, supervisor: name, project_dir: "/projects/cas-src", workers: [], liveness: "live" })) },
+    { id: "attic", label: "Attic · Linux", sessions: names.slice(0, 2).map((name) => ({ name, supervisor: name, project_dir: "/projects/cas-src", workers: [], liveness: "live" })) },
+    { id: "atlas2", label: "Atlas2 · Linux", sessions: [{ name: PELICAN, supervisor: PELICAN, project_dir: "/projects/cas-src", workers: [], liveness: "live" }] },
+  ];
+  await journey.hub({ machines, paired: machines.map((machine) => machine.id) });
+  await journey.open();
+  await journey.stage("Open the Fleet from a supervisor conversation", async () => {
+    await page.locator(".conversation-row").first().click();
+    await page.locator("#conversation-terminal").click();
+    await page.locator("#session-back").click();
+    await expect(page.locator("#fleet-board .fleet-plot-row")).toHaveCount(6);
+  });
+  await journey.stage("Compare whole twins and refit on resize without losing the row", async () => {
+    const board = page.locator("#fleet-board");
+    const card = board.locator(".fleet-session").first();
+    await card.focus();
+    const node = await card.elementHandle();
+    const read = () => board.locator(".fleet-plot-row").evaluateAll((rows) => rows.map((row) => {
+      const label = row.querySelector<HTMLElement>(".fleet-plot-name")!;
+      const tag = label.querySelector<HTMLElement>(".fleet-plot-tag")!;
+      const project = label.querySelector<HTMLElement>(".fleet-plot-project")!;
+      return { session: (row as HTMLElement).dataset.fleetSession!, tag: tag.textContent!, mark: tag.dataset.mark!,
+        whole: tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= label.getBoundingClientRect().right - parseFloat(getComputedStyle(label).paddingRight) + 1,
+        projectWidth: project.getBoundingClientRect().width };
+    }));
+    const settle = () => page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    for (const width of [1280, 390, 1280]) {
+      await page.setViewportSize({ width, height: 800 });
+      await settle();
+      const rows = await read();
+      expect(rows.every((row) => row.whole && row.projectWidth >= 8), `${width}px: ${JSON.stringify(rows)}`).toBe(true);
+      for (const [name, marks] of Object.entries({ "brisk-otter-5": ["Atl", "Att"], "patient-pelican-19": ["Atl", "Att"], [PELICAN]: ["AT1", "AT2"] })) {
+        const pair = rows.filter((row) => row.session === name);
+        expect(pair.map((row) => row.mark).sort()).toEqual(marks);
+        expect(new Set(pair.map((row) => row.tag)).size).toBe(2);
+        expect(pair.every((row) => row.tag === row.mark || row.tag.endsWith(` · ${row.mark}`))).toBe(true);
+        if (width === 1280) expect(pair.map((row) => row.tag).sort()).toEqual(marks.map((mark) => `${name.split("-").slice(-2).join("-")} · ${mark}`).sort());
+      }
+      expect(await node!.evaluate((element) => element === document.activeElement)).toBe(true);
+    }
+    await expect(board.locator(".fleet-board-summary")).toMatchAriaSnapshot("- paragraph: 3 machines · 6 sessions");
   });
 });

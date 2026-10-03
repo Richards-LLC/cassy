@@ -671,9 +671,12 @@ main {
   /* It keeps its width while the codename has any to give (a proportional
      shrink took a fraction of a pixel from it too, enough to show "cas-s…"
      beside a truncated codename, cas-3400), and is capped short of the caret
-     when the project name alone is too long. */
+     when the project name alone is too long. The cap reserves exactly the
+     gap and the caret's fixed box: a larger reserve cut "Fleet overview" to
+     "Fleet overvi…" with 200px of header to spare, because the toggle sizes
+     to its content and the percentage is taken from that (journey F24). */
   flex: 0 0 auto;
-  max-width: calc(100% - var(--space-4));
+  max-width: calc(100% - var(--space-1) - var(--space-3));
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -692,8 +695,10 @@ main {
   text-overflow: ellipsis;
 }
 
+/* A fixed box (the name's cap above reserves exactly this and the gap). */
 .session-picker-caret {
-  flex: 0 0 auto;
+  flex: 0 0 var(--space-3);
+  text-align: center;
   color: var(--text-mid);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
@@ -3620,7 +3625,11 @@ button.chip:disabled { cursor: default; }
 .thread .conversation-dismiss svg.close { width: 16px; height: 16px; }
 .thread .conversation-dismiss:hover { color: var(--ink); background: var(--bg-hover); }
 /* "1 unsent message · Show": the way back, dashed like the card it restores. */
-.conversation-unsent { display: flex; align-items: center; gap: 6px; min-height: 32px; margin: var(--space-2) auto 0; padding: 0 14px; border: 1.5px dashed var(--crit-bg); border-radius: 999px; background: var(--canvas); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+/* Its focus ring (2px, offset 2px) reaches 4px below the chip, where the
+   composer, positioned and opaque, painted over it and cut the ring flat
+   (journey F22). The bottom margin leaves the ring its room and the chip
+   paints above the composer. */
+.conversation-unsent { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; min-height: 32px; margin: var(--space-2) auto var(--space-1); padding: 0 14px; border: 1.5px dashed var(--crit-bg); border-radius: 999px; background: var(--canvas); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
 .conversation-unsent[hidden] { display: none; }
 .conversation-unsent svg.warn { width: 14px; height: 14px; flex: none; color: var(--crit-bg); }
 .conversation-unsent-show { color: var(--color-action); font-weight: var(--weight-semibold); }

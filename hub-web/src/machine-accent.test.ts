@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MACHINE_ACCENT_BASE, MACHINE_ACCENT_COUNT, MACHINE_ACCENT_STORAGE_KEY, assignMachineAccents, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineInitials, machineMonogram, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
+import { MACHINE_ACCENT_BASE, MACHINE_ACCENT_COUNT, MACHINE_ACCENT_STORAGE_KEY, assignMachineAccents, fleetMachineInitials, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineInitials, machineMonogram, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
 
 const tokens = readFileSync(fileURLToPath(new URL("./tokens.css", import.meta.url)), "utf8");
 
@@ -367,3 +367,36 @@ describe("machine rail initials (3.30.0 journey F3)", () => {
   });
 });
 
+
+describe("fleet-unique rail initials (cas-cae2, journey F25)", () => {
+  const tags = (labels: string[]) => {
+    const map = fleetMachineInitials(labels.map((label, index) => ({ id: `m${index}`, label })));
+    return labels.map((_, index) => map.get(`m${index}`));
+  };
+
+  it("gives two machines whose initials match different tiles", () => {
+    expect(tags(["Atlas · Linux", "Attic · Linux", "Studio Mac · macOS"])).toEqual(["AL", "AT", "SM"]);
+    expect(tags(["Studio Mac · macOS", "Studio Max · macOS"])).toEqual(["SC", "SX"]);
+  });
+
+  it("keeps a machine's own initials when no other machine shares them", () => {
+    expect(tags(["Atlas · Linux", "Studio Mac · macOS", "build-box-2 · Linux"])).toEqual(["AT", "SM", "BB"]);
+    expect(tags([])).toEqual([]);
+  });
+
+  it("never reuses a tag another machine shows", () => {
+    // "Atlas" would take "AL", which "Alpha" already shows.
+    const shown = tags(["Atlas · Linux", "Attic · Linux", "Alpha · Linux"]);
+    expect(shown[2]).toBe("AL");
+    expect(new Set(shown).size).toBe(3);
+  });
+
+  it("numbers machines whose names cannot be told apart, in id order", () => {
+    expect(tags(["Atlas · Linux", "Atlas · macOS", "Atlas · Linux"])).toEqual(["A1", "A2", "A3"]);
+  });
+
+  it("is independent of the order the fleet is listed in", () => {
+    const fleet = [{ id: "b", label: "Attic · Linux" }, { id: "a", label: "Atlas · Linux" }];
+    expect([...fleetMachineInitials(fleet)].sort()).toEqual([...fleetMachineInitials([...fleet].reverse())].sort());
+  });
+});

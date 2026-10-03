@@ -50,7 +50,7 @@ import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadSt
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
-import { machineAccentClass, machineInitials, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
+import { fleetMachineInitials, machineAccentClass, machineInitials, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
@@ -3507,7 +3507,7 @@ function render(captureDraft = true): void {
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
   const machineLabel = selected?.label ?? "No machine";
-  const compactMachineLabel = machineInitials(machineLabel);
+  const compactMachineLabel = selected ? fleetInitialsFor(selected) : machineInitials(machineLabel);
   const controlActionDisabled = takeControlReason !== undefined;
   const controlCommand = controlCommandCopy({
     heldByMe: Boolean(lease?.held_by_me),
@@ -4126,6 +4126,11 @@ function machineRailLabel(machineId: string, snapshot: ConnectionState | undefin
   return !snapshot || snapshot.phase === "live" ? connectionLabel(snapshot) : fleetConnectionLabel(snapshot, machineId);
 }
 
+/** A machine's rail tag, unique across the paired fleet (journey F25). */
+function fleetInitialsFor(machine: StoredMachine): string {
+  return fleetMachineInitials(machines.values()).get(machine.id) ?? machineInitials(machine.label);
+}
+
 function machineRailButton(machine: StoredMachine): HTMLButtonElement {
   // The footer's view of the machine: a dropped session makes it reconnecting,
   // as the banner, header and row already say (cas-edcd).
@@ -4136,7 +4141,7 @@ function machineRailButton(machine: StoredMachine): HTMLButtonElement {
   button.type = "button";
   // The dot leads so it can never be clipped by the chip's corner radius, and
   // the phone shows the machine's actual name instead of two initials.
-  button.innerHTML = `<span class="machine-state ${state}"></span><span class="machine-initials">${escapeHtml(machineInitials(machine.label))}</span><span class="machine-name">${escapeHtml(machine.label)}</span>`;
+  button.innerHTML = `<span class="machine-state ${state}"></span><span class="machine-initials">${escapeHtml(fleetInitialsFor(machine))}</span><span class="machine-name">${escapeHtml(machine.label)}</span>`;
   button.title = `${machine.label} · ${machineRailLabel(machine.id, snapshot)}`;
   button.setAttribute("aria-label", `${machine.label}, ${machineRailLabel(machine.id, snapshot)}`);
   button.onclick = () => selectMachine(machine);

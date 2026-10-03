@@ -244,7 +244,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(6, "answer", "Same-session answer.", 5), at(9, 41));
     view.update();
     const [cross, same] = [...view.element.querySelectorAll<HTMLElement>('.turn.sup .bub[data-kind="answer"]')];
-    expect(cross!.querySelector(".reply-quote")?.textContent).toBe("re: earlier session wise-lion-31");
+    expect(cross!.querySelector(".reply-quote")?.textContent).toBe("Reply to your message in earlier session wise-lion-31");
     expect(cross!.querySelector(".reply-quote")?.getAttribute("title")).toBe("acct-wise-lion-31");
     expect(cross!.dataset.replyTo).toBe("3196243");
     expect(cross!.textContent).toContain("The import finished overnight.");
@@ -612,5 +612,18 @@ describe("coalesced status lines under forced colours (journey F11)", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
     expect(css).toContain("border-bottom: 10px solid transparent;");
     expect(css).toMatch(/@media \(forced-colors: active\) \{\s*\.thread \.coalesce \{ border-bottom-color: Canvas; \}\s*\}/);
+  });
+});
+
+describe("earlier reply context (cas-7cb3)", () => {
+  it("quotes the question when its history arrives, without opening the earlier session", () => {
+    const history = new ConversationHistory(); history.currentSession = "acct-now";
+    const view = new ConversationView(document, history, "sup");document.body.replaceChildren(view.element);
+    history.reply({ ...reply(8, "answer", "Reconciled overnight.", 700), reply_to_session: "acct-wise-lion-31" }, at(9, 40));view.update();
+    expect(view.element.querySelector(".reply-quote")?.textContent).toBe("Reply to your message in earlier session wise-lion-31");
+    history.hydrateSend({notification_id:700,target:"sup",text:"Did the bank feed reconcile?\nPlease check.",state:"acknowledged",stamped:true,device_id:"d",session:"acct-wise-lion-31",at:new Date(at(8,0)).toISOString()});view.update();
+    expect(view.element.querySelector(".reply-quote")?.textContent).toBe("Reply to “Did the bank feed reconcile?” · wise-lion-31");
+    expect(view.element.querySelector(".earlier-session")?.hasAttribute("open")).toBe(false);
+    expect(view.element.querySelector(".reply-quote")?.textContent).not.toContain("Please check");
   });
 });

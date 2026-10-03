@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { arrivalStore, ConversationStore, draftStore, MAX_ARRIVALS, MAX_PENDING_SENDS, PENDING_SEND_BOUNDS, pendingSendStore, purgeConversations, validArrivals, validDraft, validPendingSend, validPendingSends, type PendingSend } from "./conversation-store";
 
 function memoryStorage(initial: Record<string, string> = {}) {
@@ -64,6 +64,113 @@ describe("conversation store (cas-7752, shared with cas-e7b1)", () => {
     expect(() => store.set("a:x", "v")).not.toThrow();
     expect(() => store.delete("a:x")).not.toThrow();
     expect(store.get("a:x")).toBeUndefined();
+  });
+});
+
+describe("stored conversation cleanup on load", () => {
+  const key = "cas-commander-conversation:test:v1";
+  const valid = { value: "Keep this conversation", updatedAt: 123 };
+
+  it("removes a planted 2 MB conversation and malformed entries in one rewrite, preserving the valid neighbour", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({
+      "atlas:planted": { value: "x".repeat(2_000_000), updatedAt: 200 },
+      "atlas:broken": null,
+      "atlas:invalid": { value: 7, updatedAt: 100 },
+      "atlas:valid": valid,
+    }) });
+    const set = vi.spyOn(storage, "setItem");
+    const remove = vi.spyOn(storage, "removeItem");
+    const store = new ConversationStore(storage, "test", text);
+    expect([...store.entries()]).toEqual([["atlas:valid", valid.value]]);
+    expect(JSON.parse(storage.getItem(key)!)).toEqual({ "atlas:valid": valid });
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(remove).not.toHaveBeenCalled();
+    expect(store.get("atlas:valid")).toBe(valid.value);
+    expect(store.entries().size).toBe(1);
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["{not json", "[]", "null", "3", '\"foreign\"', ""])("removes an unparseable or invalid namespace %j", (raw) => {
+    const storage = memoryStorage({ [key]: raw });
+    const remove = vi.spyOn(storage, "removeItem");
+    const set = vi.spyOn(storage, "setItem");
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.entries().size).toBe(0);
+    expect(storage.getItem(key)).toBeNull();
+    expect(store.get("atlas:valid")).toBeUndefined();
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("removes a namespace when every entry was dropped", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({ "atlas:bad": { value: 3 } }) });
+    const remove = vi.spyOn(storage, "removeItem");
+    expect(new ConversationStore(storage, "test", text).entries().size).toBe(0);
+    expect(storage.getItem(key)).toBeNull();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])("never writes a valid or absent namespace (present=%s)", (present) => {
+    const raw = JSON.stringify({ "atlas:valid": valid });
+    const storage = memoryStorage(present ? { [key]: raw } : {});
+    const set = vi.spyOn(storage, "setItem");
+    const remove = vi.spyOn(storage, "removeItem");
+    const store = new ConversationStore(storage, "test", text);
+    store.entries();
+    expect(store.get("atlas:valid")).toBe(present ? valid.value : undefined);
+    store.entries();
+    expect(storage.getItem(key)).toBe(present ? raw : null);
+    expect(set).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a denied rewrite and attempts cleanup once per store load", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({ "atlas:bad": null, "atlas:valid": valid }) });
+    const set = vi.spyOn(storage, "setItem").mockImplementation(() => { throw new Error("quota"); });
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.get("atlas:valid")).toBe(valid.value);
+    expect(store.entries().size).toBe(1);
+    expect(store.get("atlas:bad")).toBeUndefined();
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(new ConversationStore(storage, "test", text).get("atlas:valid")).toBe(valid.value);
+    expect(set).toHaveBeenCalledTimes(2);
+  });
+
+  it("tolerates a denied removal without retrying on every read", () => {
+    const storage = memoryStorage({ [key]: "{not json" });
+    const remove = vi.spyOn(storage, "removeItem").mockImplementation(() => { throw new Error("denied"); });
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.entries().size).toBe(0);
+    expect(store.get("atlas:valid")).toBeUndefined();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires an unreadable namespace once and still tolerates storage denial", () => {
+    const storage = memoryStorage({ [key]: "unreadable" });
+    vi.spyOn(storage, "getItem").mockImplementation(() => { throw new Error("denied"); });
+    const remove = vi.spyOn(storage, "removeItem");
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.entries().size).toBe(0);
+    expect(store.get("atlas:valid")).toBeUndefined();
+    expect(storage.values.has(key)).toBe(false);
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a value whose validator cannot read it and preserves its neighbour", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({ "atlas:bad": { value: "unreadable" }, "atlas:valid": valid }) });
+    const validate = (raw: unknown) => { if (raw === "unreadable") throw new Error("cannot read"); return text(raw); };
+    expect(new ConversationStore(storage, "test", validate).get("atlas:valid")).toBe(valid.value);
+    expect(JSON.parse(storage.getItem(key)!)).toEqual({ "atlas:valid": valid });
+  });
+
+  it("also retires the least recent conversations dropped by the load bound", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({
+      "atlas:old": { value: "old", updatedAt: 1 },
+      "atlas:valid": valid,
+    }) });
+    const store = new ConversationStore(storage, "test", text, { maxConversations: 1 });
+    expect([...store.entries()]).toEqual([["atlas:valid", valid.value]]);
+    expect(JSON.parse(storage.getItem(key)!)).toEqual({ "atlas:valid": valid });
   });
 });
 

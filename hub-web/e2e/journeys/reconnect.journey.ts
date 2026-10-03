@@ -24,9 +24,41 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   }, SAID);
   const threadOrder = () => page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
   let beforeOutage: string[] = [];
+  /**
+   * Journey F42: what the live regions say, one entry per change of words in
+   * a region that speaks (role status/alert/log or aria-live, not "off").
+   */
+  const listen = () => page.evaluate(() => {
+    const w = window as unknown as { __said: string[]; __listening?: boolean };
+    w.__said = [];
+    if (w.__listening) return;
+    w.__listening = true;
+    const last = new WeakMap<Element, string>();
+    const region = (node: Node): HTMLElement | null => {
+      for (let element = node instanceof Element ? node : node.parentElement; element; element = element.parentElement) {
+        const live = element.getAttribute("aria-live");
+        if (live === "off") return null;
+        if (live || ["status", "alert", "log"].includes(element.getAttribute("role") ?? "")) return element as HTMLElement;
+      }
+      return null;
+    };
+    new MutationObserver((records) => {
+      for (const record of records) {
+        const speaker = region(record.target);
+        if (!speaker || !speaker.isConnected) continue;
+        const words = speaker.innerText.trim();
+        if (!words || last.get(speaker) === words) continue;
+        last.set(speaker, words);
+        w.__said.push(words);
+      }
+    }).observe(document.body, { subtree: true, childList: true, characterData: true });
+  });
+  const heard = () => page.evaluate(() => (window as unknown as { __said: string[] }).__said);
+  const OUTAGE = /lost connection|reconnecting/i;
 
   await journey.stage("The network drops", async () => {
     await expect(header).toHaveText(" · Live");
+    await listen();
     // The outage lasts until released, so a send can be tried while it is down.
     hub.hold(PELICAN);
     hub.drop(PELICAN);
@@ -47,8 +79,13 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(seen.banner).toBe("Lost connection to Atlas · Linux. Reconnecting…");
     expect(seen.header).toContain("Reconnecting");
     expect(seen.row).toContain("Reconnecting");
+    // Journey F42: the banner announces the outage, once. The header's
+    // "Reconnecting" is on screen but is not a second announcement.
+    await page.waitForTimeout(1_500);
+    expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
+    await expect(header).toHaveAttribute("aria-live", "off");
     // Two machines, one of them down: the footer names it (cas-0739) and its dot is not all-clear (cas-b789).
-    expect(seen.footer).toContain("Atlas reconnecting");
+    expect(seen.footer).toContain("Reconnecting to Atlas");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
     // Only the terminal dims: the conversation stays readable while it
     // reconnects (cas-3446 measured 2.2-3.3:1 when the whole mount faded).
@@ -93,6 +130,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect(header).toHaveText(" · Live");
+    // The header speaks again for the return to Live.
+    await expect(header).toHaveAttribute("aria-live", "polite");
     // The row previews the held message now, so it no longer shows the Live
     // status line; it must not say Reconnecting either.
     await expect(row).not.toContainText("Reconnecting");
@@ -202,6 +241,12 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const before = await read();
     expect(before.rail).toBe("All clear");
     expect(before.mode).toBe("CONTROL");
+    // Journey F42: the pane opened on the supervisor's "The supervisor is
+    // ready." (drawn in the terminal canvas), so its header names that
+    // output or its time, never "No output yet" above it.
+    const firstPane = page.locator("#pane-grid .pane").first();
+    await expect(firstPane.locator(".pane-last-activity")).toHaveText(/^(Earlier output|now|\d+[smhd])$/);
+    await listen();
     hub.hold(PELICAN);
     hub.drop(PELICAN);
     const together = await page.waitForFunction(() => {
@@ -226,7 +271,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", outage);
     const reason = page.locator("#session-controls-reason");
     await expect(reason).toBeVisible();
-    await expect(reason).toHaveText(outage);
+    // Journey F42: the banner says what was lost; the line under the header
+    // says only what that means for the controls, so the outage reads once
+    // on screen and is announced once.
+    await expect(reason).toHaveText("Control and interrupts return when it reconnects.");
+    const outageLines = await page.locator("main").evaluate((main) => [...main.querySelectorAll<HTMLElement>("*")].filter((element) => element.childElementCount === 0 && element.getBoundingClientRect().width > 2 && /Lost connection to Atlas/.test(element.innerText)).map((element) => element.innerText));
+    expect(outageLines, "one outage line in Terminal view").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
+    expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
+    await expect(firstPane.locator(".pane-last-activity")).toHaveText(/^(Earlier output|now|\d+[smhd])$/);
     // cas-71af (6929 QA F01): a click on the greyed Interrupt calls attention
     // to that line instead of adding a toast that repeats it a third time;
     // the line is also the button's description.

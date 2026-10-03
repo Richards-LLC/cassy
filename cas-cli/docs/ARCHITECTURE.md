@@ -85,6 +85,7 @@ Rules that keep that boundary honest:
 - **Personal push is incremental and root-bound.** `cas cloud push` and the push leg of `cas cloud sync` read only the personal `sync_queue` in the supplied Cassy root; they do not rescan or re-send the local corpus. The same root supplies `cloud.json`, `config.toml` canonical-id resolution, and `cas.db`, so a push planned for project A cannot consume project B's rows or label them with project B's id. Successful rows are deleted from the queue; failed or server-skipped rows remain retryable. `--entries-only` and `--tasks-only` filter the queue before its batch limit and send no sibling entity kinds.
 - **Dry-run describes the next queue batch, not an invented snapshot.** Its JSON includes `source = "sync_queue"`, the root, canonical project id, scope, per-kind counts, batch limit, and `batch_limit_reached`. A count exactly equal to the limit is explicitly saturated: it is the number in the next attempt, not a claim about the full backlog. The old newest-10,000 snapshot windows (and their inaccurate “last 90 days” labels) are not part of push planning.
 - **Personal request limits are measured in bytes.** Queued upserts are split using the fully serialized envelope, then checked again after gzip. The default pre-gzip budget is 4 MiB and the hard cloud gzip ceiling is 4 MiB; fixed item-count chunking is not used for personal push.
+- **Foreign-row cleanup preserves unrelated queued work.** `cas cloud purge-foreign` exempts queued rows in its classified delete set: deleting an attributed foreign replica is deliberate cleanup, even when an older client enqueued it. The exemption matches entity kind and ID, plus dependency edges touching deleted tasks. Every other queued row survives and is reported as information, including entry metadata and non-content kinds; it never causes an `unpushed_rows` refusal. Dry-run and successful apply JSON expose the numeric `non_overlapping_queued_changes` count. Queue read, schema and row-decode failures still abort inspection; an absent queue table means zero rows. Pull freshness, majority-foreign and proven-rule guards retain their existing `--force` rules, and purge preserves the queue itself.
 
 - **No auth ⇒ no calls, no files, no channel.** `KnowledgeEmbedder::from_config` returns `None` when logged out, and every caller treats `None` as "this installation has no semantic channel" rather than a degraded mode. No LMDB environment is created. This is the same shape as the `dims = 0` provider-absent pattern: unconfigured storage is never materialised.
 - **`has_semantic()` tells the truth.** `HybridSearch::has_semantic` is true only when a channel is attached *and* vectors are actually cached. A configured-but-empty channel still reports false, so `SearchWeights::for_capabilities` keeps redistributing that weight to the live channels instead of allocating mass to a channel that can only return nothing.
@@ -126,6 +127,30 @@ Rules that keep that boundary honest:
 **Factory worker commit guard** (`cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs`, `check_worker_git_commit_scope`): Fires for ALL factory workers (`CAS_AGENT_ROLE=worker` + `CAS_FACTORY_MODE`) on every `git commit` / `git merge` Bash command. Denies commits to protected branches (`main`, `master`, `staging`, detached HEAD) regardless of whether the worker has an isolated worktree (`CAS_CLONE_PATH`). Isolated workers also get a cwd-outside-worktree guard. Non-isolated (standalone-task) workers that run in the shared primary checkout are therefore prevented from committing to `main` (cas-ba04 fix). The only bypass is switching to a non-protected branch — `--no-verify` does NOT bypass this guard (it only skips git hooks, not the Claude Code PreToolUse harness).
 
 **Team scope resolution chain** (`cas-cli/src/cloud/config.rs::active_team_id`, cas-ea2f5): When a write is dual-enqueued to the team push queue, the team UUID is resolved at `open_store` time via a four-step chain. (0) Kill-switch: if `team_auto_promote = Some(false)` in the project `.cas/cloud.json`, the result is always `None` — no team dual-enqueue regardless of other config. (1) Project-level explicit override: `team_id` in the project `.cas/cloud.json` wins unconditionally; set via `cas cloud team set <uuid>`. (2) User default: `default_team_id` in `~/.cas/cloud.json`, populated by `cas cloud team default <slug>` or automatically by `fetch_and_cache_teams` (`cloud/me.rs`) on `cas login`. (3) Implicit single-team auto-pick: if `teams[]` has exactly one entry and no `default_team_id` is set, that team is used automatically — no configuration needed. (4) `None` — ambiguous (0 or ≥2 teams without a nominated default) or not logged in. The testable inner `active_team_id_with_user_config(user_cfg: Option<&CloudConfig>)` accepts an injected user config for unit tests without disk I/O; the production `active_team_id()` reads from `user_level_cloud_json_path()` (honours the `CAS_USER_CLOUD_JSON` test-seam env var).
+
+### Shutdown ownership and dead registrations
+
+`factory action=shutdown_workers` uses each worker registration's factory
+session as the shutdown boundary. A dead or already-shutdown worker remains
+addressable even after its pane disappears or the launch-time
+`CAS_FACTORY_WORKER_NAMES` roster stops naming it. Other sessions and non-worker
+roles stay outside that boundary; non-factory callers retain legacy roster
+filtering. Task/worktree safety and `force` validation run before cleanup.
+
+Accepted shutdown requests re-read all same-name registrations and retire them
+only if none is supervision-live (fresh Active/Idle heartbeat or live process).
+Dead registrations need no pane. Outstanding direct notifications to their name,
+agent IDs and harness session IDs are cancelled with a shutdown reason; shared
+broadcasts, other sessions and recipient-read/acknowledged messages remain intact.
+Cancellation stamps the typed `shutdown_cancelled` reason, preserves prior
+transport evidence and never fabricates an ack.
+This explicit withdrawal can move a transported-but-unread row to `suppressed`;
+the generic monotonic delivery-stage API keeps its existing transition rules
+and late callbacks cannot revive cancelled mail. Positive stop-N requests skip
+already-shutdown registrations; explicit and all-worker requests can clean them.
+The daemon uses the same retirement path if a pane disappeared before consuming
+the queued request. This path preserves worktrees and uses existing orphan
+recovery for any held tasks; live worker termination stays with the daemon.
 
 ### Factory context when a prompt hook is silent
 

@@ -1339,3 +1339,128 @@ fn store_schema_gate_names_a_failed_migration_cas_91a3() {
         None
     );
 }
+
+/// cas-49c0: a factory worker's `cas update` refreshes only its own worktree.
+#[test]
+fn worker_update_is_scoped_to_its_own_worktree_cas_49c0() {
+    use super::{UpdateMode, WorkerUpdatePlan, worker_update_plan};
+    let worktree = std::path::Path::new("/repo/.cas/worktrees/quick-bear-33");
+    assert_eq!(
+        worker_update_plan(Some("worker"), Some(worktree), UpdateMode::Sync),
+        WorkerUpdatePlan::SyncWorktree(worktree.to_path_buf()),
+        "a worker's --sync writes its own worktree, not the main checkout"
+    );
+    for mode in [UpdateMode::AllProjects, UpdateMode::Register, UpdateMode::User, UpdateMode::Full, UpdateMode::SchemaOnly] {
+        match worker_update_plan(Some("worker"), Some(worktree), mode) {
+            WorkerUpdatePlan::Refuse(message) => assert!(
+                message.contains("cas update --sync") && message.contains(&worktree.display().to_string()),
+                "{mode:?}: {message}"
+            ),
+            other => panic!("{mode:?} must be refused for a worker: {other:?}"),
+        }
+    }
+    // Read-only and post-swap runs stay available.
+    for mode in [UpdateMode::Check, UpdateMode::PostSwap] {
+        assert_eq!(worker_update_plan(Some("worker"), Some(worktree), mode), WorkerUpdatePlan::Unrestricted);
+    }
+    // A worker with no bound worktree cannot be scoped: refuse --sync too.
+    assert!(matches!(
+        worker_update_plan(Some("worker"), None, UpdateMode::Sync),
+        WorkerUpdatePlan::Refuse(_)
+    ));
+    // The supervisor and an operator shell are unaffected.
+    for role in [None, Some("supervisor"), Some("")] {
+        for mode in [UpdateMode::Sync, UpdateMode::AllProjects, UpdateMode::Full] {
+            assert_eq!(worker_update_plan(role, Some(worktree), mode), WorkerUpdatePlan::Unrestricted);
+        }
+    }
+}
+
+/// cas-8030: in the compact `cas update` view, a project whose only non-✓
+/// phases are skipped ("not cloud-linked") prints its table row and no
+/// details block; a project with a warned phase keeps its details. Every line
+/// fits 80 columns. `verbose` still prints every project's details.
+#[test]
+fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
+    let unlinked = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/notes"),
+        unregistered: false,
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Ok("up to date".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Skipped("not cloud-linked".to_owned()),
+        cloud: ProjectPhase::Skipped("not cloud-linked".to_owned()),
+        details: String::new(),
+        phase_details: vec![
+            (true, "[OK] Migrations current".to_owned()),
+            (false, "[SKIP] membership: not cloud-linked".to_owned()),
+            (false, "[SKIP] cloud: not cloud-linked".to_owned()),
+        ],
+    };
+    let warned = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/demo"),
+        unregistered: false,
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Warning("index busy".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Ok("2 memberships".to_owned()),
+        cloud: ProjectPhase::Ok("synced".to_owned()),
+        details: String::new(),
+        phase_details: vec![
+            (true, "[OK] Migrations current".to_owned()),
+            (false, "[WARN] search index: index busy, retry later".to_owned()),
+        ],
+    };
+    let receipts = vec![unlinked, warned];
+    let user_level = ProjectPhase::Ok("current".to_owned());
+
+    let compact = render_project_refresh_summary(&receipts, &user_level, "", &[], false);
+    assert_eq!(
+        compact,
+        "  project         migr  index  skills  member  cloud  note            \n  projects/notes  ✓     ✓      ✓       –       –      not cloud-linked\n  projects/demo   ✓     ⚠      ✓       ✓       ✓      index busy      \n  projects/demo details:\n    [WARN] search index: index busy, retry later\n  [OK] user-level store: current\n",
+        "compact output was:\n{compact}"
+    );
+    assert!(
+        compact.lines().all(|line| line.chars().count() <= 80),
+        "every line fits 80 columns:\n{compact}"
+    );
+
+    let verbose = render_project_refresh_summary(&receipts, &user_level, "", &[], true);
+    assert!(
+        verbose.contains("notes details:") && verbose.contains("demo details:"),
+        "verbose prints every project's details:\n{verbose}"
+    );
+}
+
+/// cas-937a: cas-8030 kept skipped phases table-only, and briefly took a dry
+/// run's planned phases with them. The compact view then never said "DRY RUN"
+/// (integration `update_all_projects_test.rs:88` failed on the epic). A planned
+/// phase keeps its details block; a skipped one still gets none.
+#[test]
+fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
+    let planned = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/first"),
+        unregistered: false,
+        migration: ProjectPhase::Planned("would apply 2 migrations".to_owned()),
+        search_index: ProjectPhase::Skipped("dry run".to_owned()),
+        skills: ProjectPhase::Skipped("dry run".to_owned()),
+        membership: ProjectPhase::Skipped("dry run".to_owned()),
+        cloud: ProjectPhase::Skipped("dry run".to_owned()),
+        details: String::new(),
+        phase_details: vec![(
+            false,
+            "[DRY RUN] migration: would apply 2 migrations\n".to_owned(),
+        )],
+    };
+    let compact = render_project_refresh_summary(
+        &[planned],
+        &ProjectPhase::Planned("migrate and sync builtins".to_owned()),
+        "",
+        &[],
+        false,
+    );
+    assert!(
+        compact.contains("  projects/first details:\n    [DRY RUN] migration: would apply 2 migrations"),
+        "a dry run says so in the compact view:\n{compact}"
+    );
+}

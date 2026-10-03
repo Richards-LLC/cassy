@@ -5,7 +5,9 @@
 # scratch. It must adopt only a *complete* prebuild of the *exact* commit, wait
 # for an in-flight matching run for a bounded period, and decline — never fail —
 # on every degraded input, because declining costs minutes while failing costs
-# the release.
+# the release. The one exception is a hand run whose repository cannot be
+# resolved: it exits 2 with an error rather than a found=false that would look
+# like a missing prebuild (cas-0906).
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +35,13 @@ expect_field() {
 # is asked for is an error, so an unexpected API call cannot pass silently.
 cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+# `gh repo view` answers FAKE_REPO_VIEW, or fails as gh does with no default.
+if [[ "$1" == repo && "$2" == view ]]; then
+  if [[ -n "${FAKE_REPO_VIEW:-}" ]]; then printf '%s\n' "$FAKE_REPO_VIEW"; exit 0; fi
+  echo "no default remote repository has been set" >&2
+  exit 1
+fi
+[[ -n "${FAKE_GH_LOG:-}" ]] && printf '%s\n' "$2" >>"$FAKE_GH_LOG"
 if [[ "$1" != api ]]; then
   echo "unexpected fake gh invocation: $*" >&2
   exit 2
@@ -149,11 +158,87 @@ else
   fail=$((fail + 1))
 fi
 
-# 9. Missing inputs decline rather than crash the workflow step.
-out="$(GITHUB_REPOSITORY= "$lookup" deadbeef)"
-expect_field "$out" found false 'an unset repository declines'
+# 9. A missing commit declines rather than crash the workflow step.
 out="$(GITHUB_SHA= "$lookup")"
 expect_field "$out" found false 'an unset commit declines'
+
+# 10. A hand run without GITHUB_REPOSITORY resolves the repository and makes
+# the real lookup (cas-0906): the gh default repository first, then origin.
+echo '{"workflow_runs":[{"id":111,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
+printf '%s' "$both_live" >"$tmp/artifacts/111.json"
+export FAKE_GH_LOG="$tmp/gh.log"
+looked_up() {
+    local expected="$1" label="$2"
+    if grep -q "^repos/$expected/actions/workflows/" "$FAKE_GH_LOG" 2>/dev/null \
+        && ! grep -qv "^repos/$expected/" "$FAKE_GH_LOG"; then
+        printf 'ok   %s\n' "$label"
+        pass=$((pass + 1))
+    else
+        printf 'FAIL %s (gh api calls: %s)\n' "$label" "$(tr '\n' ' ' <"$FAKE_GH_LOG" 2>/dev/null)"
+        fail=$((fail + 1))
+    fi
+}
+make_repo() {
+    rm -rf "$tmp/repo"
+    git init -q "$tmp/repo"
+    local name url
+    while (( $# )); do
+        name="$1"; url="$2"; shift 2
+        git -C "$tmp/repo" remote add "$name" "$url"
+    done
+}
+export GIT_CEILING_DIRECTORIES="$tmp"
+
+make_repo origin https://github.com/Example/from-origin.git upstream https://github.com/Other/upstream-project
+: >"$FAKE_GH_LOG"
+out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' FAKE_REPO_VIEW=Example/from-gh "$lookup" deadbeef 2>"$tmp/err")"
+expect_field "$out" found true 'an unset repository uses the gh default repository'
+looked_up Example/from-gh 'the lookup asks the gh default repository'
+if grep -qF 'using Example/from-gh (gh repo view)' "$tmp/err"; then
+    printf 'ok   the resolved repository is named on stderr\n'; pass=$((pass + 1))
+else
+    printf 'FAIL the resolved repository was not named: %s\n' "$(<"$tmp/err")"; fail=$((fail + 1))
+fi
+
+: >"$FAKE_GH_LOG"
+out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>/dev/null)"
+expect_field "$out" found true 'without a gh default the origin remote is used'
+looked_up Example/from-origin 'origin wins over the upstream remote'
+
+for url in git@github.com:Example/scp-form.git ssh://git@github.com/Example/ssh-form https://github.com/Example/trailing/; do
+    make_repo origin "$url"
+    expected="$(sed -E 's#^(git@github.com:|ssh://git@github.com/|https://github.com/)##; s#/$##; s#\.git$##' <<<"$url")"
+    : >"$FAKE_GH_LOG"
+    out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>/dev/null)"
+    expect_field "$out" found true "origin $url resolves"
+    looked_up "$expected" "origin $url is looked up as $expected"
+done
+
+# 11. Unresolvable -> exit 2 with an error, no found= line and no API call:
+# a non-GitHub origin (even beside a GitHub upstream), no origin, no checkout.
+unresolvable() {
+    local dir="$1" label="$2" status=0
+    : >"$FAKE_GH_LOG"
+    out="$(cd "$dir" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>"$tmp/err")" || status=$?
+    if [[ "$status" -eq 2 ]] && ! grep -q '^found=' <<<"$out" \
+        && grep -qF 'GITHUB_REPOSITORY is unset and the repository could not be resolved' "$tmp/err" \
+        && [[ ! -s "$FAKE_GH_LOG" ]]; then
+        printf 'ok   %s\n' "$label"
+        pass=$((pass + 1))
+    else
+        printf 'FAIL %s (exit %s; stdout: %s; stderr: %s)\n' "$label" "$status" "$out" "$(<"$tmp/err")"
+        fail=$((fail + 1))
+    fi
+}
+make_repo origin https://gitlab.com/Example/elsewhere.git upstream https://github.com/Other/upstream-project
+unresolvable "$tmp/repo" 'a non-GitHub origin fails loudly instead of found=false'
+make_repo upstream https://github.com/Other/upstream-project
+unresolvable "$tmp/repo" 'no origin fails loudly; upstream is never used'
+mkdir -p "$tmp/not-a-checkout"
+unresolvable "$tmp/not-a-checkout" 'outside a checkout fails loudly'
+make_repo origin https://github.com/Example/x.git
+FAKE_REPO_VIEW='not a slug' unresolvable "$tmp/not-a-checkout" 'a malformed gh answer is not used'
+unset FAKE_GH_LOG GIT_CEILING_DIRECTORIES
 
 # Every path exits 0.
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"

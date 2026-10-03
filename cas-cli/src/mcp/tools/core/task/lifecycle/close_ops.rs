@@ -12711,14 +12711,87 @@ pub(crate) fn close_measured_factory_branch(
     // task's parked delivery commits this task on its per-task branch. When
     // that branch exists (locally, else on origin) it is the one to measure;
     // the frozen branch holds the other task's commits.
+    resolve_close_delivery_branch(repo_path, task, assignee)
+        .unwrap_or_else(|_| crate::factory_isolation::worker_task_branch(assignee, &task.id))
+}
+
+/// [`close_measured_factory_branch`], refusing instead of binding to another
+/// task's delivery (cas-93db). A worker's plain `factory/<assignee>` whose
+/// recent commits claim another task, and none this one, is that task's
+/// delivery: closing this task against it measured cas-0906's merged tip as
+/// cas-1451's. The worker's per-task branches (`factory/<assignee>-*`) are
+/// searched for the one whose commits claim this task instead; a plain branch
+/// holding this task's recorded anchor is still this task's lane. `Err`
+/// carries the refusal when nothing claims the task.
+pub(crate) fn resolve_close_delivery_branch(
+    repo_path: &std::path::Path,
+    task: &Task,
+    assignee: &str,
+) -> Result<String, String> {
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
-        return branch;
+        return Ok(branch);
     }
     let own = format!("factory/{assignee}");
-    if !task_changed_hands(task) || git_ref_exists(repo_path, &own) {
-        return own;
+    let own_ref = if git_ref_exists(repo_path, &own) {
+        own.clone()
+    } else if task_changed_hands(task) {
+        return Ok(task_delivery_branch(repo_path, task).unwrap_or(own));
+    } else if git_ref_exists(repo_path, &format!("origin/{own}")) {
+        format!("origin/{own}")
+    } else {
+        return Ok(own);
+    };
+    if task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .is_some_and(|anchor| git_commit_is_ancestor(repo_path, anchor, &own_ref))
+    {
+        return Ok(own);
     }
-    task_delivery_branch(repo_path, task).unwrap_or(own)
+    let identity = TaskCommitIdentity {
+        task_id: Some(task.id.clone()),
+        known_commits: task.deliverables.factory_branch_anchor.clone().into_iter().collect(),
+    };
+    let Some((None, Some(foreign))) =
+        task_attribution::branch_task_claims(repo_path, &own_ref, &identity)
+    else {
+        return Ok(own);
+    };
+    let prefix = format!("factory/{assignee}-");
+    let listed = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            &format!("refs/heads/{prefix}*"),
+            &format!("refs/remotes/origin/{prefix}*"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    for branch in listed.lines().map(str::trim).filter(|branch| !branch.is_empty()) {
+        if is_safe_git_refname(branch)
+            && let Some((Some(_), _)) =
+                task_attribution::branch_task_claims(repo_path, branch, &identity)
+        {
+            return Ok(branch.to_string());
+        }
+    }
+    let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
+    Err(format!(
+        "⚠️ DELIVERY BRANCH UNRESOLVED\n\n\
+         task close rejected: task {id} has no branch of its own. `{task_branch}` does not \
+         exist, no `{prefix}*` branch has a commit claiming {id}, and `{own}` ends in another \
+         task's delivery ({foreign}) with no commit claiming {id}. Cassy will not measure \
+         another task's delivery as this one.\n\n\
+         Commit {id}'s work with {id} in the commit subject on `{task_branch}`, push it, and \
+         retry; or close with commit_receipt=<this task's delivery SHA>.",
+        id = task.id,
+    ))
 }
 
 /// MERGE REQUIRED text for a close whose receipt is newer than a parked
@@ -12780,7 +12853,22 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // cas-e33f (GH #1004): after a handoff the assignee (often the
     // supervisor) has no factory branch; measure the branch that actually
     // holds the task's commits.
-    let factory_branch = close_measured_factory_branch(repo_path, task, assignee);
+    // cas-93db: never measure another task's delivery as this one. A valid
+    // receipt still proves an integrated delivery after its branch is gone.
+    let factory_branch = match resolve_close_delivery_branch(repo_path, task, assignee) {
+        Ok(branch) => branch,
+        Err(reason)
+            if !attribution.receipt.is_some_and(|receipt| {
+                attribution.window.is_some_and(|window| {
+                    validate_task_commit_receipt(repo_path, receipt, parent_branch, window)
+                        .is_ok()
+                })
+            }) =>
+        {
+            return MergeStateGateOutcome::Reject(reason);
+        }
+        Err(_) => crate::factory_isolation::worker_task_branch(assignee, &task.id),
+    };
     let fallback_content_identity = TaskCommitIdentity {
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),

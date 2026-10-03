@@ -23,7 +23,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
-import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, lostConnectionBanner, outageControlsNotice, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, fatalConnectionRecovery, lostConnectionBanner, outageControlsNotice, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -46,6 +46,7 @@ import { firstAttachRetry, machineConnection, sessionConnection } from "./sessio
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { relativeTimestamp } from "./time";
 import { paneActivityLabel, paneShowsOutput } from "./pane-activity";
+import { fleetControlGate } from "./fleet-permissions";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -840,11 +841,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase === "failed" && state.fatal === true && !state.authFailure) {
         // cas-be76: the card names the machine; the transport reason (raw
         // host, stage) stays behind Details.
+        // A session alarm for this machine is the same stopped connection.
+        for (const item of attention) {
+          if (item.machineId === machine.id && item.kind === "session_transport" && item.fingerprint) resolveAttention(item.fingerprint);
+        }
         void addAttention(machine, undefined, "hub_disconnected", {
-          headline: lostConnectionBanner(machine.label, true),
-          detail: "Retry to connect again.",
+          headline: `Lost connection to ${machine.label}`,
+          detail: fatalConnectionRecovery(state.reason),
           severity: "warning",
-          action: "retry",
+          action: "none",
           payload: { reason: state.reason, stage: state.stage },
           fingerprint: `${machine.id}:hub_disconnected`,
         });
@@ -1043,7 +1048,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       renderTerminalFailure(machine.id, session, detail);
       // A retrying drop is already one plain status on the banner, header, row
       // and footer; the rail defers to it instead of repeating it (cas-90d4).
-      if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)))) return;
+      if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)), connectionStates.get(machine.id))) return;
       void addAttention(machine, session, "session_transport", { headline: `Lost connection to ${machine.label}`, detail: `Not retrying: ${detail}`, severity: "critical", action: "none", payload: detail, fingerprint: `${machine.id}:${session}:session_transport` });
     },
   });
@@ -1776,6 +1781,9 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  // A fatal machine verdict wins over a session's last retry snapshot.
+  const machineState = connectionStates.get(machineId);
+  if (machineState?.fatal === true) snapshot = machineState;
   const hasLastFrame = grid.querySelector(".pane") !== null;
   if (hasLastFrame && shouldRetainDisconnectedFrame(snapshot)) {
     const view = disconnectedView(snapshot, now);
@@ -1811,7 +1819,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
         ? unsteadyBanner(where)
         : sessionOnly
           ? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)
-          : lostConnectionBanner(where, snapshot.fatal === true);
+          : lostConnectionBanner(where, snapshot.fatal === true, snapshot.reason);
     // Journey F42: the banner is a live region, and rewriting the same words
     // on every repaint announced the outage again each time. Only a change
     // of words is written, so the outage is announced once.
@@ -2549,16 +2557,18 @@ function persistArrivals(): void {
 }
 
 /**
- * cas-adfc: conversations whose draft is over the store's bound, so it lives
- * only in this page; the composer says so while it shows that conversation.
+ * cas-adfc, cas-f657: conversations whose draft lives only in this page, and
+ * why: over the store's bound, or refused by a full localStorage. The draft
+ * stays in memory (conversationDrafts); the composer says so while it shows
+ * that conversation.
  */
-const draftsTooLongToKeep = new Set<string>();
+const draftsNotKept = new Map<string, "too-long" | "not-saved">();
 
-/** The composer's too-long note, for the conversation it is showing. */
+/** The composer's draft note, for the conversation it is showing. */
 function paintDraftNote(): void {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   const key = composer?.dataset.threadKey;
-  applyDraftNote(document, !!key && draftsTooLongToKeep.has(key));
+  applyDraftNote(document, (key && draftsNotKept.get(key)) || false);
 }
 
 /** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
@@ -2566,7 +2576,7 @@ function rememberDraft(key: string, draft: Draft | undefined): void {
   if (draft) conversationDrafts.set(key, draft); else conversationDrafts.delete(key);
   const machineId = key.slice(0, key.indexOf(":"));
   const saved = drafts.save(key, conversationPersistenceBlocked.has(machineId) ? undefined : draft);
-  if (saved === "too-long") draftsTooLongToKeep.add(key); else draftsTooLongToKeep.delete(key);
+  if (saved === "too-long" || saved === "not-saved") draftsNotKept.set(key, saved); else draftsNotKept.delete(key);
   paintDraftNote();
 }
 
@@ -2582,7 +2592,7 @@ function purgeMachineConversations(machineId: string, options: { forgetInMemory:
   for (const key of [...storedArrivals.keys()]) if (key.startsWith(`${machineId}:`)) storedArrivals.delete(key);
   if (options.forgetInMemory) {
     for (const key of [...conversationDrafts.keys()]) if (key.startsWith(`${machineId}:`)) conversationDrafts.delete(key);
-    for (const key of [...draftsTooLongToKeep]) if (key.startsWith(`${machineId}:`)) draftsTooLongToKeep.delete(key);
+    for (const key of [...draftsNotKept.keys()]) if (key.startsWith(`${machineId}:`)) draftsNotKept.delete(key);
   }
 }
 
@@ -3526,7 +3536,9 @@ function render(captureDraft = true): void {
     : undefined;
   const outageReason = outageKind && selected && selectedSession
     ? (outageKind === "pairing" ? pairingControlsReason(selected.label)
-      : outageKind === "session" ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
+      : outageKind === "session" ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession))
+      : machineConnectionSnapshot?.fatal === true ? "Update your browser, then reload to use control and interrupts."
+      : outageControlsReason(selected.label))
     : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);
@@ -3571,6 +3583,7 @@ function render(captureDraft = true): void {
   const unsteadyHere = machineConnectionSnapshot?.phase === "live" && machineConnectionSnapshot.degraded && !sessionDown;
   const staleStatusText = statusIsStale
     ? (pairingLostHere ? `Not live — this browser needs pairing again.${staleStatusTail}`
+      : machineConnectionSnapshot?.fatal === true ? `Not live — ${fatalConnectionRecovery(machineConnectionSnapshot.reason)}${staleStatusTail}`
       : unsteadyHere ? `${UNSTEADY_SENTENCE}${staleStatusTail}`
       : `Not live — reconnecting.${staleStatusTail}`)
     : undefined;
@@ -3600,7 +3613,9 @@ function render(captureDraft = true): void {
   // is printed under the header, not left in title and aria text (journey F9).
   // Journey F42: during an outage the banner says what was lost; this line
   // says only what it means for the controls, so the outage reads once.
-  const controlsNotice = !showSessionControls ? undefined : outageKind ? outageControlsNotice(outageKind) : sessionControlsNotice(takeControlReason, interruptReason);
+  const controlsNotice = !showSessionControls ? undefined
+    : outageKind === "machine" && machineConnectionSnapshot?.fatal === true ? outageReason
+    : outageKind ? outageControlsNotice(outageKind) : sessionControlsNotice(takeControlReason, interruptReason);
   // With machines paired and nothing open, the canvas is the fleet: every
   // machine and its sessions, one tap from opening. An empty card pointing at a
   // drawer was a detour to the same list.
@@ -4124,7 +4139,7 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4477,7 +4492,8 @@ function renderAttention(): void {
     act: performAttentionAction,
     copy: async (payload) => {
       await navigator.clipboard.writeText(payload);
-      toast("Event payload copied");
+      // cas-177c: Copy copies the Details text (readable since cas-ed87), so say so.
+      toast("Details copied");
     },
   }, {
     animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,
@@ -4627,11 +4643,12 @@ function attentionOutage(): { readonly text: string; readonly word: string } | u
       const phase = fleetConnectionLabel(state, id);
       return {
         phase,
+        fatal: connectionStates.get(id)?.fatal === true,
         text: phase === "Reconnecting" ? `${label} is reconnecting` : phase === UNSTEADY ? `${label}: ${UNSTEADY_SENTENCE.toLowerCase().replace(/…$/, "")}` : `${label}: ${phase}`,
       };
     });
   if (!down.length) return undefined;
-  return { text: `Not all clear. ${down.map((item) => item.text).join("; ")}.`, word: down.every((item) => item.phase === UNSTEADY) ? UNSTEADY : "Reconnecting" };
+  return { text: `Not all clear. ${down.map((item) => item.text).join("; ")}.`, word: down.every((item) => item.phase === UNSTEADY) ? UNSTEADY : down.every((item) => item.fatal) ? "Unreachable" : "Reconnecting" };
 }
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {
@@ -5341,8 +5358,26 @@ function pairedMachineRows(): PairedMachineRow[] {
       everConnected: lastLiveAt.has(machine.id),
       connectionState: state,
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
-      runtime: machineInfo.get(machine.id)?.version };
+      runtime: machineInfo.get(machine.id)?.version,
+      // cas-d382: what this pairing may do to the fleet, and how to get the rest.
+      fleet: { operate: fleetControlGate(machine.scopes, "add-workers", location.origin), manage: fleetControlGate(machine.scopes, "stop-worker", location.origin) } };
   }));
+}
+
+/**
+ * The one-time "Allow managing workers" grant (cas-d382), as session launch
+ * is allowed: the hub adds factory-operate to this device's credential.
+ * A refusal is said in the register, beside the machine.
+ */
+async function allowManagingWorkers(machineId: string): Promise<void> {
+  const error = document.querySelector<HTMLElement>("#paired-machines-error");
+  try {
+    await launchConnection(machineId).enableFactoryOperate();
+    if (error) { error.hidden = true; error.textContent = ""; }
+  } catch (failure) {
+    if (error) { error.textContent = failure instanceof Error ? failure.message : "Could not allow managing workers."; error.hidden = false; }
+  }
+  renderMachineRegister();
 }
 
 function renderMachineRegister(): void {
@@ -5368,7 +5403,11 @@ function renderMachineRegister(): void {
   // cas-0739: a closed register is kept in order (not connected first) and
   // scrolled to its top, so it opens on the machine the footer names; an open
   // one keeps its order so a status tick never moves a row under the operator.
-  renderPairedMachines(list, rows, forgetPairedMachine, { reorder: !dialog.open });
+  renderPairedMachines(list, rows, forgetPairedMachine, {
+    reorder: !dialog.open,
+    copy: (text) => navigator.clipboard.writeText(text),
+    allowManagingWorkers: allowManagingWorkers,
+  });
   if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).

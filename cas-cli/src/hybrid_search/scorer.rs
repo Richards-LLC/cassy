@@ -617,6 +617,35 @@ pub fn calibrate_scores_with_floor(scores: &mut [(String, f64)], floor: f64) {
 mod tests {
     use crate::hybrid_search::scorer::*;
 
+    /// cas-e7ae decision evidence: both fusion paths are invariant to a
+    /// positive rescaling of the BM25 channel, so fusing the index's
+    /// calibrated score (raw x 0.85/max) instead of the raw BM25 cannot move a
+    /// ranking today. A future post-scoring adjustment that is not a pure
+    /// rescale is what the corrected read lets through.
+    #[test]
+    fn fusion_order_is_invariant_to_bm25_calibration_cas_e7ae() {
+        let raw: Vec<(String, f64)> = [("a", 31.0), ("b", 17.5), ("c", 9.25), ("d", 2.0)]
+            .iter()
+            .map(|(id, s)| (id.to_string(), *s))
+            .collect();
+        let mut calibrated = raw.clone();
+        calibrate_scores(&mut calibrated);
+        assert_ne!(raw, calibrated, "calibration rescales the channel");
+        let semantic: Vec<(String, f64)> = [("d", 0.9), ("c", 0.7), ("x", 0.6)]
+            .iter()
+            .map(|(id, s)| (id.to_string(), *s))
+            .collect();
+        let order = |fused: Vec<(String, f64)>| fused.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(
+            order(combine_multi_channel(&raw, &semantic, &[], SearchWeights::custom(0.5, 0.5, 0.0))),
+            order(combine_multi_channel(&calibrated, &semantic, &[], SearchWeights::custom(0.5, 0.5, 0.0))),
+        );
+        assert_eq!(
+            order(rrf_with_magnitude(&[raw.clone(), semantic.clone()], 60.0)),
+            order(rrf_with_magnitude(&[calibrated.clone(), semantic.clone()], 60.0)),
+        );
+    }
+
     #[test]
     fn test_query_features() {
         // Exact match query

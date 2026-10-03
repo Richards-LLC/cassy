@@ -115,7 +115,9 @@ pub fn handle_pre_tool_use(
                 return Ok(output);
             }
             return Ok(HookOutput::with_pre_tool_updated_input(updated));
-        } else if let Some(what) = command.and_then(worker_command_rust_build) {
+        } else if let Some(what) =
+            command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd)))
+        {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
@@ -1240,13 +1242,13 @@ fn worker_check_log_denial(input: &HookInput, suffix: &str) -> Option<String> {
 /// metadata, tree, version) is not a build. Commands passed to `sh -c` /
 /// `bash -c` are inspected too; quoted text in other commands (a commit
 /// message, an echo) is not.
-fn worker_command_rust_build(command: &str) -> Option<String> {
-    worker_command_rust_build_at_depth(command, 0)
+fn worker_command_rust_build(command: &str, cwd: &Path) -> Option<String> {
+    worker_command_rust_build_at_depth(command, cwd, 0)
 }
 
-fn worker_command_rust_build_at_depth(command: &str, depth: usize) -> Option<String> {
+fn worker_command_rust_build_at_depth(command: &str, cwd: &Path, depth: usize) -> Option<String> {
     for words in shell_statement_words(command) {
-        if let Some(found) = rust_build_invocation(&words) {
+        if let Some(found) = rust_build_invocation(&words, cwd) {
             return Some(found);
         }
         if depth < 2 {
@@ -1263,7 +1265,7 @@ fn worker_command_rust_build_at_depth(command: &str, depth: usize) -> Option<Str
                     })
                     .and_then(|flag| words.get(index + 1 + flag + 1));
                 if let Some(found) =
-                    script.and_then(|script| worker_command_rust_build_at_depth(script, depth + 1))
+                    script.and_then(|script| worker_command_rust_build_at_depth(script, cwd, depth + 1))
                 {
                     return Some(found);
                 }
@@ -1302,7 +1304,7 @@ const CARGO_BUILD_SUBCOMMANDS: &[&str] = &[
     "hack",
 ];
 
-fn rust_build_invocation(words: &[String]) -> Option<String> {
+fn rust_build_invocation(words: &[String], cwd: &Path) -> Option<String> {
     let mut index = executable_word_index(words)?;
     // Wrappers that run their argument as a command.
     loop {
@@ -1391,9 +1393,20 @@ fn rust_build_invocation(words: &[String]) -> Option<String> {
             Some(command.to_string())
         }
         "make" | "gmake" => {
+            let mut dir = cwd.to_path_buf();
+            let mut makefile = None;
+            let mut targets = Vec::new();
             let mut rest = args.iter();
             while let Some(arg) = rest.next() {
-                if arg == "-C" || arg == "-f" || arg == "-j" {
+                if arg == "-C" {
+                    dir = dir.join(rest.next()?);
+                    continue;
+                }
+                if arg == "-f" {
+                    makefile = rest.next().cloned();
+                    continue;
+                }
+                if arg == "-j" {
                     rest.next();
                     continue;
                 }
@@ -1401,13 +1414,135 @@ fn rust_build_invocation(words: &[String]) -> Option<String> {
                     continue;
                 }
                 if arg.starts_with("test") || arg == "build" || arg == "check" {
-                    return Some(format!("make {arg}"));
+                    targets.push(arg.clone());
                 }
             }
-            None
+            // cas-cf70: a test target whose rule, read from the Makefile
+            // itself, runs only scripts (no Cargo, no sub-make, no variable
+            // that could expand to either) is not a Rust build. Anything the
+            // Makefile cannot prove stays refused.
+            targets
+                .into_iter()
+                .find(|target| !make_target_is_script_only(&dir, makefile.as_deref(), target))
+                .map(|target| format!("make {target}"))
         }
         _ => None,
     }
+}
+
+/// cas-cf70: whether `target`'s rule in the Makefile under `dir` (or `-f`
+/// `makefile`) runs only scripts. Every recipe line of the target and of its
+/// prerequisite rules must be free of Rust builds and sub-makes and expand no
+/// variable; a prerequisite without a rule must be an existing file. A missing
+/// Makefile, an unknown target, or a cycle beyond four levels is not proof.
+fn make_target_is_script_only(dir: &Path, makefile: Option<&str>, target: &str) -> bool {
+    let path = match makefile {
+        Some(makefile) => dir.join(makefile),
+        None => ["GNUmakefile", "makefile", "Makefile"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| dir.join("Makefile")),
+    };
+    let Ok(source) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let rules = makefile_rules(&source);
+    let mut seen = Vec::new();
+    make_rule_is_script_only(dir, &rules, target, &mut seen)
+}
+
+/// Explicit rules as (targets, prerequisites, recipe lines), with `\`
+/// continuations joined. Assignments, conditionals, includes and
+/// target-specific variables are not rules.
+fn makefile_rules(source: &str) -> Vec<(Vec<String>, Vec<String>, Vec<String>)> {
+    let mut lines = Vec::new();
+    let mut pending = String::new();
+    for line in source.lines() {
+        if let Some(head) = line.strip_suffix('\\') {
+            pending.push_str(head);
+            pending.push(' ');
+            continue;
+        }
+        pending.push_str(line);
+        lines.push(std::mem::take(&mut pending));
+    }
+    let mut rules: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+    let mut in_recipe = false;
+    for line in lines {
+        if let Some(recipe) = line.strip_prefix('\t') {
+            if in_recipe && let Some(rule) = rules.last_mut() {
+                rule.2.push(recipe.trim().to_string());
+            }
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        in_recipe = false;
+        let Some((head, tail)) = line.split_once(':') else {
+            continue;
+        };
+        let tail = tail.trim_start_matches(':');
+        if head.contains('=') || tail.trim_start().starts_with('=') || tail.contains('=') {
+            continue;
+        }
+        let targets: Vec<String> = head.split_whitespace().map(str::to_string).collect();
+        if targets.is_empty() || targets.iter().any(|target| target.contains('$')) {
+            continue;
+        }
+        let (prerequisites, inline) = match tail.split_once(';') {
+            Some((prerequisites, inline)) => (prerequisites, Some(inline.trim().to_string())),
+            None => (tail, None),
+        };
+        let prerequisites = prerequisites
+            .split_whitespace()
+            .filter(|word| *word != "|")
+            .map(str::to_string)
+            .collect();
+        rules.push((targets, prerequisites, inline.into_iter().collect()));
+        in_recipe = true;
+    }
+    rules
+}
+
+fn make_rule_is_script_only(
+    dir: &Path,
+    rules: &[(Vec<String>, Vec<String>, Vec<String>)],
+    target: &str,
+    seen: &mut Vec<String>,
+) -> bool {
+    if seen.iter().any(|known| known == target) {
+        return true;
+    }
+    if seen.len() >= 4 {
+        return false;
+    }
+    seen.push(target.to_string());
+    let matching: Vec<_> = rules
+        .iter()
+        .filter(|(targets, _, _)| targets.iter().any(|known| known == target))
+        .collect();
+    if matching.is_empty() {
+        // A plain file prerequisite has no recipe to run.
+        return seen.len() > 1 && dir.join(target).is_file();
+    }
+    matching.into_iter().all(|(_, prerequisites, recipe)| {
+        recipe.iter().all(|line| {
+            let line = line.trim_start_matches(['@', '-', '+']);
+            // Sub-makes are refused before classification so a recipe that
+            // re-invokes make cannot recurse through this check.
+            !line.contains('$')
+                && !line.contains('`')
+                && !shell_statement_words(line).iter().any(|words| {
+                    words.iter().any(|word| matches!(shell_word_basename(word), "make" | "gmake"))
+                })
+                && worker_command_rust_build_at_depth(line, dir, 0).is_none()
+        }) && prerequisites
+            .iter()
+            .all(|prerequisite| make_rule_is_script_only(dir, rules, prerequisite, seen))
+    })
 }
 
 /// Detect formatter invocations that can mutate files outside a worker's scope.

@@ -30,6 +30,11 @@ describe("sessionConnection (cas-a447: one state for header, row and footer)", (
 });
 
 describe("machineConnection (the footer)", () => {
+  it("keeps the fatal machine verdict instead of stale attach retries (cas-99d7)", () => {
+    const stopped = machine("failed", { fatal: true, reason: "unsupported browser" });
+    expect(machineConnection(stopped, [{ attach: attach("backoff"), wasLive: true }])).toBe(stopped);
+    expect(machineConnection(stopped, [{ attach: attach("live"), wasLive: true }])).toBe(stopped);
+  });
   it("shows the first attached session that is not live, else the machine", () => {
     const live = machine("live");
     expect(machineConnection(live, [])).toBe(live);

@@ -4802,10 +4802,11 @@ async fn test_supervisor_force_transfer_live_worker_task() {
         task_after.notes
     );
 
-    // Task assignee must be updated to the target worker.
+    // Task assignee must be updated to the target worker's registered name,
+    // not the id `to_agent` gave (cas-1638: close builds factory/<assignee>).
     assert_eq!(
         task_after.assignee.as_deref(),
-        Some("target-worker-id"),
+        Some("target-worker"),
         "task assignee must be updated to target worker"
     );
     // cas-e33f (GH #1004): the prior holder's branch is recorded so the new

@@ -1738,6 +1738,33 @@ impl CasCore {
                     created_by: Some("mcp".to_string()),
                 })
             };
+            // cas-c85e / cas-6fb6: the delivery target a move into this
+            // epic implies, decided before any edge changes so a refusal
+            // leaves the task graph untouched.
+            let retarget = if !epic_id.is_empty() && !work_target_supplied {
+                let epic_task = task_store.get(epic_id).map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to reload epic {epic_id}: {e}")),
+                    data: None,
+                })?;
+                let previous_parents: Vec<Task> = previous_parent_ids
+                    .iter()
+                    .filter(|id| id.as_str() != epic_id)
+                    .filter_map(|id| task_store.get(id).ok())
+                    .collect();
+                super::repo_context::work_target_for_task_moved_into_epic(
+                    &self.cas_root,
+                    &task,
+                    &epic_task,
+                    &previous_parents,
+                    || known_epics(task_store.as_ref()),
+                )
+                .filter(|target| task.deliverables.work_target.as_ref() != Some(target))
+            } else {
+                None
+            };
+            // A parked or recorded delivery never reaches here: the guard
+            // above refuses `epic=` for it with the proof_scope_fix route.
             let already_matches = match replacement.as_ref() {
                 Some(dep) => {
                     existing_parent_deps.len() == 1 && existing_parent_deps[0].to_id == dep.to_id
@@ -1773,27 +1800,9 @@ impl CasCore {
             // trunk, bypassing the epic's PR/CI gate. Runs even when the edge
             // already exists so a task moved before this fix can be repaired
             // by repeating `epic=`. A distinct explicit target is kept.
-            if !epic_id.is_empty() && !work_target_supplied {
-                let epic_task = task_store.get(epic_id).map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to reload epic {epic_id}: {e}")),
-                    data: None,
-                })?;
-                let previous_parents: Vec<Task> = previous_parent_ids
-                    .iter()
-                    .filter(|id| id.as_str() != epic_id)
-                    .filter_map(|id| task_store.get(id).ok())
-                    .collect();
-                if let Some(target) = super::repo_context::work_target_for_task_moved_into_epic(
-                    &self.cas_root,
-                    &task,
-                    &epic_task,
-                    &previous_parents,
-                ) && task.deliverables.work_target.as_ref() != Some(&target)
-                {
-                    task.deliverables.work_target = Some(target);
-                    changes.push("work_target");
-                }
+            if let Some(target) = retarget {
+                task.deliverables.work_target = Some(target);
+                changes.push("work_target");
             }
         }
 
@@ -2127,6 +2136,48 @@ impl CasCore {
 
         Ok(Self::success(response))
     }
+}
+
+/// cas-6fb6: every epic in the store, for recognising a target that is some
+/// epic's lane. Read only when cheaper inheritance checks do not decide.
+pub(crate) fn known_epics(task_store: &dyn cas_store::TaskStore) -> Vec<Task> {
+    task_store
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| task.task_type == TaskType::Epic)
+        .collect()
+}
+
+/// cas-6fb6: `dep_add parent` must not silently move a delivery that is
+/// already parked for merge: its branch, anchor and proof were measured
+/// against the current target. Refuse, naming the explicit correction, as the
+/// `update epic=` guard does.
+pub(crate) fn refuse_retarget_of_parked_delivery(
+    task: &Task,
+    epic_id: &str,
+    target: &cas_types::WorkTarget,
+) -> Result<(), McpError> {
+    if task.status != TaskStatus::AwaitingMerge {
+        return Ok(());
+    }
+    let current = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|current| format!("{} @ {}", current.repo_selector, current.target_branch))
+        .unwrap_or_else(|| "no work target".to_string());
+    Err(McpError {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(format!(
+            "RE-PARENT REFUSED: task {id} is parked for merge against {current}, and moving it under epic {epic_id} would retarget it to {repo} @ {branch}. A parked delivery is not retargeted implicitly. To move the delivery, a registered supervisor runs `{prefix}task action=update id={id} proof_scope_fix=true target_repo={repo} target_branch={branch} reason=\"<why>\"`, then repeats the re-parent.",
+            id = task.id,
+            repo = target.repo_selector,
+            branch = target.target_branch,
+            prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+        )),
+        data: None,
+    })
 }
 
 #[cfg(test)]
@@ -2628,7 +2679,7 @@ mod epic_move_work_target_tests {
     //! cas-c85e (GH #997): `task update epic=` moves the delivery target with
     //! the task, so worktree_merge never inherits a stale trunk target.
     use super::*;
-    use cas_types::{Dependency, DependencyType, Task, TaskType, WorkTarget};
+    use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
     use tempfile::TempDir;
 
     const REPO: &str = "project:cas-c85e";
@@ -2709,6 +2760,179 @@ mod epic_move_work_target_tests {
             "release/operator-selected",
             "an explicit non-default target must not be overwritten"
         );
+    }
+
+    async fn add_parent(core: &CasCore, task_id: &str, epic_id: &str) -> Result<(), String> {
+        let req: DependencyRequest = serde_json::from_value(serde_json::json!({
+            "from_id": task_id,
+            "to_id": epic_id,
+            "dep_type": "parent",
+        }))
+        .unwrap();
+        core.cas_task_dep_add(Parameters(req))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.message.to_string())
+    }
+
+    fn parent_of(store: &std::sync::Arc<dyn cas_store::TaskStore>, id: &str) -> Vec<String> {
+        store
+            .get_dependencies(id)
+            .unwrap()
+            .into_iter()
+            .filter(|dep| dep.dep_type == DependencyType::ParentChild)
+            .map(|dep| dep.to_id)
+            .collect()
+    }
+
+    /// cas-6fb6: the 17 cas-f29b moves that kept their old epic lane. The
+    /// old parent edge was already gone (cas-8f1b: dep_remove first), or the
+    /// old epic carried only a branch. Either way the old lane follows the
+    /// task to the new epic; a release pin no epic owns stays.
+    #[tokio::test]
+    async fn re_parenting_moves_a_target_on_another_epics_lane_cas_6fb6() {
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-6fb6-old", "epic/old")).unwrap();
+        let mut branch_only = Task::new("cas-6fb6-c4d3".into(), "epic with a branch only".into());
+        branch_only.task_type = TaskType::Epic;
+        branch_only.branch = Some("epic/c4d3".into());
+        store.add(&branch_only).unwrap();
+        store.add(&epic("cas-6fb6-new", "epic/new")).unwrap();
+
+        // The old parent edge was removed before the move.
+        let mut orphaned = Task::new("cas-6fb6-orphan".into(), "edge already removed".into());
+        orphaned.deliverables.work_target = Some(target("epic/old"));
+        store.add(&orphaned).unwrap();
+        move_into(&core, &orphaned.id, "cas-6fb6-new").await;
+        assert_eq!(branch_of(&store, &orphaned.id), "epic/new");
+
+        // The old epic has a branch but no WorkTarget, and the edge exists.
+        let mut on_c4d3 = Task::new("cas-6fb6-lane".into(), "on a branch-only epic".into());
+        on_c4d3.deliverables.work_target = Some(target("epic/c4d3"));
+        store.add(&on_c4d3).unwrap();
+        store
+            .add_dependency(&Dependency::new(on_c4d3.id.clone(), branch_only.id.clone(), DependencyType::ParentChild))
+            .unwrap();
+        move_into(&core, &on_c4d3.id, "cas-6fb6-new").await;
+        assert_eq!(branch_of(&store, &on_c4d3.id), "epic/new");
+        assert_eq!(parent_of(&store, &on_c4d3.id), vec!["cas-6fb6-new".to_string()]);
+
+        // dep_add parent follows the same rule.
+        let mut via_dep_add = Task::new("cas-6fb6-dep".into(), "parent-linked".into());
+        via_dep_add.deliverables.work_target = Some(target("epic/old"));
+        store.add(&via_dep_add).unwrap();
+        add_parent(&core, &via_dep_add.id, "cas-6fb6-new").await.unwrap();
+        assert_eq!(branch_of(&store, &via_dep_add.id), "epic/new");
+
+        // An explicitly chosen non-epic target is preserved by both paths.
+        let mut pinned = Task::new("cas-6fb6-pinned".into(), "release pin".into());
+        pinned.deliverables.work_target = Some(target("release/operator-selected"));
+        store.add(&pinned).unwrap();
+        move_into(&core, &pinned.id, "cas-6fb6-new").await;
+        assert_eq!(branch_of(&store, &pinned.id), "release/operator-selected");
+        let mut pinned_dep = Task::new("cas-6fb6-pinned-dep".into(), "hotfix pin".into());
+        pinned_dep.deliverables.work_target = Some(target("hotfix/operator"));
+        store.add(&pinned_dep).unwrap();
+        add_parent(&core, &pinned_dep.id, "cas-6fb6-new").await.unwrap();
+        assert_eq!(branch_of(&store, &pinned_dep.id), "hotfix/operator");
+    }
+
+    /// cas-6fb6: a delivery already parked for merge is not retargeted
+    /// implicitly. Both paths refuse with the proof_scope_fix route and leave
+    /// the parent edge and the target untouched.
+    #[tokio::test]
+    async fn re_parenting_a_parked_delivery_is_refused_with_guidance_cas_6fb6() {
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-6fb6-old", "epic/old")).unwrap();
+        store.add(&epic("cas-6fb6-new", "epic/new")).unwrap();
+        let mut parked = Task::new("cas-6fb6-parked".into(), "parked".into());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.work_target = Some(target("epic/old"));
+        store.add(&parked).unwrap();
+        store
+            .add_dependency(&Dependency::new(parked.id.clone(), "cas-6fb6-old".into(), DependencyType::ParentChild))
+            .unwrap();
+
+        let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": parked.id,
+            "epic": "cas-6fb6-new",
+        }))
+        .unwrap();
+        let refused = core.cas_task_update(Parameters(req)).await.unwrap_err().message.to_string();
+        assert!(
+            refused.contains("DELIVERY PROOF SCOPE LOCKED") && refused.contains("proof_scope_fix")
+                && refused.contains("epic/new"),
+            "{refused}"
+        );
+        assert_eq!(branch_of(&store, &parked.id), "epic/old");
+        assert_eq!(parent_of(&store, &parked.id), vec!["cas-6fb6-old".to_string()]);
+
+        let refused = add_parent(&core, &parked.id, "cas-6fb6-new").await.unwrap_err();
+        assert!(
+            refused.contains("RE-PARENT REFUSED") && refused.contains("proof_scope_fix=true")
+                && refused.contains("target_branch=epic/new"),
+            "{refused}"
+        );
+        assert_eq!(branch_of(&store, &parked.id), "epic/old");
+        assert_eq!(parent_of(&store, &parked.id), vec!["cas-6fb6-old".to_string()]);
+    }
+
+    /// cas-6fb6 (cas-940f): dep_add parent on a task left on the trunk
+    /// fallback, into an epic whose own target is its lane, used to keep the
+    /// trunk target. It now follows the epic, as `update epic=` does.
+    #[tokio::test]
+    async fn dep_add_parent_moves_a_trunk_fallback_onto_a_lane_targeted_epic_cas_6fb6() {
+        let repo = TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.path().join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["branch", "epic/f29b"]);
+        let cas_dir = repo.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-6fb6-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\n",
+        )
+        .unwrap();
+        let at = |branch: &str| WorkTarget {
+            repo_selector: "project:cas-6fb6-fixture".into(),
+            target_branch: branch.into(),
+        };
+        assert!(
+            crate::mcp::tools::core::task::repo_context::resolve_repo_context(&cas_dir, &at("main")).is_ok(),
+            "precondition: the fixture project resolves"
+        );
+
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let mut lane_epic = Task::new("cas-6fb6-f29b".into(), "lane-targeted epic".into());
+        lane_epic.task_type = TaskType::Epic;
+        lane_epic.branch = Some("epic/f29b".into());
+        lane_epic.deliverables.work_target = Some(at("epic/f29b"));
+        store.add(&lane_epic).unwrap();
+        let mut trunk = Task::new("cas-6fb6-940f".into(), "trunk fallback".into());
+        trunk.deliverables.work_target = Some(at("main"));
+        store.add(&trunk).unwrap();
+
+        add_parent(&core, &trunk.id, &lane_epic.id).await.unwrap();
+        assert_eq!(branch_of(&store, &trunk.id), "epic/f29b");
     }
 
     #[tokio::test]

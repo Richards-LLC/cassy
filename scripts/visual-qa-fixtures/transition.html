@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      /* The summary line starts nearly invisible and settles readable over a
+         100 ms colour transition, as hub-web's controls do. steps(1, end)
+         holds the start colour until the transition ends, so a capture taken
+         mid-transition always reads the unsettled colour. */
+      .summary { color: #eef1f6; transition: color 100ms steps(1, end), background-color 100ms ease; }
+      .settled .summary { color: #172033; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+        .summary { color: #2a3a5c; }
+        .settled .summary { color: #f4f7fb; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Settling report</h1>
+      <p class="summary">This summary line fades in from a low-contrast colour.</p>
+    </main>
+    <script>
+      getComputedStyle(document.querySelector('.summary')).color;
+      document.body.classList.add('settled');
+    </script>
+  </body>
+</html>

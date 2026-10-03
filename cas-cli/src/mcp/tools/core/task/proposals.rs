@@ -822,4 +822,107 @@ mod tests {
         assert_eq!(stored.title, "Accepted work");
         assert_eq!(stored.door, Some(cas_types::TaskDoor::TwoWay));
     }
+
+    fn accepted_proposal_with_task(task: serde_json::Value) -> TaskProposal {
+        serde_json::from_value(serde_json::json!({
+            "proposal_id": "proposal-null-1",
+            "target_task_id": "cas-0123456789abcdef",
+            "state": "accepted",
+            "task": task,
+            "provenance": {
+                "server_attested": {
+                    "proposal_id": "proposal-null-1",
+                    "target_task_id": "cas-0123456789abcdef",
+                    "creator_user_id": "user-1",
+                    "team_id": "team-1",
+                    "origin_project_canonical_id": "origin-project",
+                    "target_project_canonical_id": "target-project",
+                    "received_at": "2026-09-28T12:00:00Z",
+                    "client_request_id": "request-1"
+                },
+                "client_asserted": {}
+            }
+        }))
+        .unwrap()
+    }
+
+    /// cas-2b9f (GH #1043): the stored task_payload shape from clients 3.4.2
+    /// and 3.15.7, explicit nulls included. Before the fix the accept failed
+    /// "invalid type: null, expected string or map" on delivery_mode, after
+    /// the cloud had already accepted and materialized the team row; a retry
+    /// echoed the same row and failed the same way.
+    #[test]
+    fn accepted_proposal_from_an_older_client_with_null_fields_materializes() {
+        let proposal = accepted_proposal_with_task(serde_json::json!({
+            "title": "Wire the relay retry",
+            "description": "Older client create payload",
+            "priority": 2,
+            "task_type": "task",
+            "labels": [],
+            "delivery_mode": null,
+            "design": null,
+            "acceptance_criteria": null,
+            "demo_statement": null,
+            "execution_note": null,
+            "external_ref": null,
+            "assignee": null,
+            "door": null,
+            "notes": null,
+            "deliverables": null,
+            "target_repo": null,
+            "target_branch": null
+        }));
+        let task = materialize_accepted_proposal(&proposal, "target-project")
+            .expect("an older client's null fields decode");
+        assert_eq!(task.title, "Wire the relay retry");
+        assert_eq!(
+            task.delivery_mode,
+            cas_types::Task::new(String::new(), String::new()).delivery_mode
+        );
+        assert_eq!(task.door, None);
+        assert_eq!(task.status, TaskStatus::Open);
+        assert!(task.notes.contains("proposal_id: \"proposal-null-1\""));
+
+        // The retry: the accept route echoes the already-materialized row,
+        // nulls and all, and it decodes the same way and stores locally.
+        let again = materialize_accepted_proposal(&proposal, "target-project").unwrap();
+        assert_eq!(again.id, task.id);
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store_local(&cas_root).unwrap();
+        store.add(&again).unwrap();
+        assert_eq!(store.get(&task.id).unwrap().title, "Wire the relay retry");
+    }
+
+    /// cas-2b9f: every field Task serializes, sent as null, still decodes:
+    /// Options read as none and defaulted fields keep their defaults.
+    #[test]
+    fn accepted_proposal_with_null_for_every_task_field_materializes() {
+        let defaults = serde_json::to_value(cas_types::Task::new(
+            "cas-0123456789abcdef".to_string(),
+            "Every field null".to_string(),
+        ))
+        .unwrap();
+        let mut all_null = serde_json::Map::new();
+        for key in defaults.as_object().unwrap().keys() {
+            all_null.insert(key.clone(), serde_json::Value::Null);
+        }
+        all_null.insert("title".to_string(), serde_json::json!("Every field null"));
+        assert!(
+            all_null.len() > 20,
+            "the probe covers Task's fields: {}",
+            all_null.len()
+        );
+        let proposal = accepted_proposal_with_task(serde_json::Value::Object(all_null));
+        let task = materialize_accepted_proposal(&proposal, "target-project")
+            .expect("nulls for every Option or defaulted field decode");
+        let base = cas_types::Task::new(String::new(), String::new());
+        assert_eq!(task.id, "cas-0123456789abcdef");
+        assert_eq!(task.title, "Every field null");
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.delivery_mode, base.delivery_mode);
+        assert_eq!(task.priority, base.priority);
+        assert_eq!(task.labels, base.labels);
+        assert_eq!(task.origin_project.as_deref(), Some("origin-project"));
+    }
 }

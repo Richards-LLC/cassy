@@ -77,7 +77,7 @@ mod status_bar;
 pub(crate) use app::{
     persist_session_metadata_delivery_mode_at, persist_session_metadata_pinned_epic_id_at,
     persist_session_metadata_worker_hold_at, record_supervisor_mcp_call,
-    supervisor_progress_from_session_metadata_named,
+    seed_worker_target_from_baseline, supervisor_progress_from_session_metadata_named,
     worker_holds_from_session_metadata_named,
 };
 

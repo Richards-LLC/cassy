@@ -975,6 +975,50 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
+    /// Executable behind the optional `nice` wrapper, without inspecting harness
+    /// arguments such as `--model`. Accept short/long adjustment options and `--`;
+    /// an incomplete or unknown wrapper option leaves the command as `nice`.
+    pub fn effective_command(&self) -> &str {
+        if self.command != "nice" {
+            return &self.command;
+        }
+        let mut args = self.args.iter().map(String::as_str);
+        while let Some(arg) = args.next() {
+            match arg {
+                "--" => {
+                    return args
+                        .next()
+                        .filter(|cmd| !cmd.is_empty())
+                        .unwrap_or(&self.command);
+                }
+                "-n" | "--adjustment" => {
+                    if args
+                        .next()
+                        .and_then(|level| level.parse::<i32>().ok())
+                        .is_none()
+                    {
+                        return &self.command;
+                    }
+                }
+                _ => {
+                    if let Some(level) = arg
+                        .strip_prefix("--adjustment=")
+                        .or_else(|| arg.strip_prefix("-n"))
+                    {
+                        if level.parse::<i32>().is_err() {
+                            return &self.command;
+                        }
+                    } else if arg.starts_with('-') || arg.is_empty() {
+                        return &self.command;
+                    } else {
+                        return arg;
+                    }
+                }
+            }
+        }
+        &self.command
+    }
+
     /// Mark a protected environment name as an explicit worker credential grant.
     ///
     /// Only the factory config builder should call this for names authorized by
@@ -2260,16 +2304,6 @@ pub struct Pty {
     exit_status_pending: bool,
 }
 
-/// Whether a configured command ultimately launches the Codex harness.
-///
-/// Factory workers may be started through `nice -n … codex` to keep a busy
-/// compile from starving the supervisor.  This classification feeds prompt
-/// submission timing as well as the spawn preflight, so it must describe the
-/// executable behind the wrapper rather than only the outer command.
-fn command_launches_codex(command: &str, args: &[String]) -> bool {
-    command == "codex" || (command == "nice" && args.iter().any(|arg| arg == "codex"))
-}
-
 /// Audit the actual executable and its provider's account environment. Do not
 /// infer the worker CLI from the supervisor's inherited metadata.
 #[derive(Debug)]
@@ -2297,12 +2331,7 @@ fn worker_spawn_audit(
     if env("CAS_AGENT_ROLE") != Some("worker") {
         return None;
     }
-    // This is the exact wrapper emitted by maybe_wrap_with_nice.
-    let cli = if config.command == "nice" && config.args.first().map(String::as_str) == Some("-n") {
-        config.args.get(2).map(String::as_str).unwrap_or("nice")
-    } else {
-        &config.command
-    };
+    let cli = config.effective_command();
     let (account_env, source_env, default) = match cli {
         "claude" => (
             "CLAUDE_CONFIG_DIR",
@@ -2347,7 +2376,7 @@ impl Pty {
     pub fn spawn(id: impl Into<String>, mut config: PtyConfig) -> Result<Self> {
         config.apply_worker_credential_policy();
         let id = id.into();
-        let is_codex = command_launches_codex(&config.command, &config.args);
+        let is_codex = config.effective_command() == "codex";
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
         // `mcp_servers.cs.command=cas`, but Codex can only launch it if the `cas`
@@ -3177,6 +3206,48 @@ mod cpr_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nice_non_codex_spawn_ignores_codex_argument_cas_046c() {
+        let mut pty = Pty::spawn(
+            "nice-harness-probe",
+            PtyConfig {
+                command: "nice".into(),
+                args: ["-n", "10", "sh", "-c", "exit 0", "--model", "codex"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                ..PtyConfig::default()
+            },
+        )
+        .expect("the wrapped shell must spawn");
+        let is_codex = pty.is_codex;
+        pty.child.wait().expect("the probe must exit");
+        assert!(!is_codex, "a model argument must not select Codex prompt timing");
+    }
+
+    #[test]
+    fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
+        for (args, cli, account_env) in [
+            (vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex", "CODEX_HOME"),
+            (vec!["-n10", "claude", "--effort", "high", "--model", "codex"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--", "codex", "--model", "large"], "codex", "CODEX_HOME"),
+        ] {
+            let config = PtyConfig {
+                command: "nice".into(),
+                args: args.into_iter().map(str::to_string).collect(),
+                env: vec![("CAS_AGENT_ROLE".into(), "worker".into())],
+                ..PtyConfig::default()
+            };
+            assert_eq!(config.effective_command() == "codex", cli == "codex", "{:?}", config.args);
+            let audit = worker_spawn_audit(&config, |_| Some("/selected-account".into())).unwrap();
+            assert_eq!(audit.cli, cli);
+            assert_eq!(audit.account_env, account_env);
+            assert_eq!(audit.account, "/selected-account");
+        }
+    }
+
     #[test]
     fn worker_spawn_audit_tracks_launched_cli_and_provider_account() {
         for cli in ["codex", "claude", "grok", "opencode"] {
@@ -5721,9 +5792,14 @@ mod tests {
                 None,
             );
 
-            assert!(command_launches_codex(&config.command, &config.args));
+            assert_eq!(config.effective_command(), "codex");
             assert!(
-                !command_launches_codex("nice", &["-n".into(), "10".into(), "claude".into()]),
+                PtyConfig {
+                    command: "nice".into(),
+                    args: vec!["-n".into(), "10".into(), "claude".into()],
+                    ..PtyConfig::default()
+                }
+                .effective_command() != "codex",
                 "the wrapper test must not classify every niced harness as Codex"
             );
         }

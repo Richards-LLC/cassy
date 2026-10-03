@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,8 +13,21 @@ const here = fileURLToPath(new URL('.', import.meta.url));
 const fixture = (name) => join(here, 'visual-qa-fixtures', name);
 const repoRoot = join(here, '..');
 
+/**
+ * cas-9ebd: where the historical acceptance runs keep their renders. It was a
+ * Linux-only /home/pippenz/.cas/artifacts/cas-f868, which does not exist on
+ * macOS or a CI runner. VISUAL_QA_ARTIFACTS_ROOT keeps them somewhere durable
+ * (a task's artifacts directory); by default they go under the OS temp dir,
+ * like every other run in this file.
+ */
+async function acceptanceDir(prefix) {
+  const root = join(process.env.VISUAL_QA_ARTIFACTS_ROOT || tmpdir(), 'cas-f868');
+  await mkdir(root, { recursive: true });
+  return mkdtemp(join(root, prefix));
+}
+
 async function revisionFixture(revision) {
-  const dir = await mkdtemp(join('/home/pippenz/.cas/artifacts/cas-f868', 'visual-qa-revision-'));
+  const dir = await acceptanceDir('visual-qa-revision-');
   const path = join(dir, `${revision}.html`);
   const html = execFileSync('git', ['show', `${revision}:docs/factory/2026-09-06-model-lane-rubric-review.html`], { cwd: repoRoot, encoding: 'utf8' });
   await writeFile(path, html);
@@ -218,7 +231,7 @@ test('reports content lost when JavaScript is disabled or print media applies', 
 });
 
 test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
-  const artifactDir = await mkdtemp(join('/home/pippenz/.cas/artifacts/cas-f868', 'visual-qa-acceptance-'));
+  const artifactDir = await acceptanceDir('visual-qa-acceptance-');
   const exemplarNames = ['product-page.html', 'report.html', 'dashboard.html', 'before-after.html'];
   for (const name of exemplarNames) {
     const result = await acceptanceRender(

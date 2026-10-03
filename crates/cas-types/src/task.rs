@@ -846,6 +846,46 @@ impl TaskDeliverables {
         }
     }
 
+    /// Record the delivery a fresh park (InProgress -> AwaitingMerge) is
+    /// about: the branch the merge gate measured and its tip.
+    ///
+    /// cas-4b3f/cas-3d37: a commit-time anchor already recorded for this
+    /// cycle is kept; otherwise the measured tip becomes the anchor.
+    ///
+    /// cas-a44a: a reopened, reassigned task still names the previous
+    /// worker's `parked_branch`. When the gate measured a tip on a different
+    /// branch, this park is a new delivery there: the parked branch and the
+    /// anchor move to it, and the previous branch and anchor stay as handoff
+    /// and historical records (cas-a844 ownership, cas-e33f handoffs). A park
+    /// on the recorded branch, or one whose branch did not resolve, keeps the
+    /// existing records.
+    pub fn record_park(
+        &mut self,
+        measured_branch: Option<&str>,
+        measured_tip: Option<&str>,
+        assignee: Option<&str>,
+    ) {
+        let branch = measured_branch
+            .map(|branch| branch.strip_prefix("origin/").unwrap_or(branch).to_string())
+            .or_else(|| assignee.map(|assignee| format!("factory/{assignee}")));
+        if let (Some(branch), Some(tip), Some(previous)) =
+            (branch.as_deref(), measured_tip, self.parked_branch.clone())
+            && previous != branch
+        {
+            self.record_handoff_branch(&previous);
+            self.retain_factory_branch_anchor_as_history();
+            self.factory_branch_anchor = Some(tip.to_string());
+            self.parked_branch = Some(branch.to_string());
+            return;
+        }
+        if self.factory_branch_anchor.is_none() {
+            self.factory_branch_anchor = measured_tip.map(str::to_string);
+        }
+        if self.parked_branch.is_none() {
+            self.parked_branch = branch;
+        }
+    }
+
     /// Move the active factory anchor out of close authority while retaining
     /// it as task-owned commit identity for later merge-gate attribution.
     ///

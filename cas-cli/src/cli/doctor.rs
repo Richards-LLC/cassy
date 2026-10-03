@@ -1861,9 +1861,53 @@ fn session_start_budget_check() -> Check {
     session_start_budget_check_for(crate::builtins::supervisor_guidance().len())
 }
 
-// Queue diagnostics never initialize or migrate the database they inspect.
-// Missing tables/columns remain warning findings instead of becoming health.
+// Queue diagnostics never initialize or migrate the database they inspect
+// (cas-d6b9). A project that has never queued anything has no prompt_queue
+// table yet: that is health, not a fault (cas-5b0b). A queue that exists but
+// can't be read is still a warning, said in plain words without SQL text.
+
+/// Whether the prompt queue has never been created, asked read-only. An
+/// unreadable database answers `false`, so the caller reports the failure.
+fn prompt_queue_absent(cas_root: &Path) -> bool {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        cas_root.join("cas.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|tables| tables == 0)
+    .unwrap_or(false)
+}
+
+/// Why the prompt queue couldn't be read, in the operator's words.
+fn prompt_queue_read_failure(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("locked") || error.contains("busy") {
+        "the database is in use by another process; run cas doctor again in a moment"
+    } else if error.contains("no such table") || error.contains("no such column") {
+        "the prompt queue is from an older cas; run 'cas update --schema-only'"
+    } else if error.contains("not a database") || error.contains("malformed") {
+        "the database file looks damaged"
+    } else if error.contains("unable to open") {
+        "the database could not be opened"
+    } else {
+        "the prompt queue could not be read"
+    }
+}
+
 fn supervisor_relay_check(cas_root: &Path) -> Check {
+    if prompt_queue_absent(cas_root) {
+        return Check {
+            name: "supervisor relay".to_string(),
+            status: CheckStatus::Ok,
+            message: "no relays yet".to_string(),
+        };
+    }
     match crate::store::SqlitePromptQueueStore::open_read_only(cas_root)
         .map_err(|e| e.to_string())
         .and_then(|queue| {
@@ -1901,13 +1945,23 @@ fn supervisor_relay_check(cas_root: &Path) -> Check {
         Err(e) => Check {
             name: "supervisor relay".to_string(),
             status: CheckStatus::Warning,
-            message: format!("cannot check undelivered lifecycle relays: {e}"),
+            message: format!(
+                "cannot check undelivered lifecycle relays: {}",
+                prompt_queue_read_failure(&e)
+            ),
         },
     }
 }
 
 fn delivery_retries_check(cas_root: &Path) -> Check {
     const RETRY_WARN_THRESHOLD: u32 = 3;
+    if prompt_queue_absent(cas_root) {
+        return Check {
+            name: "delivery retries".to_string(),
+            status: CheckStatus::Ok,
+            message: "none queued".to_string(),
+        };
+    }
     match crate::store::SqlitePromptQueueStore::open_read_only(cas_root)
         .map_err(|e| e.to_string())
         .and_then(|queue| {
@@ -1949,7 +2003,10 @@ fn delivery_retries_check(cas_root: &Path) -> Check {
         Err(e) => Check {
             name: "delivery retries".to_string(),
             status: CheckStatus::Warning,
-            message: format!("cannot check delivery retry counts: {e}"),
+            message: format!(
+                "cannot check delivery retry counts: {}",
+                prompt_queue_read_failure(&e)
+            ),
         },
     }
 }
@@ -5702,7 +5759,10 @@ mod tests {
     }
 
     #[test]
-    fn doctor_queue_checks_report_missing_schema_without_creating_it_cas_d6b9() {
+    fn doctor_queue_checks_read_an_absent_queue_as_healthy_without_creating_it_cas_5b0b() {
+        // cas-5b0b: a project that has never queued anything has no
+        // prompt_queue table. That reads as healthy, and doctor still creates
+        // nothing in the database it inspects (cas-d6b9).
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("cas.db");
         rusqlite::Connection::open(&db)
@@ -5712,18 +5772,58 @@ mod tests {
             )
             .unwrap();
         let before = fs::read(&db).unwrap();
+        let relay = supervisor_relay_check(temp.path());
+        assert!(matches!(relay.status, CheckStatus::Ok), "{}", relay.message);
+        assert_eq!(relay.message, "no relays yet");
+        let retries = delivery_retries_check(temp.path());
+        assert!(
+            matches!(retries.status, CheckStatus::Ok),
+            "{}",
+            retries.message
+        );
+        assert_eq!(retries.message, "none queued");
+        assert_eq!(fs::read(&db).unwrap(), before);
+    }
+
+    #[test]
+    fn doctor_queue_checks_warn_in_plain_words_when_the_queue_cannot_be_read_cas_5b0b() {
+        // A queue that exists but can't be read is still a warning, said
+        // without SQL error text: here an older queue missing the columns the
+        // checks read.
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE prompt_queue(id INTEGER PRIMARY KEY);")
+            .unwrap();
+        let before = fs::read(&db).unwrap();
         for check in [
             supervisor_relay_check(temp.path()),
             delivery_retries_check(temp.path()),
         ] {
-            assert!(matches!(check.status, CheckStatus::Warning));
             assert!(
-                check.message.contains("no such table: prompt_queue"),
+                matches!(check.status, CheckStatus::Warning),
                 "{}",
                 check.message
             );
+            assert!(
+                check.message.ends_with("run 'cas update --schema-only'"),
+                "{}",
+                check.message
+            );
+            for sql in ["no such", "database error", "SELECT", "sqlite"] {
+                assert!(!check.message.contains(sql), "{}", check.message);
+            }
         }
         assert_eq!(fs::read(&db).unwrap(), before);
+        assert_eq!(
+            prompt_queue_read_failure("database is locked"),
+            "the database is in use by another process; run cas doctor again in a moment"
+        );
+        assert_eq!(
+            prompt_queue_read_failure("file is not a database"),
+            "the database file looks damaged"
+        );
     }
 
     #[test]

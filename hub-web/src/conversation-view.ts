@@ -1,4 +1,5 @@
 import { fitMachineLine, hostMarkup } from "./conversation-shell";
+import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
 import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
@@ -42,6 +43,8 @@ export interface TurnRenderContext {
   readonly turn: ThreadTurn;
   readonly reply: OperatorReply;
   readonly supervisor: string;
+  /** How a screen reader names this turn's supervisor: "cas-src supervisor" (cas-d8a5, journey F32). */
+  readonly spokenSupervisor?: string;
   /** Renders the message body (prose + evidence tables) the way a plain bubble would. */
   readonly body: () => HTMLElement[];
   /** Set for the `attachment` kind: the artifact this call renders. */
@@ -974,9 +977,20 @@ export class ConversationView {
     return session && this.history.currentSession !== undefined && session !== this.history.currentSession ? sessionCodename(session) : this.options.supervisor;
   }
 
+  /**
+   * cas-d8a5 (journey F32): a group is spoken as "cas-src supervisor", with
+   * the codename (or its earlier session) as the description.
+   */
+  private spokenSpeakerOf(session: string | undefined): { name: string; description?: string } {
+    const codename = this.speakerOf(session);
+    const other = Boolean(session && this.history.currentSession !== undefined && session !== this.history.currentSession);
+    const description = supervisorDescription(this.options.project, codename, other);
+    return { name: spokenSupervisor(this.options.project, codename), ...(description ? { description } : {}) };
+  }
+
   private context(document: Document, turn: ThreadTurn, reply: OperatorReply, pinned = false): TurnRenderContext {
     const context: TurnRenderContext = {
-      document, turn, reply, supervisor: this.speakerOf(turn.event.session),
+      document, turn, reply, supervisor: this.speakerOf(turn.event.session), ...(this.options.project ? { spokenSupervisor: this.spokenSpeakerOf(turn.event.session).name } : {}),
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
@@ -1172,7 +1186,8 @@ export class ConversationView {
     const document = node.ownerDocument;
     const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
-    speaker(node, `${this.speakerOf(item.session)}, status`, item.time, item.clockAhead);
+    const spokenStatus = this.spokenSpeakerOf(item.session);
+    speaker(node, `${spokenStatus.name}, status`, item.time, item.clockAhead, spokenStatus.description);
     const line = document.createElement("div"); line.className = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
@@ -1205,7 +1220,8 @@ export class ConversationView {
     node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
     // F19 (cas-17e3): a screen reader hears who spoke and when, not bare
     // paragraphs and times. The visible time stays for sighted readers.
-    speaker(node, group.side === "you" ? "You" : this.speakerOf(group.turns[0]?.event.session), group.time, group.clockAhead);
+    const spoken = group.side === "you" ? { name: "You" } : this.spokenSpeakerOf(group.turns[0]?.event.session);
+    speaker(node, spoken.name, group.time, group.clockAhead, "description" in spoken ? spoken.description : undefined);
     // Bubbles are keyed too: a later turn re-derives the earlier one's corner
     // classes without replacing its node, so a selection or focus inside it
     // survives the update.
@@ -1579,9 +1595,10 @@ function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => stri
 }
 
 /** Names a message group for assistive tech: "You, 12:45" or "<supervisor>, 12:45". */
-function speaker(node: HTMLElement, who: string, time: string | undefined, clockAhead = false): void {
+function speaker(node: HTMLElement, who: string, time: string | undefined, clockAhead = false, description?: string): void {
   node.setAttribute("role", "group");
-  node.setAttribute("aria-label", time ? `${who}, ${time}${clockAhead ? `, ${CLOCK_AHEAD}` : ""}` : who);
+  node.setAttribute("aria-label", joinSpoken([who, time, clockAhead && CLOCK_AHEAD]));
+  if (description) node.setAttribute("aria-description", description); else node.removeAttribute("aria-description");
 }
 
 /** The quiet hint beside a time that is the arrival time, not the machine's own stamp (cas-1f13). */

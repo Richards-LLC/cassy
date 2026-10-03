@@ -9,10 +9,20 @@ import { selectCachedPlaywright } from "../../scripts/visual-qa.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+/** The names in fixtures/main.ts's own FIXTURE_NAMES list. */
+function fixtureSiteNames(source) {
+  const list = /export const FIXTURE_NAMES = \[([\s\S]*?)\];/.exec(source)?.[1];
+  if (!list) throw new Error("fixtures/main.ts has no FIXTURE_NAMES list");
+  return [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
 describe("hub-web fixture visual QA", () => {
   it("lists every Commander fixture and required visual-QA matrix", async () => {
     const source = await readFile(join(repoRoot, "fixtures", "main.ts"), "utf8");
     for (const name of FIXTURE_NAMES) expect(source).toContain(`"${name}"`);
+    // cas-9ae6: and the other way round. A fixture the site renders but strict
+    // visual QA does not list is never inspected (conversations-session-end-error).
+    expect([...FIXTURE_NAMES].sort()).toEqual([...fixtureSiteNames(source)].sort());
     expect(REQUIRED_SCHEMES).toEqual(["light", "dark"]);
     expect(REQUIRED_VIEWPORTS.map(({ width }) => width)).toEqual([1280, 390, 844]);
     expect(REQUIRED_VIEWPORTS.map(({ height }) => height)).toEqual([800, 844, 390]);

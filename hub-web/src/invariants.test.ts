@@ -1313,7 +1313,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Plain words naming the machine (cas-a447), not the protocol retry line.
     // The words now live in connection-state-view so the refusal and the
     // disabled controls share them (journey F9).
-    expect(source).toContain(": lostConnectionBanner(where, snapshot.fatal === true);");
+    expect(source).toContain(": lostConnectionBanner(where, snapshot.fatal === true, snapshot.reason);");
     // cas-d15c: a stream the hub closed below a still-connected machine names the conversation.
     expect(source).toContain("? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)");
     expect(connectionView).toContain("`Lost connection to ${machineLabel}. Reconnecting…`");
@@ -1333,7 +1333,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');
     expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
     // A retrying drop is the banner's to tell; the rail defers to it (cas-90d4).
-    expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)))) return;");
+    expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)), connectionStates.get(machine.id))) return;");
     expect(source).not.toContain('headline: "Terminal transport problem"');
     // While the session is known to be down the banner says so; no toast repeats it over the banner (cas-00cc).
     expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");');

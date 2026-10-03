@@ -327,8 +327,8 @@ export function shouldRetainDisconnectedFrame(snapshot: ConnectionSnapshotView):
  * transport terms with counts that disagreed (cas-90d4). A pairing loss has its
  * own machine card. Only a failure that will not retry needs the rail.
  */
-export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | undefined): boolean {
-  return attach?.fatal === true && !attach.authFailure;
+export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | undefined, machine?: ConnectionSnapshotView): boolean {
+  return attach?.fatal === true && !attach.authFailure && (!machine || machine.phase === "live");
 }
 
 /**
@@ -336,8 +336,16 @@ export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | 
  * outage refused and the controls it disabled all name the machine the way
  * the banner does, so the operator never reads two descriptions of one drop.
  */
-export function lostConnectionBanner(machineLabel: string, fatal: boolean): string {
-  return fatal ? `Lost connection to ${machineLabel}. Not retrying.` : `Lost connection to ${machineLabel}. Reconnecting…`;
+/** Fatal transport failures are unsupported-browser errors, never network guesses. */
+export function fatalConnectionRecovery(reason?: string): string {
+  if (!reason) return "This browser cannot make this connection. Update your browser, then reload this page.";
+  // Keep the supported browser versions in the actual reason, but explain the
+  // missing API in human terms; the full diagnostic remains in Details.
+  return `${reason.replace(/^This browser is missing .+, which Cassy Cloud needs\./, "This browser is missing a feature Cassy Cloud needs.")} Then reload this page.`;
+}
+
+export function lostConnectionBanner(machineLabel: string, fatal: boolean, reason?: string): string {
+  return fatal ? `Lost connection to ${machineLabel}. ${fatalConnectionRecovery(reason)}` : `Lost connection to ${machineLabel}. Reconnecting…`;
 }
 
 /**

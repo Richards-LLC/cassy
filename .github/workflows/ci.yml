@@ -339,13 +339,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          comparison_base="$BASE_SHA"
-          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]] \
-            || ! git rev-parse --verify --quiet "$comparison_base^{commit}" >/dev/null; then
-            comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
+          runner_comparison_base="$BASE_SHA"
+          if [[ -z "$runner_comparison_base" || "$runner_comparison_base" =~ ^0+$ ]] \
+            || ! git rev-parse --verify --quiet "$runner_comparison_base^{commit}" >/dev/null; then
+            runner_comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
           fi
           changed=false
-          changed_paths="$(git diff --name-only "$comparison_base" HEAD -- \
+          changed_paths="$(git diff --name-only "$runner_comparison_base" HEAD -- \
             'scripts/cassy-actions-*' 'scripts/test-cassy-actions-*' \
             'scripts/install-cassy-actions-runner.sh')"
           if [[ -n "$changed_paths" ]]; then
@@ -535,13 +535,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          comparison_base="$BASE_SHA"
-          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]] \
-            || ! git rev-parse --verify --quiet "$comparison_base^{commit}" >/dev/null; then
-            comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
+          runner_comparison_base="$BASE_SHA"
+          if [[ -z "$runner_comparison_base" || "$runner_comparison_base" =~ ^0+$ ]] \
+            || ! git rev-parse --verify --quiet "$runner_comparison_base^{commit}" >/dev/null; then
+            runner_comparison_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
           fi
           changed=false
-          changed_paths="$(git diff --name-only "$comparison_base" HEAD -- \
+          changed_paths="$(git diff --name-only "$runner_comparison_base" HEAD -- \
             'scripts/cassy-actions-*' 'scripts/test-cassy-actions-*' \
             'scripts/install-cassy-actions-runner.sh')"
           if [[ -n "$changed_paths" ]]; then

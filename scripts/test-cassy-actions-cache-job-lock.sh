@@ -43,8 +43,11 @@ printf 'Runner.Listener\n' >"$proc_root/102/comm"
 for slot in '' '-2'; do
     mkdir -p "$cache_root/cargo-target$slot" "$cache_root/sccache$slot"
 done
-ln -s "$job_lock" "$fixture_root/cache-job-started.sh"
-ln -s "$job_lock" "$fixture_root/cache-job-completed.sh"
+# Exercise the deployed companion layout, rather than sourcing from the repo.
+install -m 0755 "$job_lock" "$fixture_root/cache-job-lock.sh"
+install -m 0644 "$script_dir/cassy-actions-process-identity.sh" "$fixture_root/cassy-actions-process-identity.sh"
+ln -s cache-job-lock.sh "$fixture_root/cache-job-started.sh"
+ln -s cache-job-lock.sh "$fixture_root/cache-job-completed.sh"
 started_hook="$fixture_root/cache-job-started.sh"
 completed_hook="$fixture_root/cache-job-completed.sh"
 

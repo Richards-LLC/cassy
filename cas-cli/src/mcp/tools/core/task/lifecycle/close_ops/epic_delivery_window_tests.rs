@@ -67,7 +67,10 @@ fn epic_window_excludes_unrelated_checkout_paths_and_snapshots_cas_b36b() {
             not_before: chrono::Utc::now() - chrono::Duration::hours(1),
             basis: "test fixture",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
-            identity: TaskCommitIdentity::default(),
+            identity: TaskCommitIdentity {
+                task_id: Some(task.id.clone()),
+                ..Default::default()
+            },
         };
         let tip = close_task_delivery_tip(&task, repo, None, None)
             .unwrap()

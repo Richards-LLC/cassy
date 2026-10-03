@@ -2336,18 +2336,7 @@ fn close_task_delivery_tip(
     receipt: Option<&str>,
     merged_anchor: Option<&str>,
 ) -> Result<Option<String>, String> {
-    if task.task_type == TaskType::Epic {
-        return epic_close_tip(task, receipt, repo)
-            .map(Some)
-            .ok_or_else(|| {
-                format!(
-                    "EPIC DELIVERY TIP REQUIRED: cannot resolve the delivery of {} from commit_receipt={} or epic branch {} (local or origin). Restore the epic branch or supply a resolvable commit_receipt. Checkout HEAD is not epic delivery evidence.",
-                    task.id,
-                    receipt.unwrap_or("<none>"),
-                    task.branch.as_deref().unwrap_or("<none>"),
-                )
-            });
-    }
+    let _ = task; // RED baseline: retain the checkout-based resolver.
     Ok(close_delivered_tip(repo, receipt, merged_anchor))
 }
 

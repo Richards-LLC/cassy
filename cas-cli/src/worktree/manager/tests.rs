@@ -161,6 +161,44 @@ fn test_create_worker_worktree() {
 
 #[cfg(unix)]
 #[test]
+fn worker_tracked_mcp_stays_git_clean_after_provisioning_gh_1047() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_temp, repo) = create_test_repo();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        assert!(output.status.success(), "fixture git command failed: {}", String::from_utf8_lossy(&output.stderr));
+        output
+    };
+    let original = serde_json::json!({"mcpServers": {
+        "vercel": {"command": "vercel-fixture"},
+        "neon": {"command": "neon-fixture"},
+        "context7": {"command": "allowed-fixture"}
+    }}).to_string();
+    std::fs::write(repo.join(".mcp.json"), &original).unwrap();
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(&["add", ".mcp.json", ".gitignore"]);
+    git(&["commit", "-m", "Track supervisor MCP configuration"]);
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\n").unwrap();
+    let worker = cas_root.join("worktrees/worker-1");
+    git(&["worktree", "add", "-b", "worker-fixture", worker.to_str().unwrap()]);
+    provision_worker_project_config(&repo, &worker);
+    let status = Command::new("git").args(["status", "--porcelain"])
+        .current_dir(&worker).output().unwrap();
+    assert!(status.status.success());
+    assert!(status.stdout.is_empty(), "worker provisioning dirtied tracked configuration: {}", String::from_utf8_lossy(&status.stdout));
+    assert_eq!(std::fs::read_to_string(worker.join(".mcp.json")).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(repo.join(".mcp.json")).unwrap(), original);
+    let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap()).unwrap();
+    assert!(mcp["mcpServers"].get("vercel").is_none());
+    assert!(mcp["mcpServers"].get("neon").is_none());
+    assert!(mcp["mcpServers"].get("context7").is_some());
+    assert!(mcp["mcpServers"].get("cas").is_some());
+}
+
+#[cfg(unix)]
+#[test]
 fn worker_project_mcp_is_private_and_filtered_without_mutating_supervisor_gh_1047() {
     use std::os::unix::fs::PermissionsExt;
     let (temp, repo) = create_test_repo();

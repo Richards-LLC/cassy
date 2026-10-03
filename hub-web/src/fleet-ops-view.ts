@@ -168,10 +168,11 @@ function menu(document: Document, context: FleetOpsViewContext, rowKey: string, 
   }
   list.onkeydown = (event) => {
     if ((event.target as HTMLElement).tagName === "INPUT") return;
-    const entries = [...list.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    const entries = [...list.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].filter((entry) => !entry.hidden);
     const at = entries.indexOf(document.activeElement as HTMLButtonElement);
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
+      if (!entries.length) return;
       const next = entries[(at + (event.key === "ArrowDown" ? 1 : entries.length - 1)) % entries.length];
       next?.focus();
     }

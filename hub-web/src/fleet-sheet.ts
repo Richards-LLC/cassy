@@ -10,7 +10,7 @@ export function presentFleetSheet(container: HTMLElement, dismiss: () => void): 
   const close = document.createElement("button");
   close.type = "button"; close.className = "fleet-sheet-close";
   close.setAttribute("aria-label", "Close actions"); close.textContent = "×";
-  close.onclick = dismiss;
+  close.onclick = () => dismiss();
   sheet.oncancel = (event) => { event.preventDefault(); dismiss(); };
   content.before(sheet);
   sheet.append(close, content);

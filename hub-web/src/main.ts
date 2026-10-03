@@ -2138,6 +2138,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       const button = (label: string, className: string, action: () => void) => {
         const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
         control.setAttribute("aria-label", label);
+        // cas-2072: a short header shows these as glyphs; the tooltip names them.
+        control.title = label;
         control.onclick = (event) => { event.stopPropagation(); action(); };
         return control;
       };
@@ -2154,8 +2156,12 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       // area. Activated, it takes focus itself (Safari does not focus a
       // clicked button), which also puts a phone's soft keyboard away.
       const leave = button("Leave terminal", "pane-leave", () => leave.focus());
-      // A short visible word beside its key, so the pane's own name keeps its room.
-      leave.textContent = "Leave";
+      // A short visible word beside its key, so the pane's own name keeps its
+      // room; where the header is compact the word gives way to a glyph and
+      // the key stays on screen (cas-7d25).
+      leave.textContent = "";
+      const leaveWord = document.createElement("span"); leaveWord.className = "pane-leave-word"; leaveWord.textContent = "Leave";
+      leave.append(leaveWord);
       leave.setAttribute("aria-keyshortcuts", "Control+Alt+M");
       leave.title = "Leave terminal (Ctrl+Alt+M)";
       const leaveKey = document.createElement("kbd"); leaveKey.setAttribute("aria-hidden", "true"); leaveKey.textContent = "Ctrl+Alt+M";

@@ -409,6 +409,12 @@ export function unsentChipCopy(count: number, unconfirmed: number): { text: stri
   return { text: `${count} dismissed`, label: `Show ${count} dismissed ${messages}, ${status}` };
 }
 
+/**
+ * How long a just-opened pinned question ignores presses on its choices: a
+ * double tap's second tap, not a deliberate answer (cas-450b).
+ */
+const PINNED_OPEN_GUARD_MS = 400;
+
 export class ConversationView {
   readonly element: HTMLElement;
   /**
@@ -444,6 +450,8 @@ export class ConversationView {
    */
   private composing = false;
   private pinnedChoice?: { id: number; collapsed: boolean };
+  /** When the folded bar last opened the question (cas-450b). */
+  private pinnedOpenedAt = -Infinity;
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
@@ -521,6 +529,17 @@ export class ConversationView {
     this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
+    // cas-450b: the opened card can put a choice right under the folded bar's
+    // tap point (a phone with its keyboard up), so the second tap of a double
+    // tap would answer the question. A choice ignores a press that arrives
+    // within a double tap of the bar opening it; a deliberate tap still answers.
+    this.pinned.addEventListener("click", (event) => {
+      if (performance.now() - this.pinnedOpenedAt >= PINNED_OPEN_GUARD_MS) return;
+      const target = event.target instanceof Element ? event.target.closest("button") : null;
+      if (!target || !target.closest(".obj")) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     this.element.addEventListener("scroll", () => {
@@ -769,6 +788,7 @@ export class ConversationView {
       expand.append(label, " ", text, glyph.content.firstElementChild!);
       expand.title = "Show the question";
       expand.onclick = () => {
+        this.pinnedOpenedAt = performance.now();
         this.pinnedChoice = { id: ask.notification_id, collapsed: false };
         this.renderPinned(document);
         this.pinned.querySelector<HTMLElement>(".pinned-collapse")?.focus({ preventScroll: true });

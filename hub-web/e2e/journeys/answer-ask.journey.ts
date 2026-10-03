@@ -358,3 +358,42 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
     await expect(list.locator(".conversation-when")).toHaveText("now");
   });
 });
+
+// cas-450b (found in cas-8674 QA): with the phone keyboard up (390x440), the
+// opened card's "Yes, go ahead" lies under the folded bar's tap point, so the
+// second tap of a double tap answered the question. A double tap only opens it.
+test("HUB-J7 a double tap on the folded question opens it without answering it (cas-450b)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const pinned = page.getByRole("region", { name: `Waiting on you: question from ${PELICAN}` });
+  const bar = pinned.locator(".pinned-expand");
+  const yes = pinned.getByRole("button", { name: "Yes, go ahead" });
+  let ask = 0;
+  await journey.stage("A question waits, folded to its bar while the phone keyboard is up", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    ask = hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask" });
+    await expect(yes).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("textbox", { name: "Your message" }).focus();
+    await expect(bar).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 440 });
+    await expect(bar).toBeVisible();
+  });
+  await journey.stage("Double-tap the bar: the question opens and nothing is answered", async () => {
+    const box = (await bar.boundingBox())!;
+    const before = hub.sends.length;
+    await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(600);
+    expect(hub.sends.map((send) => send.text).slice(before), "a double tap on the bar sends no answer").toEqual([]);
+    await expect(yes).toBeVisible();
+    // The opened card's choice does sit under the tap point: the guard, not the layout, keeps it unanswered.
+    const under = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.textContent?.trim() ?? null, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+    expect(under).toBe("Yes, go ahead");
+  });
+  await journey.stage("A deliberate tap on Yes afterwards answers it", async () => {
+    const sent = hub.nextSend();
+    await yes.click();
+    expect(await sent).toMatchObject({ text: "Yes, go ahead", in_reply_to: ask });
+    await expect(pinned).toBeHidden();
+  });
+});

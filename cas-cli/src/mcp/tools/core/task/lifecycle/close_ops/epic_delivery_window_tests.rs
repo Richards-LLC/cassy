@@ -76,6 +76,10 @@ fn epic_window_excludes_unrelated_checkout_paths_and_snapshots_cas_b36b() {
         assert_eq!(paths, vec!["epic.rs", "epic.snap"]);
         assert_eq!(tip, epic_tip);
         assert_ne!(tip, unrelated_tip);
+        assert_eq!(
+            close_task_delivery_tip(&task, repo, None, Some(&unrelated_tip)).unwrap(),
+            Some(epic_tip.clone())
+        );
         let attributed_base =
             task_attribution::delivery_base(repo, "main", &window, Some(&tip)).unwrap();
         let range = snapshot_gate_range(
@@ -89,6 +93,9 @@ fn epic_window_excludes_unrelated_checkout_paths_and_snapshots_cas_b36b() {
         .unwrap();
         assert_eq!(range.base.as_deref(), Some(base.as_str()));
         assert_eq!(range.tip.as_deref(), Some(epic_tip.as_str()));
+        // Missing attribution must use the epic tip's merge-base, too.
+        let fallback = snapshot_gate_range(repo, "main", None, Some(&tip), false, true).unwrap();
+        assert_eq!(fallback, range);
         let refusal = snapshot_approval::rejection(
             repo,
             range.base.as_deref(),
@@ -114,4 +121,38 @@ fn epic_window_excludes_unrelated_checkout_paths_and_snapshots_cas_b36b() {
             .is_none()
         );
     }
+}
+
+#[test]
+fn epic_receipt_wins_and_unresolved_delivery_fails_closed_cas_b36b() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    let base = commit(repo, &[("seed.txt", "base\n")], "base");
+    git(repo, &["branch", "epic/old"]);
+    let receipt = commit(repo, &[("delivery.rs", "delivery\n")], "cas-b36b delivery");
+    let mut task = Task::new("cas-b36b".into(), "epic".into());
+    task.task_type = TaskType::Epic;
+    task.branch = Some("epic/old".into());
+    assert_eq!(
+        close_task_delivery_tip(&task, repo, Some(&receipt), Some(&base)).unwrap(),
+        Some(receipt.clone())
+    );
+    assert!(close_task_delivery_tip(&task, repo, Some("missing-receipt"), None).is_err());
+    task.branch = Some("epic/missing".into());
+    let error = close_task_delivery_tip(&task, repo, None, Some(&receipt)).unwrap_err();
+    assert!(error.contains("EPIC DELIVERY TIP REQUIRED"), "{error}");
+    assert!(error.contains("epic/missing"), "{error}");
+    task.branch = None;
+    assert!(close_task_delivery_tip(&task, repo, None, Some(&receipt)).is_err());
+    // Other task kinds retain their parked-anchor and checkout behavior.
+    task.task_type = TaskType::Task;
+    assert_eq!(
+        close_task_delivery_tip(&task, repo, None, Some(&base)).unwrap(),
+        Some(base)
+    );
+    assert_eq!(
+        close_task_delivery_tip(&task, repo, None, None).unwrap(),
+        Some(receipt)
+    );
 }

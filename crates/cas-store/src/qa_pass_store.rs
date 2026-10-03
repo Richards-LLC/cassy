@@ -573,6 +573,53 @@ pub fn withdraw_open_qa_pass(
     Ok(Some(pass))
 }
 
+/// Withdraw the open round whose QA work item is `qa_task_id` (cas-7877).
+///
+/// Cancelling the work item is the supervisor saying this review will not
+/// happen. Leaving its pass pending kept the delivery gated and made the next
+/// park open a "re-review" of a round nobody ran. Only a pending or claimed
+/// round is withdrawn; a recorded verdict stands.
+pub fn withdraw_qa_pass_for_qa_task(
+    cas_dir: &Path,
+    qa_task_id: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<QaPass>> {
+    if reason.trim().is_empty() {
+        return Err(StoreError::Parse(
+            "withdrawing a QA round needs a reason".to_string(),
+        ));
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let active = tx
+        .query_row(
+            &format!(
+                "SELECT {COLUMNS} FROM qa_passes
+                 WHERE qa_task_id = ?1 AND state IN ('pending', 'claimed') LIMIT 1"
+            ),
+            params![qa_task_id],
+            parse_row,
+        )
+        .optional()?;
+    let Some(active) = active else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    tx.execute(
+        "UPDATE qa_passes SET state = 'superseded', summary = ?2, resolved_at = ?3 WHERE id = ?1",
+        params![
+            active.id,
+            format!("{QA_PASS_WITHDRAWN_PREFIX}{}", reason.trim()),
+            now.to_rfc3339(),
+        ],
+    )?;
+    let pass = by_id_with_conn(&tx, &active.id)?;
+    tx.commit()?;
+    Ok(Some(pass))
+}
+
 /// Latest round for a task, after lazily timing out an expired one.
 pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Result<Option<QaPass>> {
     let conn = open_conn(cas_dir)?;

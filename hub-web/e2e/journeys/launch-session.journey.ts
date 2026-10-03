@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { SCOPES, type LaunchWorld, type Machine } from "./hub-double";
 import { PELICAN } from "./world";
 
@@ -119,6 +119,10 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
   await journey.stage("Start it and land on its supervisor", async () => {
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet.getByRole("status")).toContainText("Starting ledger-api with Claude (support@petrastella.io) on Atlas · Linux…");
+    // cas-cee5 (journey F34): the starting line names the project, never the
+    // generated codename the operator never chose.
+    await expect(sheet.locator(".launch-progress-step")).toHaveText("Waiting for the ledger-api supervisor to come up on Atlas · Linux.");
+    await expect(sheet.getByRole("status")).not.toContainText("bright-heron-21");
     await expect(sheet).toBeHidden({ timeout: 15_000 });
     await expect(page.getByRole("button", { name: "Send to the ledger-api supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-heading")).toContainText("ledger-api");
@@ -148,7 +152,12 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     const alert = sheet.getByRole("alert");
     await expect(alert).toContainText("The Claude account main isn't logged in on Atlas · Linux.");
-    await expect(alert).toContainText("Run cas claude login main on Atlas · Linux, or pick another account, then start again.");
+    // cas-cee5 (journey F32): the login command is code with Copy, as a
+    // logged-out account row shows it, not prose to retype.
+    await expect(alert).toContainText("Run this on Atlas · Linux, or pick another account, then start again.");
+    await expect(alert.locator(".launch-error-command code")).toHaveText("cas claude login main");
+    await alert.getByRole("button", { name: "Copy cas claude login main", exact: true }).tap();
+    await expect(alert.getByRole("button", { name: "Copy cas claude login main", exact: true })).toHaveText("Copied");
     await sheet.getByText("The machine's message").tap();
     await expect(sheet.getByText("claude: not logged in for profile main")).toBeVisible();
     await sheet.getByRole("button", { name: "Back", exact: true }).tap();
@@ -164,6 +173,46 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet).toBeHidden({ timeout: 15_000 });
     await expect(page.getByRole("button", { name: "Send to the acme-portal supervisor", exact: true })).toBeVisible();
     expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" }, supervisor_cli: "claude", profile: "main" });
+  });
+
+  await journey.stage("The grant command reads as whole tokens on a phone, with Supervisor and Workers explained", async () => {
+    // cas-cee5 (journey F31): a read-only pairing cannot allow launch from
+    // here, so the sheet shows the command to run on the machine. It wraps
+    // only between whole tokens at 390px ("pane:i / nput" was the defect).
+    hub.setScopes("atlas", ["machine-read", "session-read"]);
+    await hub.seedPaired();
+    await page.reload();
+    await page.locator('#new-session-toggle[data-launch-grant="true"]').tap();
+    const code = sheet.locator(".launch-grant-command code");
+    await expect(code).toContainText("session:launch");
+    const splits = await code.evaluate((node) => {
+      const chars: Array<{ char: string; top: number }> = [];
+      const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      const range = document.createRange();
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+        const value = text.textContent ?? "";
+        for (let index = 0; index < value.length; index += 1) {
+          range.setStart(text, index); range.setEnd(text, index + 1);
+          chars.push({ char: value[index]!, top: Math.round(range.getClientRects()[0]?.top ?? 0) });
+        }
+      }
+      return chars.flatMap((item, index) => index > 0 && item.top !== chars[index - 1]!.top && chars[index - 1]!.char !== " " && chars[index - 1]!.char !== "," && item.char !== " " ? [`${chars[index - 1]!.char}|${item.char}`] : []);
+    });
+    expect(splits, "the command breaks only at spaces and after commas").toEqual([]);
+    await expect(sheet.locator(".launch-grant-note")).toHaveText("The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.");
+    await sheet.getByRole("button", { name: "Close", exact: true }).tap();
+    hub.setScopes("atlas", [...SCOPES, "session-launch"]);
+    await hub.seedPaired();
+    await page.reload();
+    // cas-cee5 (journey F33): the hints say what each field changes, and the
+    // Workers placeholder agrees with its hint.
+    await page.getByRole("button", { name: "New session", exact: true }).tap();
+    await sheet.getByRole("tab", { name: "Known projects" }).tap();
+    await sheet.getByRole("radio", { name: /old-notes/ }).check();
+    await expect(sheet.locator("#launch-cli-hint")).toHaveText("Which assistant runs the supervisor.");
+    await expect(sheet.locator("input[name=launch-workers]")).toHaveAttribute("placeholder", "None");
+    await expect(sheet.locator("#launch-workers-hint")).toHaveText("Up to 16. None starts the supervisor alone.");
+    await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
   });
 
   await journey.stage("A long machine name fits the phone consent", async () => {
@@ -188,7 +237,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
 // cas-0e14 (journey F30): New session follows the machine's connection. A
 // machine that is reconnecting says so in the sheet, in the banner's words,
 // instead of failing a project load; once it is back its projects load.
-test("HUB-J13 New session says a reconnecting machine is reconnecting, then loads once it's back (cas-0e14)", async ({ page, journey }) => {
+test("HUB-J13 New session says a reconnecting machine is reconnecting, then loads once it's back (cas-0e14)", journeyPart, async ({ page, journey }) => {
   test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });

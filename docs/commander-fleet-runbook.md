@@ -8,19 +8,51 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 - Install Tailscale, join every machine and browser device to the same tailnet, enable MagicDNS and HTTPS certificates for the tailnet, and confirm `tailscale status` reports `Running`.
 - On Linux, authorize the account that runs the hub to operate Tailscale without sudo: `sudo tailscale set --operator="$USER"`. Verify it with `sudo tailscale debug prefs`; `OperatorUser` must equal that account. Without this one-time host setting, Cassy reports `permission-denied` and keeps the hub loopback-only.
 - Choose one machine URL as the browser profile's controller origin. Pair every other machine to that exact origin; changing it requires re-pairing.
-- The default controller origin is a paired hub. The hosted static origin is `https://hub.petrastella.io`, an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes, then create new invitations with `cas hub pair --origin https://hub.petrastella.io` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
+- The default controller origin is a paired hub. The hosted static origin is `https://hub.petrastella.io`, an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes (see [Hub promotion](#hub-promotion-hosted-commander-at-hubpetrastellaio)), then create new invitations with `cas hub pair --origin https://hub.petrastella.io` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
 - Do not expose port 4173 on a LAN interface. The Cassy hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
 
-## Hosted Commander bundle pin (3.18.0)
+## Hub promotion (hosted Commander at hub.petrastella.io)
 
-The hosted static origin must serve the byte-identical `hub-web/dist` rebuilt
-from the assembled 3.18.0 source. Verify this pin before creating invitations:
+Standing policy: after any `main` merge that changes `hub-web/dist`, or hub-web
+source that implies a dist rebuild, promote that dist to
+`https://hub.petrastella.io`. A supervisor treats such a merge as carrying the
+promotion duty. The hosted origin is never left pinned behind `main`.
 
-- Dist source commit: `dcd381a9` (the assembled epic tip used for this rebuild).
-- Dist digest: `2058683fe868dd1cfef06b7f9acf4c62c9c6ad58ed4617bfc9203507598645cd`.
-  Compute it as `(cd hub-web && find dist -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum`.
-- `ghostty-vt.wasm`: `6b1df1a96d59adc26360c312924898dbc122f980c17a32eb1624e48795b83f7e`.
-- `ghostty-write-pty.wasm`: `75cb147e98ede3f85f3cd6236a30f6d12565b0b237e1d8db941f5f3e8ad3d903`.
+The procedure and the current pin live in `Richards-LLC/petra-stella-cloud`,
+not in this repository:
+
+- Procedure: [`hub-static/GO-LIVE.md`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/GO-LIVE.md).
+- Verifier: [`hub-static/scripts/verify-dist.sh`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/scripts/verify-dist.sh), run as `CAS_SRC_DIR=<pinned cas-src checkout> scripts/verify-dist.sh` from `hub-static/`.
+- Current pin and deployment record: [`hub-static/PROVENANCE.md`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/PROVENANCE.md).
+  This names the source commit, dist tree, verify-dist digest, `app.js` and
+  `app.css` hashes, Vercel deployment ID and rollback anchor. It is the only
+  authority for what the hosted origin serves; this runbook keeps no copy.
+
+In outline:
+
+1. Pin a clean cas-src checkout of the exact commit, normally the release tag,
+   and copy only `hub-web/dist/` into `hub-static/public/commander/`. Copy
+   `index.html` to `hub-static/public/index.html` as well.
+2. Run `verify-dist.sh`. It recomputes the dist digest and the two WASM
+   integrity hashes, and the hashes in [`hub-web/README.md`](../hub-web/README.md)
+   are the authority: `ghostty-vt.wasm` `6b1df1a9…3f7e` and
+   `ghostty-write-pty.wasm` `75cb147e…d3d903`. Stop on any mismatch.
+3. Deploy the `hub-static` directory with the Vercel CLI to the `cas-hub-static`
+   project in the Richards-LLC team. Never use the `petra-stella-cloud` Vercel
+   project, and never create a git-sourced deployment.
+4. Verify the live bytes on both the custom and the immutable origin. For
+   example, `curl -fsS https://hub.petrastella.io/commander/app.js | md5` must
+   match the md5 of `hub-web/dist/app.js` at the pin, and likewise `app.css`
+   and both WASM files. Every route must return HTTP 200 with no redirect to
+   Vercel SSO.
+5. Record the commit, digest, deployment ID, URL and rollback anchor in
+   `PROVENANCE.md`, and merge that through a petra-stella-cloud pull request.
+
+Changing the relay metadata or the origin itself is a security-domain move that
+requires every hub to re-pair. A dist-only promotion does not.
+
+Work from a fresh clone or `git fetch` of petra-stella-cloud. A long-lived local
+checkout can trail `origin/main`, and then its `PROVENANCE.md` names an old pin.
 
 ## Start and verify one machine
 

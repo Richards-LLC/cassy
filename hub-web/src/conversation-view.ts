@@ -211,6 +211,36 @@ export function askLine(message: string): string {
   return question ?? lines[0] ?? "";
 }
 
+/**
+ * The block in a rendered ask that carries its question (the line `askLine`
+ * names), innermost and last when several match.
+ */
+export function askLineElement(body: HTMLElement, message: string): HTMLElement | undefined {
+  const question = askLine(message);
+  if (!question) return undefined;
+  const blocks = [...body.querySelectorAll<HTMLElement>("p, li, h1, h2, h3, h4, h5, h6, blockquote")];
+  return blocks.reverse().find((block) => askLine(block.textContent ?? "") === question);
+}
+
+/**
+ * cas-8674 (journey F6): an opened pinned card's body scrolls inside a
+ * quarter of the screen, and a question usually ends its message, under the
+ * preamble. Scroll the body (only the body, never the page) so the question
+ * sits in view beside its choices; one taller than the body shows its start.
+ */
+export function revealAskLine(body: HTMLElement, message: string): void {
+  if (body.scrollHeight <= body.clientHeight) return;
+  const line = askLineElement(body, message);
+  if (!line) return;
+  const style = body.ownerDocument.defaultView?.getComputedStyle(body);
+  const padTop = parseFloat(style?.paddingTop ?? "") || 0;
+  const padBottom = parseFloat(style?.paddingBottom ?? "") || 0;
+  const box = body.getBoundingClientRect();
+  const rect = line.getBoundingClientRect();
+  const offset = rect.top - box.top - body.clientTop + body.scrollTop;
+  body.scrollTop = Math.max(0, Math.min(offset - padTop, offset + rect.height + padBottom - body.clientHeight));
+}
+
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
 /**
@@ -736,6 +766,8 @@ export class ConversationView {
       this.pinned.replaceChildren(head, object);
     }
     this.pinned.hidden = false;
+    const body = collapsed ? null : this.pinned.querySelector<HTMLElement>(".obj-body");
+    if (body) revealAskLine(body, ask.message);
     // A control rebuilt under keyboard focus hands it to its counterpart.
     if (hadFocus && !this.pinned.contains(document.activeElement)) {
       [...this.pinned.querySelectorAll<HTMLElement>("button")].find((button) => button.className === hadFocus)?.focus({ preventScroll: true });

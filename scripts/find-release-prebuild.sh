@@ -3,6 +3,10 @@
 #
 # Prints `found=`, `run-id=` and `reason=` for the tag-time release workflow.
 #
+# GITHUB_REPOSITORY defaults to the gh default repository, then the origin
+# remote, for a run by hand; when neither resolves the script exits 2 with an
+# error and prints no found= line (cas-0906).
+#
 # FAIL-SAFE, NOT FAIL-CLOSED. Every terminal failure mode — no prebuild run, a
 # partial run, expired artifacts, an API outage — reports found=false, which
 # routes the release back to the pre-existing cold build path. If the matching
@@ -45,8 +49,61 @@ decline() {
 if [[ -z "$sha" ]]; then
     decline "no commit SHA to look up"
 fi
+# owner/repo, or nothing when the text is not exactly one.
+repo_slug() {
+    local slug="$1"
+    if [[ "$slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        printf '%s\n' "$slug"
+    fi
+}
+
+# owner/repo from a GitHub remote URL (https, ssh or scp form), or nothing.
+github_remote_slug() {
+    local url="$1" path=""
+    case "$url" in
+        https://github.com/*) path="${url#https://github.com/}" ;;
+        http://github.com/*) path="${url#http://github.com/}" ;;
+        ssh://git@github.com/*) path="${url#ssh://git@github.com/}" ;;
+        git@github.com:*) path="${url#git@github.com:}" ;;
+        *) return 0 ;;
+    esac
+    path="${path%/}"
+    path="${path%.git}"
+    repo_slug "$path"
+}
+
+# A hand run has no GITHUB_REPOSITORY (cas-0906). Reporting found=false for
+# that would look exactly like a missing prebuild, which is the answer an
+# operator checks before pushing a release tag. So resolve the repository the
+# way an operator would: the gh default repository first, then the origin
+# remote. Never another remote: this checkout's `upstream` is a different
+# project. If neither names exactly one GitHub repository, fail loudly; CI
+# always sets GITHUB_REPOSITORY and never reaches this.
+resolve_repo() {
+    local slug url
+    slug="$(repo_slug "$("$gh_bin" repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)")"
+    if [[ -n "$slug" ]]; then
+        printf 'GITHUB_REPOSITORY is unset; using %s (gh repo view)\n' "$slug" >&2
+        printf '%s\n' "$slug"
+        return 0
+    fi
+    url="$(git remote get-url origin 2>/dev/null || true)"
+    slug="$(github_remote_slug "$url")"
+    if [[ -n "$slug" ]]; then
+        printf 'GITHUB_REPOSITORY is unset; using %s (origin remote)\n' "$slug" >&2
+        printf '%s\n' "$slug"
+        return 0
+    fi
+    return 1
+}
+
 if [[ -z "$repo" ]]; then
-    decline "GITHUB_REPOSITORY is unset"
+    if ! repo="$(resolve_repo)"; then
+        printf 'error: GITHUB_REPOSITORY is unset and the repository could not be resolved.\n' >&2
+        printf 'error: neither "gh repo view" nor the origin remote names one GitHub repository.\n' >&2
+        printf 'error: set GITHUB_REPOSITORY=owner/repo and run again; no prebuild lookup was made.\n' >&2
+        exit 2
+    fi
 fi
 
 fetch_runs() {

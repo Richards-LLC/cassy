@@ -58,6 +58,7 @@ export const FIXTURE_NAMES = [
   "launch-account",
   "launch-account-unavailable",
   "launch-account-default-out",
+  "launch-grant-command",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -396,7 +397,7 @@ function appendOpenPairingDialog(view: PairingFixture): void {
   }
 }
 
-type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-offline" | "launch-account" | "launch-account-unavailable" | "launch-account-default-out";
+type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-grant-command" | "launch-offline" | "launch-account" | "launch-account-unavailable" | "launch-account-default-out";
 
 /**
  * The production New session sheet (LaunchSheet, cas-0f51) driven through its
@@ -410,9 +411,10 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     machines: () => [
       // cas-0e14: the offline view's machine is reconnecting.
       { id: "atlas", label: "Atlas · Linux", scopes: [...control, "session-launch"], ...(view === "launch-offline" ? { connection: "Reconnecting" } : {}) },
-      { id: "studio", label: "Studio Mac · macOS", scopes: control },
+      // cas-cee5: a read-only pairing cannot allow launch here, so the sheet shows the command to run on the machine.
+      { id: "studio", label: "Studio Mac · macOS", scopes: view === "launch-grant-command" ? ["machine-read", "session-read"] : control },
     ],
-    currentMachineId: () => (view === "launch-grant" ? "studio" : "atlas"),
+    currentMachineId: () => (view === "launch-grant" || view === "launch-grant-command" ? "studio" : "atlas"),
     origin: window.location.origin,
     projects: async () => ({
       projects: [
@@ -446,7 +448,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     copy: async () => {},
   };
   const sheet = new LaunchSheet(host);
-  sheet.open(view === "launch-grant" ? "studio" : "atlas");
+  sheet.open(view === "launch-grant" || view === "launch-grant-command" ? "studio" : "atlas");
   const dialog = document.querySelector<HTMLDialogElement>("#launch-dialog");
   if (!dialog?.open) throw new Error("Launch fixture sheet did not open");
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));

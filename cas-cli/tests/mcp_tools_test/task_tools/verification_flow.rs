@@ -6817,6 +6817,38 @@ async fn test_epic_close_requires_epic_verification_type() {
     );
 }
 
+/// An unrelated checkout snapshot is not delivery evidence for a planning epic.
+#[tokio::test]
+async fn test_branchless_no_code_epic_closes_without_checkout_snapshot_cas_04c6() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut env);
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
+    proof_boundary_git(temp.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join("unrelated.snap"), "unrelated checkout snapshot\n").unwrap();
+    proof_boundary_git(temp.path(), &["add", "unrelated.snap"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "unrelated checkout work"]);
+    let owner = open_agent_store(&cas_dir).unwrap().list(None).unwrap()[0].id.clone();
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut epic = cas::types::Task::new("cas-04c6-planning".into(), "Planning epic".into());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::InProgress;
+    epic.epic_verification_owner = Some(owner);
+    store.add(&epic).unwrap();
+    let _supervisor = ScopedSupervisorEnv::new(&mut env);
+    let text = extract_text(service.cas_task_close(Parameters(TaskCloseRequest {
+        id: epic.id.clone(),
+        reason: Some("Planning complete".into()),
+        stranded_branch_override: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+        commit_receipt: None,
+    })).await.unwrap());
+    assert_eq!(store.get(&epic.id).unwrap().status, TaskStatus::Closed, "{text}");
+    assert!(!text.contains("SNAPSHOT APPROVAL REQUIRED"), "{text}");
+}
+
 /// GH #892: an Epic has no worker-owned worktree or factory delivery anchor,
 /// but its declared epic branch is the durable code boundary. Closing without
 /// a commit_receipt must derive that branch tip and run the pre-close hook

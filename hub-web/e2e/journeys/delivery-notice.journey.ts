@@ -219,6 +219,10 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const copyBox = await attentionItems.getByRole("button", { name: "Copy" }).boundingBox();
     expect(payloadBox!.y, "Copy has its own row at1280px too").toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height);
     await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
+    // cas-177c: Copy says what it copied, the Details text, not an "event payload".
+    await attentionItems.getByRole("button", { name: "Copy" }).click();
+    await expect(page.locator("#toast")).toHaveText("Details copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy copies the Details text").toBe(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
     hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.

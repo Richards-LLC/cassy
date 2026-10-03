@@ -195,7 +195,10 @@ Workers may type-check their committed change with exactly
 `--tests` when test files changed; choose one target flag. Include consumers of
 changed shared interfaces. The PreToolUse guard routes that command through
 `cas factory worker-check`, which holds an OS builder-slot lock until Cargo
-exits. Lock descriptors are close-on-exec so compiler-cache daemons cannot
+exits. The route covers Claude's Bash and Codex's `exec_command`, including
+calls made from code mode (`functions.exec`). Codex applies a hook's rewritten
+input only with `permissionDecision: "allow"`, so the hook emits that for Codex
+(cas-980d). Lock descriptors are close-on-exec so compiler-cache daemons cannot
 retain slots after the runner exits. It checks the existing build guard, and enforces `max_concurrent_builders`
 even across simultaneous launches. A refusal requires retrying later. Run long
 checks in the background with a log. Compile checks execute no tests.

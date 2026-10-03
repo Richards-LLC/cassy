@@ -17,7 +17,11 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .unwrap();
-    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
@@ -37,21 +41,84 @@ fn fixture(drop_on_merge: bool, revert_on_lane: bool) -> (tempfile::TempDir, Tas
     git(repo, &["init", "-q", "-b", "main"]);
     commit(repo, DIST, "(()=>base())();\n", "seed bundle");
     git(repo, &["checkout", "-qb", "factory/worker"]);
-    commit(repo, DIST, "(()=>draft())();\n", "build(cas-test1): draft bundle");
-    commit(repo, DIST, "(()=>finalBuild())();\n", "build(cas-test1): final bundle");
+    commit(
+        repo,
+        DIST,
+        "(()=>draft())();\n",
+        "build(cas-test1): draft bundle",
+    );
+    git(repo, &["checkout", "-q", "main"]);
+    commit(
+        repo,
+        DIST,
+        "(()=>epicBuild())();\n",
+        "build(cas-aaaa): epic bundle",
+    );
+    git(repo, &["checkout", "-q", "factory/worker"]);
+    // Recovery discards the obsolete draft in favor of the imported epic
+    // bundle. The later reviewed rebuild is the task's final delivery.
+    git(
+        repo,
+        &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+    );
+    commit(
+        repo,
+        DIST,
+        "(()=>epicBuild())();\n",
+        "merge(cas-test1): recover onto epic",
+    );
+    commit(
+        repo,
+        DIST,
+        "(()=>finalBuild())();\n",
+        "build(cas-test1): final bundle",
+    );
     if revert_on_lane {
-        commit(repo, DIST, "(()=>base())();\n", "revert: abandon cas-test1 bundle");
+        commit(
+            repo,
+            DIST,
+            "(()=>base())();\n",
+            "revert: abandon cas-test1 bundle",
+        );
     }
     git(repo, &["checkout", "-q", "main"]);
-    commit(repo, "docs/sibling.md", "sibling\n", "docs(cas-aaaa): sibling delivery");
+    commit(
+        repo,
+        "docs/sibling.md",
+        "sibling\n",
+        "docs(cas-aaaa): sibling delivery",
+    );
     git(repo, &["checkout", "-q", "factory/worker"]);
-    git(repo, &["merge", "--no-ff", "main", "-m", "sync epic (cas-test1)"]);
+    git(
+        repo,
+        &["merge", "--no-ff", "main", "-m", "sync epic (cas-test1)"],
+    );
     let anchor = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["checkout", "-q", "main"]);
     if drop_on_merge {
-        git(repo, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "drop worker bundle"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "drop worker bundle",
+            ],
+        );
     } else {
-        git(repo, &["merge", "--no-ff", "factory/worker", "-m", "integrate worker"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "integrate worker",
+            ],
+        );
     }
     let integration = git(repo, &["rev-parse", "HEAD"]);
     let mut task = Task {
@@ -68,11 +135,20 @@ fn fixture(drop_on_merge: bool, revert_on_lane: bool) -> (tempfile::TempDir, Tas
 }
 
 fn close_gate(repo: &Path, task: &Task) -> MergeStateGateOutcome {
-    run_factory_branch_merge_gate(task, &TaskCloseRequest {
-        id: task.id.clone(), reason: None, supervisor_override: None,
-        legacy_bypass_code_review: None, search_manifest: None,
-        commit_receipt: None, stranded_branch_override: None,
-    }, "main", repo)
+    run_factory_branch_merge_gate(
+        task,
+        &TaskCloseRequest {
+            id: task.id.clone(),
+            reason: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+            commit_receipt: None,
+            stranded_branch_override: None,
+        },
+        "main",
+        repo,
+    )
 }
 
 fn epic_row(repo: &Path, task: &Task) -> EpicChildBranchStatus {
@@ -84,9 +160,17 @@ fn identical_minified_snapshot_close_and_epic_proof_cas_5f0b() {
     let (dir, task, _) = fixture(false, false);
     let repo = dir.path();
     let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
-    assert_eq!(git(repo, &["rev-parse", &format!("{anchor}:{DIST}")]),
-        git(repo, &["rev-parse", &format!("main:{DIST}")]));
-    assert_eq!(git(repo, &["diff", "--name-only", &format!("{anchor}^1"), anchor]), "docs/sibling.md");
+    assert_eq!(
+        git(repo, &["rev-parse", &format!("{anchor}:{DIST}")]),
+        git(repo, &["rev-parse", &format!("main:{DIST}")])
+    );
+    assert_eq!(
+        git(
+            repo,
+            &["diff", "--name-only", &format!("{anchor}^1"), anchor]
+        ),
+        "docs/sibling.md"
+    );
     match close_gate(repo, &task) {
         MergeStateGateOutcome::ProceedWithNote(note) => {
             assert!(note.contains("byte-identical"), "{note}");
@@ -96,26 +180,43 @@ fn identical_minified_snapshot_close_and_epic_proof_cas_5f0b() {
     }
     let row = epic_row(repo, &task);
     assert!(!row.blocks_epic_close(), "{row:?}");
-    assert!(row.content_evolution_note.as_deref().is_some_and(|note| note.contains("byte-identical")), "{row:?}");
+    assert!(
+        row.content_evolution_note
+            .as_deref()
+            .is_some_and(|note| note.contains("byte-identical")),
+        "{row:?}"
+    );
 }
 
 #[test]
 fn genuine_minified_drop_close_and_epic_reject_cas_5f0b() {
     let (dir, task, _) = fixture(true, false);
     match close_gate(dir.path(), &task) {
-        MergeStateGateOutcome::Reject(message) => assert!(message.contains("DELIVERY CONTENT DROPPED") && message.contains(DIST), "{message}"),
+        MergeStateGateOutcome::Reject(message) => assert!(
+            message.contains("DELIVERY CONTENT DROPPED") && message.contains(DIST),
+            "{message}"
+        ),
         other => panic!("dropping integration must reject: {other:?}"),
     }
     let row = epic_row(dir.path(), &task);
-    assert!(row.blocks_epic_close() && row.dropped_paths.contains(&DIST.into()), "{row:?}");
+    assert!(
+        row.blocks_epic_close() && row.dropped_paths.contains(&DIST.into()),
+        "{row:?}"
+    );
 }
 
 #[test]
 fn identical_reverted_minified_snapshot_rejects_cas_5f0b() {
     let (dir, task, _) = fixture(false, true);
-    assert!(matches!(close_gate(dir.path(), &task), MergeStateGateOutcome::Reject(_)));
+    assert!(matches!(
+        close_gate(dir.path(), &task),
+        MergeStateGateOutcome::Reject(_)
+    ));
     let row = epic_row(dir.path(), &task);
-    assert!(row.blocks_epic_close() && row.dropped_paths.contains(&DIST.into()), "{row:?}");
+    assert!(
+        row.blocks_epic_close() && row.dropped_paths.contains(&DIST.into()),
+        "{row:?}"
+    );
 }
 
 #[test]
@@ -124,12 +225,42 @@ fn minified_drop_requires_audited_superseding_commit_cas_5f0b() {
     let repo = dir.path();
     let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
     let paths = vec![DIST.into()];
-    assert!(validated_delivery_drop_review(repo, anchor, "main", &paths,
-        Some(&format!("reviewed-drop: {integration} -- merge threw away bundle"))).is_err());
-    let replacement = commit(repo, DIST, "(()=>reviewedBuild())();\n", "build: reviewed replacement");
-    let review = validated_delivery_drop_review(repo, anchor, "main", &paths,
-        Some(&format!("reviewed-drop: {replacement} -- rebuilt reviewed bundle"))).unwrap().unwrap();
-    assert!(review.contains(anchor) && review.contains(&replacement) && review.contains(DIST), "{review}");
-    assert!(matches!(close_gate(repo, &task), MergeStateGateOutcome::Reject(_)));
+    assert!(
+        validated_delivery_drop_review(
+            repo,
+            anchor,
+            "main",
+            &paths,
+            Some(&format!(
+                "reviewed-drop: {integration} -- merge threw away bundle"
+            ))
+        )
+        .is_err()
+    );
+    let replacement = commit(
+        repo,
+        DIST,
+        "(()=>reviewedBuild())();\n",
+        "build: reviewed replacement",
+    );
+    let review = validated_delivery_drop_review(
+        repo,
+        anchor,
+        "main",
+        &paths,
+        Some(&format!(
+            "reviewed-drop: {replacement} -- rebuilt reviewed bundle"
+        )),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        review.contains(anchor) && review.contains(&replacement) && review.contains(DIST),
+        "{review}"
+    );
+    assert!(matches!(
+        close_gate(repo, &task),
+        MergeStateGateOutcome::Reject(_)
+    ));
     assert!(epic_row(repo, &task).blocks_epic_close());
 }

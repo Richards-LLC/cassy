@@ -637,6 +637,25 @@ reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository
 binding, ancestry, non-empty delivery, and target-content checks still apply.
 
+A delivery's final file that is byte-identical on the authoritative target and
+still differs from the task's delivery base is present, even when historical
+intermediate builds disappeared during recovery. This exact-file proof applies
+to any path; it grants no exemption for minified or generated files. Child close
+and epic accounting use task-attributed history for merge deliveries rather
+than crediting only the epic changes imported by a worker's sync merge. Epic
+accounting compares the recorded child anchor, so a later task on the same lane
+cannot supply its final snapshot. Restoring the delivery base still rejects.
+
+For an older runtime that falsely reports dropped historical bundle lines,
+first inspect the recorded anchor and authoritative target with `git ls-tree`
+and `git diff <anchor>..<target> -- <paths>`. Preserve branches and evidence.
+Upgrade to the runtime containing the exact-file proof, or use the authenticated
+supervisor review below with the real integration/replacement commit and exact
+blob comparison in the review. Do not manufacture a corrective commit or edit
+task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
+64d1740bd7bb065049dea3b9c7eee2e712738e68 as its reviewed-drop receipt; anchor
+6ff3c4d6e and target held app.js blob 5bde1a1d1bf2b077538c054ee758bc8ffcdd4006.
+
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and
 `reason="reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>"`. Each named commit

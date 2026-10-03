@@ -13,6 +13,14 @@ fn cas_cmd(root: &Path) -> Command {
     let xdg = root.join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&xdg).unwrap();
+    // cas-937a: scrub every inherited CAS_* variable. Run from a factory
+    // worker, CAS_AGENT_ROLE=worker leaked through and cas-49c0's worker
+    // refusal rejected every `cas update --all-projects` these tests drive.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("CAS_") {
+            cmd.env_remove(key);
+        }
+    }
     if let Some(host_home) = std::env::var_os("HOME") {
         cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
     }

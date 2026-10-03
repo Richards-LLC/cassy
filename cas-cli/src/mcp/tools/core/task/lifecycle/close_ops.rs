@@ -36913,3 +36913,7 @@ mod zero_diff_spike_close_tests {
 
 #[cfg(test)]
 mod identical_delivery_tests;
+
+#[cfg(test)]
+#[path = "close_ops/recovery_delivery_tests.rs"]
+mod recovery_delivery_tests;

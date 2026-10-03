@@ -2877,6 +2877,12 @@ dialog form > *,
 
   .context-panel:not(.collapsed) {
     position: static;
+    /* cas-bad9: expanded, the panel is a row of its own and needs no layer.
+       The pill's z-index 6 (above) made it a stacking context over the
+       machine navigation (5), so the open drawer slid under it and every
+       machine row below the first was covered. The landscape sheet sets its
+       own layer below. */
+    z-index: auto;
     grid-column: 1;
     grid-row: 2;
     grid-template-columns: minmax(0, 1fr);

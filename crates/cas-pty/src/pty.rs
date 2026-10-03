@@ -3206,6 +3206,26 @@ mod cpr_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nice_non_codex_spawn_ignores_codex_argument_cas_046c() {
+        let mut pty = Pty::spawn(
+            "nice-harness-probe",
+            PtyConfig {
+                command: "nice".into(),
+                args: ["-n", "10", "sh", "-c", "exit 0", "--model", "codex"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                ..PtyConfig::default()
+            },
+        )
+        .expect("the wrapped shell must spawn");
+        let is_codex = pty.is_codex;
+        pty.child.wait().expect("the probe must exit");
+        assert!(!is_codex, "a model argument must not select Codex prompt timing");
+    }
+
     #[test]
     fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
         for (args, cli, account_env) in [

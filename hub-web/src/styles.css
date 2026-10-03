@@ -825,6 +825,13 @@ main {
 }
 
 .mode-badge.observer { color: var(--text-mid); }
+/* cas-d1fa: while this browser is in control the terminal keeps Tab, so the
+   header says how the keyboard leaves it, outside the terminal's drawing
+   area, where it never covers a program row. */
+.session-header .actions kbd { margin-left: var(--space-1); padding: 0 var(--space-1); color: var(--text-mid); font: inherit; font-size: var(--fs-xs); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+@container session-header (max-width: 360px) {
+  .session-header .actions kbd { display: none; }
+}
 /* No control to claim while the session is reconnecting (cas-edcd, cas-4a93). */
 .mode-badge[hidden] { display: none; }
 
@@ -1173,22 +1180,6 @@ main {
 }
 
 .t3-ghostty-scrollbar { display: none; }
-/* cas-d1fa: while this browser is in control the terminal keeps Tab, so a
-   quiet line in its corner says how the keyboard leaves. */
-.t3-ghostty-escape-hint {
-  position: absolute;
-  right: var(--space-2);
-  bottom: var(--space-2);
-  z-index: 3;
-  margin: 0;
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-mid);
-  background: var(--bg-raised);
-  border-radius: var(--radius-card);
-  font-size: var(--fs-xs);
-  pointer-events: none;
-}
-.t3-ghostty-escape-hint[hidden] { display: none; }
 .empty { place-self: center; color: var(--text-mid); }
 
 /* == Unit 3: empty state == */

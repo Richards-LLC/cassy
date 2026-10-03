@@ -356,24 +356,27 @@ export function terminalLinkAtColumn(row: GhosttySnapshot["rowData"][number], co
 }
 
 /** The terminal's own keys, in the words its escape hint uses (cas-d1fa). */
-export const TERMINAL_ESCAPE_HINT = "Tab goes to the terminal. Ctrl+M leaves it.";
+export const TERMINAL_ESCAPE_HINT = "Tab goes to the terminal. Ctrl+Alt+M leaves it.";
+/** The element, outside the drawing area, that says so (the session header's). */
+export const TERMINAL_ESCAPE_HINT_ID = "terminal-escape-hint";
 
 /**
- * Ctrl+M leaves the terminal input (cas-d1fa, WCAG 2.1.2): in control, Tab and
- * Shift+Tab are the program's (completion, mode cycling), so the keyboard
- * needs another way out. Ctrl+M is a carriage return to a terminal, which
- * Enter already sends, and it is the escape editors such as VS Code use.
+ * Ctrl+Alt+M leaves the terminal input (cas-d1fa, WCAG 2.1.2): in control,
+ * Tab and Shift+Tab are the program's (completion, mode cycling), so the
+ * keyboard needs another way out. Ctrl+M alone is Firefox's mute-tab key, and
+ * AltGraph (Ctrl+Alt on some layouts) types characters, so it never counts.
+ * The physical key is read, as Option changes the character on a Mac.
  */
-export function isTerminalLeaveShortcut(event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "shiftKey" | "altKey">): boolean {
-  return event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "m";
+export function isTerminalLeaveShortcut(event: Pick<KeyboardEvent, "ctrlKey" | "key" | "code" | "metaKey" | "shiftKey" | "altKey" | "getModifierState">): boolean {
+  if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return false;
+  if (event.getModifierState?.("AltGraph")) return false;
+  return event.code === "KeyM" || event.key.toLowerCase() === "m";
 }
 
 /** A plain Tab or Shift+Tab, the keys that move focus. */
 export function isTerminalFocusTab(event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "altKey">): boolean {
   return event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey;
 }
-
-let escapeHintCount = 0;
 
 export function isTerminalCopyShortcut(
   event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "shiftKey">,
@@ -525,7 +528,6 @@ export class GhosttyTerminalSurface {
   rows = 1;
 
   private readonly mount: HTMLElement;
-  private readonly escapeHint: HTMLParagraphElement;
   private readonly context: CanvasRenderingContext2D;
   private readonly core: GhosttyTerminalCore;
   private readonly options: GhosttyTerminalSurfaceOptions;
@@ -608,7 +610,6 @@ export class GhosttyTerminalSurface {
     input: HTMLTextAreaElement,
     scrollbar: HTMLDivElement,
     scrollbarThumb: HTMLDivElement,
-    escapeHint: HTMLParagraphElement,
     context: CanvasRenderingContext2D,
     core: GhosttyTerminalCore,
     metrics: GhosttyCellMetrics,
@@ -620,7 +621,6 @@ export class GhosttyTerminalSurface {
     this.input = input;
     this.scrollbar = scrollbar;
     this.scrollbarThumb = scrollbarThumb;
-    this.escapeHint = escapeHint;
     this.context = context;
     this.core = core;
     this.metrics = metrics;
@@ -666,14 +666,7 @@ export class GhosttyTerminalSurface {
     // thread, marked data-mount-overlay) survives the setup, so the reader never
     // sees the mount blank while fonts and WASM load (cas-04ee).
     const overlays = [...mount.children].filter((child) => child instanceof HTMLElement && child.dataset.mountOverlay !== undefined);
-    // cas-d1fa: in control, the terminal keeps Tab; this says how to leave. It
-    // is mounted with the input, so a later surface on this mount replaces both.
-    const escapeHint = document.createElement("p");
-    escapeHint.className = "t3-ghostty-escape-hint";
-    escapeHint.id = `t3-ghostty-escape-hint-${++escapeHintCount}`;
-    escapeHint.textContent = TERMINAL_ESCAPE_HINT;
-    escapeHint.hidden = true;
-    mount.replaceChildren(canvas, input, scrollbar, escapeHint, ...overlays);
+    mount.replaceChildren(canvas, input, scrollbar, ...overlays);
 
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("Canvas 2D is unavailable");
@@ -707,7 +700,6 @@ export class GhosttyTerminalSurface {
       input,
       scrollbar,
       scrollbarThumb,
-      escapeHint,
       context,
       core,
       metrics,
@@ -1057,12 +1049,11 @@ export class GhosttyTerminalSurface {
       this.input.remove();
       this.scrollbar.remove();
     }
-    this.escapeHint.remove();
   }
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     this.updateLinkModifier(event);
-    // cas-d1fa (WCAG 2.1.2): the keyboard can always leave. Ctrl+M leaves
+    // cas-d1fa (WCAG 2.1.2): the keyboard can always leave. Ctrl+Alt+M leaves
     // from either mode; without control nothing reaches the program, so Tab
     // and Shift+Tab keep their usual job of moving focus.
     if (isTerminalLeaveShortcut(event)) {
@@ -1162,11 +1153,13 @@ export class GhosttyTerminalSurface {
     this.requestRender();
   };
 
-  /** Shown, and the input's description, only while the terminal keeps Tab. */
+  /**
+   * While the terminal keeps Tab, the input is described by the session
+   * header's escape hint, which sits outside the drawing area so it never
+   * covers a program row (cas-d1fa QA round 1).
+   */
   private updateEscapeHint(): void {
-    const capturing = this.controlMode && !this.disposed;
-    this.escapeHint.hidden = !(capturing && this.focused);
-    if (capturing) this.input.setAttribute("aria-describedby", this.escapeHint.id);
+    if (this.controlMode && !this.disposed) this.input.setAttribute("aria-describedby", TERMINAL_ESCAPE_HINT_ID);
     else this.input.removeAttribute("aria-describedby");
   }
 

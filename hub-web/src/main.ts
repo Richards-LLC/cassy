@@ -4802,10 +4802,14 @@ function renderStatus(status?: Record<string, unknown>): void {
         ?? container.querySelector<HTMLElement>('.fleet-ops-sheet [role="menuitem"]')
       : container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`);
     if (target) { target.focus({ preventScroll: false }); return; }
-    // Its row is gone: the next row's ⋯, else the list itself.
-    const at = priorTriggers.indexOf(`${want.slice(0, want.lastIndexOf(":"))}:trigger`);
-    if (at < 0) return;
     const alive = (key: string) => container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(key)}"]`);
+    // A phone sheet that closed took its control with it: back to the row's ⋯ (cas-5bef0).
+    const rowTrigger = `${want.slice(0, want.lastIndexOf(":"))}:trigger`;
+    const opener = alive(rowTrigger);
+    if (opener) { opener.focus({ preventScroll: false }); return; }
+    // Its row is gone: the next row's ⋯, else the list itself.
+    const at = priorTriggers.indexOf(rowTrigger);
+    if (at < 0) return;
     const neighbour = priorTriggers.slice(at + 1).map(alive).find(Boolean);
     if (neighbour) { neighbour.focus({ preventScroll: false }); return; }
     container.tabIndex = -1;

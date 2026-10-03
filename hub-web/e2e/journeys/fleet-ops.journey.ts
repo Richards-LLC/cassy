@@ -86,6 +86,8 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await row("brisk-wren-9").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
     await expect(announcer).toHaveText("brisk-wren-9 stopped.");
     await expect(row("brisk-wren-9")).toHaveCount(0);
+    // It was the last row, so focus moves to the list, never to <body> (QA N1).
+    await expect(rail).toBeFocused();
     expect(hub.operations.length).toBe(before + 1);
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "shutdown_workers", workers: ["brisk-wren-9"] }, expected: { worker: "brisk-wren-9", generation: 4 } });
     // No Undo for a destructive action.
@@ -114,6 +116,15 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(announcer).toHaveText("Asked the supervisor to merge cas-1999.");
     await expect(task("cas-1999").locator(".fleet-ops-asked")).toHaveText(/^Asked (just now|\d+[smh] ago)$/);
     expect(hub.operations.filter((call) => (call.body.op as Record<string, unknown>).kind === "request_merge")).toHaveLength(1);
+  });
+
+  await journey.stage("Stopping a row hands focus to the next row", async () => {
+    await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
+    await row("swift-lark-3").getByRole("menuitem", { name: "Stop…" }).click();
+    await row("swift-lark-3").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(announcer).toHaveText("swift-lark-3 stopped.");
+    await expect(row("swift-lark-3")).toHaveCount(0);
+    await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeFocused();
   });
 
   await journey.stage("A pairing without factory:manage sees Stop disabled with the command that adds it", async () => {

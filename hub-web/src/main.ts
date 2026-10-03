@@ -4655,7 +4655,12 @@ let fleetHeaderPanel: "add" | "focus" | undefined;
 let fleetFocusNext: string | undefined;
 let fleetUndoTimer: number | undefined;
 
-function fleetAnnounce(text: string): void {
+/**
+ * The one live region for fleet results. It exists, empty, from the moment
+ * the rail draws its controls, so a screen reader is already watching it when
+ * the first sentence lands (cas-a474 QA N2).
+ */
+function fleetAnnouncer(): HTMLElement {
   let region = document.querySelector<HTMLElement>("#fleet-ops-announcer");
   if (!region) {
     region = document.createElement("p");
@@ -4664,6 +4669,11 @@ function fleetAnnounce(text: string): void {
     region.setAttribute("role", "status");
     document.body.append(region);
   }
+  return region;
+}
+
+function fleetAnnounce(text: string): void {
+  const region = fleetAnnouncer();
   if (region.textContent !== text) region.textContent = text;
 }
 
@@ -4774,6 +4784,9 @@ function renderStatus(status?: Record<string, unknown>): void {
     renderStatus(status);
   };
   const hadFocus = document.activeElement instanceof HTMLElement && container.contains(document.activeElement) ? document.activeElement.dataset.fleetFocus : undefined;
+  // The rows' triggers in their drawn order, so focus on a row that leaves
+  // (a confirmed Stop) can move to its neighbour (cas-a474 QA N1).
+  const priorTriggers = [...container.querySelectorAll<HTMLElement>('[data-fleet-focus$=":trigger"]')].map((node) => node.dataset.fleetFocus ?? "");
   // Region updates run against a container the shell rebuild is no longer
   // clearing for them, so this owns its own emptying.
   container.replaceChildren();
@@ -4788,7 +4801,15 @@ function renderStatus(status?: Record<string, unknown>): void {
         ?? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
         ?? container.querySelector<HTMLElement>('.fleet-ops-sheet [role="menuitem"]')
       : container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`);
-    target?.focus({ preventScroll: false });
+    if (target) { target.focus({ preventScroll: false }); return; }
+    // Its row is gone: the next row's ⋯, else the list itself.
+    const at = priorTriggers.indexOf(`${want.slice(0, want.lastIndexOf(":"))}:trigger`);
+    if (at < 0) return;
+    const alive = (key: string) => container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(key)}"]`);
+    const neighbour = priorTriggers.slice(at + 1).map(alive).find(Boolean);
+    if (neighbour) { neighbour.focus({ preventScroll: false }); return; }
+    container.tabIndex = -1;
+    container.focus({ preventScroll: false });
   };
   if (!status) {
     container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status.";
@@ -4831,6 +4852,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   // eye had to find the dots to tell name from state from task.
   const ops = fleetOpsContext(status);
   if (ops) {
+    fleetAnnouncer();
     const undo = undoBar(document, ops);
     if (undo) container.append(undo);
     container.append(headerControls(document, ops, fleetHeaderPanel));

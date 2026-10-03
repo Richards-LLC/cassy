@@ -519,10 +519,19 @@ fn materialize_accepted_proposal(
         title.to_string(),
     ))
     .map_err(|error| format!("Could not initialize accepted task: {error}"))?;
+    let defaults = encoded.clone();
     let encoded_object = encoded
         .as_object_mut()
         .expect("Task serializes as a JSON object");
     for (key, value) in object {
+        // cas-2b9f (GH #1043): clients 3.4.2 and 3.15.7 sent explicit nulls
+        // (`delivery_mode: null`) and the cloud stores and echoes the task
+        // verbatim. A null where Task accepts one (an Option) still means
+        // "none"; a null for a defaulted, non-optional field means "not
+        // given", so the default stays instead of failing the whole accept.
+        if value.is_null() && !task_field_accepts_null(&defaults, key) {
+            continue;
+        }
         encoded_object.insert(key.clone(), value.clone());
     }
     if let Some(raw_id) = encoded_object.get("id").and_then(serde_json::Value::as_str)
@@ -568,6 +577,17 @@ fn materialize_accepted_proposal(
     crate::cloud::syncer::render_task_proposal_provenance(&mut encoded);
     serde_json::from_value(encoded)
         .map_err(|error| format!("Cloud accepted response task was invalid: {error}"))
+}
+
+/// Whether `Task` decodes with `key` set to null, probed against a valid
+/// default task (cas-2b9f). True for `Option` fields and keys `Task` ignores;
+/// false for a non-optional field, where a null would fail the whole decode.
+fn task_field_accepts_null(defaults: &serde_json::Value, key: &str) -> bool {
+    let mut probe = defaults.clone();
+    if let Some(object) = probe.as_object_mut() {
+        object.insert(key.to_string(), serde_json::Value::Null);
+    }
+    serde_json::from_value::<cas_types::Task>(probe).is_ok()
 }
 
 fn validate_proposal_attempt_id(value: Option<&str>) -> Result<String, McpError> {

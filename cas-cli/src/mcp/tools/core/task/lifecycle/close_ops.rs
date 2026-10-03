@@ -28030,6 +28030,64 @@ mod merge_state_gate_tests {
         }
     }
 
+    fn f2eb_commit(p: &std::path::Path, path: &str, content: &str, message: &str) -> String {
+        std::fs::write(p.join(path), content).unwrap();
+        git(p, &["add", path]);
+        git(p, &["commit", "-q", "-m", message]);
+        rev_parse_local(p, "HEAD")
+    }
+
+    fn f2eb_stat(p: &std::path::Path, receipt: &str) -> String {
+        let mut window = window_at(0, "cas-f2eb fixture");
+        window.identity = TaskCommitIdentity {
+            task_id: Some("cas-test1".into()),
+            known_commits: vec![receipt.to_string()],
+        };
+        render_close_diff_stat(p, "main", Some(&window), Some(receipt))
+    }
+
+    /// cas-f2eb (landing-merge shape): the lane merges an epic tip carrying
+    /// another task's work the measured target does not hold yet. The close
+    /// diff stat attributes only the task's own commits, not the merged-in
+    /// epic content.
+    #[test]
+    fn close_diff_stat_excludes_epic_content_merged_into_the_lane_cas_f2eb() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        f2eb_commit(p, "worker.ts", "export const a = 1;\n", "fix(hub): first change (cas-test1)");
+        git(p, &["checkout", "-q", "-b", "epic/newer", "main"]);
+        f2eb_commit(p, "other.rs", "fn other() {}\n", "fix(task): another lane's work (cas-6fb6)");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "epic/newer", "-m", "Merge epic tip into cas-test1 lane"]);
+        let receipt =
+            f2eb_commit(p, "worker2.ts", "export const b = 2;\n", "fix(hub): QA follow-up (cas-test1)");
+        let stat = f2eb_stat(p, &receipt);
+        assert!(stat.contains("worker.ts") && stat.contains("worker2.ts"), "{stat}");
+        assert!(!stat.contains("other.rs"), "merged-in epic content is not task content: {stat}");
+    }
+
+    /// cas-f2eb (cas-a7e0 shape): a supervisor commit on the target whose
+    /// subject claims another task, and whose body only tells this task's
+    /// worker to base on it, is not this task's delivery.
+    #[test]
+    fn close_diff_stat_ignores_a_target_commit_claimed_by_another_task_cas_f2eb() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        f2eb_commit(
+            p,
+            "draft.md",
+            "draft\n",
+            "chore(epic): stage drafts (cas-6fb6)\n\nWorkers on cas-test1 base on this.",
+        );
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+        let receipt =
+            f2eb_commit(p, "worker.ts", "export const a = 1;\n", "feat(hub): add one file (cas-test1)");
+        let stat = f2eb_stat(p, &receipt);
+        assert!(stat.contains("worker.ts"), "{stat}");
+        assert!(!stat.contains("draft.md"), "another task's target commit is not task content: {stat}");
+    }
+
     /// cas-f38ca fixture (the cas-940f shape): the worker's lane branches
     /// off an older epic, the epic then lands another task's work on
     /// `update.rs` (a commit whose subject claims cas-6fb6 but whose body

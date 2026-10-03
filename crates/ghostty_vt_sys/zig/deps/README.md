@@ -57,6 +57,7 @@ mkdir -p target
 proof_dir=$(mktemp -d "$PWD/target/ghostty-offline.XXXXXX")
 sandbox-exec -p '(version 1)(allow default)(deny network*)' \
   env CARGO_TARGET_DIR="$proof_dir/target" \
+  RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= CARGO_BUILD_JOBS=2 \
   cargo check --offline -p ghostty_vt_sys --lib
 ```
 
@@ -64,4 +65,6 @@ Linux can substitute `unshare -rn` for `sandbox-exec -p ...`. Keep the proof
 directory and log for inspection. A fresh Cargo target guarantees fresh
 `OUT_DIR` Zig caches and prevents a warm Rust build from skipping the script.
 The network restriction covers Cargo, the build script, Zig and its children.
+Compiler wrappers are disabled so an already running cache daemon cannot serve
+the check from outside that network sandbox.
 This compile is supervisor-owned in factory sessions.

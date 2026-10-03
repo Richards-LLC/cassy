@@ -230,7 +230,13 @@ impl CasService {
         )
         .await
         {
-            Ok(result) => result,
+            Ok(result) => {
+                let elapsed = start.elapsed();
+                if elapsed.as_secs() >= 5 {
+                    info!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, "MCP slow request");
+                }
+                result
+            }
             Err(_) => {
                 let elapsed = start.elapsed();
                 let commit = receipt.commit.get();
@@ -252,6 +258,7 @@ impl CasService {
 
     /// Preserve the tool's result and attach recoverable factory mail/recall.
     /// Only the registered process identity may read its inbox or transcript.
+    #[cfg(test)]
     async fn append_factory_context(
         &self,
         result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,

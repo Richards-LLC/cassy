@@ -1255,21 +1255,28 @@ fn archive_entries(cas_dir: &std::path::Path, ids: &[String]) {
 /// alone; the process environment is never written.
 #[test]
 fn concurrent_rankings_with_different_injected_environments_are_independent_cas_7cc95() {
+    // Ranking records what it surfaced, so a corpus ranks differently the
+    // second time. Every run gets its own freshly materialized corpus: the
+    // solo and concurrent runs then differ only in running at the same time.
     let fixture = fixture();
-    let dir_a = tempfile::tempdir().expect("corpus a");
-    let dir_b = tempfile::tempdir().expect("corpus b");
-    let corpus_a = EvalCorpus::materialize_with_index(&fixture, dir_a.path(), TierMode::AllWorking)
-        .expect("seed + index a");
-    let corpus_b = EvalCorpus::materialize_with_index(&fixture, dir_b.path(), TierMode::AllWorking)
-        .expect("seed + index b");
-    let env_a = retrieval_eval::NeutralHookEnvironment::new(corpus_a.cas_dir());
-    let env_b = retrieval_eval::NeutralHookEnvironment::with(corpus_b.cas_dir(), |environment| {
-        environment
-            .with_var("CAS_AGENT_ROLE", "worker")
-            .with_var("CAS_AGENT_NAME", "sentinel-7cc95")
-    });
+    let dirs: Vec<_> = (0..4).map(|_| tempfile::tempdir().expect("corpus dir")).collect();
+    let corpora: Vec<_> = dirs
+        .iter()
+        .map(|dir| {
+            EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+                .expect("seed + index")
+        })
+        .collect();
+    let env_a = |corpus: &EvalCorpus| retrieval_eval::NeutralHookEnvironment::new(corpus.cas_dir());
+    let env_b = |corpus: &EvalCorpus| {
+        retrieval_eval::NeutralHookEnvironment::with(corpus.cas_dir(), |environment| {
+            environment
+                .with_var("CAS_AGENT_ROLE", "worker")
+                .with_var("CAS_AGENT_NAME", "sentinel-7cc95")
+        })
+    };
     let cases: Vec<_> = fixture.cases.iter().take(4).cloned().collect();
-    let rank_all = |corpus: &EvalCorpus, environment| {
+    let rank_all = |corpus: &EvalCorpus, environment: &retrieval_eval::NeutralHookEnvironment| {
         cases
             .iter()
             .map(|case| {
@@ -1277,25 +1284,26 @@ fn concurrent_rankings_with_different_injected_environments_are_independent_cas_
                     corpus,
                     case,
                     QueryMode::SeededTask,
-                    environment,
+                    environment.environment(),
                 )
                 .expect("rank")
             })
             .collect::<Vec<_>>()
     };
     let process_env: Vec<_> = std::env::vars_os().collect();
-    let alone_a = rank_all(&corpus_a, env_a.environment());
-    let alone_b = rank_all(&corpus_b, env_b.environment());
+    let alone_a = rank_all(&corpora[0], &env_a(&corpora[0]));
+    let alone_b = rank_all(&corpora[1], &env_b(&corpora[1]));
 
+    let (concurrent_a_env, concurrent_b_env) = (env_a(&corpora[2]), env_b(&corpora[3]));
     let barrier = std::sync::Barrier::new(2);
     let (together_a, together_b) = thread::scope(|scope| {
         let a = scope.spawn(|| {
             barrier.wait();
-            rank_all(&corpus_a, env_a.environment())
+            rank_all(&corpora[2], &concurrent_a_env)
         });
         let b = scope.spawn(|| {
             barrier.wait();
-            rank_all(&corpus_b, env_b.environment())
+            rank_all(&corpora[3], &concurrent_b_env)
         });
         (a.join().expect("thread a"), b.join().expect("thread b"))
     });

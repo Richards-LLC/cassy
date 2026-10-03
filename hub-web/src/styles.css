@@ -4400,7 +4400,7 @@ button.chip:disabled { cursor: default; }
 #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target] { position: relative; padding-right: 72px; background: var(--accent-soft); outline: var(--line-width) solid var(--line-subtle); outline-offset: -1px; }
 .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] { background: var(--bg-hover); outline: var(--line-width) solid var(--line-subtle); outline-offset: -1px; }
 #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target]::after,
-.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { content: "Enter ↵"; position: absolute; right: 12px; top: 50%; translate: 0 -50%; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { content: "Enter ↵" / ""; position: absolute; right: 12px; top: 50%; translate: 0 -50%; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
 @media (forced-colors: active) {
   #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target],
   .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] { outline: 2px solid Highlight; outline-offset: -2px; }
@@ -4412,4 +4412,4 @@ button.chip:disabled { cursor: default; }
    the count moves aside instead of sitting under the hint. */
 .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { position: static; grid-column: 3; grid-row: 2; justify-self: end; translate: none; }
 .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]:has(.conversation-marks)::after { content: none; }
-.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] .conversation-marks::before { content: "Enter ↵"; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] .conversation-marks::before { content: "Enter ↵" / ""; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }

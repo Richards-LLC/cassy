@@ -522,7 +522,8 @@ test("HUB-J12 network switch: without control, Tab and Shift+Tab leave the termi
     await hub.down("atlas", { sockets: "close" });
     await hub.up("atlas");
     await clock.advance(1_000);
-    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    // cas-c945 tells the outage once: the controls' reason no longer repeats the banner's machine sentence.
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
     await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
     const input = terminalInput(page);
     await input.focus();

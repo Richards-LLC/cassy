@@ -258,9 +258,67 @@ fn minified_drop_requires_audited_superseding_commit_cas_5f0b() {
         review.contains(anchor) && review.contains(&replacement) && review.contains(DIST),
         "{review}"
     );
+    let identity = task_commit_identity(&task, None);
+    let reason = format!("reviewed-drop: {replacement} -- rebuilt reviewed bundle");
+    match anchored_delivery_content_gate(
+        &task,
+        repo,
+        anchor,
+        "main",
+        None,
+        &identity,
+        None,
+        Some(&reason),
+    ) {
+        Some(MergeStateGateOutcome::ProceedWithNote(note)) => {
+            assert!(
+                note.contains(anchor) && note.contains(&replacement) && note.contains(DIST),
+                "{note}"
+            );
+        }
+        other => panic!("a valid supersession must keep an audited decision: {other:?}"),
+    }
+
     assert!(matches!(
         close_gate(repo, &task),
         MergeStateGateOutcome::Reject(_)
     ));
     assert!(epic_row(repo, &task).blocks_epic_close());
+}
+
+#[test]
+fn later_lane_task_cannot_supply_old_minified_snapshot_cas_5f0b() {
+    let (dir, task, _) = fixture(true, false);
+    let repo = dir.path();
+    git(repo, &["checkout", "-q", "factory/worker"]);
+    commit(
+        repo,
+        DIST,
+        "(()=>nextTask())();\n",
+        "build(cas-aaaa): later lane task",
+    );
+    git(repo, &["checkout", "-q", "main"]);
+    // The side carries a different bundle; resolve to that final later task.
+    git(
+        repo,
+        &[
+            "merge",
+            "--no-ff",
+            "--no-commit",
+            "-s",
+            "ours",
+            "factory/worker",
+        ],
+    );
+    commit(
+        repo,
+        DIST,
+        "(()=>nextTask())();\n",
+        "integrate later lane task",
+    );
+    let row = epic_row(repo, &task);
+    assert!(
+        row.blocks_epic_close() && row.dropped_paths.contains(&DIST.into()),
+        "{row:?}"
+    );
 }

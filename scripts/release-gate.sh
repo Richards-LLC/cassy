@@ -213,7 +213,7 @@ cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
 # The train owns durable row evidence; unchanged inputs reuse it automatically.
 [[ -z "$cache_dir" || -n "$only_rows" ]] || reuse_rows=true
 cache_head="$(git rev-parse HEAD)"
-gate_implementation="$(realpath "${BASH_SOURCE[0]}")"
+gate_implementation="$(release_portable_realpath "${BASH_SOURCE[0]}")"
 cache_toolchain=''
 if [[ ( -n "$cache_dir" || "$reuse_rows" == true ) && -z "$only_rows" ]]; then
     [[ -z "$cache_dir" ]] || mkdir -p "$cache_dir"

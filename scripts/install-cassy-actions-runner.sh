@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only runner provisioning: the pinned Linux archive and GNU coreutils are required.
 # Install the pinned GitHub runner and register it in the pre-created,
 # selected-repository/selected-workflow group. Run from a trusted checkout:
 #   RUNNER_SLOT=2 SCCACHE_SOURCE="$(command -v sccache)" \

@@ -42,6 +42,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/release-portable.sh
+source "$REPO_ROOT/scripts/release-portable.sh"
 CARGO="${CARGO:-cargo}"
 CARGO_CMD="${CARGO_CMD:-nextest run}"
 
@@ -93,7 +95,7 @@ snapshot() {
 }
 
 digest() {
-    sha256sum | cut -d' ' -f1
+    release_portable_sha256sum | cut -d' ' -f1
 }
 
 # Content digest of the rules table, plus a digest of the rule files synced
@@ -106,12 +108,14 @@ rule_snapshot() {
         2>/dev/null | digest)"
     printf 'rules.content\t%s\n' "${rules}"
 
-    local root rule_dir files
+    local root rule_dir files rule_file
     root="$(dirname "$(dirname "${db}")")"
     for rule_dir in "${root}/.claude/rules/cas" "${root}/.claude/rules/cas-global"; do
         [[ -d "${rule_dir}" ]] || continue
         files="$(cd "${rule_dir}" && find . -maxdepth 1 -type f -name '*.md' -print0 |
-            sort -z | xargs -0 -r sha256sum | digest)"
+            sort -z | while IFS= read -r -d '' rule_file; do
+                release_portable_sha256sum "$rule_file"
+            done | digest)"
         printf 'rule-files:%s\t%s\n' "${rule_dir}" "${files}"
     done
 }

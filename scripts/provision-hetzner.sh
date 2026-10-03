@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only provisioning/runner script: GNU coreutils and Linux kernel interfaces are required.
 # provision-hetzner.sh — Idempotent provisioning for CAS development server
 # Target: Hetzner CCX23 (Ubuntu, 16GB RAM, 150GB disk)
 # Usage: Run as root on the target server, or via: ssh root@<ip> 'bash -s' < scripts/provision-hetzner.sh

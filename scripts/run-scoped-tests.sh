@@ -333,7 +333,7 @@ if [[ "${proof_mode}" -eq 1 ]]; then
         proof_changed_files="$(git -C "${REPO_ROOT}" diff --name-only "${proof_merge_base}" HEAD | sed '/^$/d' | wc -l | tr -d '[:space:]')"
         proof_targets="$(printf '%s\n' "${proof_output}" | sed -n 's/^SCOPED_PROOF: targets=//p' | sed -E 's/[[:space:]]+result=PASS.*$//' | tail -1)"
         proof_payload="version=1\nresult=PASS\nhead_sha=${proof_head}\nbase_sha=${proof_merge_base}\nchanged_files=${proof_changed_files}\ntargets=${proof_targets}\nworktree=${REPO_ROOT}"
-        proof_id="sp-$(printf '%b\n' "${proof_payload}" | sha256sum | awk '{print $1}')"
+        proof_id="sp-$(printf '%b\n' "${proof_payload}" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
         proof_receipt_dir="$(dirname "${SCOPED_PROOF_RECEIPT}")"
         mkdir -p "${proof_receipt_dir}"
         proof_receipt_tmp="${SCOPED_PROOF_RECEIPT}.tmp.$$"

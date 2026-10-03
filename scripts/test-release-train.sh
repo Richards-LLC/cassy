@@ -10,6 +10,9 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/release-portable.sh
+source "$script_dir/release-portable.sh"
+release_portable_define_sha256sum
 train="$script_dir/release-train.sh"
 repo_root="$(cd "$script_dir/.." && pwd)"
 tmp="$(mktemp -d)"
@@ -2932,7 +2935,10 @@ mkdir -p "$portable_dir"
 cat >"$portable_dir/bsd-stat" <<'EOF'
 #!/usr/bin/env bash
 [[ "$1" == -c ]] && { printf 'stat: illegal option -- c\n' >&2; exit 1; }
-[[ "$1" == -f && "$2" == %d ]] && exec stat -c %d "$3"
+if [[ "$1" == -f && "$2" == %d ]]; then
+    stat -c %d "$3" 2>/dev/null || stat -f %d "$3"
+    exit $?
+fi
 exit 1
 EOF
 chmod +x "$portable_dir/bsd-stat"
@@ -2942,7 +2948,7 @@ portable_out="$(
     gnu="$(release_portable_stat_device "$tmp")"
     bsd="$(CAS_RELEASE_PORTABLE_STAT="$portable_dir/bsd-stat" release_portable_stat_device "$tmp")"
     none="$(CAS_RELEASE_PORTABLE_STAT=false release_portable_stat_device "$tmp" && printf found || printf none)"
-    printf '%s %s %s %s\n' "$gnu" "$bsd" "$none" "$(stat -c %d "$tmp")"
+    printf '%s %s %s %s\n' "$gnu" "$bsd" "$none" "$(release_portable_stat_device "$tmp")"
 )"
 read -r portable_gnu portable_bsd portable_none portable_real <<<"$portable_out"
 if [[ "$portable_gnu" == "$portable_real" && "$portable_bsd" == "$portable_real" && "$portable_none" == none ]]; then

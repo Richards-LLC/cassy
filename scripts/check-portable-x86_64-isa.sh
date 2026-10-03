@@ -89,5 +89,5 @@ if [[ -s "$offenders" ]]; then
   exit 1
 fi
 
-checksum="$(sha256sum -- "$artifact" | awk '{print $1}')"
+checksum="$(release_portable_sha256sum -- "$artifact" | awk '{print $1}')"
 echo "portable x86_64 ISA audit passed: evex_avx512=absent sha256=$checksum artifact=$artifact"

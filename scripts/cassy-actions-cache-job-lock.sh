@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only provisioning/runner script: GNU coreutils and Linux kernel interfaces are required.
 # Hold a shared cache lock from GitHub Runner's job-started hook until its
 # job-completed hook. The pruner takes the same lock exclusively.
 set -euo pipefail

@@ -18,6 +18,7 @@ import {
   unsteadyBanner,
   sessionOutageControlsReason,
   sessionReconnectingBanner,
+  outageControlsNotice,
   outageControlsReason,
   outageRefusal,
   shouldRetainDisconnectedFrame,
@@ -298,5 +299,29 @@ describe("one outage, one vocabulary (journey F9)", () => {
       expect(line.toLowerCase()).toContain("lost connection to atlas · linux");
       expect(line).not.toMatch(/hub connection|session is live/);
     }
+  });
+
+  it("says the outage once in Terminal view: the line under the header only says what it means for the controls (journey F42)", () => {
+    const banners = {
+      machine: lostConnectionBanner("Atlas · Linux", false),
+      session: sessionReconnectingBanner("cas-src", "Atlas · Linux", false),
+      pairing: pairingLostBanner("Atlas · Linux"),
+    } as const;
+    const reasons = {
+      machine: outageControlsReason("Atlas · Linux"),
+      session: sessionOutageControlsReason("cas-src"),
+      pairing: pairingControlsReason("Atlas · Linux"),
+    } as const;
+    for (const kind of ["machine", "session", "pairing"] as const) {
+      const notice = outageControlsNotice(kind);
+      // The line beside the banner restates neither the machine nor the loss.
+      expect(notice).not.toMatch(/Atlas|cas-src|lost connection|needs pairing|reconnecting to/i);
+      expect(banners[kind]).not.toContain(notice);
+      // The control's own description is the banner's words plus the line's.
+      expect(reasons[kind].endsWith(notice)).toBe(true);
+    }
+    expect(outageControlsNotice("machine")).toBe("Control and interrupts return when it reconnects.");
+    expect(outageControlsNotice("session")).toBe("Control and interrupts return when it's back.");
+    expect(outageControlsNotice("pairing")).toBe("Re-pair it to take control and interrupt.");
   });
 });

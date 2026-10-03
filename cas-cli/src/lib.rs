@@ -57,6 +57,7 @@ pub mod fs_space;
 pub mod gh_graphql;
 pub mod github_issue_attach;
 pub(crate) mod github_repo;
+pub(crate) mod git_evidence;
 pub mod git_log;
 pub mod harness_policy;
 pub mod history;

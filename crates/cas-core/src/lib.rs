@@ -42,6 +42,7 @@
 //! ```
 
 pub mod dedup;
+pub mod env_overlay;
 pub mod error;
 pub mod extraction;
 pub mod hooks;

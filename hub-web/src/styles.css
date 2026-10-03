@@ -1715,7 +1715,9 @@ main {
 }
 
 .attention-payload-body {
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
@@ -1735,9 +1737,9 @@ main {
 }
 
 .attention-copy {
-  position: absolute;
-  top: var(--space-1);
-  right: var(--space-1);
+  align-self: flex-end;
+  /* Keep the outer focus ring inside the Attention tab's scroll boundary. */
+  margin-inline-end: calc(2 * var(--focus-ring-width));
   min-height: var(--space-6);
   padding: var(--space-1) var(--space-2);
   color: var(--text-mid);
@@ -2376,6 +2378,16 @@ fieldset {
   flex-wrap: wrap;
   margin-top: var(--space-2);
 }
+
+/* cas-b52d (journey F26): what a narrowed link withholds sits under what it
+   grants, compact enough that the fields still open unscrolled: the hint and
+   its Copy share a row, and the command fills whole lines below them. */
+.pair-withheld { display: grid; gap: var(--space-1); }
+.pair-withheld > .pair-lead { margin: 0; }
+.pair-withheld-command { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+.pair-withheld-command .scope-hint { flex: 1 1 14rem; margin: 0; }
+.pair-withheld-command button { min-height: var(--space-8); padding: 0 var(--space-3); font-size: var(--fs-meta); }
+.pair-withheld-command code { flex: 1 1 100%; min-width: 0; color: var(--text-hi); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 
 .scope-hint + .pair-code-actions code {
   min-width: 0;
@@ -3829,7 +3841,9 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
   /* cas-0739 QA F01: on the one-line phone footer the state yields to the
      label, ellipsised; the full words are its title, the button's spoken
-     name, and the open dialog's first row. Its shrink weight makes it give
+     name, and the open dialog's first row. Its outage words lead ("Can't
+     reach Build Server…", cas-cae9), so the ellipsis cuts the name, not the
+     verb. Its shrink weight makes it give
      way first (cas-c19d), so an ordinary long name still reads whole; it
      keeps a 4em stub ("Conne…", its full words in the title), so an
      overlong name never hides it entirely. */

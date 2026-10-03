@@ -2272,8 +2272,20 @@ impl FactoryApp {
         force: bool,
         preserve_worktree: bool,
     ) -> anyhow::Result<()> {
-        // Check if worker exists
+        // Crash/recycle handling can remove the pane before shutdown arrives.
+        // A dead registration in our session is still a valid cleanup target.
         if !self.worker_names.contains(&name.to_string()) {
+            if crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(
+                self.cas_dir(),
+                name,
+                self.factory_session.as_deref(),
+            )?
+            .is_some()
+            {
+                self.last_db_fingerprint = None;
+                let _ = self.refresh_data();
+                return Ok(());
+            }
             anyhow::bail!("Worker '{name}' not found");
         }
 

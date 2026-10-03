@@ -45,8 +45,37 @@ function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
 }
 
-export const test = base.extend<{ journey: Journey }>({
-  page: async ({ page }, use) => {
+/**
+ * The keyboard platform a journey's browser declares (cas-2a33). Commander
+ * names the palette chord from navigator.userAgentData.platform, else
+ * navigator.platform (applePlatform): "⌘K" on Apple, "Ctrl K" elsewhere.
+ * The Desktop Chrome device only overrides the user agent, so what a run saw
+ * depended on the host: a Windows UA beside a real "MacIntel" platform, and
+ * on some Chromium builds no userAgentData at all, so a macOS host read ⌘K
+ * where a Linux CI host read Ctrl K. Every journey now declares one platform,
+ * consistently in both properties: Linux by default, and macOS where a test
+ * asks for it with test.use({ journeyPlatform: "mac" }).
+ */
+export type JourneyPlatform = "linux" | "mac";
+
+const PLATFORM_NAMES: Record<JourneyPlatform, { platform: string; uaPlatform: string }> = {
+  linux: { platform: "Linux x86_64", uaPlatform: "Linux" },
+  mac: { platform: "MacIntel", uaPlatform: "macOS" },
+};
+
+export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlatform }>({
+  journeyPlatform: ["linux", { option: true }],
+  page: async ({ page, journeyPlatform }, use) => {
+    await page.addInitScript(({ platform, uaPlatform }) => {
+      const real = (navigator as unknown as { userAgentData?: object }).userAgentData;
+      const data = real
+        ? new Proxy(real, { get: (target, key) => key === "platform" ? uaPlatform : Reflect.get(target, key, target) })
+        : { platform: uaPlatform, mobile: false, brands: [] };
+      // On the navigator itself, so it shadows whatever the host's Chromium
+      // puts on Navigator.prototype (or leaves off it).
+      Object.defineProperty(navigator, "platform", { get: () => platform, configurable: true });
+      Object.defineProperty(navigator, "userAgentData", { get: () => data, configurable: true });
+    }, PLATFORM_NAMES[journeyPlatform]);
     // Install before navigation; time flows normally from a known instant.
     // Freezing Date would stop the app aging receipts and heartbeat deadlines.
     await page.clock.install({ time: startJourneyClock() });

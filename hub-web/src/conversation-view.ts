@@ -211,6 +211,36 @@ export function askLine(message: string): string {
   return question ?? lines[0] ?? "";
 }
 
+/**
+ * The block in a rendered ask that carries its question (the line `askLine`
+ * names), innermost and last when several match.
+ */
+export function askLineElement(body: HTMLElement, message: string): HTMLElement | undefined {
+  const question = askLine(message);
+  if (!question) return undefined;
+  const blocks = [...body.querySelectorAll<HTMLElement>("p, li, h1, h2, h3, h4, h5, h6, blockquote")];
+  return blocks.reverse().find((block) => askLine(block.textContent ?? "") === question);
+}
+
+/**
+ * cas-8674 (journey F6): an opened pinned card's body scrolls inside a
+ * quarter of the screen, and a question usually ends its message, under the
+ * preamble. Scroll the body (only the body, never the page) so the question
+ * sits in view beside its choices; one taller than the body shows its start.
+ */
+export function revealAskLine(body: HTMLElement, message: string): void {
+  if (body.scrollHeight <= body.clientHeight) return;
+  const line = askLineElement(body, message);
+  if (!line) return;
+  const style = body.ownerDocument.defaultView?.getComputedStyle(body);
+  const padTop = parseFloat(style?.paddingTop ?? "") || 0;
+  const padBottom = parseFloat(style?.paddingBottom ?? "") || 0;
+  const box = body.getBoundingClientRect();
+  const rect = line.getBoundingClientRect();
+  const offset = rect.top - box.top - body.clientTop + body.scrollTop;
+  body.scrollTop = Math.max(0, Math.min(offset - padTop, offset + rect.height + padBottom - body.clientHeight));
+}
+
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
 /**
@@ -310,11 +340,14 @@ function relativeAgo(at: number, now: number): string {
   return `${Math.floor(elapsed / 86_400_000)}d ago`;
 }
 
-/** "re: earlier session calm-puma-34" above an answer to another session's turn (cas-e829). */
-export function earlierReplyQuote(document: Document, session: string): HTMLElement {
+/** Name the question an answer belongs to; unavailable history stays explicit. */
+export function earlierReplyQuote(document: Document, session: string, question?: string): HTMLElement {
   const quote = document.createElement("div");
   quote.className = "reply-quote";
-  quote.textContent = `re: earlier session ${sessionCodename(session)}`;
+  const firstLine = question ? plainTextMarkdown(question.split(/\r?\n/, 1)[0] ?? "").trim() : "";
+  quote.textContent = firstLine
+    ? `Reply to “${firstLine}” · ${sessionCodename(session)}`
+    : `Reply to your message in earlier session ${sessionCodename(session)}`;
   quote.title = session;
   return quote;
 }
@@ -760,6 +793,8 @@ export class ConversationView {
       this.pinned.replaceChildren(head, object);
     }
     this.pinned.hidden = false;
+    const body = collapsed ? null : this.pinned.querySelector<HTMLElement>(".obj-body");
+    if (body) revealAskLine(body, ask.message);
     // A control rebuilt under keyboard focus hands it to its counterpart.
     if (hadFocus && !this.pinned.contains(document.activeElement)) {
       [...this.pinned.querySelectorAll<HTMLElement>("button")].find((button) => button.className === hadFocus)?.focus({ preventScroll: true });
@@ -862,6 +897,13 @@ export class ConversationView {
     return context;
   }
 
+  private earlierQuestion(reply: OperatorReply): string | undefined {
+    if (!reply.reply_to_session || reply.reply_to === null) return undefined;
+    const entry = this.history.earlierSessions().find((entry) => entry.session === reply.reply_to_session);
+    const question = entry?.events.find((event) => event.kind === "send" && event.value.notificationId === reply.reply_to);
+    return question?.kind === "send" ? question.value.text : undefined;
+  }
+
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
   private turnSignature(turn: ThreadTurn): string {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
@@ -881,7 +923,8 @@ export class ConversationView {
     const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
     // cas-b00c: a run of unconfirmed messages repaints when Review opens or closes it.
     const review = settled === false ? [...this.reviewedRuns].join(",") : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
+    const earlierQuestion = reply?.reply_to_session ? this.earlierQuestion(reply) : undefined;
+    return JSON.stringify([turn.event, earlierQuestion, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
   }
 
   /**
@@ -1394,7 +1437,7 @@ export class ConversationView {
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
     // cas-e829: an answer to another session's turn stays in this thread and
     // only names what it answers; the earlier session itself is read-only.
-    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session));
+    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session, this.earlierQuestion(reply)));
     return { bubble, sheets };
   }
 

@@ -47,27 +47,27 @@ pub fn agent_tool_prefix(agent: &cas_types::Agent) -> Option<&'static str> {
 }
 
 pub fn worker_harness_from_env() -> SupervisorCli {
-    std::env::var("CAS_FACTORY_WORKER_CLI")
+    cas_core::env_overlay::var("CAS_FACTORY_WORKER_CLI")
         .ok()
         .and_then(|v| parse_harness(&v))
         .unwrap_or(SupervisorCli::Claude)
 }
 
 pub fn supervisor_harness_from_env() -> SupervisorCli {
-    std::env::var("CAS_FACTORY_SUPERVISOR_CLI")
+    cas_core::env_overlay::var("CAS_FACTORY_SUPERVISOR_CLI")
         .ok()
         .and_then(|v| parse_harness(&v))
         .unwrap_or(SupervisorCli::Claude)
 }
 
 pub fn is_supervisor_from_env() -> bool {
-    std::env::var("CAS_AGENT_ROLE")
+    cas_core::env_overlay::var("CAS_AGENT_ROLE")
         .map(|r| r.eq_ignore_ascii_case("supervisor"))
         .unwrap_or(false)
 }
 
 pub fn is_worker_from_env() -> bool {
-    std::env::var("CAS_AGENT_ROLE")
+    cas_core::env_overlay::var("CAS_AGENT_ROLE")
         .map(|r| r.eq_ignore_ascii_case("worker"))
         .unwrap_or(false)
 }
@@ -86,7 +86,7 @@ fn resolve_role(input: &HookInput) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     field.or_else(|| {
-        std::env::var("CAS_AGENT_ROLE")
+        cas_core::env_overlay::var("CAS_AGENT_ROLE")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())

@@ -280,6 +280,11 @@ for _ in $(seq 1 100); do
     kill -0 "$failed_holder_pid" 2>/dev/null || break
     sleep 0.02
 done
+if run_started >/dev/null 2>&1; then
+    printf 'FAIL duplicate start ignored the live Worker after holder failure\n' >&2
+    exit 1
+fi
+printf 'ok   live Worker blocks duplicate start even after holder failure\n'
 mkdir -p "$proc_root/103"
 printf '103\n' >>"$cgroup_root/slot1/cgroup.procs"
 printf 'Runner.Worker\n' >"$proc_root/103/comm"

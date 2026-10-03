@@ -197,8 +197,12 @@ start_job() {
         stale="$(read_record)" || fail "invalid or unsafe existing job lock state: $pid_file"
         local stale_owner_pid stale_owner_start
         read -r holder_pid token holder_start stale_owner_pid stale_owner_start <<<"$stale"
+        # A live Worker still owns its job even if its detached holder died.
+        if [[ -n "$holder_start" ]] && worker_matches "$stale_owner_pid" "$stale_owner_start"; then
+            fail "slot $slot already has a live job lock holder"
+        fi
         if holder_matches "$holder_pid" "$token" "$holder_start"; then
-            if [[ -z "$holder_start" ]] || worker_matches "$stale_owner_pid" "$stale_owner_start"; then
+            if [[ -z "$holder_start" ]]; then
                 fail "slot $slot already has a live job lock holder"
             fi
             retire_holder "$holder_pid" "$token" "$holder_start"

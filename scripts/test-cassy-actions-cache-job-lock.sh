@@ -253,3 +253,5 @@ kill -TERM "$unrelated_pid"
 wait "$unrelated_pid" 2>/dev/null || true
 rm -f "$state_root/slot-1.pid"
 printf 'ok   completion never signals an unverified PID\n'
+
+printf 'PASS runner cache job lock lifecycle integration\n'

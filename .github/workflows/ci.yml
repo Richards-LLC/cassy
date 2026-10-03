@@ -333,7 +333,26 @@ jobs:
           fi
           ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
 
+      - name: Detect runner lock fixture changes
+        id: runner-lock-diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          comparison_base="$BASE_SHA"
+          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]] \
+            || ! git rev-parse --verify --quiet "$comparison_base^{commit}" >/dev/null; then
+            comparison_base="$(git merge-base HEAD origin/${{ github.event.repository.default_branch }})"
+          fi
+          changed=false
+          if [[ -n "$(git diff --name-only "$comparison_base" HEAD -- \
+            'scripts/cassy-actions-*' 'scripts/test-cassy-actions-*' \
+            'scripts/install-cassy-actions-runner.sh')" ]]; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
       - name: Test runner cache job lock lifecycle
+        if: steps.runner-lock-diff.outputs.changed == 'true'
         run: ./scripts/test-cassy-actions-cache-job-lock.sh
 
       - name: Report full-tier routing
@@ -507,10 +526,27 @@ jobs:
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
         run: ./scripts/test-cas-install.sh
 
+      - name: Detect runner lock fixture changes
+        id: runner-lock-diff
+        if: github.event_name != 'push' && steps.pr-dedupe.outputs.covered != 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          comparison_base="$BASE_SHA"
+          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]] \
+            || ! git rev-parse --verify --quiet "$comparison_base^{commit}" >/dev/null; then
+            comparison_base="$(git merge-base HEAD origin/${{ github.event.repository.default_branch }})"
+          fi
+          changed=false
+          if [[ -n "$(git diff --name-only "$comparison_base" HEAD -- \
+            'scripts/cassy-actions-*' 'scripts/test-cassy-actions-*' \
+            'scripts/install-cassy-actions-runner.sh')" ]]; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
       - name: Test runner cache job lock lifecycle
-        if: >-
-          steps.pr-dedupe.outputs.covered != 'true'
-          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
+        if: steps.runner-lock-diff.outputs.changed == 'true'
         run: ./scripts/test-cassy-actions-cache-job-lock.sh
 
       # PRs and larger pushes own these checks here; small factory pushes

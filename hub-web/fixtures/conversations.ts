@@ -291,6 +291,10 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // cas-adfc: a draft over the store's 64k bound; the composer says it will not survive a reload.
     reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
     draft = 'Release notes for 3.26.0, pasted whole. '.repeat(1_800);
+  } else if (state === 'conversation-draft-not-saved') {
+    // cas-f657: an ordinary draft the browser's full storage refused; the composer says it won't survive a reload.
+    reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
+    draft = 'Ship it once the Mac lane is green, and tag 3.26.1.';
   } else if (state === 'conversation-unconfirmed-dismissed') {
     // cas-6a96 (journey F36): three not confirmed and dismissed, then a run of
     // two still in the thread. The thread notice counts its two; the chip
@@ -333,7 +337,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor, machine.project);
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
-  applyDraftNote(slot, state === 'conversation-draft-too-long');
+  applyDraftNote(slot, state === 'conversation-draft-too-long' ? 'too-long' : state === 'conversation-draft-not-saved' ? 'not-saved' : false);
   // The dismissed-messages chip sits at the top of the composer region, as main.ts places it.
   if (!view.unsent.hidden) slot.prepend(view.unsent);
   if (state === 'conversation-keyboard') {

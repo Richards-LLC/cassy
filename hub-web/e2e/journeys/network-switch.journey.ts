@@ -1046,7 +1046,8 @@ test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journe
     await page.getByRole("tab", { name: "Attention", exact: true }).click();
     await expect(page.locator("#attention-panel").getByText("Lost connection to Atlas · Linux", { exact: true })).toHaveCount(1);
     // No automatic reconnect is claimed on any visible surface.
-    await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
+    await expect(page.getByText(/reconnecting|return when it reconnects/i).filter({ visible: true })).toHaveCount(0);
+    await expect(page.locator("#session-controls-reason")).toHaveText("Update your browser, then reload to use control and interrupts.");
     await expect(banner).toMatchAriaSnapshot("- text: Lost connection to Atlas · Linux. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
     await page.keyboard.press("Control+k");
     await page.locator("#palette-paired-machines").click();

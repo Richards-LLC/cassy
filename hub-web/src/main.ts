@@ -3503,7 +3503,9 @@ function render(captureDraft = true): void {
     : undefined;
   const outageReason = outageKind && selected && selectedSession
     ? (outageKind === "pairing" ? pairingControlsReason(selected.label)
-      : outageKind === "session" ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
+      : outageKind === "session" ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession))
+      : machineConnectionSnapshot?.fatal === true ? "Update your browser, then reload to use control and interrupts."
+      : outageControlsReason(selected.label))
     : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);

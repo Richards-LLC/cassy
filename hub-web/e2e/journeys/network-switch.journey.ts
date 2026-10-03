@@ -808,6 +808,20 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
     // The dismissed-messages chip takes the caution tone for messages only not confirmed.
     for (let index = 0; index < 3; index += 1) await log.getByRole("button", { name: "Dismiss this notice", exact: true }).first().click();
     await expect(page.locator(".conversation-unsent")).toHaveAttribute("data-tone", "caution");
+    // cas-6a96 (journey F36): the thread's notice said "2 messages not
+    // confirmed" over a chip saying "Show 3 messages not confirmed". The chip
+    // counts what was dismissed, and now says so; no two counts of the same
+    // thing disagree, on screen or to a screen reader.
+    const chip = page.getByRole("button", { name: "Show 3 dismissed messages, not confirmed", exact: true });
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("3 dismissed");
+    await expect(log.locator('.conversation-unconfirmed[role="status"] b')).toHaveText("2 messages not confirmed");
+    const counts = await page.evaluate(() => {
+      const said = [document.body.innerText, ...[...document.querySelectorAll("[aria-label]")].map((node) => node.getAttribute("aria-label") ?? "")].join("\n");
+      return [...said.matchAll(/(\d+) (?:messages?|dismissed)[^\n]*?not (?:sent or not )?confirmed/g)].map((match) => `${match[0].includes("dismissed") ? "dismissed" : "thread"}:${match[1]}`);
+    });
+    expect([...new Set(counts.filter((said) => said.startsWith("thread:")))], "every count of the thread's not-confirmed messages agrees").toEqual(["thread:2"]);
+    expect([...new Set(counts.filter((said) => said.startsWith("dismissed:")))], "every count of the dismissed ones agrees").toEqual(["dismissed:3"]);
   });
 });
 
@@ -857,31 +871,33 @@ test("HUB-J12 network switch: an oversized stored waiting message is not sent af
 // still shows the conversation's kept messages straight away: the waiting
 // message is on screen, saying it waits, before the session is back, and it
 // goes out once when the session attaches.
-test("HUB-J12 network switch: kept messages show before the session attaches after a reload (cas-fc2c)", async ({ page }) => {
-  const { hub, clock, held } = await connected(page);
-  hub.upstreamLost(PELICAN);
-  await sendNow(page, "Kept while the session is away");
-  await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-  // The reloaded page's attach is held: the session cannot attach yet.
-  const releaseAttach = hub.holdAttach(PELICAN);
-  await page.reload();
-  await chooseConversation(page);
-  await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-  await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
-  expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
-  // A keyboard reader is in the thread when the session comes back.
-  await page.locator(".conversation-reading.thread").focus();
-  // The session comes back: the thread is the same one, and the message goes once.
-  hub.upstreamBack(PELICAN);
-  const next = hub.nextSend();
-  releaseAttach();
-  await clock.advance(1_000);
-  expect((await next).text).toBe("Kept while the session is away");
-  await expect(held).toHaveCount(0);
-  // The reader stays in the thread that took over, not on the page.
-  await expect(page.locator(".conversation-reading.thread")).toBeFocused();
-  await expect(page.getByRole("log")).toHaveCount(1);
-  await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).toHaveCount(1);
-  await clock.advance(15_000);
-  expect(sentTimes(hub, "Kept while the session is away")).toBe(1);
+test("HUB-J12 network switch: kept messages show before the session attaches after a reload (cas-fc2c)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Kept messages show before attach, then send once without moving the reader", async () => {
+    const { hub, clock, held } = await connected(page);
+    hub.upstreamLost(PELICAN);
+    await sendNow(page, "Kept while the session is away");
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    // The reloaded page's attach is held: the session cannot attach yet.
+    const releaseAttach = hub.holdAttach(PELICAN);
+    await page.reload();
+    await chooseConversation(page);
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
+    expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
+    // A keyboard reader is in the thread when the session comes back.
+    await page.locator(".conversation-reading.thread").focus();
+    // The session comes back: the thread is the same one, and the message goes once.
+    hub.upstreamBack(PELICAN);
+    const next = hub.nextSend();
+    releaseAttach();
+    await clock.advance(1_000);
+    expect((await next).text).toBe("Kept while the session is away");
+    await expect(held).toHaveCount(0);
+    // The reader stays in the thread that took over, not on the page.
+    await expect(page.locator(".conversation-reading.thread")).toBeFocused();
+    await expect(page.getByRole("log")).toHaveCount(1);
+    await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).toHaveCount(1);
+    await clock.advance(15_000);
+    expect(sentTimes(hub, "Kept while the session is away")).toBe(1);
+  });
 });

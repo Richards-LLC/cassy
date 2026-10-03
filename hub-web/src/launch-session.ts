@@ -232,10 +232,12 @@ export function parseWorkers(value: string): { ok: true; workers?: number } | { 
  * and what to do; the machine's own detail follows verbatim for whoever fixes
  * it.
  */
-export function launchErrorCopy(result: { status: number; code?: string; detail?: string }, cli: string, machine: string, profile?: string): { title: string; advice: string } {
+export function launchErrorCopy(result: { status: number; code?: string; detail?: string }, cli: string, machine: string, profile?: string): { title: string; advice: string; command?: string } {
   const name = supervisorCliLabel(cli);
   if (profile && result.code === "not_logged_in") {
-    return { title: `The ${name} account ${profile} isn't logged in on ${machine}.`, advice: `Run ${accountLoginCommand(cli as SupervisorCli, profile)} on ${machine}, or pick another account, then start again.` };
+    // cas-cee5 (journey F32): the command is code with Copy, as a logged-out
+    // account row shows it, not prose to retype.
+    return { title: `The ${name} account ${profile} isn't logged in on ${machine}.`, advice: `Run this on ${machine}, or pick another account, then start again.`, command: accountLoginCommand(cli as SupervisorCli, profile) };
   }
   switch (result.code) {
     case "invalid_profile":
@@ -301,9 +303,9 @@ export function launchSheetMarkup(): string {
         </div>
       </fieldset>
       <div class="launch-options">
-      <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Runs the session's supervisor.</small></fieldset>
+      <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Which assistant runs the supervisor.</small></fieldset>
       <fieldset class="launch-account" hidden><legend>Account</legend><div class="launch-account-body" data-launch-accounts></div></fieldset>
-      <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">0 to 16. Leave empty to start the supervisor alone.</small></label>
+      <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="None" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">Up to 16. None starts the supervisor alone.</small></label>
       </div>
       <p class="launch-invalid" role="alert" hidden></p>
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
@@ -311,9 +313,9 @@ export function launchSheetMarkup(): string {
     <section class="launch-view launch-grant" data-launch-view="grant" hidden>
       <p class="launch-lead"></p>
       <p class="launch-grant-error" role="alert" hidden></p>
-      <p class="launch-grant-invite">Starting sessions is a separate permission this browser asks for once per machine. Run this on the machine, then open the link it prints in this browser. What this browser can do now is kept.</p>
+      <p class="launch-grant-invite">Starting sessions is a separate permission this browser asks for once per machine. Run this on the machine, then open the link it prints in this browser.</p>
       <div class="pair-code-actions launch-grant-command"><code></code><button type="button" data-launch-action="copy">Copy command</button></div>
-      <p class="field-hint launch-grant-note">Opening the new link replaces this browser's pairing with the machine.</p>
+      <p class="field-hint launch-grant-note">The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.</p>
       <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button><button type="button" class="primary" data-launch-action="allow">Allow starting sessions</button></div>
     </section>
     <section class="launch-view launch-confirm" data-launch-view="confirm" hidden>
@@ -326,7 +328,7 @@ export function launchSheetMarkup(): string {
       <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button></div>
     </section>
     <section class="launch-view launch-error" data-launch-view="error" hidden>
-      <div role="alert"><h3 class="launch-error-title"></h3><p class="launch-error-advice"></p></div>
+      <div role="alert"><h3 class="launch-error-title"></h3><p class="launch-error-advice"></p><span class="launch-login launch-error-command" hidden><code></code><button type="button" data-launch-action="copy">Copy</button></span></div>
       <details class="launch-error-detail" hidden><summary>The machine's message</summary><pre></pre></details>
       <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button><button type="button" class="primary" data-launch-action="back">Back</button></div>
     </section>
@@ -697,7 +699,7 @@ export class LaunchSheet {
     const label = machine?.label ?? "this machine";
     const command = launchGrantCommand(this.host.origin, machine?.scopes ?? []);
     const code = this.$(".launch-grant-command code");
-    code.textContent = command;
+    code.innerHTML = commandTokensMarkup(command);
     this.$(".launch-grant-command button").dataset.command = command;
     const eligible = canEnableSessionLaunch(machine?.scopes ?? []) && !this.grantNeedsInvitation;
     this.$('[data-launch-action="allow"]').hidden = !eligible;
@@ -851,7 +853,9 @@ export class LaunchSheet {
       return;
     }
     if (result.attached) { this.land(machine.id, result.session); return; }
-    this.$(".launch-progress-step").textContent = `Waiting for ${result.session} to come up on ${machine.label}.`;
+    // cas-cee5 (journey F34): the project the operator chose, never the
+    // generated codename they never saw (the cas-71f4 rule).
+    this.$(".launch-progress-step").textContent = `Waiting for the ${selection.name} supervisor to come up on ${machine.label}.`;
     const deadline = Date.now() + LAUNCH_SETTLE_MS;
     while (generation === this.launchGeneration) {
       let listed = false;
@@ -860,7 +864,7 @@ export class LaunchSheet {
       if (listed) { this.land(machine.id, result.session); return; }
       if (Date.now() >= deadline) {
         this.showError({
-          title: `${machine.label} started ${result.session}, but it hasn't come up yet.`,
+          title: `${machine.label} started the ${selection.name} supervisor, but it hasn't come up yet.`,
           advice: "It may still be starting. It appears in your conversations when it does; if it never does, check cas doctor on the machine.",
         });
         return;
@@ -886,11 +890,17 @@ export class LaunchSheet {
     this.$(".launch-starting [data-launch-action=close]").focus();
   }
 
-  private showError(copy: { title: string; advice: string }, detail?: string): void {
+  private showError(copy: { title: string; advice: string; command?: string }, detail?: string): void {
     this.stopTicker();
     this.showView("error");
     this.$(".launch-error-title").textContent = copy.title;
     this.$(".launch-error-advice").textContent = copy.advice;
+    const command = this.$(".launch-error-command");
+    command.hidden = !copy.command;
+    command.querySelector("code")!.textContent = copy.command ?? "";
+    const copyButton = command.querySelector<HTMLButtonElement>("button")!;
+    copyButton.dataset.command = copy.command ?? "";
+    copyButton.setAttribute("aria-label", copy.command ? `Copy ${copy.command}` : "Copy");
     const details = this.$(".launch-error-detail") as HTMLDetailsElement;
     details.hidden = !detail;
     details.querySelector("pre")!.textContent = detail ?? "";
@@ -950,6 +960,18 @@ function projectRowMarkup(project: LaunchProject, checked: boolean): string {
     return `<div class="launch-row launch-running"><span class="launch-row-text"><span class="launch-row-name">${name}</span><small class="launch-row-path">${path}</small><small class="launch-row-state"><span class="launch-dot" aria-hidden="true"></span>Running · <span class="codename">${escapeHtml(project.running_session)}</span></small></span><button type="button" class="launch-attach primary" data-launch-attach="${escapeHtml(project.running_session)}" aria-label="Attach to ${name} (${escapeHtml(project.running_session)})">Attach</button></div>`;
   }
   return `<label class="launch-row launch-choice"><input type="radio" name="launch-project" value="${escapeHtml(project.id)}" data-launch-name="${name}" data-launch-path="${path}" data-launch-target="${escapeHtml(JSON.stringify(project.target))}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span><small class="launch-row-path">${path}</small></span></label>`;
+}
+
+/**
+ * A command as code that wraps only between whole tokens (cas-cee5, journey
+ * F31): words split at spaces, and a comma list (the scopes) after each
+ * comma. Each piece is unbreakable, so "session:launch" never splits.
+ */
+export function commandTokensMarkup(command: string): string {
+  return command
+    .split(" ")
+    .map((word) => word.split(/(?<=,)/).map((piece) => `<span class="launch-command-piece">${escapeHtml(piece)}</span>`).join("<wbr>"))
+    .join(" ");
 }
 
 function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean): string {

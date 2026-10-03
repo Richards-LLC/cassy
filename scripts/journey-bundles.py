@@ -36,6 +36,18 @@ def trace_actions(bundle: Path, hub: str) -> str:
     return actions.stdout + actions.stderr
 
 
+def read_result(result: Path, ident: str) -> dict:
+    data = json.loads(result.read_text())
+    if data["id"] != ident:
+        raise ValueError(f"{ident}: mixed receipt id {data['id']} in {result}")
+    screenshots = [stage["screenshot"] for stage in data.get("stages", [])]
+    actual = {path.name for path in result.parent.glob("J*.png")}
+    if len(screenshots) != len(set(screenshots)) or set(screenshots) != actual:
+        raise ValueError(f"{ident}: stale or mixed stage receipts in {result.parent}; "
+                         f"declared={sorted(screenshots)}, actual={sorted(actual)}")
+    return data
+
+
 def main(argv: list[str]) -> int:
     artifacts, tree, commit, status, hub, pw_version = Path(argv[0]), argv[1], argv[2], int(argv[3]), argv[4], argv[5]
     journeys = artifacts / "journeys"
@@ -51,7 +63,7 @@ def main(argv: list[str]) -> int:
         bundle = journeys / ident
         result = bundle / "result.json"
         parts = sorted(bundle.glob("parts/*/result.json"))
-        data = json.loads(result.read_text()) if result.is_file() else None
+        data = read_result(result, ident) if result.is_file() else None
         stages = [dict(stage) for stage in (data or {}).get("stages", [])]
         files: dict[str, object] = {"cells": [stage["screenshot"] for stage in stages]}
         if data is not None:
@@ -67,7 +79,7 @@ def main(argv: list[str]) -> int:
         for part_result in parts:
             part_dir = part_result.parent
             rel = part_dir.relative_to(bundle).as_posix()
-            part = json.loads(part_result.read_text())
+            part = read_result(part_result, ident)
             verdicts.append(part["status"])
             part_files = {"receipt": f"{rel}/receipt.webm", "aria_yaml": f"{rel}/final.aria.yml", "aria_json": f"{rel}/final.aria.json"}
             part_trace = Path(part.get("output_dir", "")) / "trace.zip"

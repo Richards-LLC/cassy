@@ -457,9 +457,9 @@ pub fn handle_pre_tool_use(
                     .and_then(|staging| staging.scratch_root.clone()),
             )
         };
-        let mut artifacts_root = Some(crate::config::project_factory_artifacts_root(
-            cas_root, &crate::config::resolved_factory_artifacts_root(artifacts_root.as_deref())
-        ).display().to_string());
+        let mut artifacts_root = Some(crate::config::resolved_factory_artifact_paths(
+            cas_root, artifacts_root.as_deref()
+        ).project_root.display().to_string());
         if artifacts_root.as_deref().is_some_and(|root| {
             std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink())
         }) {

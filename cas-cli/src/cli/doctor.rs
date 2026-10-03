@@ -5670,8 +5670,16 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
         };
+        let counts = || {
+            get_schema_summary(&root)
+                .unwrap()
+                .tables
+                .into_iter()
+                .map(|table| (table.name, table.columns, table.row_count))
+                .collect::<Vec<_>>()
+        };
         let before = schema();
-        let counts_before = serde_json::to_value(get_schema_summary(&root).unwrap()).unwrap();
+        let counts_before = counts();
         let cli = Cli::parse_from(["cas", "--json", "doctor"]);
         let Some(crate::cli::Commands::Doctor(args)) = &cli.command else {
             panic!("doctor arguments");
@@ -5681,7 +5689,7 @@ mod tests {
         let result = execute(args, &cli, Some(&root));
         assert_eq!(schema(), before, "doctor result: {result:?}");
         assert_eq!(
-            serde_json::to_value(get_schema_summary(&root).unwrap()).unwrap(),
+            counts(),
             counts_before,
             "doctor must preserve table, column and row counts"
         );

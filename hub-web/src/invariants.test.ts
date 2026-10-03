@@ -1313,7 +1313,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Plain words naming the machine (cas-a447), not the protocol retry line.
     // The words now live in connection-state-view so the refusal and the
     // disabled controls share them (journey F9).
-    expect(source).toContain(": lostConnectionBanner(where, snapshot.fatal === true);");
+    expect(source).toContain(": lostConnectionBanner(where, snapshot.fatal === true, snapshot.reason);");
     // cas-d15c: a stream the hub closed below a still-connected machine names the conversation.
     expect(source).toContain("? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)");
     expect(connectionView).toContain("`Lost connection to ${machineLabel}. Reconnecting…`");

@@ -715,17 +715,17 @@ impl WorktreeManager {
 /// Safe to call on worktrees where the files are already present (tracked in git):
 /// existing paths are silently skipped.
 pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
-    project_support_config(repo_root, worktree_path, false);
+    project_support_config(repo_root, worktree_path, None);
 }
 
 /// Provision worker support files with a private MCP configuration when the
 /// project declares supervisor-only resources. Epic/supervisor worktrees retain
 /// the full project configuration through `symlink_project_config`.
-pub fn provision_worker_project_config(repo_root: &Path, worktree_path: &Path) {
-    project_support_config(repo_root, worktree_path, true);
+pub fn provision_worker_project_config(repo_root: &Path, worktree_path: &Path, worker_name: &str) {
+    project_support_config(repo_root, worktree_path, Some(worker_name));
 }
 
-fn project_support_config(repo_root: &Path, worktree_path: &Path, worker: bool) {
+fn project_support_config(repo_root: &Path, worktree_path: &Path, worker: Option<&str>) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
@@ -733,8 +733,8 @@ fn project_support_config(repo_root: &Path, worktree_path: &Path, worker: bool) 
         // .mcp.json — MCP server definitions (Cassy, Context7, etc.)
         let mcp_src = repo_root.join(".mcp.json");
         let mcp_dst = worktree_path.join(".mcp.json");
-        let provisioned = if worker {
-            cas_mux::worker_resources::provision_project_mcp(repo_root, worktree_path)
+        let provisioned = if let Some(worker_name) = worker {
+            cas_mux::worker_resources::provision_project_mcp(repo_root, worker_name)
         } else { Ok(false) };
         match provisioned {
             Ok(true) => {}

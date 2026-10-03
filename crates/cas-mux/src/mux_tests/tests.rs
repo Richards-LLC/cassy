@@ -48,6 +48,8 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
     let before = std::fs::read(&source).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&source, worktree.join(".mcp.json")).unwrap();
+    #[cfg(not(unix))]
+    std::fs::copy(&source, worktree.join(".mcp.json")).unwrap();
     for name in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
         env.set(name, "operator-fixture");
     }
@@ -72,15 +74,20 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
             assert!(std::env::var_os(key).is_some(), "parent retains its credentials");
         }
         let materialized: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(worktree.join(".mcp.json")).unwrap()
+            &std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap()
         ).unwrap();
-        assert!(!std::fs::symlink_metadata(worktree.join(".mcp.json")).unwrap().file_type().is_symlink());
+        assert!(!std::fs::symlink_metadata(cas_root.join("worker-mcp/worker-1.json")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(worktree.join(".mcp.json")).unwrap(), before, "existing worker configuration is untouched");
         assert!(materialized["mcpServers"].get("vercel").is_none());
         assert!(materialized["mcpServers"].get("neon").is_none());
         assert!(materialized["mcpServers"].get("context7").is_some());
         assert!(materialized["mcpServers"].get("cas").is_some());
         match cli {
-            SupervisorCli::Claude => assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config")),
+            SupervisorCli::Claude => {
+                assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+                let flag = worker.args.iter().position(|arg| arg == "--mcp-config").unwrap();
+                assert_eq!(worker.args[flag + 1], cas_root.join("worker-mcp/worker-1.json").display().to_string());
+            }
             SupervisorCli::Codex => {
                 for name in ["vercel", "neon"] {
                     assert!(worker.args.iter().any(|arg| arg == &format!("mcp_servers.{name}.enabled=false")));

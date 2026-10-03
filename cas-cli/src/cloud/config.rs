@@ -1030,7 +1030,7 @@ pub(crate) fn is_acceptable_endpoint(url: &str) -> bool {
 }
 
 pub(crate) fn default_endpoint() -> String {
-    std::env::var("CAS_CLOUD_ENDPOINT")
+    cas_core::env_overlay::var("CAS_CLOUD_ENDPOINT")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .filter(|s| {
@@ -1056,12 +1056,12 @@ pub(crate) fn default_endpoint() -> String {
 /// `CAS_CLOUD_ENDPOINT` pattern and lets integration tests inject a
 /// controlled user-level config without touching the real `~/.cas/`.
 pub(crate) fn user_level_cloud_json_path() -> Option<std::path::PathBuf> {
-    if let Ok(override_path) = std::env::var("CAS_USER_CLOUD_JSON") {
+    if let Ok(override_path) = cas_core::env_overlay::var("CAS_USER_CLOUD_JSON") {
         if !override_path.trim().is_empty() {
             return Some(std::path::PathBuf::from(override_path));
         }
     }
-    dirs::home_dir().map(|h| h.join(".cas").join("cloud.json"))
+    cas_core::env_overlay::home_dir(dirs::home_dir).map(|h| h.join(".cas").join("cloud.json"))
 }
 
 /// Compare two config paths for identity, tolerating different spellings of

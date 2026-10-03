@@ -1248,3 +1248,94 @@ fn archive_entries(cas_dir: &std::path::Path, ids: &[String]) {
         "test setup must archive every named entry"
     );
 }
+
+/// cas-7cc95: the production ranking takes its hook environment as an
+/// injected value. Two rankings on two threads, each under its own
+/// environment, run concurrently and each returns exactly what it returns
+/// alone; the process environment is never written.
+#[test]
+fn concurrent_rankings_with_different_injected_environments_are_independent_cas_7cc95() {
+    let fixture = fixture();
+    let dir_a = tempfile::tempdir().expect("corpus a");
+    let dir_b = tempfile::tempdir().expect("corpus b");
+    let corpus_a = EvalCorpus::materialize_with_index(&fixture, dir_a.path(), TierMode::AllWorking)
+        .expect("seed + index a");
+    let corpus_b = EvalCorpus::materialize_with_index(&fixture, dir_b.path(), TierMode::AllWorking)
+        .expect("seed + index b");
+    let env_a = retrieval_eval::NeutralHookEnvironment::new(corpus_a.cas_dir());
+    let env_b = retrieval_eval::NeutralHookEnvironment::with(corpus_b.cas_dir(), |environment| {
+        environment
+            .with_var("CAS_AGENT_ROLE", "worker")
+            .with_var("CAS_AGENT_NAME", "sentinel-7cc95")
+    });
+    let cases: Vec<_> = fixture.cases.iter().take(4).cloned().collect();
+    let rank_all = |corpus: &EvalCorpus, environment| {
+        cases
+            .iter()
+            .map(|case| {
+                retrieval_eval::helpful_memories_production_ranking_in(
+                    corpus,
+                    case,
+                    QueryMode::SeededTask,
+                    environment,
+                )
+                .expect("rank")
+            })
+            .collect::<Vec<_>>()
+    };
+    let process_env: Vec<_> = std::env::vars_os().collect();
+    let alone_a = rank_all(&corpus_a, env_a.environment());
+    let alone_b = rank_all(&corpus_b, env_b.environment());
+
+    let barrier = std::sync::Barrier::new(2);
+    let (together_a, together_b) = thread::scope(|scope| {
+        let a = scope.spawn(|| {
+            barrier.wait();
+            rank_all(&corpus_a, env_a.environment())
+        });
+        let b = scope.spawn(|| {
+            barrier.wait();
+            rank_all(&corpus_b, env_b.environment())
+        });
+        (a.join().expect("thread a"), b.join().expect("thread b"))
+    });
+    assert_eq!(together_a, alone_a, "environment A's ranking is unaffected by B");
+    assert_eq!(together_b, alone_b, "environment B's ranking is unaffected by A");
+    assert_eq!(
+        std::env::vars_os().collect::<Vec<_>>(),
+        process_env,
+        "no ranking wrote the process environment"
+    );
+}
+
+/// cas-7cc95: the scoped ranking consults its injected environment, and does
+/// so only on the calling thread. If the ranking path handed work to another
+/// thread that read the environment, that read would be unscoped and this
+/// would fail.
+#[test]
+fn a_scoped_ranking_reads_its_environment_only_on_its_own_thread_cas_7cc95() {
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("seed + index");
+    let neutral = retrieval_eval::NeutralHookEnvironment::new(corpus.cas_dir());
+    let unscoped_before = cas_core::env_overlay::unscoped_reads();
+    let scoped_before = cas_core::env_overlay::scoped_reads();
+    retrieval_eval::helpful_memories_production_ranking_in(
+        &corpus,
+        &fixture.cases[0],
+        QueryMode::SeededTask,
+        neutral.environment(),
+    )
+    .expect("rank");
+    assert!(
+        cas_core::env_overlay::scoped_reads() > scoped_before,
+        "the ranking path reads through the injected environment"
+    );
+    assert_eq!(
+        cas_core::env_overlay::unscoped_reads(),
+        unscoped_before,
+        "no environment read on the ranking path ran off the scoped thread"
+    );
+    assert!(!cas_core::env_overlay::is_scoped(), "the scope ended with the call");
+}

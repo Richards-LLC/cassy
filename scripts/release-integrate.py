@@ -131,9 +131,12 @@ def resume_rebase_command(root, old_tip, new_tip):
 
 
 def git(root, *args):
-    result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    command = ["git", "-C", str(root), *args]
+    result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode:
-        raise RuntimeError("Git could not validate or fast-forward the assembly checkout")
+        detail = "\n".join(value.strip() for value in (result.stderr, result.stdout) if value.strip())
+        raise RuntimeError(f"Git command failed (exit {result.returncode}): {shlex.join(command)}\n"
+                           + (detail or "No Git diagnostic output"))
     return result.stdout.strip()
 
 
@@ -207,6 +210,23 @@ def is_ancestor(root, older, newer):
     return result.returncode == 0
 
 
+def rebase_release_metadata(root, old_tip, integration_tip):
+    """Replay metadata with diagnostics and restore the checkout on conflicts."""
+    original = git(root, "rev-parse", "HEAD")
+    try:
+        git(root, "-c", "core.hooksPath=/dev/null", "rebase", "--onto", integration_tip, old_tip)
+    except RuntimeError as failure:
+        aborted = subprocess.run(["git", "-C", str(root), "-c", "core.hooksPath=/dev/null", "rebase", "--abort"],
+                                 capture_output=True, text=True)
+        restored = (git(root, "rev-parse", "HEAD") == original and not git(root, "status", "--porcelain"))
+        state = "checkout restored" if restored else "checkout needs rebase recovery"
+        abort_detail = "" if restored or not aborted.returncode else "\nAbort diagnostic: " + aborted.stderr.strip()
+        raise RuntimeError(
+            "BLOCKER integration-release-metadata: could not rebase release metadata onto the integration tip; "
+            + state + ". Recovery: " + resume_rebase_command(root, old_tip, integration_tip)
+            + "\n" + str(failure) + abort_detail) from failure
+
+
 def rebase_docs_only_release(root, main_tip, integration_tip):
     """Move release metadata commits from main onto the tested union tip."""
     current = git(root, "rev-parse", "HEAD")
@@ -216,30 +236,25 @@ def rebase_docs_only_release(root, main_tip, integration_tip):
     if previous and previous["tip"] != integration_tip:
         old_tip = previous["tip"]
         validate_release_metadata(root, old_tip, integration_tip)
-        result = subprocess.run(
-            ["git", "-C", str(root), "-c", "core.hooksPath=/dev/null", "rebase", "--onto", integration_tip, old_tip],
-            capture_output=True, text=True)
-        if result.returncode:
-            git(root, "-c", "core.hooksPath=/dev/null", "rebase", "--abort")
-            raise RuntimeError(
-                "BLOCKER integration-release-metadata: release metadata conflicts with the new integration tip; "
-                "checkout restored. Recovery: " + resume_rebase_command(root, old_tip, integration_tip))
+        rebase_release_metadata(root, old_tip, integration_tip)
         print("Rebased release metadata onto updated integration tip", file=sys.stderr)
         return
     branch = git(root, "branch", "--show-current")
     if not branch.startswith("release/") or not is_ancestor(root, main_tip, current):
         return
-    changed = git(root, "diff", "--name-only", f"{main_tip}..{current}").splitlines()
-    allowed = lambda path: path == "CHANGELOG.md" or path.startswith("docs/release-notes/")
-    if not changed or not all(allowed(path) for path in changed):
+    changed = git(root, "diff", "--name-only", "--no-renames", f"{main_tip}..{current}").splitlines()
+    allowed = lambda path: (path == "CHANGELOG.md" or path.startswith("docs/release-notes/")
+                            or (path.startswith("docs/qa/journey-evaluations/") and path.endswith(".md")))
+    offending = [path for path in changed if not allowed(path)]
+    if offending:
+        raise RuntimeError(
+            "BLOCKER integration-release-metadata: release commits contain unsupported paths: "
+            + shlex.join(offending) + ". Preserve these commits separately; "
+            "start release/<ver> from origin/main, then rerun --cut; "
+            "prep carries the prior receipts commit after assemble.")
+    if not changed:
         return
-    result = subprocess.run(
-        ["git", "-C", str(root), "rebase", "--onto", integration_tip, main_tip],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        raise RuntimeError("Could not rebase docs-only release commits onto the integration tip")
+    rebase_release_metadata(root, main_tip, integration_tip)
     print("Rebased docs-only release commits onto integration tip", file=sys.stderr)
 
 

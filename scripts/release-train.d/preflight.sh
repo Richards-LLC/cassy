@@ -257,7 +257,8 @@ cut_preflight_check_changelog() {
         return 0
     fi
     if ! grep -Eq '^## \[Unreleased\]' "$changelog"; then
-        cut_preflight_block changelog-heading "CHANGELOG.md has no Unreleased section and no $version heading"
+        cut_preflight_block changelog-heading \
+            "$changelog has no Unreleased section and no $version heading; copy the reviewed section into this release worktree and commit it"
         return $?
     fi
     local tmp="$changelog.cut.$$"
@@ -276,7 +277,7 @@ cut_preflight_check_changelog() {
     ' "$changelog" >"$tmp"
     mv "$tmp" "$changelog"
     cut_preflight_block changelog-heading \
-        "created CHANGELOG.md heading for $version; fill the section, commit it, then resume"
+        "created CHANGELOG.md heading for $version in $worktree; fill this release worktree's section, commit it, then resume"
     return $?
 }
 

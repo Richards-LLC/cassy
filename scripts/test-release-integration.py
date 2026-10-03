@@ -2,8 +2,10 @@
 """Fixture proof for release-train.sh --assemble (no Cargo or remote service)."""
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -390,6 +392,104 @@ PY
     def test_changed_integration_refuses_wrong_receipt(self):
         self.git("update-ref", "refs/heads/integration/project", self.base)
         self.refused("tip changed")
+
+    def test_release_notes_and_journey_report_rebase_together(self):
+        files = {"CHANGELOG.md": "release prose\n",
+                 "docs/release-notes/2099-01-01-v9.99.7-slack.md": "draft\n",
+                 "docs/qa/journey-evaluations/2099-01-01-hub-web-fixture.md": "journey passed\n"}
+        for name, content in files.items():
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.git("add", ".")
+        self.git("commit", "-m", "release metadata and journey")
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
+        for name, content in files.items():
+            self.assertEqual((self.root / name).read_text(), content)
+
+    def test_prior_receipts_and_other_paths_are_named_before_mutation(self):
+        for name in ("docs/release-reports/v9.99.7.md", "unreviewed-source",
+                     "docs/qa/journey-evaluations/fixture.json"):
+            with self.subTest(path=name):
+                self.git("reset", "--hard", self.base)
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("preserve me\n")
+                self.git("add", ".")
+                self.git("commit", "-m", "carried commit")
+                original = self.git("rev-parse", "HEAD")
+                result = self.assemble()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(name, result.stderr)
+                self.assertIn("prep carries the prior receipts commit", result.stderr)
+                self.assertIn("start release/<ver> from origin/main", result.stderr)
+                self.assertEqual(self.git("rev-parse", "HEAD"), original)
+                self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_git_error_includes_command_exit_code_and_stderr(self):
+        spec = importlib.util.spec_from_file_location("release_integrate", INTEGRATE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with self.assertRaises(RuntimeError) as raised:
+            module.git(self.root, "rev-parse", "--verify", "missing-fixture-ref")
+        message = str(raised.exception)
+        self.assertIn("git -C", message)
+        self.assertIn("rev-parse --verify missing-fixture-ref", message)
+        self.assertIn("exit 128", message)
+        self.assertIn("fatal:", message)
+
+    def test_initial_metadata_conflict_names_git_error_and_restores_checkout(self):
+        self.git("checkout", "epic/one")
+        (self.root / "CHANGELOG.md").write_text("epic prose\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "epic prose")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(tip=self.tip, epics=[{"branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "release/test")
+        (self.root / "CHANGELOG.md").write_text("release prose\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "release prose")
+        original = self.git("rev-parse", "HEAD")
+        result = self.assemble()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("rebase --onto", result.stderr)
+        self.assertIn("could not apply", result.stderr.lower())
+        self.assertIn("checkout restored", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), original)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertFalse((self.root / ".git/rebase-merge").exists())
+
+    def test_resume_preserves_journey_metadata_on_updated_integration(self):
+        run_dir = self.prepare_resume()
+        journey = self.root / "docs/qa/journey-evaluations/fixture.md"
+        journey.parent.mkdir(parents=True)
+        journey.write_text("journey passed\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "journey metadata")
+        self.advance_integration()
+        result = self.resume_action("--resume-check", run_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.resume_action("assemble", run_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(journey.read_text(), "journey passed\n")
+        self.assertEqual(self.git("rev-parse", "HEAD~2"), self.tip)
+
+    def test_changelog_blocker_names_release_worktree_not_epic(self):
+        (self.root / "CHANGELOG.md").write_text("# Release checkout without headings\n")
+        script = ('set -euo pipefail\n'
+                  + f'worktree={shlex.quote(str(self.root))}\nversion=9.99.7\n'
+                  + f'script_dir={shlex.quote(str(TRAIN.parent))}\nrun_dir=""\n'
+                  + f'source {shlex.quote(str(TRAIN.parent / "release-train.d/preflight.sh"))}\n'
+                  + 'cut_preflight_check_changelog\n')
+        result = subprocess.run(['/bin/bash', '-c', script], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(str(self.root / "CHANGELOG.md"), result.stdout + result.stderr)
+        self.assertIn("this release worktree", result.stdout + result.stderr)
+        self.assertEqual((self.root / "CHANGELOG.md").read_text(), "# Release checkout without headings\n")
 
     def test_dirty_destination_is_preserved(self):
         (self.root / "uncommitted").write_text("keep me")

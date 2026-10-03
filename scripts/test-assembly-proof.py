@@ -177,6 +177,32 @@ class ReceiptTests(unittest.TestCase):
         self.commit()
         self.assertNotEqual(self.expected["code_input"], proof.code_input(self.root))
 
+    def test_journey_markdown_keeps_code_proof(self):
+        path = self.root / "docs/qa/journey-evaluations/fixture.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("journey passed\n")
+        self.commit()
+        self.assertEqual(self.expected["code_input"], proof.code_input(self.root))
+        self.assertIsNotNone(proof.matching(self.root, self.expected))
+
+    def test_non_markdown_journey_file_remains_a_code_input(self):
+        path = self.root / "docs/qa/journey-evaluations/fixture.json"
+        path.parent.mkdir(parents=True)
+        path.write_text('{}\n')
+        self.assert_code_miss()
+
+    def test_embedded_journey_markdown_remains_a_code_input(self):
+        path = self.root / "docs/qa/journey-evaluations/fixture.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("journey passed\n")
+        (self.root / "src/lib.rs").write_text('const DOC: &str = include_str!(\n'
+                                               ' "../docs/qa/journey-evaluations/fixture.md");\n')
+        self.commit()
+        before = proof.code_input(self.root)
+        path.write_text("changed embedded journey\n")
+        self.commit()
+        self.assertNotEqual(before, proof.code_input(self.root))
+
     def test_expired_future_and_invalid_receipts_miss(self):
         for epoch in (time.time() - proof.MAX_AGE - 10, time.time() + 100, "bad"):
             with self.subTest(epoch=epoch):

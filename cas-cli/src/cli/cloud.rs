@@ -262,9 +262,8 @@ pub struct CloudPurgeForeignArgs {
     #[arg(long)]
     pub include_unknown: bool,
 
-    /// Proceed even when the recoverability guard refuses (stale pull state, or
-    /// local rows that were never pushed to cloud). Classifier hard stops for a
-    /// task majority or proven rule cannot be overridden. Destructive — the
+    /// Proceed even when the cloud pull baseline is stale, missing or unreadable.
+    /// Classifier hard stops for a task majority or proven rule cannot be overridden. Destructive — the
     /// refusal reason is still printed.
     #[arg(long)]
     pub force: bool,
@@ -6269,7 +6268,10 @@ fn parse_sync_timestamp(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// Decide whether a destructive purge is safe. Pure — takes the observed state,
-/// returns every reason to refuse (empty = safe).
+/// returns every reason to refuse (empty = safe). Pending pushes must represent
+/// work the concrete plan would lose, not a generic backlog. The foreign-row
+/// classifier exempts intentional replicas and preserves every other queue row,
+/// so its inspection passes an empty at-risk list.
 fn evaluate_purge_safety(
     last_pull_at: Option<&str>,
     pending_pushes: &[(String, String)],
@@ -6311,22 +6313,37 @@ fn evaluate_purge_safety(
     refusals
 }
 
-/// Queued-but-unpushed local changes for the entity kinds a purge deletes.
+/// Content backlog counted by doctor, independently of purge safety.
 ///
 /// Entry access reinforcement is observational metadata written by
 /// `SessionStart` through `SyncingEntryStore`; it is not a content mutation
-/// that this purge can safely classify from the queue row alone. Tasks, rules,
-/// and skills remain guarded because their queued rows represent content or
-/// ownership changes.
+/// that doctor can classify from the queue row alone. Tasks, rules and skills
+/// remain in this content-only count; purge uses the full reader below and
+/// reports surviving rows of every kind as information.
 ///
 /// Fails CLOSED. Only an absent `sync_queue` table is "no pending pushes";
 /// every other read failure (schema drift, corruption, a row that will not
 /// decode) is propagated so the purge refuses loudly. Silently returning zero
-/// here would disable the unpushed-rows guard in a destructive path — the one
-/// place a reassuring wrong answer is most expensive.
+/// here would conceal an unreadable queue before a destructive purge.
 pub(crate) fn pending_content_pushes(
     conn: &rusqlite::Connection,
 ) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(queued_purge_changes(conn)?
+        .into_iter()
+        .filter(|(kind, _)| {
+            matches!(
+                kind.to_ascii_lowercase().as_str(),
+                "task" | "rule" | "skill"
+            )
+        })
+        .collect())
+}
+
+/// Read every queue kind before applying informational purge exclusions. Even
+/// an unrelated row that cannot decode must fail closed, never vanish from the
+/// preview. Doctor's content-only count shares this reader through the filter
+/// above, while purge reports all surviving queue rows.
+fn queued_purge_changes(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(String, String)>> {
     let mut stmt = match conn.prepare(
         "SELECT entity_type, entity_id FROM sync_queue
          ORDER BY id",
@@ -6353,22 +6370,18 @@ pub(crate) fn pending_content_pushes(
         let (entity_type, entity_id) = row.map_err(|e| {
             anyhow::anyhow!("unreadable row in the sync queue while checking unpushed changes: {e}")
         })?;
-        if matches!(
-            entity_type.to_ascii_lowercase().as_str(),
-            "task" | "rule" | "skill"
-        ) {
-            out.push((entity_type, entity_id));
-        }
+        out.push((entity_type, entity_id));
     }
     Ok(out)
 }
 
-/// Queued content rows that would survive the purge. A foreign replica may
+/// Queued rows of any kind that would survive the purge. A foreign replica may
 /// still have a local queue row because an older client pushed it before the
 /// origin guard existed; deleting that replica is the cleanup itself, not a
-/// loss of user work. Only queue rows outside the concrete delete set keep the
-/// unpushed-work refusal active.
-pub(crate) fn pending_content_pushes_excluding(
+/// loss of user work. Queue rows outside the concrete delete set are preserved
+/// and reported as information; they cannot make the purge lose local work and
+/// therefore never activate the unpushed-work refusal.
+pub(crate) fn queued_changes_outside_purge(
     conn: &rusqlite::Connection,
     delete_set: &PurgeDeleteSet,
 ) -> anyhow::Result<Vec<(String, String)>> {
@@ -6388,9 +6401,30 @@ pub(crate) fn pending_content_pushes_excluding(
         })
         .collect::<BTreeSet<_>>();
 
-    Ok(pending_content_pushes(conn)?
+    let deleted_tasks = delete_set
+        .tasks
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<BTreeSet<_>>();
+    Ok(queued_purge_changes(conn)?
         .into_iter()
-        .filter(|(kind, id)| !doomed.contains(&(kind.to_ascii_lowercase(), id.clone())))
+        .filter(|(kind, id)| {
+            let kind = kind.to_ascii_lowercase();
+            if doomed.contains(&(kind.clone(), id.clone())) {
+                return false;
+            }
+            // SyncingTaskStore uses from_id:to_id:dep_type for both upserts
+            // and deletes. These edges are removed with either endpoint;
+            // inspect the queued identity even when the local edge is absent.
+            if matches!(kind.as_str(), "task_dependency" | "task_dependencies") {
+                let mut parts = id.splitn(3, ':');
+                if let (Some(from), Some(to), Some(_)) = (parts.next(), parts.next(), parts.next())
+                {
+                    return !deleted_tasks.contains(from) && !deleted_tasks.contains(to);
+                }
+            }
+            true
+        })
         .collect())
 }
 
@@ -6450,6 +6484,16 @@ fn verify_purge_delete_set_hash(
     Ok(())
 }
 
+struct PurgeInspection {
+    analysis: PurgeForeignAnalysis,
+    refusals: Vec<PurgeRefusal>,
+    non_overlapping_queued_changes: usize,
+}
+
+fn purge_queue_info(non_overlapping_queued_changes: usize) -> String {
+    format!("  Info: {non_overlapping_queued_changes} unrelated queued change(s) preserved")
+}
+
 fn inspect_purge_state(
     cas_root: &Path,
     project_id: &str,
@@ -6457,7 +6501,7 @@ fn inspect_purge_state(
     stale_days: i64,
     allow_majority_foreign: bool,
     include_unknown: bool,
-) -> anyhow::Result<(PurgeForeignAnalysis, Vec<PurgeRefusal>)> {
+) -> anyhow::Result<PurgeInspection> {
     let db_path = cas_root.join("cas.db");
     let conn = rusqlite::Connection::open(&db_path)?;
     // Use doctor's cross-DB classifier so a legacy backfill that stamped
@@ -6466,7 +6510,10 @@ fn inspect_purge_state(
     // must not be presented as a complete delete set.
     let doctor_report = crate::cli::foreign_rows::scan(cas_root)?;
     let analysis = collect_purge_delete_set_with_report_options(
-        &conn, project_id, &doctor_report, include_unknown,
+        &conn,
+        project_id,
+        &doctor_report,
+        include_unknown,
     )?;
     let proven_rule_count = count_proven_attributed_rules(&conn, &analysis.delete_set)?;
     let last_pull_at: Option<String> = conn
@@ -6476,20 +6523,23 @@ fn inspect_purge_state(
             |r| r.get(0),
         )
         .ok();
-    let pending = pending_content_pushes_excluding(&conn, &analysis.delete_set)?;
-    let mut refusals = evaluate_purge_safety(
-        last_pull_at.as_deref(),
-        &pending,
-        chrono::Utc::now(),
-        stale_days,
-    );
+    let pending = queued_changes_outside_purge(&conn, &analysis.delete_set)?;
+    // The concrete delete set already exempts intentional replica cleanup.
+    // Every remaining queue row survives the purge; its count is information,
+    // not evidence of unrecoverable loss. Keep the read above fail-closed.
+    let mut refusals =
+        evaluate_purge_safety(last_pull_at.as_deref(), &[], chrono::Utc::now(), stale_days);
     refusals.extend(evaluate_purge_hard_guards_with_options(
         &analysis.delete_set,
         total_tasks,
         proven_rule_count,
         allow_majority_foreign,
     ));
-    Ok((analysis, refusals))
+    Ok(PurgeInspection {
+        analysis,
+        refusals,
+        non_overlapping_queued_changes: pending.len(),
+    })
 }
 
 pub(crate) fn execute_purge_foreign(
@@ -6616,7 +6666,11 @@ fn execute_purge_foreign_with_output(
     // cas-a034 / GH #132: resolve the concrete delete set and the safety state
     // BEFORE anything destructive happens, so --dry-run can show exactly what
     // would be lost and a real run can refuse when losing it is unrecoverable.
-    let (mut analysis, mut refusals) = inspect_purge_state(
+    let PurgeInspection {
+        mut analysis,
+        mut refusals,
+        mut non_overlapping_queued_changes,
+    } = inspect_purge_state(
         cas_root,
         &project_id,
         tasks_before,
@@ -6632,7 +6686,7 @@ fn execute_purge_foreign_with_output(
         // destructive operation to the first set's hash. A concurrent edit or
         // classifier change therefore fails closed instead of being purged.
         let fresh_total_tasks = task_store.list(None)?.len();
-        let (fresh_analysis, fresh_refusals) = inspect_purge_state(
+        let fresh = inspect_purge_state(
             cas_root,
             &project_id,
             fresh_total_tasks,
@@ -6647,9 +6701,10 @@ fn execute_purge_foreign_with_output(
                 fresh_total_tasks
             );
         }
-        verify_purge_delete_set_hash(&delete_set_hash, &fresh_analysis.delete_set)?;
-        analysis = fresh_analysis;
-        refusals = fresh_refusals;
+        verify_purge_delete_set_hash(&delete_set_hash, &fresh.analysis.delete_set)?;
+        analysis = fresh.analysis;
+        refusals = fresh.refusals;
+        non_overlapping_queued_changes = fresh.non_overlapping_queued_changes;
         delete_set_hash = purge_delete_set_hash(&analysis.delete_set);
     }
 
@@ -6672,6 +6727,7 @@ fn execute_purge_foreign_with_output(
                     },
                     "delete_set": delete_set.to_json(),
                     "delete_set_hash": delete_set_hash,
+                    "non_overlapping_queued_changes": non_overlapping_queued_changes,
                     "task_ratio": {
                         "foreign_tasks": delete_set.tasks.len(),
                         "total_tasks": tasks_before,
@@ -6729,6 +6785,8 @@ fn execute_purge_foreign_with_output(
             "{} entries, {} tasks, {} rules, {} skills ({} total)",
             entries_before, tasks_before, rules_before, skills_before, total_before,
         ))?;
+        fmt.newline()?;
+        fmt.write_raw(&purge_queue_info(non_overlapping_queued_changes))?;
         fmt.newline()?;
 
         if args.dry_run {
@@ -6942,6 +7000,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
                     "default purge safety guards"
                 },
                 "fresh_delete_set_hash_verified": !args.dry_run,
+                "non_overlapping_queued_changes": non_overlapping_queued_changes,
                 "peer_evidence_tasks_quarantined": peer_evidence_tasks_quarantined,
                 "entities_before": {
                     "entries": entries_before,
@@ -7050,7 +7109,7 @@ pub(crate) fn doctor_purge_foreign(
     let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let tasks_before = open_task_store_local(cas_root)?.list(None)?.len();
-    let (_, refusals) = inspect_purge_state(
+    let inspection = inspect_purge_state(
         cas_root,
         &project_id,
         tasks_before,
@@ -7058,7 +7117,7 @@ pub(crate) fn doctor_purge_foreign(
         false,
         false,
     )?;
-    if !refusals.is_empty() || !apply {
+    if !inspection.refusals.is_empty() || !apply {
         return Ok(false);
     }
 
@@ -9237,21 +9296,35 @@ mod purge_foreign_safety_tests {
         assert_eq!(pending, vec![("Task".to_string(), "cas-0001".to_string())]);
     }
 
-    #[test]
-    fn purge_queue_non_overlapping_changes_proceed_and_survive_delete() {
+    fn purge_queue_fixture() -> (crate::test_support::TestEnvGuard, PathBuf, Connection) {
         let env = crate::test_support::TestEnvGuard::temp_home();
         let cas_root = env.home().join("project/.cas");
         std::fs::create_dir_all(&cas_root).unwrap();
-        std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"test-project\"\n").unwrap();
-        let mut conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        std::fs::write(
+            cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"test-project\"\n",
+        )
+        .unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
         seed_db(&conn);
         conn.execute_batch(
             "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'open';
              INSERT INTO tasks (id, title, origin_project) VALUES
                 ('kept-task', 'local work', 'test-project'),
                 ('kept-peer', 'other local work', 'test-project');",
-        ).unwrap();
-        conn.execute("INSERT INTO sync_metadata VALUES ('last_pull_at', ?1)", [chrono::Utc::now().to_rfc3339()]).unwrap();
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_metadata VALUES ('last_pull_at', ?1)",
+            [chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        (env, cas_root, conn)
+    }
+
+    #[test]
+    fn purge_queue_non_overlapping_changes_proceed_and_survive_delete() {
+        let (_env, cas_root, mut conn) = purge_queue_fixture();
         // The incident shape: 362 unrelated task pushes plus two other kinds,
         // none in the concrete delete set. No live store or cloud is involved.
         for index in 0..362 {
@@ -9264,13 +9337,34 @@ mod purge_foreign_safety_tests {
             "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
                 ('entry', 'local-learning', 'update'),
                 ('task_dependency', 'kept-task:kept-peer:blocks', 'upsert');",
-        ).unwrap();
-        let (analysis, refusals) = inspect_purge_state(&cas_root, "test-project", 3, 7, false, false).unwrap();
-        assert!(refusals.is_empty(), "unrelated queued changes must survive safely: {refusals:?}");
-        assert_eq!(delete_purge_rows(&mut conn, &analysis.delete_set).unwrap(), 5);
-        let queued: i64 = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
+        )
+        .unwrap();
+        let inspection = inspect_purge_state(&cas_root, "test-project", 3, 7, false, false).unwrap();
+        assert!(
+            inspection.refusals.is_empty(),
+            "unrelated queued changes must survive safely: {:?}",
+            inspection.refusals
+        );
+        assert_eq!(inspection.non_overlapping_queued_changes, 364);
+        assert_eq!(
+            purge_queue_info(inspection.non_overlapping_queued_changes),
+            "  Info: 364 unrelated queued change(s) preserved"
+        );
+        assert_eq!(
+            delete_purge_rows(&mut conn, &inspection.analysis.delete_set).unwrap(),
+            5
+        );
+        let queued: i64 = conn
+            .query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(queued, 364);
-        let title: String = conn.query_row("SELECT title FROM tasks WHERE id = 'kept-task'", [], |row| row.get(0)).unwrap();
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM tasks WHERE id = 'kept-task'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(title, "local work");
     }
 
@@ -9286,18 +9380,135 @@ mod purge_foreign_safety_tests {
                 ('skill', 's1', 'update'),
                 ('task_dependency', 'cas-0001:kept-peer:blocks', 'upsert'),
                 ('task_dependency', 'kept-peer:cas-0001:blocks', 'upsert');",
-        ).unwrap();
+        )
+        .unwrap();
         let delete_set = collect_purge_delete_set(&conn, "test-project").unwrap();
-        let pending = pending_content_pushes_excluding(&conn, &delete_set).unwrap();
-        assert!(pending.is_empty(), "queued replicas in the classified delete set are intentional cleanup");
+        let pending = queued_changes_outside_purge(&conn, &delete_set).unwrap();
+        assert!(
+            pending.is_empty(),
+            "queued replicas in the classified delete set are intentional cleanup"
+        );
         assert!(evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7).is_empty());
         assert_eq!(delete_purge_rows(&mut conn, &delete_set).unwrap(), 5);
-        let queued: i64 = conn.query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0)).unwrap();
+        let queued: i64 = conn
+            .query_row("SELECT count(*) FROM sync_queue", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(queued, 6, "purge preserves the queue even for exempt rows");
     }
 
     #[test]
-    fn pending_purge_rows_do_not_block_but_real_local_edit_still_does() {
+    fn purge_queue_counts_any_kind_and_matches_typed_ids_and_exact_endpoints() {
+        let (_env, cas_root, conn) = purge_queue_fixture();
+        conn.execute_batch(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
+                ('Task', 'cas-0001', 'upsert'),
+                ('entry', 'e1', 'upsert'),
+                ('rule', 'r1', 'upsert'),
+                ('skill', 's1', 'upsert'),
+                ('Task_Dependency', 'cas-0001:kept-task:blocks', 'upsert'),
+                ('task_dependencies', 'kept-task:cas-0001:relates', 'delete'),
+                ('rule', 'cas-0001', 'upsert'),
+                ('task_dependency', 'cas-00010:kept-task:blocks', 'upsert'),
+                ('event', 'e1', 'upsert'),
+                ('knowledge_page', 'local-page', 'upsert'),
+                ('future-kind', 'future-id', 'upsert');",
+        )
+        .unwrap();
+        let inspection = inspect_purge_state(&cas_root, "test-project", 3, 7, false, false).unwrap();
+        assert!(inspection.refusals.is_empty());
+        assert_eq!(inspection.non_overlapping_queued_changes, 5);
+        let rows = queued_changes_outside_purge(&conn, &inspection.analysis.delete_set).unwrap();
+        assert_eq!(
+            rows[0],
+            ("rule".into(), "cas-0001".into()),
+            "same ID in another kind survives"
+        );
+        assert_eq!(
+            rows[1].1, "cas-00010:kept-task:blocks",
+            "endpoint prefixes must not match"
+        );
+    }
+
+    #[test]
+    fn purge_queue_read_schema_and_decode_errors_abort_inspection() {
+        for sql in [
+            "DROP TABLE sync_queue; CREATE TABLE sync_queue (id INTEGER PRIMARY KEY, junk TEXT)",
+            "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES (X'FF', 'unrelated', 'upsert')",
+            "INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES ('future-kind', X'FF', 'upsert')",
+        ] {
+            let (_env, cas_root, conn) = purge_queue_fixture();
+            conn.execute_batch(sql).unwrap();
+            let error = inspect_purge_state(&cas_root, "test-project", 3, 7, false, false)
+                .err()
+                .expect("unreadable queue must abort");
+            assert!(error.to_string().contains("sync queue"), "{error}");
+            let tasks: i64 = conn
+                .query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(tasks, 3, "failed inspection must not delete any rows");
+        }
+    }
+
+    #[test]
+    fn purge_queue_absent_table_is_empty_info() {
+        let (_env, cas_root, conn) = purge_queue_fixture();
+        conn.execute_batch("DROP TABLE sync_queue").unwrap();
+        let inspection = inspect_purge_state(&cas_root, "test-project", 3, 7, false, false).unwrap();
+        assert!(inspection.refusals.is_empty());
+        assert_eq!(inspection.non_overlapping_queued_changes, 0);
+    }
+
+    #[test]
+    fn purge_queue_info_does_not_weaken_freshness_hard_guards_or_force() {
+        for (sql, expected_code, hard, total_tasks) in [
+            ("DELETE FROM sync_metadata", "never_pulled", false, 3),
+            (
+                "UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'",
+                "stale_pull",
+                false,
+                3,
+            ),
+            (
+                "UPDATE sync_metadata SET value = 'unreadable'",
+                "unreadable_pull_timestamp",
+                false,
+                3,
+            ),
+            (
+                "DELETE FROM tasks WHERE origin_project = 'test-project'",
+                "too_many_foreign_tasks",
+                true,
+                1,
+            ),
+            ("UPDATE rules SET status = 'proven'", "proven_rule", true, 3),
+        ] {
+            let (_env, cas_root, conn) = purge_queue_fixture();
+            conn.execute_batch(sql).unwrap();
+            conn.execute_batch("INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES ('future-kind', 'unrelated', 'upsert')").unwrap();
+            let inspection =
+                inspect_purge_state(&cas_root, "test-project", total_tasks, 7, false, false).unwrap();
+            assert_eq!(inspection.non_overlapping_queued_changes, 1);
+            assert_eq!(inspection.refusals.len(), 1, "{:?}", inspection.refusals);
+            assert_eq!(inspection.refusals[0].code(), expected_code);
+            assert_eq!(
+                inspection.refusals[0].is_hard(),
+                hard,
+                "--force may bypass only freshness refusals"
+            );
+        }
+    }
+
+    #[test]
+    fn purge_queue_info_line_is_ascii_and_fits_80_columns() {
+        for count in [0, 364, usize::MAX] {
+            let line = purge_queue_info(count);
+            assert!(line.is_ascii());
+            assert!(line.len() <= 80, "{line}");
+        }
+    }
+
+    #[test]
+    fn delete_set_rows_are_exempt_while_other_queue_rows_are_counted() {
         let conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);
         conn.execute_batch(
@@ -9343,7 +9554,7 @@ mod purge_foreign_safety_tests {
             dependencies: 0,
         };
 
-        let pending = pending_content_pushes_excluding(&conn, &delete_set).unwrap();
+        let pending = queued_changes_outside_purge(&conn, &delete_set).unwrap();
         assert_eq!(
             pending,
             vec![("task".to_string(), "local-edit".to_string())],

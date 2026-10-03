@@ -5250,11 +5250,9 @@ fn pull_id_collision_check_for(ids: &[String]) -> Option<Check> {
     ))
 }
 
-/// Surface the exact content queue rows that keep `purge-foreign` fail-closed.
-/// The remediation is intentionally executable in order: reset terminal rows,
-/// push them, then preview the purge again. A count from the generic queue
-/// stats would include knowledge pages, so this reuses the purge's own content
-/// predicate instead.
+/// Surface the content backlog and cloud rejections independently of purge
+/// safety. Reset terminal rows, push them, then preview the purge. The preview
+/// reports unrelated queued rows as information because they survive cleanup.
 fn cloud_queue_check(cas_root: &Path) -> Check {
     let db_path = cas_root.join("cas.db");
     let conn = match rusqlite::Connection::open_with_flags(
@@ -5292,7 +5290,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
-    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately.";
     let rejections = cloud_queue_rejections(&conn);
 
     if !registration_conflicts.is_empty() {
@@ -5307,7 +5305,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             .join("; ");
         let remedy = "Resolve with `cas cloud project set <registered-canonical-id>` or a cloud-owner alias, then run `cas cloud sync`; parked rows are not transport retries.";
         let mut message = format!(
-            "{} queued content change(s) block purge-foreign ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
+            "{} queued content change(s) await push ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
             pending.len()
         );
         if !rejections.is_empty() {
@@ -5328,14 +5326,14 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Ok,
-            message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+            message: format!("0 queued content change(s) await push; {remediation}"),
         }
     } else if pending.is_empty() {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "0 queued content change(s) block purge-foreign, but the cloud refused {} parked row(s): {}",
+                "0 queued content change(s) await push, but the cloud refused {} parked row(s): {}",
                 rejections.iter().map(|(_, count)| count).sum::<usize>(),
                 describe_queue_rejections(&rejections)
             ),
@@ -5345,7 +5343,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}{}",
+                "{} queued content change(s) await push ({breakdown}); {remediation}{}",
                 pending.len(),
                 if rejections.is_empty() {
                     String::new()
@@ -7270,6 +7268,8 @@ mod tests {
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("1 queued content change(s)"));
+        assert!(check.message.contains("await push"));
+        assert!(!check.message.contains("block purge-foreign"));
         assert!(!check.message.contains("entry: 2"));
         assert!(check.message.contains("task: 1"));
         let retry = check.message.find("cas cloud queue --retry").unwrap();

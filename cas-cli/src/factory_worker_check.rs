@@ -295,11 +295,14 @@ fn continuation_admits_load(
     let Ok(metadata) = std::fs::metadata(receipt) else {
         return false;
     };
+    // A receipt stamped up to a minute ahead (filesystem/clock skew) is fresh.
     let fresh = metadata
         .modified()
         .ok()
-        .and_then(|written| now.duration_since(written).ok())
-        .is_some_and(|age| age <= CONTINUATION_WINDOW);
+        .is_some_and(|written| match now.duration_since(written) {
+            Ok(age) => age <= CONTINUATION_WINDOW,
+            Err(ahead) => ahead.duration() <= std::time::Duration::from_secs(60),
+        });
     let Some(record) = std::fs::read(receipt)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<CheckReceipt>(&bytes).ok())

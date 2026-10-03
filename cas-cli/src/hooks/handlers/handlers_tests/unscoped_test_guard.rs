@@ -305,3 +305,92 @@ fn supervisor_retains_full_suite_authority() {
         .expect("handler ok");
     assert!(deny_reason(&out).is_none());
 }
+
+/// cas-cf70 fixture: a Makefile with one script-only target and the shapes
+/// that must stay refused.
+fn cf70_makefile_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("cas-cli")).unwrap();
+    std::fs::write(
+        dir.path().join("cas-cli/Makefile"),
+        "CARGO ?= cargo\n\
+         .PHONY: test-ci-tiers test-rust\n\
+         \n\
+         # Script-only CI fixtures.\n\
+         test-ci-tiers:\n\
+         \tcd .. && bash scripts/test-a.sh\n\
+         \tcd .. && python3 scripts/test-b.py\n\
+         \tcd .. && ./scripts/test-c.sh\n\
+         \n\
+         test-rust:\n\
+         \t$(CARGO) nextest run -p cas\n\
+         \n\
+         test-literal-cargo:\n\
+         \tcargo test -p cas\n\
+         \n\
+         test-needs-rust: test-rust\n\
+         \tcd .. && bash scripts/test-a.sh\n\
+         \n\
+         test-submake:\n\
+         \tmake test-rust\n\
+         \n\
+         test-variable:\n\
+         \t$(RUNNER) scripts/test-a.sh\n\
+         \n\
+         check:\n\
+         \t$(CARGO) check -p cas\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// cas-cf70: `make -C cas-cli test-ci-tiers` runs only Python and Bash CI
+/// fixtures, which the Makefile shows; the build guard admits it, read from
+/// the target's own recipe.
+#[test]
+fn script_only_make_target_is_admitted_cas_cf70() {
+    let dir = cf70_makefile_dir();
+    let mut request = input("make -C cas-cli test-ci-tiers", "worker");
+    request.cwd = dir.path().to_str().unwrap().into();
+    let out = handle_pre_tool_use(&request, None).expect("handler ok");
+    assert!(
+        deny_reason(&out).is_none_or(|reason| !reason.contains("NO WORKER RUST BUILDS")),
+        "a script-only target is not a Rust build: {out:?}"
+    );
+
+    // The real target in this repository, as reported.
+    let root = crate::test_paths::workspace_root();
+    let mut request = input("make -C cas-cli test-ci-tiers", "worker");
+    request.cwd = root.to_str().unwrap().into();
+    let out = handle_pre_tool_use(&request, None).expect("handler ok");
+    assert!(
+        deny_reason(&out).is_none_or(|reason| !reason.contains("NO WORKER RUST BUILDS")),
+        "cas-cli/Makefile test-ci-tiers runs only CI fixtures: {out:?}"
+    );
+}
+
+/// cas-cf70: the admission comes from the target, not from `make`: Rust
+/// recipes, Rust prerequisites, sub-makes, unexpanded variables, unknown
+/// targets, a mixed target list and an unreadable Makefile stay refused.
+#[test]
+fn rust_or_unprovable_make_targets_stay_refused_cas_cf70() {
+    let dir = cf70_makefile_dir();
+    for command in [
+        "make -C cas-cli test-rust",
+        "make -C cas-cli test-literal-cargo",
+        "make -C cas-cli test-needs-rust",
+        "make -C cas-cli test-submake",
+        "make -C cas-cli test-variable",
+        "make -C cas-cli test-unknown",
+        "make -C cas-cli check",
+        "make -C cas-cli test-ci-tiers test-rust",
+        "make -C missing test-ci-tiers",
+        "bash -c 'make -C cas-cli test-rust'",
+    ] {
+        let mut request = input(command, "worker");
+        request.cwd = dir.path().to_str().unwrap().into();
+        let out = handle_pre_tool_use(&request, None).expect("handler ok");
+        let reason = deny_reason(&out).unwrap_or_else(|| panic!("expected deny for {command:?}"));
+        assert!(reason.contains("NO WORKER RUST BUILDS"), "{command:?}: {reason}");
+    }
+}

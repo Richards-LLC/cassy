@@ -4,7 +4,7 @@ import { renderFleetOpsFixture } from "./fleet-ops";
 import { renderConversationFixture } from "./conversations";
 import { attentionCounts, createAttentionItem } from "../src/attention";
 import { renderAttentionPanel } from "../src/attention-view";
-import { renderConnectionSurfaceInto } from "../src/connection-state-view";
+import { lostConnectionBanner, renderConnectionSurfaceInto } from "../src/connection-state-view";
 import { DeferredRenderScheduler } from "../src/deferred-render";
 import { FleetBoardRenderer, renderFleetBoardInto, type FleetBoardModel } from "../src/fleet-board";
 import { pairingDialogCancellationActive } from "../src/pairing-dialog";
@@ -26,6 +26,7 @@ export const FIXTURE_NAMES = [
   "conversation-attachment", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard",
   "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
   "conversations-session-ended",
+  "conversations-session-end-error",
   "conversation-needs-pairing",
   "fleet-populated",
   "fleet-twins",
@@ -42,6 +43,7 @@ export const FIXTURE_NAMES = [
   "drawer-attention-open",
   "operator-thread",
   "connection-failed-retry",
+  "connection-fatal-browser",
   "pairing-step-1",
   "pairing-email",
   "pairing-code",
@@ -53,6 +55,7 @@ export const FIXTURE_NAMES = [
   "conversation-mic-listening",
   "conversation-mic-unavailable",
   "conversation-draft-too-long",
+  "conversation-draft-not-saved",
   "conversation-unconfirmed-dismissed",
   "conversations-loading",
   "conversations-unpaired",
@@ -496,7 +499,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
 
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
-  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry", "drawer-attention-open"].includes(fixtureName);
+  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry", "connection-fatal-browser", "drawer-attention-open"].includes(fixtureName);
   const drawerOpen = fixtureName === "drawer-attention-open";
   const shell = element("div", `shell ${["session-canvas", "session-workers", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}${drawerOpen ? " drawer-open" : ""}`);
   shell.dataset.fixture = fixtureName;
@@ -566,6 +569,17 @@ function renderShell(): void {
     const primary = element("div", "primary-pane-slot");
     primary.append(renderTranscript());
     grid.append(primary, element("div", "secondary-pane-strip"));
+    main.append(grid);
+  } else if (fixtureName === "connection-fatal-browser") {
+    const grid = element("section", "pane-grid pane-layout single-pane terminal-disconnected");
+    const primary = element("div", "primary-pane-slot");
+    primary.append(renderTranscript());
+    const banner = element("div", "terminal-disconnected-banner");
+    banner.setAttribute("role", "status");
+    banner.dataset.scope = "machine";
+    banner.append(element("span", "banner-text", lostConnectionBanner("Atlas · Linux", true,
+      "This browser is missing AbortSignal.timeout, which Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer.")));
+    grid.append(banner, primary, element("div", "secondary-pane-strip"));
     main.append(grid);
   } else if (fixtureName === "connection-failed-retry") {
     main.append(renderConnection());

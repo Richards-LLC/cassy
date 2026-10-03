@@ -27,6 +27,8 @@ mod hub_detached_lifecycle_test;
 mod hub_launcher_path_test;
 #[path = "../init_non_project_guard_test.rs"]
 mod init_non_project_guard_test;
+#[path = "../init_store_repair_test.rs"]
+mod init_store_repair_test;
 #[path = "../init_watchdog_budget_test.rs"]
 mod init_watchdog_budget_test;
 #[path = "../integrate_lifecycle_test.rs"]

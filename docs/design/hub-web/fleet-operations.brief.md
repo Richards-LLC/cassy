@@ -400,3 +400,47 @@ both hubs."
 3. **Should the operations endpoint require the terminal lease?** This brief
    says no: it is not pane input. Requiring it would serialize operators in a
    way the CLI and MCP do not.
+
+
+## S6 implementation checkpoint (cas-5bef0, 2026-10-03)
+
+Source checkpoint only; browser/typecheck/runtime and real two-hub platform
+proof are pending separate supervisor admission. This does not change the
+approved interaction contract or its real audit acceptance criterion.
+
+- Conversation header: a 44 px Tasks & progress entry opens the existing
+  context rail's progress section as a phone sheet. Attention retains its
+  own count/entry; both use the existing inert/focus guard.
+- FleetOpsState remains the operation/menu/confirm/Undo owner. The view adds
+  one trailing task ⋯ and full-height searchable Assign/Focus pickers; local
+  query survives status redraw and resets on a new picker, with no network
+  search or polling. fleet-sheet.ts derives native modal presentation from
+  the one active S5 control; it owns no independent operation state.
+- Keyboard Escape closes the innermost action/confirm/picker first, returning
+  to its trigger, then closes Tasks & progress back to the header. Cancel
+  remains first on destructive confirmation. Undo and its pending/refused
+  result remain visible above the composer using the existing visual viewport
+  height, including after the progress sheet closes; expiry has a visible
+  focus fallback. A response from a departed conversation cannot alter the
+  newly selected machine's operation state.
+- Semantic tokens come from DESIGN.md/tokens.css; rail-item-min is 44 px,
+  sheet/bg/text/line/lift tokens are reused, no imagery/new token scale.
+  No decorative motion is added; forced-color outlines remain explicit.
+- HUB-J17 source adds phone390×844 and landscape844×390 protocol-double
+  parts with two machines: Add first, keyboard Pause/Undo, searchable
+  pickers, confirmed Stop second, stale Stop second and focused dismissal.
+  These are frontend assertions, never real audit proof. New view/modal
+  regressions cover disabled sends, local no-match recovery/query persistence,
+  nested dialog Escape and closed-sheet Undo refusal.
+- Real two-hub evidence requires exact assembled backend/frontend and actual
+  disposable sessions/workers, both pairing scope sets, writable audit.jsonl
+  and real generation change. Supervisor owns assembly/venue/worker-slot
+  admission; requested/outcome/stale excerpts must be captured from those
+  hubs and placed in the QA bundle before final acceptance. Current source
+  plan and prerequisites are recorded in cas-5bef0/SOURCE_PLAN.md artifacts.
+
+Performance budget remains ≤200 KB gzip initial JS/≤30 KB gzip CSS from the
+frontend skill; measurement waits for admitted production build. No new
+network library, downloaded font or image asset is introduced. Final critique,
+ARIA/media/keyboard receipts, strict390/844×390 reports and audit excerpts are
+still pending; no completion or performance PASS is claimed here.

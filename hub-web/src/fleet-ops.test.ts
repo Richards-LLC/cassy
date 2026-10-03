@@ -16,7 +16,7 @@ import {
   type FleetAgent,
   type FleetTask,
 } from "./fleet-ops";
-import { agentControls, headerControls, taskControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
 import type { Scope } from "./types";
 
 const ORIGIN = "https://commander.example";
@@ -254,4 +254,18 @@ describe("S6 phone controls", () => {
     expect(preview.querySelectorAll(":scope > button")).toHaveLength(1);
     expect(preview.querySelector(".fleet-ops-preview-text")?.textContent).toBe(mergeRequestMessage(parked));
   });
+});
+
+
+it("keeps an Undo refusal readable after the phone progress sheet closes", () => {
+  const state = new FleetOpsState(); const action = holdAction(lark, false);
+  state.started("agent:swift-lark-3", action);
+  const pending = phoneFleetNotice(document, context(CONTROL, state))!;
+  expect(pending.textContent).toBe(action.progress);
+  expect(pending.dataset.fleetFocus).toBe("agent:swift-lark-3:progress");
+  state.failed("agent:swift-lark-3", action, { stale: true, current: { worker: lark.name, generation: 3 } });
+  const refused = phoneFleetNotice(document, context(CONTROL, state))!;
+  expect(refused.textContent).toContain("already restarted");
+  expect(refused.dataset.fleetFocus).toBe("agent:swift-lark-3:note");
+  expect(undoBar(document, context(CONTROL, state))).toBeUndefined();
 });

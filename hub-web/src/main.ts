@@ -49,7 +49,7 @@ import { relativeTimestamp } from "./time";
 import { paneActivityLabel, paneShowsOutput } from "./pane-activity";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, newOperationId, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
-import { agentControls, headerControls, taskControls, undoBar, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, type FleetOpsViewContext } from "./fleet-ops-view";
 import { HubRequestError } from "./connection";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
@@ -4879,12 +4879,13 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (!want) return;
     const target = want.endsWith(":first-item")
       ? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
-      : (want === "undo" ? document : container).querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`);
+      : [...(phoneLayout() ? document : container).querySelectorAll<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`)].find((node) => node.getClientRects().length > 0);
     if (target) { target.focus({ preventScroll: false }); return; }
     if (want === "undo") {
       const fallback = progressSheetOpen() || !phoneLayout() ? container.querySelector<HTMLElement>('[data-fleet-focus="header:add"]') : document.querySelector<HTMLElement>("#conversation-fleet");
       fallback?.focus(); return;
     }
+    if (phoneLayout() && !progressSheetOpen()) { document.querySelector<HTMLElement>("#conversation-fleet")?.focus(); return; }
     // Its row is gone: the next row's ⋯, else the list itself.
     const at = priorTriggers.indexOf(`${want.slice(0, want.lastIndexOf(":"))}:trigger`);
     if (at < 0) return;
@@ -4937,7 +4938,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (ops) {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();
-    const undo = undoBar(document, ops);
+    const undo = undoBar(document, ops) ?? (phoneLayout() ? phoneFleetNotice(document, ops) : undefined);
     if (undo && phoneLayout()) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
     else if (undo) container.append(undo);
     container.append(headerControls(document, ops, fleetHeaderPanel));

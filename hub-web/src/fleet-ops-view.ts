@@ -367,3 +367,17 @@ export function undoBar(document: Document, context: FleetOpsViewContext): HTMLE
   bar.append(text, button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo()));
   return bar;
 }
+
+/** Undo's in-flight or refused result remains visible even after the progress sheet closes. */
+export function phoneFleetNotice(document: Document, context: FleetOpsViewContext): HTMLElement | undefined {
+  const pending = [...context.state.pending].at(-1);
+  const refused = [...context.state.notes].at(-1);
+  if (!pending && !refused) return undefined;
+  const [row, value] = pending ?? refused!;
+  const bar = document.createElement("div");
+  bar.className = "fleet-ops-undo";
+  bar.tabIndex = -1;
+  bar.dataset.fleetFocus = `${row}:${pending ? "progress" : "note"}`;
+  bar.textContent = "progress" in value ? value.progress : value.text;
+  return bar;
+}

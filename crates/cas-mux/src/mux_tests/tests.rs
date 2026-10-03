@@ -83,7 +83,7 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
             SupervisorCli::Claude => assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config")),
             SupervisorCli::Codex => {
                 for name in ["vercel", "neon"] {
-                    assert!(worker.args.iter().any(|arg| arg == &format!("mcp_servers.\"{name}\".enabled=false")));
+                    assert!(worker.args.iter().any(|arg| arg == &format!("mcp_servers.{name}.enabled=false")));
                 }
             }
             _ => unreachable!(),

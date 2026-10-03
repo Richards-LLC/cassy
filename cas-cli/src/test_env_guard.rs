@@ -275,6 +275,106 @@ impl Drop for TestEnvGuard {
 #[cfg(test)]
 mod ambient_scrub_tests {
     use super::*;
+    use cas_store::{KnownRepoStore, SqliteKnownRepoStore};
+
+    fn registration_fixture() -> TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".cas")).unwrap();
+        std::fs::write(
+            repo.path().join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"registry-isolation-sentinel\"\n",
+        )
+        .unwrap();
+        repo
+    }
+
+    #[test]
+    fn inherited_registry_tripwire_blocks_fixture_registration_cas_88a0() {
+        // Model the operator's registry in a disposable HOME. Never open the
+        // actual host database, even when exercising the broken fixture.
+        let host = tempfile::tempdir().unwrap();
+        let host_cas = host.path().join(".cas");
+        std::fs::create_dir(&host_cas).unwrap();
+        let store = SqliteKnownRepoStore::open(&host_cas).unwrap();
+        store.init().unwrap();
+        store.upsert(Path::new("/operator/sentinel")).unwrap();
+        let before = store.list().unwrap();
+        let repo = registration_fixture();
+        let _ambient_home = AmbientEnvRestore::set("HOME", host.path());
+        let _tripwire = AmbientEnvRestore::set(
+            cas_store::shared_db::PROTECTED_DBS_ENV,
+            host_cas.join("cas.db"),
+        );
+        let mut guard = TestEnvGuard::new();
+        // CAS_ROOT alone does not isolate the host-scoped known-repo writer.
+        guard.set("CAS_ROOT", repo.path().join(".cas"));
+        let result = std::panic::catch_unwind(|| {
+            crate::store::known_repos::register_repo(repo.path());
+        });
+        assert_eq!(
+            store.list().unwrap(),
+            before,
+            "fixture polluted host known_repos"
+        );
+        let panic = result.expect_err("nonfatal registration must not swallow the tripwire");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("refusing to open protected database"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn temp_home_registration_preserves_host_registry_tripwires_cas_88a0() {
+        let host = tempfile::tempdir().unwrap();
+        let host_cas = host.path().join(".cas");
+        std::fs::create_dir(&host_cas).unwrap();
+        let store = SqliteKnownRepoStore::open(&host_cas).unwrap();
+        store.init().unwrap();
+        store.upsert(Path::new("/operator/sentinel")).unwrap();
+        let before = store.list().unwrap();
+        let repo = registration_fixture();
+        let _ambient_home = AmbientEnvRestore::set("HOME", host.path());
+        let _protected_home = AmbientEnvRestore::set("CAS_TEST_PROTECTED_HOME", host.path());
+        let protected_db = host_cas.join("cas.db");
+        let _tripwire =
+            AmbientEnvRestore::set(cas_store::shared_db::PROTECTED_DBS_ENV, &protected_db);
+        {
+            let guard = TestEnvGuard::temp_home();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            crate::store::known_repos::register_repo_strict(repo.path()).unwrap();
+            let isolated = crate::store::known_repos::open_host_known_repo_store().unwrap();
+            let rows = isolated.list().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].path, repo.path().canonicalize().unwrap());
+            assert_eq!(rows[0].touch_count, 1);
+            assert_eq!(
+                crate::store::known_repos::host_cas_dir(),
+                guard.home().join(".cas")
+            );
+            assert_eq!(store.list().unwrap(), before);
+            assert_eq!(
+                std::env::var_os(cas_store::shared_db::PROTECTED_DBS_ENV),
+                Some(protected_db.clone().into_os_string())
+            );
+            assert_eq!(
+                std::env::var_os("CAS_TEST_PROTECTED_HOME"),
+                Some(host.path().as_os_str().to_owned())
+            );
+        }
+        assert_eq!(
+            std::env::var_os("HOME"),
+            Some(host.path().as_os_str().to_owned())
+        );
+        assert_eq!(
+            std::env::var_os(cas_store::shared_db::PROTECTED_DBS_ENV),
+            Some(protected_db.into_os_string())
+        );
+    }
 
     #[test]
     fn ambient_cas_and_factory_state_is_scrubbed() {

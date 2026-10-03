@@ -369,6 +369,30 @@ test('text a vertical scroller reaches is not clipped; a fixed-height hidden box
   );
 });
 
+test('text folded inside a closed <details> is not clipped; an open disclosure that clips still is (cas-b7f2)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-details-'));
+  const result = await runVisualQa({
+    urls: [fixture('details-disclosure.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  });
+  const clipped = result.findings.filter((finding) => finding.type === 'clipped-content');
+  // Folded content has a layout box past the scroller's range but is not
+  // drawn; opening its summary brings it into the range (cas-6b75 QA F01).
+  assert.deepEqual(clipped.filter((finding) => /Folded turn|machine:read/.test(finding.textSample ?? '')), [], JSON.stringify(clipped, null, 2));
+  // The summaries are drawn and still checked: none is clipped.
+  assert.deepEqual(clipped.filter((finding) => /Earlier session|Technical details/.test(finding.textSample ?? '')), []);
+  // A real clip inside an open disclosure still fails.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(clipped.some((finding) => /lost below the edge/.test(finding.textSample ?? '')), JSON.stringify(result.findings, null, 2));
+  assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '')), [], JSON.stringify(clipped, null, 2));
+});
+
 test('visually hidden helpers, an intentional ellipsis and closed drawers pass strict; real defects still fail (GH #1081)', async () => {
   const run = (name) => mkdtemp(join(tmpdir(), `visual-qa-${name}-`)).then((artifactDir) => runVisualQa({
     urls: [fixture(`${name}.html`)],

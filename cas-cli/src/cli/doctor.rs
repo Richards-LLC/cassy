@@ -5748,7 +5748,6 @@ mod tests {
                 "lost relay",
                 None,
                 Some("cas-d6b9"),
-                None,
             )
             .unwrap();
         queue

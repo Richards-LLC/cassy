@@ -457,9 +457,10 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
 4. Open Terminal view from the empty session — its "Terminal view" link switches to the session's Terminal view and back; the pane header never says "No activity" for a session that was just active
-5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view; back on, the plain copy and the link return
-6. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
-7. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
+5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view, and the header's Terminal view is dimmed and says why ("Reconnecting to Atlas · Linux — Terminal view opens once it's back") instead of opening; back on, the plain copy, the link and the header's Terminal view return
+6. On a phone, Terminal view on the empty card is a full-size target — at 390 it is at least 44 px each way and opens Terminal view
+7. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
+8. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
 
 #### Expected experience
 

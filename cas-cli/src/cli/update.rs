@@ -1716,15 +1716,40 @@ fn print_project_refresh_summary(
         return;
     }
 
+    print!(
+        "{}",
+        render_project_refresh_summary(
+            receipts,
+            user_level,
+            user_details,
+            skipped_unregistered,
+            cli.verbose,
+        )
+    );
+}
+
+/// The compact (non-JSON) refresh summary: the project table, a details
+/// block under each project with a warned, failed or dry-run planned phase
+/// (every project with `verbose`), the user-level line and skipped projects
+/// (cas-8030, cas-937a).
+fn render_project_refresh_summary(
+    receipts: &[ProjectRefreshReceipt],
+    user_level: &ProjectPhase,
+    user_details: &str,
+    skipped_unregistered: &[SkippedProject],
+    verbose: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     let mut warnings = RepeatedWarningCollector::default();
     let mut details = Vec::with_capacity(receipts.len());
     for receipt in receipts {
-        let project = project_display_name(&receipt.project, cli.verbose);
+        let project = project_display_name(&receipt.project, verbose);
         // Collect warnings from every phase, including successful phases whose
         // output is intentionally omitted from the compact transcript.
         warnings.collect_output(&project, &receipt.details);
-        let detail = render_project_phase_details(receipt, cli.verbose, &mut warnings, &project);
-        let show_detail = cli.verbose
+        let detail = render_project_phase_details(receipt, verbose, &mut warnings, &project);
+        let show_detail = verbose
             || [
                 &receipt.migration,
                 &receipt.search_index,
@@ -1733,56 +1758,68 @@ fn print_project_refresh_summary(
                 &receipt.cloud,
             ]
             .into_iter()
-            .any(|phase| !phase.is_ok());
+            // cas-8030: a skipped phase ("not cloud-linked") is already
+            // explained by the table's note, so it earns no details block.
+            // A dry run's planned phases do (cas-937a): their block is the
+            // only place the compact view says "DRY RUN" and what would run.
+            .any(|phase| {
+                matches!(
+                    phase,
+                    ProjectPhase::Warning(_) | ProjectPhase::Failed(_) | ProjectPhase::Planned(_)
+                )
+            });
         details.push((project, show_detail.then_some(detail)));
     }
     if !user_details.is_empty() {
         let project = "user-level";
         let detail =
-            strip_repeated_warning_lines(user_details, &mut warnings, project, cli.verbose, false);
-        if cli.verbose && !detail.trim().is_empty() {
+            strip_repeated_warning_lines(user_details, &mut warnings, project, verbose, false);
+        if verbose && !detail.trim().is_empty() {
             details.push((project.to_owned(), Some(detail)));
         }
     }
 
-    let table_lines = render_project_table_plain(receipts, cli.verbose);
+    let table_lines = render_project_table_plain(receipts, verbose);
     let mut table_lines = table_lines.lines();
     if let Some(header) = table_lines.next() {
-        println!("{header}");
+        let _ = writeln!(out, "{header}");
     }
     for ((_, row), (project, detail)) in receipts.iter().zip(table_lines).zip(details) {
-        println!("{row}");
+        let _ = writeln!(out, "{row}");
         if let Some(detail) = detail
             && !detail.trim().is_empty()
         {
-            println!("  {project} details:");
+            let _ = writeln!(out, "  {project} details:");
             for line in detail.lines().filter(|line| !line.trim().is_empty()) {
-                println!("    {line}");
+                let _ = writeln!(out, "    {line}");
             }
         }
     }
 
     // The user-level store is host state, so it gets a named line of its own
     // rather than a project row it would otherwise be miscounted in.
-    println!(
+    let _ = writeln!(
+            out,
         "  [{}] user-level store: {}",
         user_level.status_label().trim_matches(['[', ']']),
         user_level.detail()
     );
 
     if !skipped_unregistered.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  not refreshed (skipped_unregistered): {} — use `cas known-repos forget <path>` for stale registry rows; intentional projects can be registered explicitly",
             skipped_unregistered.len()
         );
         for skip in skipped_unregistered.iter().take(5) {
-            println!("    ! {} — {}", skip.project.display(), skip.reason);
+            let _ = writeln!(out, "    ! {} — {}", skip.project.display(), skip.reason);
         }
         if skipped_unregistered.len() > 5 {
-            println!("    … and {} more", skipped_unregistered.len() - 5);
+            let _ = writeln!(out, "    … and {} more", skipped_unregistered.len() - 5);
         }
     }
-    print!("{}", warnings.render(cli.verbose));
+    out.push_str(&warnings.render(verbose));
+    out
 }
 
 fn with_first_launch_ms(

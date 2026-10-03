@@ -488,13 +488,16 @@ test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'conn
     await expect(page.locator("#toast")).not.toContainText("connection dropped");
     expect(await page.locator("body").ariaSnapshot()).not.toContain("connection dropped");
     // Nor does control come back by itself: the pairing must be repaired first,
-    // and the controls say so instead of promising a reconnect.
-    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    // and the controls say so instead of promising a reconnect. The banner
+    // above says what is wrong, so the line says only the step (journey F42);
+    // the controls' own reason keeps the whole sentence.
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
+    await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", "Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
     // Heartbeats keep ticking: the refusal must stand on every surface (it
     // turned "live" again on the next beat, cas-05c0 QA).
     for (let beat = 0; beat < 3; beat++) await clock.advance(5_000);
     await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
-    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
     await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
     await expect(page.locator("[data-machine-latency]")).toHaveText("Needs pairing");
     await expect(page.locator("#attention-panel .attention-title").filter({ hasText: "Machine needs pairing" })).toBeVisible();
@@ -613,6 +616,44 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     // or to a screen reader.
     await expect(working).toHaveCount(0);
     expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
+  });
+});
+
+// cas-460a: a pairing revoked while Paired machines is open rebuilds the shell
+// under the dialog. Escape must still hand focus back to the footer control
+// that opened it, not to the page; Enter on that control opens it again.
+test("HUB-J12 network switch: Paired machines returns focus to its footer opener across a revoked pairing (cas-460a)", journeyPart, async ({ page, journey }) => {
+  const footer = page.locator("#paired-machines-toggle");
+  const dialog = page.getByRole("dialog", { name: "Paired machines" });
+  let revoke: () => Promise<void> = async () => {};
+  await journey.stage("Open Paired machines from the footer by keyboard while the machine is live", async () => {
+    const { hub, clock, header } = await connected(page);
+    revoke = async () => {
+      hub.refuseProofs("atlas", 1_000, "revoked", false);
+      await hub.down("atlas", { sockets: "close" });
+      await hub.up("atlas");
+      await clock.advance(1_000);
+      await expect(header).toHaveText(" · Needs pairing");
+    };
+    await footer.focus();
+    await expect(footer).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+  });
+  await journey.stage("The pairing is revoked while it is open; Escape returns to the footer", async () => {
+    await revoke();
+    await expect(dialog.locator(".paired-machine-state").first()).toContainText("Needs pairing");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#paired-machines-toggle")).toBeFocused();
+  });
+  await journey.stage("Enter on the footer opens it again, and Escape returns there again", async () => {
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#paired-machines-toggle")).toBeFocused();
   });
 });
 

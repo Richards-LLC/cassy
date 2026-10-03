@@ -615,18 +615,20 @@ impl ShutdownWorkerSnapshot {
     }
 
     fn render(&self) -> String {
+        format!("{}; {}", self.render_state(), self.worktree_cleanup_verdict)
+    }
+
+    /// Tasks and worktree state without the shutdown cleanup verdict, which
+    /// does not apply to a recycle (it keeps the worktree).
+    fn render_state(&self) -> String {
         let tasks = if self.task_states.is_empty() {
             "none".to_string()
         } else {
             self.task_states.join(", ")
         };
         format!(
-            "{} (id={}): tasks=[{}]; {}; {}",
-            self.worker_name,
-            self.worker_id,
-            tasks,
-            self.worktree_state,
-            self.worktree_cleanup_verdict
+            "{} (id={}): tasks=[{}]; {}",
+            self.worker_name, self.worker_id, tasks, self.worktree_state
         )
     }
 }
@@ -2874,19 +2876,21 @@ impl CasService {
             .filter(|agent| agent.role == AgentRole::Worker)
             .cloned()
             .collect();
+        // The durable factory-session registration owns shutdown scope, not
+        // the launch-time pane roster or a live-only status filter. Dead and
+        // already-shutdown rows remain addressable for notification cleanup.
+        // Keep the historical roster/status scope for non-factory callers.
         let (known_workers, _) = dedupe_authoritative_agents(
             all_agents
                 .into_iter()
                 .filter(|agent| {
                     agent.role == AgentRole::Worker
-                        && matches!(
-                            agent.status,
-                            AgentStatus::Active | AgentStatus::Idle | AgentStatus::Stale
-                        )
                         && agent.visible_to_factory_session(factory_session.as_deref())
-                        && owned
-                            .as_ref()
-                            .is_none_or(|names| names.contains(&agent.name))
+                        && (factory_session.is_some()
+                            || (matches!(
+                                agent.status,
+                                AgentStatus::Active | AgentStatus::Idle | AgentStatus::Stale
+                            ) && owned.as_ref().is_none_or(|names| names.contains(&agent.name))))
                 })
                 .collect(),
         );
@@ -2917,6 +2921,9 @@ impl CasService {
             let limit = req.count.unwrap_or(0) as usize;
             known_workers
                 .iter()
+                // Already-retired rows are explicit/all cleanup targets, but
+                // must not consume a request to stop N nonterminal workers.
+                .filter(|worker| limit == 0 || worker.status != AgentStatus::Shutdown)
                 .take(if limit == 0 {
                     known_workers.len()
                 } else {
@@ -3101,6 +3108,25 @@ impl CasService {
                     format!("Failed to queue shutdown request: {e}"),
                 )
             })?;
+        // No daemon pane is needed to retire a confirmed-dead registration.
+        // Do this only after selector and force validation, and re-read all
+        // same-name identities so a recycled live worker cannot lose its mail.
+        for worker in &selected {
+            retire_dead_worker_for_shutdown(
+                &self.inner.cas_root,
+                &worker.name,
+                factory_session.as_deref(),
+            )
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Shutdown request {request_id} queued, but dead-worker cleanup for {} failed: {error}",
+                        worker.name
+                    ),
+                )
+            })?;
+        }
         let request_id_text = request_id.to_string();
         let count_text = req.count.map(|value| value.to_string()).unwrap_or_default();
         let worker_names_text = worker_names.join(",");
@@ -3222,12 +3248,19 @@ impl CasService {
             local_merge_delivery,
             pinned_epic_branch.as_deref(),
         );
-        if snapshot.requires_force() {
+        // cas-a622: a recycle keeps the worktree and every task binding (the
+        // daemon respawns the same name and re-delivers the in-progress
+        // brief), so holding work is no reason to refuse. Only work that
+        // exists nowhere but this checkout is, and no flag overrides that.
+        if snapshot.unsafe_worktree {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "recycle_worker refused: selected worker state requires force=true, but recycling never force-destroys work.\n- {}",
-                    snapshot.render()
+                    "recycle_worker refused: {worker_name} has work that is only in its worktree. \
+                     Have it commit and push its branch (or get it merged, for local delivery), \
+                     then retry; recycling keeps the worktree and task bindings but never \
+                     restarts a worker over unsaved work.\n- {}",
+                    snapshot.render_state()
                 ),
             ));
         }
@@ -3290,7 +3323,8 @@ impl CasService {
         );
 
         Ok(Self::success(format!(
-            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe."
+            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe. Its task bindings are kept and its open work is re-delivered as a resume brief.\n- {}",
+            snapshot.render_state()
         )))
     }
 
@@ -7309,6 +7343,55 @@ fn cleanup_stale_skill_markers(cas_root: &std::path::Path, max_age: std::time::D
             (invalid_empty_suffix || stale) && std::fs::remove_file(entry.path()).is_ok()
         })
         .count()
+}
+
+/// Retire registered dead workers without requiring a live pane. Returns
+/// None for an unknown or still-live identity; no worktree or process is
+/// removed. The daemon also uses this when a queued shutdown reaches a worker
+/// whose pane was already removed by crash/recycle handling.
+pub(crate) fn retire_dead_worker_for_shutdown(
+    cas_root: &std::path::Path,
+    name: &str,
+    factory_session: Option<&str>,
+) -> crate::Result<Option<usize>> {
+    let agents = crate::store::open_agent_store(cas_root)?;
+    let matching: Vec<_> = agents
+        .list(None)?
+        .into_iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Worker
+                && agent.name == name
+                && agent.visible_to_factory_session(factory_session)
+        })
+        .collect();
+    if matching.is_empty() || super::agent_liveness::has_live_agent_named(&matching, name) {
+        return Ok(None);
+    }
+    let queue = crate::store::open_prompt_queue_store(cas_root)?;
+    let detail =
+        format!("Cancelled: shutdown requested for dead worker {name}; its recipient is retired");
+    let mut recipients = std::collections::BTreeSet::from([name.to_string()]);
+    for agent in &matching {
+        let held_task_ids = agents.graceful_shutdown(&agent.id)?;
+        if agent.status != cas_types::AgentStatus::Shutdown {
+            super::orphan_recovery::recover_worker_vanished(
+                cas_root,
+                agents.as_ref(),
+                agent,
+                &held_task_ids,
+                "dead worker retired by shutdown request",
+            );
+        }
+        recipients.insert(agent.id.clone());
+        if let Some(session_id) = &agent.cc_session_id {
+            recipients.insert(session_id.clone());
+        }
+    }
+    let mut cancelled = 0;
+    for recipient in recipients {
+        cancelled += queue.cancel_unread_for_shutdown(&recipient, factory_session, &detail)?;
+    }
+    Ok(Some(cancelled))
 }
 
 /// Returns the set of worker names this supervisor owns, derived from the `CAS_FACTORY_WORKER_NAMES`
@@ -11512,6 +11595,324 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn shutdown_dead_session_worker_cancels_notifications_cas_c653() {
+        use cas_store::{AgentStore, PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore};
+        use cas_types::AgentStatus;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-c653");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "live-worker");
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let agents = SqliteAgentStore::open(&cas_root).expect("agents");
+        let queue = SqlitePromptQueueStore::open(&cas_root).expect("queue");
+        queue.init().expect("initialize queue");
+        let mut sender = cas_types::Agent::new("sender-c653".into(), "scope-supervisor".into());
+        sender.role = AgentRole::Supervisor;
+        sender.factory_session = Some("shutdown-c653".into());
+        agents.register(&sender).expect("register watchdog sender");
+        let mut cancelled = Vec::new();
+        for (name, status) in [
+            ("proud-newt-45", AgentStatus::Stale),
+            ("bold-stork-90", AgentStatus::Shutdown),
+        ] {
+            let mut worker = worker_named(name, &format!("id-{name}"));
+            worker.factory_session = Some("shutdown-c653".into());
+            worker.status = status;
+            worker.cc_session_id = Some(format!("session-{name}"));
+            worker.pid = Some(i32::MAX as u32);
+            worker.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(10);
+            assert!(!agent_process_is_alive(&worker), "fixture PID must be dead");
+            agents.register(&worker).expect("register dead worker");
+            for target in [
+                name,
+                worker.id.as_str(),
+                worker.cc_session_id.as_deref().unwrap(),
+            ] {
+                let id = queue
+                    .enqueue_with_session("supervisor", target, "unfinished message", "shutdown-c653")
+                    .expect("enqueue");
+                cancelled.push(id);
+            }
+        }
+        // Already handed to the transport, but unread: cancellation must not
+        // rely on processed_at being NULL or pretend the recipient read it.
+        queue
+            .mark_transport_delivered(cancelled[0])
+            .expect("handoff");
+        let broadcast = queue
+            .enqueue_with_session("supervisor", "all_workers", "broadcast", "shutdown-c653")
+            .unwrap();
+        let foreign = queue
+            .enqueue_with_session(
+                "supervisor",
+                "proud-newt-45",
+                "foreign message",
+                "other-session",
+            )
+            .unwrap();
+        let unrelated = queue
+            .enqueue_with_session("supervisor", "live-worker", "live message", "shutdown-c653")
+            .unwrap();
+
+        // Watchdog eligibility requires a registered sender. Prove that the
+        // incident rows would alert before cancellation, then disappear from
+        // that same read path after shutdown.
+        let before = queue
+            .delivery_stalled_candidates("shutdown-c653", 0, 0, 100)
+            .unwrap();
+        assert!(
+            cancelled
+                .iter()
+                .all(|id| before.iter().any(|row| row.id == *id))
+        );
+
+        let core = CasCore::with_daemon(cas_root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "proud-newt-45,bold-stork-90"
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("same-session dead workers remain shutdownable without panes");
+        // A repeated shutdown by opaque ID remains accepted and must not
+        // resurrect or reclassify already-cancelled mail.
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "id": "id-proud-newt-45"
+        }))
+        .unwrap();
+        service.factory_shutdown_workers(request).await.unwrap();
+        assert!(
+            queue
+                .message_delivery_report(cancelled[0])
+                .unwrap()
+                .unwrap()
+                .delivered_at
+                .is_some()
+        );
+        assert!(
+            queue
+                .delivery_stalled_candidates("shutdown-c653", 0, 0, 100)
+                .unwrap()
+                .iter()
+                .all(|row| !cancelled.contains(&row.id))
+        );
+        for id in cancelled {
+            let report = queue.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+            assert_eq!(
+                report.pending_reason,
+                Some(cas_store::PendingReason::ShutdownCancelled)
+            );
+            assert!(
+                report
+                    .pending_detail
+                    .as_deref()
+                    .unwrap()
+                    .contains("shutdown"),
+                "{report:?}"
+            );
+            assert!(queue.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
+        }
+        for id in [broadcast, foreign, unrelated] {
+            assert_eq!(
+                queue.message_delivery_report(id).unwrap().unwrap().stage,
+                cas_store::DeliveryStage::Enqueued
+            );
+        }
+        for name in ["proud-newt-45", "bold-stork-90"] {
+            assert_eq!(
+                agents.get(&format!("id-{name}")).unwrap().status,
+                AgentStatus::Shutdown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_scope_and_force_guards_cas_c653() {
+        use cas_types::{AgentStatus, Task, TaskStatus};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-guards");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "unrelated-pane");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut worker = worker_named("dead-guard-worker", "dead-guard-id");
+        worker.factory_session = Some("shutdown-guards".into());
+        worker.status = AgentStatus::Stale;
+        worker.pid = Some(i32::MAX as u32);
+        agents.register(&worker).unwrap();
+        let mut foreign = worker_named("foreign-worker", "foreign-id");
+        foreign.factory_session = Some("foreign-session".into());
+        foreign.status = AgentStatus::Shutdown;
+        agents.register(&foreign).unwrap();
+        let mut supervisor = worker_named("guard-supervisor", "supervisor-id");
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("shutdown-guards".into());
+        agents.register(&supervisor).unwrap();
+        let message = queue
+            .enqueue_with_session("supervisor", &worker.name, "work", "shutdown-guards")
+            .unwrap();
+        let mut task = Task::new("cas-shutdown-guard".into(), "Retain unfinished work".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        for target in [
+            "foreign-worker",
+            "guard-supervisor",
+            "unknown-worker",
+            "dead-guard-id",
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "shutdown_workers", "id": target
+            }))
+            .unwrap();
+            let error = service
+                .factory_shutdown_workers(request)
+                .await
+                .expect_err("policy refusal");
+            if target == "dead-guard-id" {
+                assert!(error.message.contains("requires force=true"), "{error:?}");
+            }
+            assert_eq!(
+                queue
+                    .message_delivery_report(message)
+                    .unwrap()
+                    .unwrap()
+                    .stage,
+                cas_store::DeliveryStage::Enqueued
+            );
+            assert_eq!(agents.get(&worker.id).unwrap().status, AgentStatus::Stale);
+        }
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "id": "dead-guard-id", "force": true
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("explicit force preserves prior override");
+        assert_eq!(
+            queue
+                .message_delivery_report(message)
+                .unwrap()
+                .unwrap()
+                .stage,
+            cas_store::DeliveryStage::Suppressed
+        );
+        assert_ne!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(
+            agents.get(&foreign.id).unwrap().status,
+            AgentStatus::Shutdown
+        );
+        assert_eq!(
+            agents.get(&supervisor.id).unwrap().status,
+            AgentStatus::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_live_successor_keeps_unread_mail_cas_c653() {
+        use cas_types::AgentStatus;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-successor");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let mut live = worker_named("recycled-worker", "live-generation");
+        live.factory_session = Some("shutdown-successor".into());
+        live.pid = Some(std::process::id());
+        agents.register(&live).unwrap();
+        let mut dead = worker_named("recycled-worker", "dead-generation");
+        dead.factory_session = live.factory_session.clone();
+        dead.status = AgentStatus::Shutdown;
+        dead.pid = Some(i32::MAX as u32);
+        // Make the dead row win the display dedupe. Retirement must inspect
+        // all registrations, including the older still-running successor.
+        dead.last_heartbeat = chrono::Utc::now() + chrono::Duration::seconds(1);
+        agents.register(&dead).unwrap();
+        let message = queue
+            .enqueue_with_session("supervisor", &live.name, "new work", "shutdown-successor")
+            .unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "recycled-worker"
+        }))
+        .unwrap();
+        service.factory_shutdown_workers(request).await.unwrap();
+        assert_eq!(
+            queue
+                .message_delivery_report(message)
+                .unwrap()
+                .unwrap()
+                .stage,
+            cas_store::DeliveryStage::Enqueued
+        );
+        assert_eq!(agents.get(&live.id).unwrap().status, AgentStatus::Idle);
+        // The absent-pane daemon path shares the same conservative check.
+        assert_eq!(
+            retire_dead_worker_for_shutdown(&root, &live.name, Some("shutdown-successor")).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_positive_count_skips_retired_history_cas_c653() {
+        use cas_types::AgentStatus;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-count");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut retired = worker_named("retired-count-worker", "retired-count-id");
+        retired.factory_session = Some("shutdown-count".into());
+        retired.status = AgentStatus::Shutdown;
+        retired.registered_at = chrono::Utc::now() - chrono::Duration::days(1);
+        retired.pid = Some(i32::MAX as u32);
+        agents.register(&retired).unwrap();
+        let mut live = worker_named("live-count-worker", "live-count-id");
+        live.factory_session = Some("shutdown-count".into());
+        live.pid = Some(std::process::id());
+        agents.register(&live).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "count": 1
+        }))
+        .unwrap();
+        service.factory_shutdown_workers(request).await.unwrap();
+        let requests = crate::store::open_spawn_queue_store(&root)
+            .unwrap()
+            .poll("shutdown-count", 10)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].worker_names, vec![live.name]);
+        assert_eq!(
+            requests[0].count, None,
+            "daemon receives an exact target, never a count to expand"
+        );
     }
 
     #[tokio::test]

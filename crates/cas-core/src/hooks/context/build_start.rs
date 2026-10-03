@@ -281,7 +281,7 @@ pub fn build_context_with_stores(
 
         // Check if this is factory mode - via database agents OR env var
         // Env var check handles cases where agent isn't registered yet
-        let is_factory_via_env = std::env::var("CAS_AGENT_ROLE")
+        let is_factory_via_env = crate::env_overlay::var("CAS_AGENT_ROLE")
             .map(|r| matches!(r.to_lowercase().as_str(), "worker" | "supervisor"))
             .unwrap_or(false);
         let is_factory_via_db = all_agents
@@ -381,7 +381,7 @@ pub fn build_context_with_stores(
         .agent_role
         .clone()
         .filter(|role| !role.trim().is_empty())
-        .or_else(|| std::env::var("CAS_AGENT_ROLE").ok());
+        .or_else(|| crate::env_overlay::var("CAS_AGENT_ROLE").ok());
     let session_role = handoff::normalize_role(role_hint.as_deref());
     if let Some(store) = stores.primary_store()
         && let Ok(project_entries) = store.list()

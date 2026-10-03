@@ -31,6 +31,15 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
       await expect(checkbox).not.toBeChecked();
     }
     await expect(dialog.locator("#pair-copy")).toHaveAttribute("data-pair-command", /--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
+    // cas-b52d (journey F26): what the link withholds, in plain words, and the
+    // command that grants it, with its Copy, are on screen without scrolling
+    // inside the dialog, beside what this browser will be able to do.
+    await expect(dialog.getByRole("button", { name: "Copy command" })).toBeInViewport({ ratio: 1 });
+    const withheld = dialog.locator(".pair-withheld");
+    await expect(withheld).toContainText("This link does not let it: Type, send messages and interrupt");
+    await expect(withheld).toBeInViewport({ ratio: 1 });
+    await expect(dialog.locator(".pair-withheld-command code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
+    await expect(dialog.locator(".pair-withheld-command code")).toBeInViewport({ ratio: 1 });
     await dialog.getByText("Technical details").click();
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     // The link carries the machine's hub address and name, as `cas hub pair`

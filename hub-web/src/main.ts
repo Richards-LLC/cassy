@@ -8,14 +8,14 @@ import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./co
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView, emptyActivityText } from "./conversation-view";
+import { ConversationView, emptyActivityText, terminalOfferReason } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
-import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
-import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
+import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
+import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
+import { applyTerminalOffer, arrangeConversationShell, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -23,7 +23,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
-import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, lostConnectionBanner, outageControlsNotice, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -44,7 +44,8 @@ import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { TERMINAL_ESCAPE_HINT, TERMINAL_ESCAPE_HINT_ID } from "./terminal/ghostty/surface";
 import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
-import { absoluteTimestamp, relativeTimestamp } from "./time";
+import { relativeTimestamp } from "./time";
+import { paneActivityLabel, paneShowsOutput } from "./pane-activity";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -283,6 +284,8 @@ let commandPaletteOpen = false;
  * land to read, not in the reply box: that would keep the keyboard up over
  * the conversation. Ctrl/Cmd+K and mouse opens mean a hardware keyboard. */
 let commandPaletteOpenedByTouch = false;
+/** The control that opened Paired machines, by id, so its close can hand focus back (cas-460a). */
+let pairedMachinesOpener: string | undefined;
 let speechCapability: SpeechInputCapability | undefined;
 let speechDetectionStarted = false;
 let speechController: SpeechDictationController | undefined;
@@ -604,15 +607,23 @@ function goBack(): void {
 /**
  * A pane header's time is the pane's last output seen by this page. With
  * none yet it says so, rather than "No activity", which contradicted the
- * session's own last activity on the empty thread (cas-010f).
+ * session's own last activity on the empty thread (cas-010f), and a pane that
+ * opened on earlier output says that instead of "No output yet" above it
+ * (journey F42).
  */
-function lastActivityLabel(timestamp: number | undefined): string {
-  return timestamp === undefined ? "No output yet" : relativeTimestamp(timestamp);
+const bufferShowsOutput = new WeakMap<readonly number[], boolean>();
+function paneBufferShowsOutput(key: string): boolean {
+  const buffer = paneBuffers.get(key);
+  if (!buffer) return false;
+  let shows = bufferShowsOutput.get(buffer);
+  if (shows === undefined) { shows = paneShowsOutput(buffer); bufferShowsOutput.set(buffer, shows); }
+  return shows;
 }
 
-function updatePaneActivity(element: HTMLElement, timestamp: number | undefined): void {
-  element.textContent = lastActivityLabel(timestamp);
-  element.title = timestamp === undefined ? "No output received since this page opened" : absoluteTimestamp(timestamp);
+function updatePaneActivity(element: HTMLElement, key: string): void {
+  const label = paneActivityLabel(paneLastActivity.get(key), paneBufferShowsOutput(key));
+  if (element.textContent !== label.text) element.textContent = label.text;
+  element.title = label.title;
 }
 
 function focusPane(machineId: string, session: string, paneId: string): void {
@@ -775,6 +786,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // cas-c808 QA F01: a card that said the machine couldn't be reached
       // must not keep saying so once it is back.
       if (state.phase === "live" && !wasLive) clearTransientAttachmentNotes(document, machine.id);
+      // Journey F28: a card that said the machine is connected says what the
+      // header says once it is not.
+      else restateAttachmentNotes(document, machine.id);
       const connectedNotice = firstConnections.observe(machine.id, machine.label, state);
       if (connectedNotice) toast(connectedNotice);
       if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
@@ -849,6 +863,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
       }
+      else restateAttachmentNotes(document, machine.id);
       if (selectedMachineId === machine.id && selectedSession === session) render();
       // The list row and the footer read the session's connection too.
       else renderConversationList();
@@ -888,6 +903,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneKeyframesReady.add(key);
       paneBuffers.set(key, [...data]);
       surfaces.get(key)?.write(data);
+      // Journey F42: the header follows what the pane now shows.
+      const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
+      if (activity && selectedMachineId === machine.id && selectedSession === session) updatePaneActivity(activity, key);
     },
     onPaneSize: (session, pane, cols, rows, authority) => {
       applyPaneAuthority(machine.id, session, pane, cols, rows, authority);
@@ -907,7 +925,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
       const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
-      if (activity && selectedMachineId === machine.id && selectedSession === session) updatePaneActivity(activity, paneLastActivity.get(key));
+      if (activity && selectedMachineId === machine.id && selectedSession === session) updatePaneActivity(activity, key);
     },
     onMessageQueued: (session, receipt) => {
       conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
@@ -1221,6 +1239,17 @@ function machineFooterConnection(machineId: string): ConnectionState | undefined
   const prefix = `${machineId}:`;
   const attached = [...attachStates].filter(([key]) => key.startsWith(prefix)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key) }));
   return machineConnection(connectionStates.get(machineId), attached);
+}
+
+/**
+ * A file card's connection note in the footer's terms (journey F28): Live,
+ * a drop that is retrying, or neither.
+ */
+function artifactMachineReach(machineId: string): ArtifactMachineReach {
+  const state = machineFooterConnection(machineId);
+  if (state?.phase === "live") return "live";
+  const label = machineConnectionLabel(state, lastLiveAt.has(machineId));
+  return label === "Reconnecting" ? "reconnecting" : "unreachable";
 }
 
 /**
@@ -1701,6 +1730,19 @@ function conversationLabel(machineId: string, session: string): string {
   return projectTitle(sessions.get(machineId)?.find((item) => item.name === session)?.project_dir) || session;
 }
 
+/**
+ * Whether the reconnect banner over the session's last frame states its
+ * connection now (or will, in this render): the session has a frame on
+ * screen and is not plainly live (renderConnectionSurface's own test).
+ */
+function bannerStatesConnection(machineId: string, session: string | undefined): boolean {
+  if (!session) return false;
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session) || !grid.querySelector(".pane")) return false;
+  const snapshot = attachStates.get(sessionKey(machineId, session)) ?? connectionStates.get(machineId);
+  return snapshot !== undefined && shouldRetainDisconnectedFrame(snapshot);
+}
+
 function renderConnectionSurface(machineId: string, session: string, snapshot: ConnectionState, now = Date.now()): void {
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
@@ -1734,13 +1776,17 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     }
     // cas-a6f0: still live but its heartbeats go unanswered: not lost yet.
     const unsteady = !pairingLost && snapshot.phase === "live" && snapshot.degraded;
-    words.textContent = pairingLost
+    const sentence = pairingLost
       ? pairingLostBanner(where)
       : unsteady
         ? unsteadyBanner(where)
         : sessionOnly
           ? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)
           : lostConnectionBanner(where, snapshot.fatal === true);
+    // Journey F42: the banner is a live region, and rewriting the same words
+    // on every repaint announced the outage again each time. Only a change
+    // of words is written, so the outage is announced once.
+    if (words.textContent !== sentence) words.textContent = sentence;
     // cas-d636 QA F01: a phone hides the rail's Re-pair, so the banner that
     // says the pairing is gone carries it.
     const repair = banner.querySelector<HTMLButtonElement>(":scope > .banner-repair");
@@ -2050,7 +2096,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       const statusDot = document.createElement("span"); statusDot.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
       const label = document.createElement("span"); label.className = "pane-title"; label.textContent = pane.title || pane.id;
       const role = document.createElement("span"); role.className = "pane-role"; role.textContent = pane.kind.toLowerCase();
-      const activity = document.createElement("span"); activity.className = "pane-last-activity"; updatePaneActivity(activity, paneLastActivity.get(key));
+      const activity = document.createElement("span"); activity.className = "pane-last-activity"; updatePaneActivity(activity, key);
       const controls = document.createElement("div"); controls.className = "pane-layout-controls";
       const button = (label: string, className: string, action: () => void) => {
         const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
@@ -2140,7 +2186,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         paneHeader.removeAttribute("aria-label");
       }
     }
-    updatePaneActivity(card.querySelector<HTMLElement>(".pane-last-activity")!, paneLastActivity.get(key));
+    updatePaneActivity(card.querySelector<HTMLElement>(".pane-last-activity")!, key);
     const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
     const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
     const moveLater = card.querySelector<HTMLButtonElement>(".move-later");
@@ -2229,7 +2275,11 @@ function renderHiddenWorkersNote(strip: HTMLElement, count: number): void {
     note.append(label, reveal);
     strip.append(note);
   }
-  note.querySelector<HTMLElement>(".hidden-workers-label")!.textContent = hiddenWorkersLabel(count);
+  // A live region: the same words rewritten on every repaint were spoken
+  // again each time, through an outage too (journey F42).
+  const label = note.querySelector<HTMLElement>(".hidden-workers-label")!;
+  const words = hiddenWorkersLabel(count);
+  if (label.textContent !== words) label.textContent = words;
 }
 
 function hubSupports(machineId: string, capability: string): boolean {
@@ -3436,13 +3486,17 @@ function render(captureDraft = true): void {
   // control or be interrupted until it is back, so those controls say why
   // instead of offering an action that cannot reach the machine. A first
   // connection is not an outage.
-  const outageReason = sessionDown && selected && selectedSession
+  const outageKind = sessionDown && selected && selectedSession
     && (sessionsEverLive.has(sessionKey(selected.id, selectedSession))
       || (machineConnectionSnapshot !== undefined && machineConnectionSnapshot.phase !== "live" && lastLiveAt.has(selected.id)))
     // cas-7b31 (journey F2): a refused pairing does not reconnect, and
     // control does not come back by itself, so it does not promise either.
-    ? (machineConnectionSnapshot?.authFailure ? pairingControlsReason(selected.label)
-      : sessionOnlyDrop(selected.id, selectedSession) ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
+    ? (machineConnectionSnapshot?.authFailure ? "pairing" as const
+      : sessionOnlyDrop(selected.id, selectedSession) ? "session" as const : "machine" as const)
+    : undefined;
+  const outageReason = outageKind && selected && selectedSession
+    ? (outageKind === "pairing" ? pairingControlsReason(selected.label)
+      : outageKind === "session" ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
     : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);
@@ -3514,7 +3568,9 @@ function render(captureDraft = true): void {
   const showSessionControls = selected !== undefined && selectedSession !== undefined;
   // A touch screen has no tooltip: the reason a header control is unavailable
   // is printed under the header, not left in title and aria text (journey F9).
-  const controlsNotice = showSessionControls ? sessionControlsNotice(takeControlReason, interruptReason) : undefined;
+  // Journey F42: during an outage the banner says what was lost; this line
+  // says only what it means for the controls, so the outage reads once.
+  const controlsNotice = !showSessionControls ? undefined : outageKind ? outageControlsNotice(outageKind) : sessionControlsNotice(takeControlReason, interruptReason);
   // With machines paired and nothing open, the canvas is the fleet: every
   // machine and its sessions, one tap from opening. An empty card pointing at a
   // drawer was a detour to the same list.
@@ -3982,6 +4038,28 @@ function keepConversationListPlace(container: HTMLElement, selectedKey: string |
   conversationListScroll = container.scrollTop;
 }
 
+/**
+ * Back from a conversation (a phone's list and thread take turns): the list
+ * is where the operator left it, and focus returns to the row that was open,
+ * brought into view if it is not, instead of the first row, whose focus
+ * scrolled the list back to its top (cas-f50f). With that row gone, the
+ * first row takes focus where the list already is.
+ */
+function returnToConversationRow(openedKey: string | undefined): void {
+  const container = document.querySelector<HTMLElement>("#conversation-list");
+  const rows = [...document.querySelectorAll<HTMLButtonElement>("#conversation-list .conversation-row")];
+  const row = rows.find((node) => node.dataset.threadKey === openedKey) ?? rows[0];
+  if (!row) return;
+  if (container && container.scrollTop !== conversationListScroll) container.scrollTop = conversationListScroll;
+  row.focus({ preventScroll: true });
+  if (!container) return;
+  const box = container.getBoundingClientRect();
+  const rect = row.getBoundingClientRect();
+  if (rect.top < box.top) container.scrollTop += rect.top - box.top;
+  else if (rect.bottom > box.bottom) container.scrollTop += rect.bottom - box.bottom;
+  conversationListScroll = container.scrollTop;
+}
+
 function renderConversationList(): void {
   renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
@@ -4047,11 +4125,16 @@ function renderConversationList(): void {
     const label = conversationHeaderLabel(selectedMachineId, selectedSession);
     // The dot separates it from the codename on screen; the status reads just
     // the state ("Live", not "· Live") (cas-17e3).
+    // Journey F42: while the reconnect banner says what happened (in its own
+    // live region), the header's one word is not a second announcement of
+    // the same outage. It speaks again for the return to Live.
+    state.setAttribute("aria-live", bannerStatesConnection(selectedMachineId, selectedSession) ? "off" : "polite");
     if (state.dataset.label !== label) {
       state.dataset.label = label;
       const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
       state.replaceChildren(separator, label);
     }
+    applyTerminalOffer(document, terminalOfferReason(label, machines.get(selectedMachineId)?.label));
   }
   // The state's width changes the room the machine · codename line has.
   fitConversationHost(document);
@@ -4366,7 +4449,13 @@ function renderAttention(): void {
       await navigator.clipboard.writeText(payload);
       toast("Event payload copied");
     },
-  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text });
+  }, {
+    animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,
+    sessionLabel: (item) => {
+      const session = sessions.get(item.machineId)?.find((session) => session.name === item.session);
+      return session ? [projectTitle(session.project_dir), session.supervisor].filter(Boolean).join(" · ") || undefined : undefined;
+    },
+  });
   // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
   syncConversationAttention(hubPresentation === "conversation" && selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }
@@ -4431,8 +4520,34 @@ document.addEventListener("keydown", (event) => {
 // (machines that aren't connected first) for its next opening; while it was
 // open, status ticks left its rows where they were.
 document.addEventListener("close", (event) => {
-  if ((event.target as Element | null)?.id === "paired-machines-dialog") renderMachineRegister();
+  const dialog = event.target as HTMLDialogElement | null;
+  if (dialog?.id !== "paired-machines-dialog") return;
+  renderMachineRegister();
+  restorePairedMachinesOpener(dialog);
 }, true);
+
+/**
+ * cas-460a: a shell rebuild while Paired machines is open (a pairing revoked,
+ * a machine added) replaces the footer and re-shows the dialog, so the
+ * browser's own focus restoration has no live opener to return to and focus
+ * fell to the page. When it did, focus goes back to the control that opened
+ * the register, or the footer's Paired machines control when that one is gone
+ * (the palette's entry closes with the palette). Focus still on a control
+ * inside the closed dialog (the re-shown dialog's ×) counts as lost: the
+ * browser drops it to the page a moment later. A close that hands focus on
+ * (Pair a machine opens its own dialog) is left alone.
+ */
+function restorePairedMachinesOpener(dialog: HTMLDialogElement): void {
+  const opener = pairedMachinesOpener;
+  pairedMachinesOpener = undefined;
+  const active = document.activeElement;
+  if (active && active !== document.body && active.isConnected && !dialog.contains(active)) return;
+  if (document.querySelector("dialog[open]")) return;
+  const visible = (element: HTMLElement | null): element is HTMLElement => element !== null && element.getClientRects().length > 0;
+  const fromOpener = opener ? document.getElementById(opener) : null;
+  const target = visible(fromOpener) ? fromOpener : document.getElementById("paired-machines-toggle");
+  if (visible(target)) target.focus();
+}
 
 // A layer that was over the sheet (the palette) has closed: focus goes back
 // into the sheet, to the control it left, rather than to the page.
@@ -4688,9 +4803,19 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
   if (sheetClose) sheetClose.onclick = closeAttentionSheet;
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
-  if (conversationBack) conversationBack.onclick = () => { attentionSheetOpen = false; if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
+  if (conversationBack) conversationBack.onclick = () => {
+    attentionSheetOpen = false;
+    // cas-f50f: back to the row that was open, not the list's first row.
+    const opened = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+    if (selectedMachineId) commitSelection({ machineId: selectedMachineId });
+    render();
+    queueMicrotask(() => returnToConversationRow(opened));
+  };
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
-  if (terminal) terminal.onclick = (event) => { attentionSheetOpen = false; hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
+  if (terminal) terminal.onclick = (event) => {
+    const unavailable = terminal.dataset.disabledReason;
+    if (unavailable) { toast(unavailable); return; }
+    attentionSheetOpen = false; hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
   if (returning) returning.onclick = (event) => {
     hubPresentation = "conversation";
@@ -5058,8 +5183,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     // cas-71af (6929 QA F01): when the reason is already on screen under the
     // header, a toast only repeats it a third time. The click calls attention
     // to the sentence that is there instead.
+    // During an outage the line holds only the reason's second half; the
+    // banner holds the first (journey F42).
     const notice = document.querySelector<HTMLElement>("#session-controls-reason");
-    if (notice && !notice.hidden && notice.textContent?.includes(reason)) {
+    const shown = notice?.textContent?.trim() ?? "";
+    if (notice && !notice.hidden && shown && (shown.includes(reason) || reason.endsWith(shown))) {
       notice.classList.remove("called");
       void notice.offsetWidth;
       notice.classList.add("called");
@@ -5128,17 +5256,21 @@ app.addEventListener("click", (event) => {
   // and every outcome is said on the card that was pressed.
   const localKey = `${machineId}:${artifactId}`;
   const onCard = link.matches("a.sheet");
+  const machineLabel = machines.get(machineId)?.label ?? "that machine";
   void openArtifact({
     fetchView: () => connection.artifactView(session, artifactId),
     openWindow: () => window.open("about:blank", "_blank"),
     notify: (message, result) => {
       if (artifactIsLocalOnly(result)) localOnlyArtifacts.add(localKey);
       else if (result?.ok) localOnlyArtifacts.delete(localKey);
-      if (onCard && setAttachmentNote(document, artifactId, message, { machineId, transient: !artifactFailureIsAboutTheFile(result) }) > 0) return;
+      // Journey F28: a note about reaching the machine follows the connection
+      // the header shows, rather than the one it had at the click.
+      const restate = artifactFailureFollowsConnection(result) ? () => artifactOpenFailure(result, machineLabel, artifactMachineReach(machineId)) : undefined;
+      if (onCard && setAttachmentNote(document, artifactId, message, { machineId, transient: !artifactFailureIsAboutTheFile(result), ...(restate ? { restate } : {}) }) > 0) return;
       toast(message);
     },
-    machineLabel: machines.get(machineId)?.label ?? "that machine",
-    machineLive: () => machineFooterConnection(machineId)?.phase === "live",
+    machineLabel,
+    machineLive: () => artifactMachineReach(machineId),
     knownLocalOnly: localOnlyArtifacts.has(localKey),
     fileName: link.querySelector(".fname")?.textContent?.trim() || undefined,
   }).then((opened) => { if (opened) setAttachmentNote(document, artifactId, undefined); });
@@ -5210,9 +5342,9 @@ function renderMachineRegister(): void {
   if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).
-  const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
+  const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
   for (const id of ['paired-machines-toggle', 'palette-paired-machines']) {
-    const button = document.getElementById(id); if (button) button.onclick = open;
+    const button = document.getElementById(id); if (button) button.onclick = () => open(id);
   }
   document.getElementById('paired-machines-close')!.onclick = () => dialog.close();
   document.getElementById('paired-machines-add')!.onclick = () => { dialog.close(); document.querySelector<HTMLDialogElement>('#pair-dialog')?.showModal(); };

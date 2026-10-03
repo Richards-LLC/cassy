@@ -30,6 +30,7 @@ export const FIXTURE_NAMES = [
   "drawer-attention-open",
   "operator-thread",
   "connection-failed-retry",
+  "connection-fatal-browser",
   "pairing-step-1",
   "pairing-email",
   "pairing-code",

@@ -111,6 +111,8 @@ direct servers must be declared in the project file. Cassy remains available
 even if it was registered only in local scope. Shared-cwd workers use a separate
 file under `.cas/worker-mcp/`. Codex disables the named native MCP servers, and
 its Cassy proxy filters those upstreams before startup and reload. Worker
+Codex overrides require server names containing letters, digits, hyphens or
+underscores; ambiguous names refuse launch rather than bypass isolation.
 snapshots cannot overwrite the supervisor's shared proxy catalog/health.
 Listed environment names are removed from inherited and explicitly granted
 values, including machine credential bootstrap. Invalid configuration or a

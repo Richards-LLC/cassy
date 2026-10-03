@@ -155,8 +155,15 @@ pub(super) fn finish_worker_config(
                         config.args.extend(["--strict-mcp-config".into(), "--mcp-config".into(), path.display().to_string()]);
                     } else if cli == "codex" {
                         for name in &policy.supervisor_only_mcp {
-                            let key = serde_json::to_string(name).expect("string serialization");
-                            config.args.extend(["-c".into(), format!("mcp_servers.{key}.enabled=false")]);
+                            // Codex splits override paths on dots; quoted TOML
+                            // keys become literal quote characters, not keys.
+                            // Refuse ambiguous names rather than silently
+                            // configuring a different server.
+                            if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
+                                config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Codex worker isolation requires supervisor-only MCP names containing only letters, digits, hyphens or underscores".into()));
+                                break;
+                            }
+                            config.args.extend(["-c".into(), format!("mcp_servers.{name}.enabled=false")]);
                         }
                     }
                 }

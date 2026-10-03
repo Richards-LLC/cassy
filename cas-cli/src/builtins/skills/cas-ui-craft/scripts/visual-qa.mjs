@@ -382,7 +382,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       }
     }
 
-    // Each axis is judged on its own (cas-0d16, GH #1073). A vertical scroller
+    // Each axis is judged on its own (GH #1073). A vertical scroller
     // (`overflow-x: hidden; overflow-y: auto`) clips sideways but scrolls
     // down: text below its fold is reachable, so it ends the vertical walk
     // instead of counting as a clip boundary on both axes. Only text outside

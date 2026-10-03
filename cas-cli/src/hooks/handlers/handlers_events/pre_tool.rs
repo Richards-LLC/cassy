@@ -3563,6 +3563,99 @@ mod workspace_contract_tests {
                 );
             }
         }
+    /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
+    /// its sanctioned roots and stale Cassy runtime files (sockets, locks,
+    /// pid and session files) under ~/.cas; the supervisor may also clear
+    /// caches under /tmp. `$HOME`, `/`, `/tmp`, the repository and the
+    /// worktree root are never deletable, and every other delete is refused
+    /// as a deletion with its reason, never as "file creation".
+    #[test]
+    fn rm_is_classified_as_deletion_decision_table_cas_cf4f() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let root_path = root.path().canonicalize().expect("canonical fixture root");
+        let home = root_path.join("home");
+        let main = root_path.join("main");
+        let worktree = main.join(".cas/worktrees/solid-condor-23");
+        let artifacts = root_path.join("artifacts");
+        for dir in [home.join(".cas/sessions"), worktree.join("src"), artifacts.join("cas-cf4f/old")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for file in [
+            home.join(".cas/factory-qa4cd6.gui.sock"),
+            home.join(".cas/sessions/qa4cd6.json.lock"),
+            home.join(".cas/sessions/qa4cd6.json"),
+            home.join(".cas/daemon.pid"),
+            home.join(".zshrc"),
+            worktree.join("src/stale.rs"),
+        ] {
+            std::fs::write(file, b"").unwrap();
+        }
+        let tmp_cache = tempfile::Builder::new()
+            .prefix("cas-cf4f-cache")
+            .tempdir_in("/tmp")
+            .expect("/tmp cache dir");
+        let tmp_cache_path = tmp_cache.path().display().to_string();
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let artifacts_root = Some(artifacts.display().to_string());
+        let decide = |command: &str, supervisor: bool| {
+            factory_write_violation(
+                &bash_input(command, &worktree),
+                &artifacts_root,
+                None,
+                supervisor,
+                Some(worktree.as_path()),
+            )
+        };
+
+        let allowed: Vec<(&str, String, bool)> = vec![
+            ("stale socket and lock under ~/.cas", "rm -f ~/.cas/factory-qa4cd6.gui.sock ~/.cas/sessions/qa4cd6.json.lock".into(), false),
+            ("stale session file", "rm ~/.cas/sessions/qa4cd6.json".into(), false),
+            ("stale pid file via $HOME", "rm -f $HOME/.cas/daemon.pid".into(), false),
+            ("a file in the worktree", "rm -f src/stale.rs".into(), false),
+            ("task-scoped artifacts", format!("rm -rf {}", artifacts.join("cas-cf4f/old").display()), false),
+            ("supervisor clears a /tmp cache", format!("rm -rf {tmp_cache_path}"), true),
+        ];
+        for (case, command, supervisor) in &allowed {
+            assert_eq!(decide(command, *supervisor), None, "{case}: {command}");
+        }
+
+        let refused: Vec<(&str, String, bool, &str)> = vec![
+            ("all of $HOME", "rm -rf ~".into(), false, "protected"),
+            ("all of $HOME via the variable", "rm -rf $HOME".into(), true, "protected"),
+            ("the main checkout", format!("rm -rf {}", main.display()), true, "protected"),
+            ("the worktree root", "rm -rf .".into(), false, "protected"),
+            ("/tmp itself", "rm -rf /tmp".into(), true, "protected"),
+            ("the whole ~/.cas directory", "rm -rf ~/.cas".into(), false, "outside"),
+            ("an unrelated home file", "rm ~/.zshrc".into(), false, "outside"),
+            ("a worker clearing /tmp", format!("rm -rf {tmp_cache_path}"), false, "outside"),
+        ];
+        for (case, command, supervisor, rule) in &refused {
+            let violation = decide(command, *supervisor).unwrap_or_else(|| panic!("{case} must be refused: {command}"));
+            assert!(violation.matched_rule.starts_with("deletion"), "{case}: {violation:?}");
+            assert!(violation.matched_rule.contains(rule), "{case}: {violation:?}");
+            let denial = factory_workspace_contract_denial(
+                &bash_input(command, &worktree),
+                &violation,
+                artifacts_root.as_deref(),
+                None,
+                Some(worktree.as_path()),
+            );
+            assert!(
+                denial.contains("deletion") && !denial.contains("file creation"),
+                "{case}: a delete is refused as a deletion, with its reason: {denial}"
+            );
+        }
+
+        // Creation keeps its own rule: `touch` of the same socket path is
+        // still refused as file creation outside the sanctioned roots.
+        let created = decide("touch ~/.cas/factory-qa4cd6.gui.sock", false).expect("creation is still guarded");
+        assert_eq!(created.matched_rule, "none");
     }
 
     #[test]

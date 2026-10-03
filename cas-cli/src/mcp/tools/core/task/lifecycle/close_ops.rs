@@ -8518,6 +8518,12 @@ impl CasCore {
                 {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
+                // cas-49c0: name main-checkout edits that match this delivery.
+                if let Some(note) =
+                    stray_main_checkout_edit_note(worker_wt, &resolved_parent_branch)
+                {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
             }
         }
 
@@ -11204,8 +11210,60 @@ fn stray_main_checkout_edit_note(
     worker_worktree: &std::path::Path,
     parent_branch: &str,
 ) -> Option<String> {
-    let _ = (worker_worktree, parent_branch);
-    None
+    use std::process::Command;
+    let git = |args: &[&str]| -> Option<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(worker_worktree)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    // The main checkout owns the shared git dir; a linked worktree does not.
+    let common_dir = std::path::PathBuf::from(git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
+    if common_dir.file_name() != Some(std::ffi::OsStr::new(".git")) {
+        return None;
+    }
+    let main = common_dir.parent()?.canonicalize().ok()?;
+    if worker_worktree.canonicalize().ok()? == main {
+        return None;
+    }
+    let delivery: std::collections::BTreeSet<String> = git(&[
+        "diff",
+        "--name-only",
+        &format!("{parent_branch}...HEAD"),
+        "--",
+    ])?
+    .lines()
+    .map(str::to_string)
+    .collect();
+    if delivery.is_empty() {
+        return None;
+    }
+    let receipt = clean_tree_receipt(&main);
+    if receipt.unavailable.is_some() {
+        return None;
+    }
+    let stray: Vec<String> = receipt
+        .tracked_dirty
+        .iter()
+        .map(|entry| entry.path.clone())
+        .chain(receipt.untracked.iter().cloned())
+        .filter(|path| delivery.contains(path))
+        .collect();
+    (!stray.is_empty()).then(|| {
+        format!(
+            "STRAY MAIN-CHECKOUT EDITS (cas-49c0): {} has uncommitted changes to {} file(s) this delivery also changes: {}. A worker may have written to the main checkout instead of its worktree {}; the supervisor should review them before they are committed or discarded.",
+            main.display(),
+            stray.len(),
+            stray.join(", "),
+            worker_worktree.display()
+        )
+    })
 }
 
 /// Collect the close-time clean-tree receipt for the git repo at

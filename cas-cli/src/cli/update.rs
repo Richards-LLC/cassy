@@ -269,8 +269,28 @@ pub(crate) fn worker_update_plan(
     clone_path: Option<&Path>,
     mode: UpdateMode,
 ) -> WorkerUpdatePlan {
-    let _ = (role, clone_path, mode);
-    WorkerUpdatePlan::Unrestricted
+    let is_worker = role.is_some_and(|role| role.trim().eq_ignore_ascii_case("worker"));
+    if !is_worker {
+        return WorkerUpdatePlan::Unrestricted;
+    }
+    let worktree = clone_path.filter(|path| !path.as_os_str().is_empty());
+    match (mode, worktree) {
+        (UpdateMode::Check | UpdateMode::PostSwap, _) => WorkerUpdatePlan::Unrestricted,
+        (UpdateMode::Sync, Some(worktree)) => WorkerUpdatePlan::SyncWorktree(worktree.to_path_buf()),
+        (UpdateMode::Sync, None) => WorkerUpdatePlan::Refuse(
+            "cas update --sync refused: this factory worker has no bound worktree (CAS_CLONE_PATH), \
+             so the refresh cannot be confined to it. Ask the supervisor to refresh the project."
+                .to_string(),
+        ),
+        (_, worktree) => WorkerUpdatePlan::Refuse(format!(
+            "cas update refused for a factory worker: this mode refreshes the host's local \
+             projects or installs a binary, which belongs to the supervisor. Run \
+             `cas update --sync` to refresh only your worktree ({}).",
+            worktree
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unbound".to_string())
+        )),
+    }
 }
 
 pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
@@ -283,6 +303,25 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // binary, otherwise every update would recursively launch updates.
     if args.post_swap {
         return execute_post_swap(args, cli, current_version);
+    }
+
+    // cas-49c0: a factory worker refreshes only its own worktree. Its
+    // `--sync` used to rewrite the supervisor's main checkout, and the
+    // host-wide modes walk every registered project.
+    let worker_scope = {
+        let role = std::env::var("CAS_AGENT_ROLE").ok();
+        let clone_path = std::env::var_os("CAS_CLONE_PATH").map(PathBuf::from);
+        worker_update_plan(role.as_deref(), clone_path.as_deref(), UpdateMode::of(args))
+    };
+    match worker_scope {
+        WorkerUpdatePlan::Unrestricted => {}
+        WorkerUpdatePlan::Refuse(message) => anyhow::bail!(message),
+        WorkerUpdatePlan::SyncWorktree(worktree) => {
+            let mut steps = UpdateStepTracker::new(1, !cli.json);
+            return steps.run("Syncing .claude/.codex files in this worktree", || {
+                sync_claude_files_into(cli, cas_root, Some(&worktree))
+            });
+        }
     }
 
     if let Some(path) = &args.register {
@@ -1974,6 +2013,16 @@ fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>
 
 /// Sync rules, skills, and configuration to .claude/.codex directories
 fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result<()> {
+    sync_claude_files_into(cli, cas_root_param, None)
+}
+
+/// [`sync_claude_files`] writing the harness files under `project_root`
+/// instead of `cas_root.parent()` (cas-49c0: a worker's own worktree).
+fn sync_claude_files_into(
+    cli: &Cli,
+    cas_root_param: Option<&Path>,
+    project_root: Option<&Path>,
+) -> anyhow::Result<()> {
     // cas_root is optional - if not provided and Cassy is not initialized, nothing to sync
     let cas_root = match cas_root_param {
         Some(path) => path.to_path_buf(),
@@ -1983,11 +2032,14 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         }
     };
 
+    // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
     #[cfg(feature = "mcp-proxy")]
-    crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
-        &cas_root.join("proxy.toml"),
-    ))?;
-    let project_root = cas_root.parent().unwrap_or(&cas_root);
+    if project_root.is_none() {
+        crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
+            &cas_root.join("proxy.toml"),
+        ))?;
+    }
+    let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
     let claude_dir = project_root.join(".claude");
     let codex_dir = project_root.join(".codex");
     let codex_enabled = codex_dir.exists();

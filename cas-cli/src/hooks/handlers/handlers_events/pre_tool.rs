@@ -3114,8 +3114,20 @@ fn factory_write_violation(
 /// cas-49c0: every file a Codex `apply_patch` call adds, updates, deletes or
 /// moves to, in patch order.
 fn apply_patch_write_targets(patch: &str) -> Vec<String> {
-    let _ = patch;
-    Vec::new()
+    // Only header lines name files; `+`, `-` and ` ` lines are content, so a
+    // header-looking line inside an added file is never a target.
+    const HEADERS: [&str; 4] = ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
+    patch
+        .lines()
+        .filter_map(|line| {
+            HEADERS
+                .iter()
+                .find_map(|header| line.strip_prefix(header))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn unsanctioned_factory_path(

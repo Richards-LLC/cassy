@@ -941,8 +941,11 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
 /// edits and not only shell commands. Codex reports those calls with
 /// `tool_name: "apply_patch"` whichever matcher selects them.
 fn codex_hook_matcher(event: &str) -> &'static str {
-    let _ = event;
-    "^Bash$"
+    if event == "PreToolUse" {
+        "^(Bash|apply_patch)$"
+    } else {
+        "^Bash$"
+    }
 }
 
 #[cfg(test)]

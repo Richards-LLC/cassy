@@ -1503,7 +1503,19 @@ pub(crate) fn settle_retired_worker_bindings(
     held_task_ids: &[String],
     retirement: WorkerRetirement,
 ) -> usize {
-    let _ = retirement;
+    if retirement == WorkerRetirement::Recycle {
+        // cas-a622: parking or releasing here is what cost proud-newt-45 its
+        // assignment. The replacement is the same name in the same worktree,
+        // so it already owns every binding; graceful_shutdown released only
+        // the old process's leases, which `task action=start` re-takes from
+        // the resume brief (`enqueue_recycle_resume_brief`).
+        tracing::info!(
+            worker = %agent.name,
+            held = held_task_ids.len(),
+            "cas-a622: recycle keeps the worker's task bindings"
+        );
+        return 0;
+    }
     // Emit the same durable supervisor lifecycle relay used for unexpected
     // PTY exits. The process is already gone, and this runs before the legacy
     // binding cleanup, so the relay records and parks any task that was held
@@ -1533,8 +1545,58 @@ pub(crate) fn settle_retired_worker_bindings(
 /// The brief a recycled worker receives so its fresh conversation resumes its
 /// assigned work (cas-a622). `None` when it holds no nonterminal task.
 pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str) -> Option<String> {
-    let _ = (cas_dir, worker_name);
-    None
+    let task_store = open_task_store(cas_dir).ok()?;
+    let mut held: Vec<cas_types::Task> = task_store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|task| task.assignee.as_deref() == Some(worker_name) && !task.is_terminal())
+        .collect();
+    if held.is_empty() {
+        return None;
+    }
+    held.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut brief =
+        "Your context was reset by a recycle; your worktree and every task binding were kept.\n"
+            .to_string();
+    let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
+    for task in held.iter().filter(|task| task.status == cas_types::TaskStatus::InProgress) {
+        brief.push_str(&format!(
+            "{}\n  Resume it: run `task action=start id={}` to re-take its lease, read its notes with \
+             `task action=notes id={}`, then continue from the last checkpoint.\n",
+            line(task),
+            task.id,
+            task.id
+        ));
+    }
+    let parked: Vec<String> = held
+        .iter()
+        .filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
+        .map(line)
+        .collect();
+    if !parked.is_empty() {
+        brief.push_str(&format!(
+            "Awaiting merge (re-close each after its merge lands; do not start it):\n{}\n",
+            parked.join("\n")
+        ));
+    }
+    let other: Vec<String> = held
+        .iter()
+        .filter(|task| {
+            !matches!(
+                task.status,
+                cas_types::TaskStatus::InProgress | cas_types::TaskStatus::AwaitingMerge
+            )
+        })
+        .map(line)
+        .collect();
+    if !other.is_empty() {
+        brief.push_str(&format!(
+            "Also assigned to you (start only when the supervisor directs):\n{}\n",
+            other.join("\n")
+        ));
+    }
+    Some(brief)
 }
 
 /// Queue [`recycle_resume_brief`] to the recycled worker. Returns the prompt
@@ -1545,8 +1607,18 @@ pub(crate) fn enqueue_recycle_resume_brief(
     factory_session: &str,
     worker_name: &str,
 ) -> anyhow::Result<Option<i64>> {
-    let _ = (cas_dir, supervisor_name, factory_session, worker_name);
-    Ok(None)
+    let Some(brief) = recycle_resume_brief(cas_dir, worker_name) else {
+        return Ok(None);
+    };
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = queue.enqueue_with_summary(
+        supervisor_name,
+        worker_name,
+        &brief,
+        Some(factory_session),
+        Some("Recycled: resume your assigned work"),
+    )?;
+    Ok(Some(id))
 }
 
 /// cas-7a94: release tasks bound to a dead/shutting-down worker so they are

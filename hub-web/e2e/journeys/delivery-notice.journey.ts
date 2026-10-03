@@ -134,6 +134,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const copyBox = await notice.getByRole("button", { name: "Copy" }).boundingBox();
     expect(payloadBox!.y, "Copy has its own row, above the full Details text at390px").toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height);
     await expect(notice.locator("pre")).toContainText("9 minutes ago");
+    // cas-ed87: Details reads as the message, never as a {summary, message} object.
+    await expect(notice.locator("pre"), "Details is the message as text at 390px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
     await notice.locator("summary").focus();
     await page.keyboard.press("Tab");
     await expectWholeFocusRing(notice.getByRole("button", { name: "Copy" }), { vertical: true });
@@ -216,6 +218,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const payloadBox = await attentionItems.locator("pre").boundingBox();
     const copyBox = await attentionItems.getByRole("button", { name: "Copy" }).boundingBox();
     expect(payloadBox!.y, "Copy has its own row at1280px too").toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height);
+    await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
     hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.

@@ -268,6 +268,62 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(document.activeElement).toBe(control.querySelector(".conversation-end-ask"));
   });
 
+  it("keeps a failed End session actionable and focused without dropping its row (cas-a549)", async () => {
+    const container = document.createElement("nav"); document.body.replaceChildren(container);
+    const list = new ConversationList();
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]);
+    const end = vi.fn(async () => { throw new Error("DELETE /v1/sessions/noble-cheetah-84 failed (500)"); });
+    const open = vi.fn();
+    list.render(container, rows, open, end);
+    const keptRow = container.querySelectorAll(".conversation-row")[1];
+    const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
+    control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+    const confirm = control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!;
+    confirm.focus(); confirm.click();
+    await Promise.resolve();
+    const retry = control.querySelector<HTMLButtonElement>(".conversation-end-ask")!;
+    const error = control.querySelector<HTMLElement>(".conversation-end-error")!;
+    expect(error.textContent).toBe("Could not end noble-cheetah-84 on Atlas. Try End session again. If it still fails, check the session on Atlas.");
+    // cas-9ae6: focus is back on End session, which reads the failure as its
+    // description; the line is not also an alert, so it is said once.
+    expect(error.hasAttribute("role")).toBe(false);
+    expect(document.activeElement).toBe(retry);
+    expect(retry.getAttribute("aria-describedby")).toBe(error.id);
+    expect(error.id).not.toBe("");
+    expect(container.querySelectorAll(".conversation-row")).toHaveLength(2);
+    expect(container.querySelectorAll(".conversation-row")[1]).toBe(keptRow);
+    // A catalog heartbeat keeps the actionable error and keyboard position.
+    list.render(container, rows, open, end);
+    expect(document.activeElement).toBe(retry);
+    expect(container.querySelector(".conversation-ended")).toBeNull();
+    // Retrying still asks for confirmation; Cancel does not send another request.
+    retry.click();
+    expect(control.dataset.state).toBe("confirm");
+    expect(document.activeElement).toBe(control.querySelector(".conversation-end-cancel"));
+    control.querySelector<HTMLButtonElement>(".conversation-end-cancel")!.click();
+    expect(end).toHaveBeenCalledOnce();
+  });
+
+  it("does not steal focus if the operator leaves while End session is pending (cas-a549)", async () => {
+    const container = document.createElement("nav");
+    const elsewhere = document.createElement("button"); elsewhere.textContent = "Another action";
+    document.body.replaceChildren(container, elsewhere);
+    let reject!: (error: Error) => void;
+    const end = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; }));
+    new ConversationList().render(container, [row("calm-puma-34", 300, { canEnd: true })], vi.fn(), end);
+    container.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+    const confirm = container.querySelector<HTMLButtonElement>(".conversation-end-confirm")!;
+    confirm.focus(); confirm.click();
+    elsewhere.focus();
+    reject(new Error("request failed (500)"));
+    await Promise.resolve();
+    expect(document.activeElement).toBe(elsewhere);
+    expect(container.querySelector(".conversation-end-error")?.textContent).toContain("Try End session again.");
+    // Focus stayed elsewhere, so nothing reads the description: the failure is an alert (cas-9ae6).
+    expect(container.querySelector(".conversation-end-error")?.getAttribute("role")).toBe("alert");
+    expect(container.querySelectorAll(".conversation-row")).toHaveLength(1);
+  });
+
   it("gives End session its own column only on rows that can end (cas-339a)", () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100)]);

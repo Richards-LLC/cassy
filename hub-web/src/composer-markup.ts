@@ -18,15 +18,36 @@ export function composerMarkup(supervisor: string | undefined, threadMarkup = ""
 export const DRAFT_TOO_LONG_NOTE = "This draft is too long to keep if the page reloads. Send it, or copy it somewhere safe, before you leave.";
 
 /**
- * Show or hide the too-long note. The sentence is written only when it was not
- * already showing, so a screen reader hears it once, not on every keystroke.
+ * cas-f657: the draft fits, but the browser refused to store it (localStorage
+ * is full or denied), so it too lives only in this page.
  */
-export function applyDraftNote(root: ParentNode, tooLong: boolean): void {
+export const DRAFT_NOT_SAVED_NOTE = "This browser couldn't save this draft, because its storage is full, so it won't survive a reload. Send it, or copy it somewhere safe, before you leave.";
+
+/** Why a draft lives only in this page, or false when it is safe on disk. */
+export type DraftNoteReason = false | "too-long" | "not-saved";
+
+/**
+ * Show or hide the draft note. The sentence is written only when it changes,
+ * so a screen reader hears it once, not on every keystroke. While it shows,
+ * the composer's textarea is described by it too (cas-f657), so a screen
+ * reader user focused on the field hears why the draft is at risk. `true` is
+ * the cas-adfc spelling of "too-long".
+ */
+export function applyDraftNote(root: ParentNode, reason: DraftNoteReason | boolean): void {
   const note = root.querySelector<HTMLElement>("#message-draft-note");
   if (!note) return;
-  if (!tooLong) { note.hidden = true; note.textContent = ""; return; }
-  if (!note.hidden && note.textContent === DRAFT_TOO_LONG_NOTE) return;
-  note.textContent = DRAFT_TOO_LONG_NOTE;
+  const why = reason === true ? "too-long" : reason;
+  const field = root.querySelector<HTMLElement>("#message-text");
+  const describedBy = (field?.getAttribute("aria-describedby") ?? "").split(/\s+/).filter((id) => id && id !== note.id);
+  if (!why) {
+    note.hidden = true; note.textContent = "";
+    if (field) field.setAttribute("aria-describedby", describedBy.join(" "));
+    return;
+  }
+  if (field) field.setAttribute("aria-describedby", [...describedBy, note.id].join(" "));
+  const sentence = why === "not-saved" ? DRAFT_NOT_SAVED_NOTE : DRAFT_TOO_LONG_NOTE;
+  if (!note.hidden && note.textContent === sentence) return;
+  note.textContent = sentence;
   note.hidden = false;
 }
 

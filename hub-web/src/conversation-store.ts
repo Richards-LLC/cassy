@@ -57,14 +57,23 @@ export class ConversationStore<T> {
    * it will not survive a reload (cas-adfc).
    */
   set(conversation: string, value: T): boolean {
+    return this.put(conversation, value) !== "too-long";
+  }
+
+  /**
+   * As `set`, saying what happened: `kept` is on disk, `too-long` is over the
+   * per-conversation bound, `not-saved` fit but the browser refused the write
+   * (a full or denied localStorage), so it lives only in this page (cas-f657).
+   */
+  put(conversation: string, value: T): "kept" | "too-long" | "not-saved" {
     const records = this.read();
     const fits = JSON.stringify(value).length <= this.maxValueChars;
     records.delete(conversation);
     if (fits) records.set(conversation, { value, updatedAt: this.now() });
     const ordered = [...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt);
     while (ordered.length > this.maxConversations) ordered.shift();
-    this.write(new Map(ordered));
-    return fits;
+    const written = this.write(new Map(ordered));
+    return !fits ? "too-long" : written ? "kept" : "not-saved";
   }
 
   delete(conversation: string): void {
@@ -110,12 +119,14 @@ export class ConversationStore<T> {
     this.write(records);
   }
 
-  private write(records: Map<string, Record_<T>>): void {
-    if (!this.storage) return;
+  /** False when the browser refused the write (full or denied): the in-memory state still holds for this page. */
+  private write(records: Map<string, Record_<T>>): boolean {
+    if (!this.storage) return false;
     try {
       if (records.size) this.storage.setItem(this.key, JSON.stringify(Object.fromEntries(records)));
       else this.storage.removeItem(this.key);
-    } catch { /* full or denied: the in-memory state still holds for this page */ }
+      return true;
+    } catch { return false; }
   }
 }
 
@@ -165,9 +176,11 @@ export function validDraft(raw: unknown): Draft | undefined {
 /**
  * What saving a draft did: `kept` is on disk for the next load, `cleared` was
  * blank (or withheld) and is gone, `too-long` is over the store's bound, so it
- * lives only in this page and a reload loses it (cas-adfc).
+ * lives only in this page and a reload loses it (cas-adfc), and `not-saved`
+ * fit but the browser refused to store it (full or denied localStorage), so it
+ * too lives only in this page (cas-f657).
  */
-export type DraftSave = "kept" | "cleared" | "too-long";
+export type DraftSave = "kept" | "cleared" | "too-long" | "not-saved";
 
 /** The drafts store: a blank draft is a deletion, never a stored entry. */
 export function draftStore(storage: StorageLike | undefined, options: ConversationStoreOptions = {}): {
@@ -180,7 +193,7 @@ export function draftStore(storage: StorageLike | undefined, options: Conversati
     save: (conversation, draft) => {
       const valid = draft && validDraft(draft);
       if (!valid) { store.delete(conversation); return "cleared"; }
-      return store.set(conversation, valid) ? "kept" : "too-long";
+      return store.put(conversation, valid);
     },
   };
 }

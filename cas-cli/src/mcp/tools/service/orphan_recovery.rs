@@ -131,7 +131,7 @@ pub(crate) fn recover_worker_vanished_with_exit(
     }
 
     for task_id in &candidate_ids {
-        if park_orphaned_task(&task_store, task_id, agent, reason) {
+        if park_orphaned_task(cas_root, &task_store, task_id, agent, reason) {
             summary.recovered_task_ids.push(task_id.clone());
         }
     }
@@ -318,6 +318,7 @@ fn task_assigned_to_agent(assignee: &Option<String>, agent: &Agent) -> bool {
 
 /// Returns true if the task was parked to Open.
 fn park_orphaned_task(
+    cas_root: &Path,
     task_store: &Arc<dyn TaskStore>,
     task_id: &str,
     agent: &Agent,
@@ -328,6 +329,16 @@ fn park_orphaned_task(
         Err(_) => return false,
     };
     if is_protected_status(task.status) {
+        return false;
+    }
+    // A held-task snapshot can outlive its old binding. Never clear another
+    // worker's assignment or QA claim while recovering this death incident.
+    if task.assignee.is_some() && !task_assigned_to_agent(&task.assignee, agent) {
+        return false;
+    }
+    if let Err(error) = cas_store::release_qa_claim_for_reviewer(cas_root, task_id, &agent.name) {
+        tracing::error!(task_id, worker = %agent.name, %error,
+            "cas-3172: QA claim release failed; retaining orphaned task binding for retry");
         return false;
     }
 
@@ -938,6 +949,49 @@ mod cas_3dcb_death_relay_tests {
                 .filter(|n| n.event_type == "worker_died")
                 .count()
         }
+    }
+
+    #[test]
+    fn orphan_qa_recovery_preserves_round_and_retries_failed_release_cas_3172() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("dead-reviewer", 900);
+        let store = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = cas_types::Task::new("cas-qa3172".into(), "QA".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        store.add(&task).unwrap();
+        let now = Utc::now();
+        let opened = cas_store::open_qa_pass(&fixture.cas_root, &cas_store::NewQaPass {
+            task_id: "cas-delivery3172", implementer_agent_id: "implementer",
+            branch: "factory/implementer", bound_head: "aaaa1111",
+            deadline_at: now + chrono::Duration::minutes(45), max_rounds: 3,
+        }, now).unwrap();
+        let cas_store::QaPassOpen::Dispatched(pass) = opened else { panic!("new round"); };
+        cas_store::set_qa_task(&fixture.cas_root, &pass.id, &task.id).unwrap();
+        let before = cas_store::claim_qa_pass(&fixture.cas_root, &pass.task_id, &worker.name, now).unwrap();
+        let conn = rusqlite::Connection::open(fixture.cas_root.join("cas.db")).unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_qa_release BEFORE UPDATE ON qa_passes
+            WHEN OLD.state = 'claimed' AND NEW.state = 'pending'
+            BEGIN SELECT RAISE(ABORT, 'injected QA release failure'); END;").unwrap();
+        let recover = || recover_worker_vanished(&fixture.cas_root, fixture.agent_store.as_ref(),
+            &worker, std::slice::from_ref(&task.id), "heartbeat stale");
+        assert!(recover().recovered_task_ids.is_empty());
+        assert_eq!(store.get(&task.id).unwrap().assignee, task.assignee);
+        assert_eq!(store.get(&task.id).unwrap().status, task.status);
+        assert_eq!(cas_store::latest_qa_pass(&fixture.cas_root, &pass.task_id, now).unwrap().unwrap(), before);
+        conn.execute_batch("DROP TRIGGER reject_qa_release;").unwrap();
+        assert_eq!(recover().recovered_task_ids, vec![task.id.clone()]);
+        let pending = cas_store::latest_qa_pass(&fixture.cas_root, &pass.task_id, now).unwrap().unwrap();
+        assert_eq!(pending.state, cas_types::QaPassState::Pending);
+        assert_eq!(pending.id, before.id);
+        assert_eq!(pending.round, before.round);
+        assert_eq!(pending.deadline_at, before.deadline_at);
+        assert!(pending.reviewer_agent_id.is_none());
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Open);
+        assert!(store.get(&task.id).unwrap().assignee.is_none());
+        let replacement = cas_store::claim_qa_pass(&fixture.cas_root, &pass.task_id, "replacement", now).unwrap();
+        assert_eq!(replacement.id, before.id);
+        assert_eq!(replacement.deadline_at, before.deadline_at);
     }
 
     /// The reported defect (GH #168): the emitter wrote to `supervisor_queue`

@@ -322,6 +322,16 @@ impl CodeWatcher {
         &self.config.watch_paths
     }
 
+    pub(crate) fn request_reconcile(&self) {
+        self.initial_reconcile.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn source_files(&self) -> Vec<PathBuf> {
+        super::indexing::collect_source_files(
+            &self.config.watch_paths, &self.config.extensions, &self.config.ignore_patterns,
+        )
+    }
+
     /// Check if a path should be watched based on extension and ignore patterns
     fn should_watch_path(path: &Path, extensions: &[String], ignore_patterns: &[String]) -> bool {
         if Self::is_ignored_path(path, ignore_patterns) {

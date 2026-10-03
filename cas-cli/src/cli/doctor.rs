@@ -1376,7 +1376,7 @@ fn root_projection_autofix(root: &Path) -> Option<Check> {
 fn code_index_autofix(root: &Path) -> Option<Check> {
     let state = gather_symbol_index_state(root);
     if !matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning) { return None; }
-    let project = root.parent().unwrap_or(root).to_path_buf();
+    let project = crate::daemon::indexing::code_project_root(root);
     let cfg = Config::load(root).unwrap_or_default().code();
     let roots = vec![project];
     let mut files = crate::daemon::indexing::collect_source_files(&roots, &cfg.extensions, &cfg.exclude_patterns);
@@ -4427,14 +4427,15 @@ struct SymbolIndexState {
 const SYMBOL_INDEX_LAG_WARN_SECS: i64 = 24 * 60 * 60;
 
 fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
-    let enabled = Config::load(cas_root)
-        .map(|config| config.code().enabled)
-        .unwrap_or(true);
-    let searchable = crate::hybrid_search::code::code_search_available(cas_root);
+    let project_root = crate::daemon::indexing::code_project_root(cas_root);
+    gather_symbol_index_state_for(cas_root, &project_root)
+}
 
-    let project_root = cas_root.parent().unwrap_or(cas_root);
-    // Same derivation the indexer writes with, or the lookup would miss every row.
-    let (_repo_root, repository) = crate::daemon::indexing::resolve_repository(project_root);
+fn gather_symbol_index_state_for(cas_root: &Path, project_root: &Path) -> SymbolIndexState {
+    let code_config = Config::load(cas_root).unwrap_or_default().code();
+    let enabled = code_config.enabled;
+    let searchable = crate::hybrid_search::code::code_search_available(cas_root);
+    let (_, repository) = crate::daemon::indexing::resolve_repository(project_root);
 
     let store = match crate::store::open_code_store(cas_root) {
         Ok(store) => store,
@@ -4460,6 +4461,14 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         }
     };
 
+    let files: Vec<_> = files.into_iter().filter(|file| {
+        crate::daemon::indexing::code_file_in_root(&file.path, project_root)
+    }).collect();
+    let (eligible, skipped) = crate::daemon::indexing::checkout_source_files(
+        project_root, &code_config.extensions, &code_config.exclude_patterns,
+    );
+    let indexed_files = crate::daemon::indexing::checkout_indexed_file_count(&files, &eligible);
+
     let vector_store = match cas_store::SqliteCodeVectorStore::open(cas_root) {
         Ok(store) => store,
         Err(e) => {
@@ -4478,7 +4487,7 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
     // contain, which reads as "0 pending" for a store whose queue was emptied
     // while thousands of symbols still have no vector (GH #696).
     let vectors = vector_store.coverage().unwrap_or_default();
-    let scan = vector_store.index_state(&repository).ok().flatten();
+    let scan = vector_store.index_state(&crate::daemon::indexing::code_scan_key(project_root)).ok().flatten();
     let current_head = crate::daemon::indexing::resolve_repository(project_root)
         .0
         .as_deref()
@@ -4496,11 +4505,11 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         files: files.len(),
         symbols: store.count_symbols().unwrap_or(0),
         last_indexed: files.iter().map(|file| file.updated).max(),
-        eligible_files: scan.as_ref().map(|scan| scan.eligible_files).unwrap_or(0),
-        indexed_files: scan.as_ref().map(|scan| scan.indexed_files).unwrap_or(0),
+        eligible_files: eligible.len(),
+        indexed_files,
         failed_files: scan.as_ref().map(|scan| scan.failed_files).unwrap_or(0),
-        skipped_files: scan.as_ref().map(|scan| scan.skipped_files).unwrap_or(0),
-        skipped_detail: scan.as_ref().and_then(|scan| scan.skipped_detail.clone()),
+        skipped_files: skipped.len(),
+        skipped_detail: (!skipped.is_empty()).then(|| skipped.join("; ")),
         vector_eligible: vectors.eligible,
         vectorized: vectors.vectorized,
         vector_pending: vectors.pending,
@@ -9624,6 +9633,33 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(idle.status, CheckStatus::Ok));
+    }
+
+    #[test]
+    fn doctor_counts_current_checkout_after_sibling_scan_cas_e4aa() {
+        let fixture = crate::daemon::worktree_index_tests::Worktrees::new();
+        assert!(fixture.scan(&fixture.main).errors.is_empty());
+        assert!(fixture.scan(&fixture.sibling).errors.is_empty());
+        // Repository-level historical failure receipts cannot certify this checkout.
+        cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap()
+            .record_scan("repo", 999, 1, 998, 0, None, None, Some("false retirement")).unwrap();
+        let main = gather_symbol_index_state_for(&fixture.cas_root, &fixture.main);
+        assert_eq!((main.files, main.eligible_files, main.indexed_files, main.failed_files), (2, 2, 2, 0));
+        assert_eq!(main.head_lag, Some(false));
+        assert!(main.scan_error.is_none());
+        assert!(matches!(symbol_index_check(main, chrono::Utc::now()).status, CheckStatus::Ok));
+        let sibling = gather_symbol_index_state_for(&fixture.cas_root, &fixture.sibling);
+        assert_eq!((sibling.files, sibling.eligible_files, sibling.indexed_files, sibling.failed_files), (1, 1, 1, 0));
+        assert_eq!(sibling.head_lag, Some(false));
+        assert!(matches!(symbol_index_check(sibling, chrono::Utc::now()).status, CheckStatus::Ok));
+        fs::write(fixture.main.join("unindexed.rs"), "pub fn unindexed() {}\n").unwrap();
+        fs::write(fixture.main.join("binary.rs"), [0xff, 0xfe, 0x00]).unwrap();
+        let changed = gather_symbol_index_state_for(&fixture.cas_root, &fixture.main);
+        assert_eq!((changed.eligible_files, changed.indexed_files, changed.skipped_files), (3, 2, 1));
+        let check = symbol_index_check(changed, chrono::Utc::now());
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("2/3 eligible"), "{}", check.message);
+        assert!(check.message.contains("0 file failure(s)"), "{}", check.message);
     }
 
     /// End-to-end over a real code store: a seeded stale `code_files.updated` row is what the

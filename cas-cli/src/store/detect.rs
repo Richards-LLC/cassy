@@ -750,11 +750,27 @@ pub fn open_rule_store_local(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
     open_rule_store_base(cas_dir, false)
 }
 
-/// Initialize a new .cas directory
+/// Whether `cas_dir` already holds the Cassy store (its `cas.db`).
+pub fn cas_store_present(cas_dir: &Path) -> bool {
+    cas_dir.join("cas.db").exists()
+}
+
+/// Whether `cas_dir` already holds a project configuration file.
+pub fn cas_config_present(cas_dir: &Path) -> bool {
+    cas_dir.join("config.toml").exists() || cas_dir.join("config.yaml").exists()
+}
+
+/// Initialize a .cas directory: create and migrate its store.
+///
+/// An already-initialized directory (one with `cas.db`) is returned as is. A
+/// `.cas` that exists without a store, for example one holding only a
+/// committed `config.toml`, gets its store created and migrated; an existing
+/// configuration is kept as written (cas-563f). Only a directory with no
+/// configuration at all gets the default one.
 pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
     let cas_dir = path.join(".cas");
 
-    if cas_dir.exists() {
+    if cas_store_present(&cas_dir) {
         return Ok(cas_dir);
     }
 
@@ -790,9 +806,11 @@ pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
     // Create verification store for task quality gates (auto-inits on open)
     let _verification_store = SqliteVerificationStore::open(&cas_dir)?;
 
-    // Create default config
-    let config = Config::default();
-    config.save(&cas_dir)?;
+    // Create the default config, unless the directory already carries one.
+    if !cas_config_present(&cas_dir) {
+        let config = Config::default();
+        config.save(&cas_dir)?;
+    }
 
     // Run migrations to create any additional tables (e.g., worktrees)
     // Fail init if migrations fail to avoid partial/unsafe schema state.

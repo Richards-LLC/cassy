@@ -130,15 +130,38 @@ impl CasService {
             .open_task_store()?
             .get(task_id)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Task not found: {error}")))?;
+        // cas-624f: past the escalation (max_rounds rejections) this request
+        // is the supervisor's fix plan, and it opens exactly one more round.
+        // Log it as the override it is.
+        let rejected_rounds = cas_store::list_qa_passes(&self.inner.cas_root, task_id)
+            .unwrap_or_default()
+            .iter()
+            .filter(|pass| pass.state == cas_types::QaPassState::Failed)
+            .count() as u32;
+        let max_rounds = crate::config::Config::load(&self.inner.cas_root)
+            .map(|config| config.qa().max_rounds)
+            .unwrap_or(3)
+            .max(1);
         let dispatch = self
             .inner
             .request_independent_qa(&task, reason.trim())
             .map_err(|why| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_request rejected: {why}")))?;
-        let note = format!(
-            "[{}] ✅ DECISION Independent QA requested by supervisor {supervisor}. Reason: {}",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-            reason.trim(),
-        );
+        let note = if rejected_rounds >= max_rounds {
+            format!(
+                "[{}] ✅ DECISION Independent QA fix plan: supervisor {supervisor} opened round {} past the \
+                 escalation after {rejected_rounds} rejected rounds (qa.max_rounds {max_rounds}). A further \
+                 rejection escalates again. Fix plan: {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                rejected_rounds + 1,
+                reason.trim(),
+            )
+        } else {
+            format!(
+                "[{}] ✅ DECISION Independent QA requested by supervisor {supervisor}. Reason: {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                reason.trim(),
+            )
+        };
         if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
             tracing::warn!(task_id = %task_id, error = %error, "cas-74284: qa_request decision note not recorded");
         }

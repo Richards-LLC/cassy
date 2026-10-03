@@ -223,6 +223,15 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
     }
 }
 
+/// cas-624f: rejected (failed) rounds on record for a delivery.
+pub(crate) fn failed_qa_rounds(cas_root: &Path, task_id: &str) -> u32 {
+    cas_store::list_qa_passes(cas_root, task_id)
+        .unwrap_or_default()
+        .iter()
+        .filter(|pass| pass.state == cas_types::QaPassState::Failed)
+        .count() as u32
+}
+
 fn qa_pass_covers_integrated_delivery(
     repo: &Path,
     pass: &QaPass,
@@ -642,13 +651,24 @@ impl CasCore {
             )));
         };
         let now = chrono::Utc::now();
+        // cas-624f: after `max_rounds` rejections Cassy escalates instead of
+        // opening another round, and the escalation offers "a fix plan with
+        // the implementer". The supervisor's explicit qa_request (with that
+        // plan as its reason) is the executable form of that option: it opens
+        // exactly one more round. A worker's close stays capped, so a further
+        // rejection escalates again.
+        let max_rounds = if requested.is_some_and(|reason| !reason.trim().is_empty()) {
+            qa.max_rounds.max(failed_qa_rounds(&self.cas_root, &task.id) + 1)
+        } else {
+            qa.max_rounds
+        };
         let new = NewQaPass {
             task_id: &task.id,
             implementer_agent_id: implementer,
             branch,
             bound_head: head,
             deadline_at: now + chrono::Duration::minutes(i64::from(qa.pass_timeout_mins.max(1))),
-            max_rounds: qa.max_rounds,
+            max_rounds,
         };
         // cas-ce39: a new tip retires the round open for the old one. Report
         // which, so its work item is cancelled and a reviewer who had claimed
@@ -723,8 +743,12 @@ impl CasCore {
                 self.escalate_qa_rounds(task, failed_rounds, &latest);
                 format!(
                     "\n\nINDEPENDENT QA ESCALATED: {failed_rounds} rejected rounds (latest {}). \
-                     Cassy will not open another round; the supervisor decides (fix plan, waiver, or cancel).",
-                    latest.id
+                     Cassy will not open another round by itself; the supervisor decides: a fix plan \
+                     (`{prefix}verification action=qa_request task_id={task} summary=\"<fix plan>\"` opens \
+                     one more round), a waiver, or cancel.",
+                    latest.id,
+                    prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    task = task.id,
                 )
             }
         };
@@ -1254,7 +1278,9 @@ impl CasCore {
         let body = crate::prompt_revalidation::attach_blocker_envelope(
             &format!(
                 "Independent QA rejected {task} {failed_rounds} times (latest pass {pass}, ledger {ledger}). \
-                 Cassy stopped opening rounds. Decide: a fix plan with the implementer, a logged waiver \
+                 Cassy stopped opening rounds. Decide: a fix plan with the implementer (once it is \
+                 pushed and parked, `{prefix}verification action=qa_request task_id={task} \
+                 summary=\"<fix plan>\"` opens one more round), a logged waiver \
                  (`{prefix}verification action=qa_waive task_id={task} summary=\"...\"`), or cancel.",
                 task = task.id,
                 prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),

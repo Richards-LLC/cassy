@@ -1995,3 +1995,105 @@ async fn a_stale_local_target_does_not_make_a_ci_only_delivery_user_facing_cas_3
     assert!(!parked.contains("INDEPENDENT QA"), "{parked}");
     assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty());
 }
+
+/// One rejected round: start the open round's QA task as `reviewer`, record
+/// a rejection for `head`, and put the delivery back in progress.
+async fn reject_open_round(reviewer: &CasCore, repo: &Path, task_id: &str, round: u32, head: &str) {
+    let cas_dir = repo.join(".cas");
+    reviewer
+        .cas_task_start(Parameters(IdRequest {
+            id: qa_task_id(&cas_dir, task_id),
+        }))
+        .await
+        .unwrap();
+    let ledger = round_evidence(&repo.join(format!("round-{round}")), task_id, head);
+    let rejected = extract_text(
+        CasService::new(reviewer.clone(), None)
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_record",
+                "task_id": task_id,
+                "status": "rejected",
+                "summary": format!("round {round}: a distinct real defect"),
+                "ledger_path": ledger.display().to_string(),
+            }))))
+            .await
+            .unwrap(),
+    );
+    assert!(rejected.contains("REJECTION"), "{rejected}");
+    reopened_to_in_progress(&cas_dir, task_id);
+}
+
+/// cas-624f: after `max_rounds` (3) rejections Cassy escalates, and the
+/// escalation offers "a fix plan with the implementer". That option had no
+/// executable path: the supervisor's qa_request was refused with the same
+/// escalation. Now a supervisor qa_request with the fix plan opens round 4,
+/// with its QA task and deadline, logged as an override. The worker's own
+/// close stays capped, so a 4th rejection escalates again.
+#[tokio::test]
+async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+
+    let mut head = git(&repo, &["rev-parse", "HEAD"]);
+    for round in 1..=3u32 {
+        let parked = close_text(&core, &task_id).await;
+        assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "round {round}: {parked}");
+        reject_open_round(&reviewer, &repo, &task_id, round, &head).await;
+        head = commit_file(
+            &repo,
+            "web/composer.css",
+            &format!(".composer{{gap:{}px}}\n", 8 + round),
+            &format!("fix round {round}"),
+        );
+    }
+
+    // The worker's park after three rejections escalates; no round opens.
+    let escalated = close_text(&core, &task_id).await;
+    assert!(escalated.contains("INDEPENDENT QA ESCALATED: 3 rejected rounds"), "{escalated}");
+    assert!(escalated.contains("action=qa_request"), "the escalation names the fix-plan path: {escalated}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 3, "no fourth round from the worker's close");
+    assert_eq!(open_task_store(&cas_dir).unwrap().get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
+
+    // The supervisor's fix plan opens round 4 with its QA task and deadline.
+    let _role = SupervisorRole::enter(&mut test_env);
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let fix_plan = "pair with the implementer on the focus order; reviewer checks keyboard-only first";
+    let requested = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_request",
+                "task_id": task_id,
+                "summary": fix_plan,
+            }))))
+            .await
+            .expect("the supervisor's fix plan opens one more round"),
+    );
+    assert!(requested.contains("INDEPENDENT QA DISPATCHED"), "{requested}");
+    let round4 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .expect("round four");
+    assert_eq!(round4.round, 4);
+    assert_eq!(round4.bound_head, head);
+    assert!(round4.state.is_active());
+    assert!(round4.deadline_at > chrono::Utc::now(), "round four has a deadline");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let qa_task = tasks.get(round4.qa_task_id.as_deref().expect("round four's QA task")).unwrap();
+    assert!(qa_task.description.contains(fix_plan), "{}", qa_task.description);
+    let notes = tasks.get(&task_id).unwrap().notes;
+    assert!(
+        notes.contains("Independent QA fix plan: supervisor") && notes.contains("past the escalation after 3 rejected rounds"),
+        "the override is logged: {notes}"
+    );
+
+    // A 4th rejection escalates again: the worker's next park opens nothing.
+    drop(_role);
+    reject_open_round(&reviewer, &repo, &task_id, 4, &head).await;
+    commit_file(&repo, "web/composer.css", ".composer{gap:12px}\n", "fix round 4");
+    let escalated_again = close_text(&core, &task_id).await;
+    assert!(escalated_again.contains("INDEPENDENT QA ESCALATED: 4 rejected rounds"), "{escalated_again}");
+    assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 4);
+}

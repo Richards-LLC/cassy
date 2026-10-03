@@ -5703,14 +5703,55 @@ impl CasCore {
         else {
             return;
         };
+        let Ok(head) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["rev-parse", "HEAD"])
+            .output()
+        else {
+            return;
+        };
+        if !head.status.success() {
+            return;
+        }
+        let Ok(head) = String::from_utf8(head.stdout) else {
+            return;
+        };
+        let expected_head = head.trim().to_string();
+        let task_id = task.id.clone();
         let root = self.inner.cas_root.clone();
         let retention = self.load_config().factory().target_cache_retention_count;
         // Recursive unlinking must not hold the MCP task mutation budget.
         // Failure leaves regenerable outputs for later GC; delivery is durable.
         std::thread::spawn(move || {
-            if let Err(error) =
-                crate::factory_target_cache::parked::park(&root, &worktree, retention)
-            {
+            let Ok(store) = crate::store::open_task_store(&root) else {
+                return;
+            };
+            let Ok(tasks) = store.list(None) else {
+                return;
+            };
+            if !tasks.iter().any(|current| {
+                current.id == task_id
+                    && matches!(
+                        current.status,
+                        TaskStatus::AwaitingMerge | TaskStatus::Closed
+                    )
+            }) || tasks.iter().any(|other| {
+                other.id != task_id
+                    && other.status == TaskStatus::InProgress
+                    && other
+                        .assignee
+                        .as_deref()
+                        .is_some_and(|owner| owner == agent.id || owner == agent.name)
+            }) {
+                return;
+            }
+            if let Err(error) = crate::factory_target_cache::parked::park(
+                &root,
+                &worktree,
+                retention,
+                Some(&expected_head),
+            ) {
                 tracing::warn!(%error, worktree = %worktree.display(), "parked worker cache retirement deferred");
             }
         });

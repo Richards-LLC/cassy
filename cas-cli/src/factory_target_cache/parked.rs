@@ -44,10 +44,18 @@ fn identity(cas_root: &Path, worktree: &Path) -> Option<ParkedCache> {
 
 /// Called after the delivery parks/closes, never from the critical task write.
 /// It is safe to skip a contended cache; the next park retries the inventory.
-pub(crate) fn park(cas_root: &Path, worktree: &Path, retention: usize) -> io::Result<()> {
+pub(crate) fn park(
+    cas_root: &Path,
+    worktree: &Path,
+    retention: usize,
+    expected_head: Option<&str>,
+) -> io::Result<()> {
     let Some(current) = identity(cas_root, worktree) else {
         return Ok(());
     };
+    if expected_head.is_some_and(|head| head != current.head) {
+        return Ok(()); // A delayed retirement job must not mark a newer delivery parked.
+    }
     let directory = cas_root.join("worker-target-parks");
     fs::create_dir_all(&directory)?;
     // The runner removes its parked marker under this same lane lock before
@@ -226,9 +234,9 @@ mod tests {
                 .is_none()
         );
         drop((a, b));
-        park(&root, &first, 0).unwrap();
+        park(&root, &first, 0, None).unwrap();
         assert!(!first.join("target/debug").exists());
-        park(&root, &second, 1).unwrap();
+        park(&root, &second, 1, None).unwrap();
         assert!(second.join("target/debug").exists());
         for path in [&first, &second] {
             assert_eq!(
@@ -247,7 +255,7 @@ mod tests {
         // N sequential deliveries leave at most the configured warm count.
         for index in 0..4 {
             let path = worker(&root, &format!("later-{index}"));
-            park(&root, &path, 1).unwrap();
+            park(&root, &path, 1, None).unwrap();
         }
         let count = fs::read_dir(root.join("worktrees"))
             .unwrap()
@@ -261,13 +269,16 @@ mod tests {
     fn live_builder_and_resumed_lane_cannot_be_pruned_cas_29b0() {
         let (_temp, root) = fixture();
         let worker = worker(&root, "builder");
+        park(&root, &worker, 0, Some("stale delivery head")).unwrap();
+        assert!(worker.join("target/debug").exists());
+        assert!(!park_path(&root, &worker).exists());
         let held = crate::factory_worker_check::try_lock_lane(&root, &worker)
             .unwrap()
             .unwrap();
-        park(&root, &worker, 0).unwrap();
+        park(&root, &worker, 0, None).unwrap();
         assert!(worker.join("target/debug").exists());
         drop(held);
-        park(&root, &worker, 1).unwrap();
+        park(&root, &worker, 1, None).unwrap();
         let _held = crate::factory_worker_check::try_lock_lane(&root, &worker)
             .unwrap()
             .unwrap();
@@ -296,13 +307,13 @@ mod tests {
             .unwrap()
             .read_exact(&mut ready)
             .unwrap();
-        let result = park(&root, &worker, 0);
+        let result = park(&root, &worker, 0, None);
         let preserved = worker.join("target/debug/deps/output").exists();
         let _ = child.kill();
         child.wait().unwrap();
         result.unwrap();
         assert!(preserved);
-        park(&root, &worker, 0).unwrap();
+        park(&root, &worker, 0, None).unwrap();
         assert!(!worker.join("target/debug").exists());
     }
 }

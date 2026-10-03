@@ -135,7 +135,7 @@ def git(root, *args):
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode:
         detail = "\n".join(value.strip() for value in (result.stderr, result.stdout) if value.strip())
-        raise RuntimeError(f"Git command failed (exit {result.returncode}): {shlex.join(command)}\n"
+        raise RuntimeError(f"Git command failed (exit {result.returncode})\nCommand: {shlex.join(command)}\n"
                            + (detail or "No Git diagnostic output"))
     return result.stdout.strip()
 
@@ -222,8 +222,8 @@ def rebase_release_metadata(root, old_tip, integration_tip):
         state = "checkout restored" if restored else "checkout needs rebase recovery"
         abort_detail = "" if restored or not aborted.returncode else "\nAbort diagnostic: " + aborted.stderr.strip()
         raise RuntimeError(
-            "BLOCKER integration-release-metadata: could not rebase release metadata onto the integration tip; "
-            + state + ". Recovery: " + resume_rebase_command(root, old_tip, integration_tip)
+            "BLOCKER integration-release-metadata: rebase failed; " + state
+            + ". Recovery:\n" + resume_rebase_command(root, old_tip, integration_tip)
             + "\n" + str(failure) + abort_detail) from failure
 
 
@@ -248,9 +248,10 @@ def rebase_docs_only_release(root, main_tip, integration_tip):
     offending = [path for path in changed if not allowed(path)]
     if offending:
         raise RuntimeError(
-            "BLOCKER integration-release-metadata: release commits contain unsupported paths: "
-            + shlex.join(offending) + ". Preserve these commits separately; "
-            "start release/<ver> from origin/main, then rerun --cut; "
+            "BLOCKER integration-release-metadata: unsupported release paths\n"
+            + "\n".join("  " + path for path in offending)
+            + "\nPreserve the listed commits separately.\n"
+            "Recovery: start release/<ver> from origin/main, then rerun --cut.\n"
             "prep carries the prior receipts commit after assemble.")
     if not changed:
         return

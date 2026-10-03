@@ -149,7 +149,7 @@ holder_main() {
     [[ "$(readlink -f -- /proc/self/fd/9)" == "$lock_file" ]] ||
         fail 'holder inherited the wrong lock descriptor'
     flock -n -s 9 || fail 'holder did not inherit the shared cache lock'
-    process_matches "$owner_pid" "$owner_start" || fail 'owning Runner.Worker exited before holder startup'
+    worker_matches "$owner_pid" "$owner_start" || fail 'owning Runner.Worker exited before holder startup'
     snapshot="$(process_snapshot "$$")" || fail 'cannot read holder process identity'
     read -r _ holder_start _ <<<"$snapshot"
     [[ ! -e "$pid_file" && ! -L "$pid_file" ]] || fail "job lock state already exists: $pid_file"
@@ -198,7 +198,7 @@ start_job() {
         local stale_owner_pid stale_owner_start
         read -r holder_pid token holder_start stale_owner_pid stale_owner_start <<<"$stale"
         if holder_matches "$holder_pid" "$token" "$holder_start"; then
-            if [[ -z "$holder_start" ]] || process_matches "$stale_owner_pid" "$stale_owner_start"; then
+            if [[ -z "$holder_start" ]] || worker_matches "$stale_owner_pid" "$stale_owner_start"; then
                 fail "slot $slot already has a live job lock holder"
             fi
             retire_holder "$holder_pid" "$token" "$holder_start"

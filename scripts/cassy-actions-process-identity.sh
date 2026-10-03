@@ -26,6 +26,13 @@ process_matches() {
     process_identity_matches "$pid" "$start" "$observed_pid" "$observed_start" "$state"
 }
 
+worker_matches() {
+    local comm
+    process_matches "$1" "$2" || return 1
+    IFS= read -r comm 2>/dev/null <"/proc/$1/comm" || return 1
+    [[ "$comm" == Runner.Worker ]]
+}
+
 worker_identity() {
     local pid="$PPID" start state parent snapshot comm
     while [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != 1 ]]; do

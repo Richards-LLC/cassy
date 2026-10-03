@@ -341,13 +341,11 @@ mod tests {
         assert_eq!(untrusted[0].disposition, CacheDisposition::OwnershipChanged);
         assert!(preview.exists());
         fs::write(preview.join("source.rs"), "reader edits must survive").unwrap();
+        let before = fs::read(preview.join("source.rs")).unwrap();
         let mut records = inspect(&root, policy(), &[]);
         cleanup(&root, &mut records, policy(), &[]);
         assert_eq!(records[0].disposition, CacheDisposition::CleanupError);
-        assert_eq!(
-            fs::read_to_string(preview.join("source.rs")).unwrap(),
-            "reader edits must survive"
-        );
+        assert_eq!(fs::read(preview.join("source.rs")).unwrap(), before);
     }
 
     #[test]

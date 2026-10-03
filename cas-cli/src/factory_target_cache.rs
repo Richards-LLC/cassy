@@ -21,6 +21,9 @@ use crate::config::FactoryConfig;
 
 mod lane;
 pub(crate) mod parked;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod process_probe;
+pub(crate) mod parked;
 pub use lane::LanePreviewRecord;
 
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
@@ -826,19 +829,29 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
 }
 
 fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
-    process_uses(worktree, cache, false)
+    process_uses(worktree, cache, None)
 }
 
-fn output_in_use(cache: &Path) -> bool {
-    process_uses(cache, cache, true)
+fn output_in_use(cache: &Path, eviction_lock: &fs::File) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        process_uses(cache, cache, Some(eviction_lock.as_raw_fd()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cache, eviction_lock);
+        true
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn process_uses(worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
-    // macOS has no /proc. Field output is NUL-delimited, so paths with spaces
-    // or newlines cannot evade an open-output check. Unknown evidence is live.
+fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
+    // Unknown/inaccessible evidence must preserve the cache. Include fd fields
+    // to exempt precisely the eviction lock, while keeping this process's
+    // executable, mappings and every other output handle visible.
     let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-F0pn"])
+        .args(["-nP", "-F0pfn"])
         .output()
     else {
         return true;
@@ -846,13 +859,14 @@ fn process_uses(worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
     if !output.status.success() || !output.stderr.is_empty() {
         return true;
     }
-    lsof_uses(&output.stdout, worktree, cache, ignore_self)
+    lsof_uses(&output.stdout, worktree, cache, own_lock_fd)
 }
 
 #[cfg(all(unix, any(target_os = "macos", test)))]
-fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
+fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let mut pid = None;
+    let mut fd = None;
     for field in output.split(|byte| *byte == 0) {
         let field = field.strip_prefix(b"\n").unwrap_or(field);
         match field.first() {
@@ -860,11 +874,23 @@ fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, ignore_self: bool) ->
                 pid = std::str::from_utf8(&field[1..])
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok());
+                fd = None;
                 if pid.is_none() {
                     return true;
                 }
             }
-            Some(b'n') if !(ignore_self && pid == Some(std::process::id())) => {
+            Some(b'f') => {
+                fd = std::str::from_utf8(&field[1..])
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok());
+            }
+            Some(b'n') => {
+                if pid.is_none() {
+                    return true;
+                }
+                if pid == Some(std::process::id()) && own_lock_fd.is_some() && fd == own_lock_fd {
+                    continue;
+                }
                 let path = Path::new(std::ffi::OsStr::from_bytes(&field[1..]));
                 if path.starts_with(worktree) || path.starts_with(cache) {
                     return true;
@@ -873,55 +899,17 @@ fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, ignore_self: bool) ->
             _ => {}
         }
     }
-    // Empty/malformed output must never authorize deletion.
     pid.is_none()
 }
 
-#[cfg(not(target_os = "macos"))]
-fn process_uses(worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
-    let Ok(processes) = fs::read_dir("/proc") else {
-        // On platforms without a process table, fail closed: target-cache GC
-        // remains report-only instead of guessing that a cache is idle.
-        return true;
-    };
-    let worktree_text = worktree.as_os_str().to_string_lossy();
-    for process in processes.flatten().filter(|entry| {
-        entry
-            .file_name()
-            .to_string_lossy()
-            .bytes()
-            .all(|byte| byte.is_ascii_digit())
-    }) {
-        if ignore_self && process.file_name() == std::process::id().to_string().as_str() {
-            continue;
-        }
-        let proc_path = process.path();
-        if fs::read_link(proc_path.join("cwd"))
-            .ok()
-            .is_some_and(|cwd| cwd.starts_with(worktree))
-        {
-            return true;
-        }
-        if let Ok(cmdline) = fs::read(proc_path.join("cmdline")) {
-            if cmdline
-                .split(|byte| *byte == 0)
-                .filter_map(|arg| std::str::from_utf8(arg).ok())
-                .any(|arg| arg.contains(worktree_text.as_ref()))
-            {
-                return true;
-            }
-        }
-        if let Ok(fds) = fs::read_dir(proc_path.join("fd")) {
-            if fds
-                .flatten()
-                .filter_map(|fd| fs::read_link(fd.path()).ok())
-                .any(|path| path.starts_with(cache))
-            {
-                return true;
-            }
-        }
-    }
-    false
+#[cfg(target_os = "linux")]
+fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
+    process_probe::linux_uses(Path::new("/proc"), worktree, cache, own_lock_fd)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_uses(_worktree: &Path, _cache: &Path, _own_lock_fd: Option<i32>) -> bool {
+    true
 }
 
 fn capacity_from_bytes(
@@ -1008,26 +996,27 @@ mod tests {
     #[test]
     fn lsof_output_handles_paths_process_identity_and_unknown_evidence_cas_29b0() {
         let cache = Path::new("/repo with spaces/target/debug");
-        assert!(lsof_uses(
-            b"p42\0\nn/repo with spaces/target/debug/output\0",
-            cache,
-            cache,
-            true
-        ));
+        let other = std::process::id() + 1;
+        let artifact = format!("p{other}\0\nf18\0n/repo with spaces/target/debug/output\0");
+        assert!(lsof_uses(artifact.as_bytes(), cache, cache, Some(17)));
         assert!(!lsof_uses(
-            b"p42\0\nn/repo with spaces/target/debugger/unrelated\0",
+            b"p42\0\nf18\0n/repo with spaces/target/debugger/unrelated\0",
             cache,
             cache,
-            true
+            None
         ));
-        let own = format!(
-            "p{}\0\nn/repo with spaces/target/debug/.cargo-lock\0",
+        let own_lock = format!(
+            "p{}\0\nf17\0n/repo with spaces/target/debug/.cargo-lock\0",
             std::process::id()
         );
-        assert!(!lsof_uses(own.as_bytes(), cache, cache, true));
-        assert!(lsof_uses(own.as_bytes(), cache, cache, false));
-        assert!(lsof_uses(b"", cache, cache, true));
-        assert!(lsof_uses(b"pinvalid\0", cache, cache, true));
+        assert!(!lsof_uses(own_lock.as_bytes(), cache, cache, Some(17)));
+        assert!(lsof_uses(own_lock.as_bytes(), cache, cache, None));
+        let own_output = format!("{own_lock}\nf18\0n/repo with spaces/target/debug/output\0");
+        assert!(lsof_uses(own_output.as_bytes(), cache, cache, Some(17)));
+        let own_exe = format!("{own_lock}\nftxt\0n/repo with spaces/target/debug/binary\0");
+        assert!(lsof_uses(own_exe.as_bytes(), cache, cache, Some(17)));
+        assert!(lsof_uses(b"", cache, cache, Some(17)));
+        assert!(lsof_uses(b"pinvalid\0", cache, cache, Some(17)));
     }
 
     #[test]

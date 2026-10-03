@@ -3,11 +3,13 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 struct ParkedCache {
     worktree: PathBuf,
     admin: PathBuf,
     head: String,
+    #[serde(default)]
+    generation: String,
 }
 
 fn park_path(cas_root: &Path, worktree: &Path) -> PathBuf {
@@ -39,6 +41,7 @@ fn identity(cas_root: &Path, worktree: &Path) -> Option<ParkedCache> {
         worktree,
         admin: candidate.git_admin_dir?,
         head: candidate.commit?,
+        generation: String::new(),
     })
 }
 
@@ -50,7 +53,7 @@ pub(crate) fn park(
     retention: usize,
     expected_head: Option<&str>,
 ) -> io::Result<()> {
-    let Some(current) = identity(cas_root, worktree) else {
+    let Some(mut current) = identity(cas_root, worktree) else {
         return Ok(());
     };
     if expected_head.is_some_and(|head| head != current.head) {
@@ -64,6 +67,7 @@ pub(crate) fn park(
     else {
         return Ok(());
     };
+    current.generation = uuid::Uuid::new_v4().to_string();
     let path = park_path(cas_root, &current.worktree);
     let temporary = path.with_extension("partial");
     fs::write(
@@ -94,7 +98,8 @@ pub(crate) fn park(
         .filter_map(|entry| {
             let record: ParkedCache = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
             let now = identity(cas_root, &record.worktree)?;
-            if now.admin != record.admin
+            if record.generation.is_empty()
+                || now.admin != record.admin
                 || now.head != record.head
                 || !record.worktree.join("target/debug").is_dir()
             {
@@ -115,7 +120,7 @@ pub(crate) fn park(
         };
         // Re-read the marker and Git identity after lock acquisition: a new
         // check could have resumed between inventory and admission.
-        if !path.exists()
+        if !marker_is_current(&path, &parked)
             || !identity(cas_root, &parked.worktree)
                 .is_some_and(|now| now.admin == parked.admin && now.head == parked.head)
         {
@@ -126,6 +131,14 @@ pub(crate) fn park(
     }
     FileExt::unlock(&gc)?;
     Ok(())
+}
+
+fn marker_is_current(path: &Path, recorded: &ParkedCache) -> bool {
+    !recorded.generation.is_empty()
+        && fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ParkedCache>(&bytes).ok())
+            .is_some_and(|current| current == *recorded)
 }
 
 fn prune_debug(worktree: &Path) -> io::Result<()> {
@@ -157,7 +170,7 @@ fn prune_debug(worktree: &Path) -> io::Result<()> {
     }
     // Ignore only this process's own lock handle. An unrelated open artifact
     // (including a still-running test binary) preserves the complete cache.
-    if output_in_use(&debug) {
+    if output_in_use(&debug, &cargo) {
         return Ok(());
     }
     let quarantine = target.join(format!(".cas-parked-debug-{}", std::process::id()));
@@ -165,7 +178,7 @@ fn prune_debug(worktree: &Path) -> io::Result<()> {
         return Ok(());
     }
     fs::rename(&debug, &quarantine)?;
-    if output_in_use(&quarantine) || output_in_use(&debug) {
+    if output_in_use(&quarantine, &cargo) || output_in_use(&debug, &cargo) {
         if !debug.exists() {
             fs::rename(&quarantine, &debug)?;
         }
@@ -221,6 +234,10 @@ mod tests {
         let (_temp, root) = fixture();
         let first = worker(&root, "first");
         let second = worker(&root, "second");
+        let sources: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|path| (path.clone(), fs::read(path.join("source.rs")).unwrap()))
+            .collect();
         // Independent builders never share a lock or mutable target.
         let a = crate::factory_worker_check::try_lock_lane(&root, &first)
             .unwrap()
@@ -247,10 +264,9 @@ mod tests {
                 fs::read_to_string(path.join("target/nextest/proof.json")).unwrap(),
                 "evidence"
             );
-            assert_eq!(
-                fs::read_to_string(path.join("source.rs")).unwrap(),
-                "fixture"
-            );
+        }
+        for (path, before) in sources {
+            assert_eq!(fs::read(path.join("source.rs")).unwrap(), before);
         }
         // N sequential deliveries leave at most the configured warm count.
         for index in 0..4 {
@@ -285,6 +301,37 @@ mod tests {
         resume(&root, &worker).unwrap();
         assert!(!park_path(&root, &worker).exists());
         assert!(worker.join("target/debug").exists());
+    }
+
+    #[test]
+    fn same_head_repark_invalidates_old_retention_inventory_cas_29b0() {
+        let (_temp, root) = fixture();
+        let worker = worker(&root, "repark");
+        park(&root, &worker, 1, None).unwrap();
+        let path = park_path(&root, &worker);
+        let before: ParkedCache = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(marker_is_current(&path, &before));
+        park(&root, &worker, 1, None).unwrap();
+        assert!(!marker_is_current(&path, &before));
+        let after: ParkedCache = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(before.head, after.head);
+        assert!(marker_is_current(&path, &after));
+        assert!(worker.join("target/debug").exists());
+    }
+
+    #[test]
+    fn same_process_output_handle_preserves_cache_but_eviction_lock_alone_prunes_cas_29b0() {
+        let (_temp, root) = fixture();
+        let worker = worker(&root, "own-open-output");
+        let output = fs::File::open(worker.join("target/debug/deps/output")).unwrap();
+        park(&root, &worker, 0, None).unwrap();
+        assert!(worker.join("target/debug/deps/output").exists());
+        drop(output);
+        // prune_debug holds its own .cargo-lock descriptor during inspection.
+        // That exact descriptor alone must not keep every cache permanently warm.
+        park(&root, &worker, 0, None).unwrap();
+        assert!(!worker.join("target/debug").exists());
+        assert!(worker.join("target/worker-check.log").exists());
     }
 
     #[test]

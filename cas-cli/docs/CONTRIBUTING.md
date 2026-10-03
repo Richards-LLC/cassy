@@ -415,7 +415,16 @@ previews created before provenance was recorded remain inventory-only. The
 `lane_previews` dispositions. The existing high/low watermark configuration
 controls cache pressure warnings; preview cleanup does not need disk pressure.
 On macOS, liveness uses NUL-delimited `lsof` field output and fails closed if
-that probe is unavailable or reports errors.
+that probe is unavailable or reports errors. Only the evictor's held Cargo-lock
+file descriptor is exempt; other same-process handles and executable/mapped
+artifacts preserve the cache. Linux also inspects `/proc/PID/exe` and `maps`,
+and unknown/inaccessible evidence keeps the cache; reclamation therefore needs
+a readable process table. Same-HEAD parks have distinct marker generations,
+so an older retention inventory cannot evict a newly parked warm cache.
+Interrupted `.cas-parked-debug-*` quarantines remain preserved for explicit
+whole-target GC once the worktree is inactive and the recency/pressure policy
+permits it. They are included in target byte inventory; automatic park-time
+cleanup does not retry a quarantine or delete proof logs to recover it.
 
 New isolated workers also seed their private `target/` from compiled artifacts
 hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;

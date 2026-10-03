@@ -477,10 +477,9 @@ mod tests {
     /// immediately before fork(), so no child inherits a pooled SQLite handle.
     #[test]
     fn daemon_fork_paths_close_idle_db_connections_before_fork_cas_65cce() {
+        // pin: fork() cannot be exercised safely inside the test process, so the close-before-fork ordering is pinned at source level.
         for (name, source) in [
-            // pin: fork() cannot be exercised safely inside the test process, so the close-before-fork ordering is pinned at source level.
             ("process.rs (daemonize)", include_str!("process.rs")),
-            // pin: fork() cannot be exercised safely inside the test process, so the close-before-fork ordering is pinned at source level.
             ("fork_first.rs (fork_first_daemon)", include_str!("fork_first.rs")),
         ] {
             let production = source.split("#[cfg(test)]").next().unwrap();

@@ -4066,3 +4066,248 @@ async fn end_session_writes_audit_row() {
         assert_eq!(row["device_id"], fixture.device_id.as_str());
     }
 }
+
+// --- cas-9b08: worker lifecycle operations and factory:operate (brief S2) ---
+
+const OPS_WORKER: &str = "swift-lark-3";
+const OPS_GENERATION: &str = "swift-lark-3-gen-2";
+
+fn operate_scopes() -> std::collections::BTreeSet<Scope> {
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryOperate);
+    scopes
+}
+
+impl OpsFixture {
+    /// A live worker of the session whose current registration (its spawn
+    /// generation) is `generation`.
+    fn register_worker(&self, generation: &str) {
+        let mut agent = cas_types::Agent::new(generation.to_string(), OPS_WORKER.to_string());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.factory_session = Some(OPS_SESSION.to_string());
+        agent.heartbeat();
+        crate::store::open_agent_store(&self.cas_dir)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
+    }
+
+    fn add_open_epic(&self) {
+        let mut epic = cas_types::Task::new("cas-ops-epic".to_string(), "Ops epic".to_string());
+        epic.task_type = cas_types::TaskType::Epic;
+        crate::store::open_task_store(&self.cas_dir).unwrap().add(&epic).unwrap();
+    }
+
+    fn spawn_queue(&self) -> Vec<cas_store::SpawnRequest> {
+        crate::store::open_spawn_queue_store(&self.cas_dir)
+            .unwrap()
+            .peek(20)
+            .unwrap()
+    }
+}
+
+/// O3: adding a worker from the hub goes through the same MCP
+/// `factory_spawn_workers` body, so it lands in the session's spawn queue
+/// exactly as a supervisor's spawn would, under factory:operate.
+#[tokio::test]
+async fn operations_spawn_uses_factory_spawn_workers_queue() {
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let fixture = ops_fixture(operate_scopes());
+    fixture.add_open_epic();
+    let mut events = fixture.events.subscribe();
+
+    let (status, body) = fixture
+        .operate(serde_json::json!({
+            "op_id": "9b080000-0000-4000-8000-000000000001",
+            "op": {"kind": "spawn_workers", "count": 1},
+            "expected": {},
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"]["kind"], "spawn_workers", "{body}");
+
+    let queued = fixture.spawn_queue();
+    assert_eq!(queued.len(), 1, "one spawn request: {queued:?}");
+    assert_eq!(queued[0].action, cas_store::SpawnAction::Spawn);
+    assert_eq!(queued[0].count, Some(1));
+    assert_eq!(queued[0].factory_session.as_deref(), Some(OPS_SESSION));
+
+    let audit = fixture.audit("operation:spawn_workers");
+    let outcomes: Vec<_> = audit.iter().map(|row| row["outcome"].as_str().unwrap()).collect();
+    assert_eq!(outcomes, ["requested", "allowed"], "{audit:?}");
+    assert!(audit.iter().all(|row| row["required_scope"] == "factory:operate"));
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("FleetChanged is emitted")
+        .unwrap();
+    assert_eq!(event.kind, MachineEventKind::FleetChanged);
+
+    // Bounds from the wire contract: 1-4 workers.
+    let (status, _) = fixture
+        .operate(serde_json::json!({
+            "op_id": "9b080000-0000-4000-8000-000000000002",
+            "op": {"kind": "spawn_workers", "count": 5},
+            "expected": {},
+        }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(fixture.spawn_queue().len(), 1, "a refused spawn queues nothing");
+}
+
+/// O6 and O7 are destructive: factory:operate is refused with the scope that
+/// is needed, and factory:manage stops the worker through
+/// `factory_shutdown_workers`.
+#[tokio::test]
+async fn operations_stop_requires_factory_manage() {
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let operator = ops_fixture(operate_scopes());
+    operator.register_worker(OPS_GENERATION);
+    for (op_id, op) in [
+        (
+            "9b080000-0000-4000-8000-000000000011",
+            serde_json::json!({"kind": "shutdown_workers", "workers": [OPS_WORKER]}),
+        ),
+        (
+            "9b080000-0000-4000-8000-000000000012",
+            serde_json::json!({"kind": "recycle_worker", "worker": OPS_WORKER}),
+        ),
+    ] {
+        let (status, body) = operator
+            .operate(serde_json::json!({
+                "op_id": op_id,
+                "op": op,
+                "expected": {"worker": OPS_WORKER, "generation": OPS_GENERATION},
+            }))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "scope_denied");
+        assert_eq!(body["required_scope"], "factory:manage");
+    }
+    assert!(operator.spawn_queue().is_empty(), "a refused stop queues nothing");
+
+    let mut scopes = operate_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let manager = ops_fixture(scopes);
+    manager.register_worker(OPS_GENERATION);
+    let (status, body) = manager
+        .operate(serde_json::json!({
+            "op_id": "9b080000-0000-4000-8000-000000000013",
+            "op": {"kind": "shutdown_workers", "workers": [OPS_WORKER]},
+            "expected": {"worker": OPS_WORKER, "generation": OPS_GENERATION},
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"]["kind"], "shutdown_workers");
+    let queued = manager.spawn_queue();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0].action, cas_store::SpawnAction::Shutdown);
+    assert_eq!(queued[0].worker_names, vec![OPS_WORKER.to_string()]);
+    let audit = manager.audit("operation:shutdown_workers");
+    assert!(audit.iter().all(|row| row["required_scope"] == "factory:manage"), "{audit:?}");
+}
+
+/// Worker operations name the spawn generation the operator saw. A worker
+/// that has since restarted is a different generation: 409 stale, the
+/// current generation, and nothing queued or held.
+#[tokio::test]
+async fn operations_worker_generation_stale() {
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut scopes = operate_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    fixture.register_worker(OPS_GENERATION);
+
+    for (op_id, op) in [
+        (
+            "9b080000-0000-4000-8000-000000000021",
+            serde_json::json!({"kind": "shutdown_workers", "workers": [OPS_WORKER]}),
+        ),
+        (
+            "9b080000-0000-4000-8000-000000000022",
+            serde_json::json!({"kind": "recycle_worker", "worker": OPS_WORKER}),
+        ),
+        (
+            "9b080000-0000-4000-8000-000000000023",
+            serde_json::json!({"kind": "set_worker_hold", "worker": OPS_WORKER, "hold": true}),
+        ),
+    ] {
+        let (status, body) = fixture
+            .operate(serde_json::json!({
+                "op_id": op_id,
+                "op": op,
+                "expected": {"worker": OPS_WORKER, "generation": "swift-lark-3-gen-1"},
+            }))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "stale");
+        assert_eq!(body["current"]["worker"], OPS_WORKER);
+        assert_eq!(body["current"]["generation"], OPS_GENERATION);
+    }
+    assert!(fixture.spawn_queue().is_empty(), "a stale operation queues nothing");
+    assert_eq!(
+        crate::ui::factory::worker_holds_from_session_metadata_named(OPS_SESSION)
+            .unwrap_or_default()
+            .len(),
+        0,
+        "a stale hold holds nothing"
+    );
+}
+
+/// factory:operate is a real scope in every spelling, and the one scope a
+/// control device may grant itself besides session launch. factory:manage is
+/// never self-granted.
+#[tokio::test]
+async fn scope_factory_operate_roundtrip() {
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    assert_eq!(Scope::parse("factory:operate").unwrap(), Scope::FactoryOperate);
+    assert_eq!(Scope::parse("factory-operate").unwrap(), Scope::FactoryOperate);
+    assert_eq!(Scope::FactoryOperate.as_str(), "factory:operate");
+    assert_eq!(Scope::FactoryOperate.as_wire(), "factory-operate");
+
+    let mut full_control = control_scopes();
+    full_control.extend([Scope::PaneInput, Scope::PaneInterrupt]);
+    let control = ops_fixture(full_control);
+    let grant = |body: &'static str| {
+        let fixture = &control;
+        async move {
+            fixture
+                .call("POST", "/v1/auth/scopes", Some(serde_json::from_str(body).unwrap()))
+                .await
+        }
+    };
+    let (status, _) = grant(r#"{"add":["factory-manage"]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "factory:manage is never self-granted");
+    let (status, body) = grant(r#"{"add":["factory-operate"]}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["scopes"].as_array().unwrap().iter().any(|scope| scope == "factory:operate"
+            || scope == "factory-operate"
+            || scope == "FactoryOperate"),
+        "{body}"
+    );
+    assert_eq!(control.audit("self_grant_factory_operate").len(), 1);
+    let (status, _) = grant(r#"{"add":["factory-operate"]}"#).await;
+    assert_eq!(status, StatusCode::OK, "granting again is idempotent");
+    assert_eq!(control.audit("self_grant_factory_operate").len(), 1);
+
+    // The granted scope is usable at once.
+    control.add_open_epic();
+    let (status, body) = control
+        .operate(serde_json::json!({
+            "op_id": "9b080000-0000-4000-8000-000000000031",
+            "op": {"kind": "focus_epic", "epic_id": "cas-ops-epic"},
+            "expected": {"epic_id": null},
+        }))
+        .await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let read_only = ops_fixture(Scope::default_read_only());
+    let (status, _) = read_only
+        .call(
+            "POST",
+            "/v1/auth/scopes",
+            Some(serde_json::json!({"add": ["factory-operate"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a read-only pairing cannot grant itself control");
+}

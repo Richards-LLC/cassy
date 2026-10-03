@@ -134,6 +134,9 @@ pub enum Scope {
     PaneInput,
     MessageSend,
     PaneInterrupt,
+    /// Reversible and additive fleet operations: focus an epic, add, pause
+    /// and resume workers, assign tasks (fleet-operations brief, cas-9b08).
+    FactoryOperate,
     FactoryManage,
     HubAdmin,
 }
@@ -154,6 +157,7 @@ impl Scope {
             "pane:input" | "pane-input" => Self::PaneInput,
             "message:send" | "message-send" => Self::MessageSend,
             "pane:interrupt" | "pane-interrupt" => Self::PaneInterrupt,
+            "factory:operate" | "factory-operate" => Self::FactoryOperate,
             "factory:manage" | "factory-manage" => Self::FactoryManage,
             "hub:admin" | "hub-admin" => Self::HubAdmin,
             _ => anyhow::bail!("unknown Commander scope '{value}'"),
@@ -170,6 +174,7 @@ impl Scope {
             Self::PaneInput => "pane-input",
             Self::MessageSend => "message-send",
             Self::PaneInterrupt => "pane-interrupt",
+            Self::FactoryOperate => "factory-operate",
             Self::FactoryManage => "factory-manage",
             Self::HubAdmin => "hub-admin",
         }
@@ -184,6 +189,7 @@ impl Scope {
             Self::PaneInput => "pane:input",
             Self::MessageSend => "message:send",
             Self::PaneInterrupt => "pane:interrupt",
+            Self::FactoryOperate => "factory:operate",
             Self::FactoryManage => "factory:manage",
             Self::HubAdmin => "hub:admin",
         }

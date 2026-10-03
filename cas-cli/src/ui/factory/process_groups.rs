@@ -483,6 +483,50 @@ mod tests {
     /// The crash path's exact shape: the worker CLI is already dead, so the
     /// process group reads as `Gone` — but a dev server it detached is still
     /// alive and holding a port. Teardown must reap it anyway.
+    /// cas-f9d5: a factory-session label unique to this test process and
+    /// call, for tests that create a real scope in the host's shared delegated
+    /// cgroup tree. Concurrent suites run in separate processes, so the pid
+    /// separates them; the counter separates calls within one process.
+    fn hermetic_scope_session(label: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// cas-f9d5: the shared-scope hazard, modelled without a real cgroup.
+    /// Two suites that create the same scope name adopt one scope, so the
+    /// first teardown reaps the other suite's live leader. Hermetic names give
+    /// each its own scope, and each teardown reaps only its own process.
+    #[test]
+    fn concurrent_suites_need_distinct_scopes_to_reap_only_their_own_leader() {
+        use super::super::cgroup::{FakeScopeOps, ScopeOps};
+        let host = FakeScopeOps::default();
+        let (suite_a, suite_b) = (4_201, 4_202);
+
+        let shared_a = host.create_scope("reap-test", "escapee-host").unwrap();
+        let shared_b = host.create_scope("reap-test", "escapee-host").unwrap();
+        assert_eq!(shared_a, shared_b, "a fixed name is one scope for both suites");
+        host.add_pid(&shared_a, suite_a).unwrap();
+        host.add_pid(&shared_b, suite_b).unwrap();
+        let reaped: Vec<u32> = host.kill_scope(&shared_b).unwrap().iter().map(|p| p.pid).collect();
+        assert!(reaped.contains(&suite_a), "suite B's reap killed suite A's leader: {reaped:?}");
+        host.remove_scope(&shared_a);
+
+        let own_a = host.create_scope(&hermetic_scope_session("reap-test"), "escapee-host").unwrap();
+        let own_b = host.create_scope(&hermetic_scope_session("reap-test"), "escapee-host").unwrap();
+        assert_ne!(own_a, own_b);
+        host.add_pid(&own_a, suite_a).unwrap();
+        host.add_pid(&own_b, suite_b).unwrap();
+        let reaped: Vec<u32> = host.kill_scope(&own_b).unwrap().iter().map(|p| p.pid).collect();
+        assert_eq!(reaped, vec![suite_b], "each teardown reaps only its own scope");
+        let reaped: Vec<u32> = host.kill_scope(&own_a).unwrap().iter().map(|p| p.pid).collect();
+        assert_eq!(reaped, vec![suite_a]);
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn reap_kills_an_escaped_descendant_after_the_worker_cli_is_gone() {
@@ -490,7 +534,11 @@ mod tests {
         use std::process::Command;
 
         let temp = tempfile::tempdir().unwrap();
-        let Some(record_scope) = super::super::cgroup::create_scope("reap-test", "escapee-host")
+        // cas-f9d5: the scope lives in the host's shared delegated tree, so its
+        // name must be this invocation's alone. A fixed name let a concurrent
+        // suite adopt the same scope and kill this test's leader on its reap.
+        let session = hermetic_scope_session("reap-test");
+        let Some(record_scope) = super::super::cgroup::create_scope(&session, "escapee-host")
         else {
             eprintln!(
                 "skipping: no writable delegated cgroup v2 tree on this host — \
@@ -526,11 +574,16 @@ mod tests {
         let record = track_contained(
             temp.path(),
             "escapee-host",
-            "reap-test",
+            &session,
             pgid,
             Some(record_scope.clone()),
         )
         .unwrap();
+        assert_eq!(
+            record.cgroup.as_deref(),
+            Some(record_scope.as_path()),
+            "the reap acts only on this invocation's own scope"
+        );
 
         // The worker CLI exits, leaving the detached descendant behind.
         assert!(leader.wait().unwrap().success());

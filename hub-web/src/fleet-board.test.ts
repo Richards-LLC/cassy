@@ -153,7 +153,7 @@ describe("fleet board region lifecycle", () => {
       entry({ ...forge, session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
       entry({ ...forge, session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
     ]);
-    expect([...mixed.values()].map((label) => label.tag)).toEqual(["…ican-9 · AT", "…ican-9 · FO", "otter-5"]);
+    expect([...mixed.values()].map((label) => label.tag)).toEqual(["pelican-9 · AT", "pelican-9 · FO", "otter-5"]);
     // cas-ae5e QA F01: initials that collide (Atlas, Attic: both AT) use the
     // shortest differing prefix of the machine's name, never the full label.
     const sameInitials = fleetPlotLabels([

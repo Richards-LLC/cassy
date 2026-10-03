@@ -17,13 +17,16 @@
 import { attentionControlKey } from "./attention-view";
 
 const LABEL_OPEN = "Attention for this session";
+/** cas-5bef0: the same sheet, holding Tasks & progress and its fleet controls. */
+const LABEL_PROGRESS = "Tasks & progress for this session";
 const LABEL_RAIL = "Conversation context";
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]';
 
 /** Give or take the sheet's modal semantics; `modal` false restores the plain rail. */
-export function applySheetSemantics(shell: HTMLElement | null, modal: boolean): void {
+export function applySheetSemantics(shell: HTMLElement | null, modal: boolean, mode: "attention" | "progress" = "attention"): void {
   if (!shell) return;
   shell.classList.toggle("attention-sheet-open", modal);
+  shell.classList.toggle("progress-sheet", modal && mode === "progress");
   const rail = shell.querySelector<HTMLElement>(":scope > .conversation-context");
   for (const child of shell.children) {
     if (child === rail) continue;
@@ -33,11 +36,14 @@ export function applySheetSemantics(shell: HTMLElement | null, modal: boolean): 
   if (modal) {
     rail.setAttribute("role", "dialog");
     rail.setAttribute("aria-modal", "true");
-    rail.setAttribute("aria-label", LABEL_OPEN);
+    rail.setAttribute("aria-label", mode === "progress" ? LABEL_PROGRESS : LABEL_OPEN);
+    const close = rail.querySelector<HTMLElement>(":scope > .context-sheet-close");
+    close?.setAttribute("aria-label", mode === "progress" ? "Close tasks & progress" : "Close attention");
   } else {
     rail.removeAttribute("role");
     rail.removeAttribute("aria-modal");
     rail.setAttribute("aria-label", LABEL_RAIL);
+    rail.querySelector<HTMLElement>(":scope > .context-sheet-close")?.setAttribute("aria-label", "Close attention");
   }
 }
 

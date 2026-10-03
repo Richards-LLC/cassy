@@ -4471,6 +4471,8 @@ function renderAttention(): void {
  * Escape or once nothing is left, and focus returns to the badge or thread.
  */
 let attentionSheetOpen = false;
+/** cas-5bef0: which section the phone sheet holds; Tasks & progress carries the fleet controls. */
+let contextSheetMode: "attention" | "progress" = "attention";
 function syncConversationAttention(count: number): void {
   const badge = document.querySelector<HTMLButtonElement>("#conversation-attention");
   if (badge) {
@@ -4485,8 +4487,8 @@ function syncConversationAttention(count: number): void {
   // back in the conversation; leaving the conversation, or the viewport
   // becoming a desktop where the rail is a side panel again (cas-a5c6),
   // closes it quietly.
-  if (attentionSheetOpen && (count < 1 || !phoneLayout())) {
-    if (count < 1 && hubPresentation === "conversation" && selectedSession) closeAttentionSheet();
+  if (attentionSheetOpen && ((contextSheetMode === "attention" && count < 1) || !phoneLayout())) {
+    if (count < 1 && contextSheetMode === "attention" && hubPresentation === "conversation" && selectedSession) closeAttentionSheet();
     else { attentionSheetOpen = false; badge?.setAttribute("aria-expanded", "false"); }
   }
   applyAttentionSheet();
@@ -4496,7 +4498,7 @@ let sheetFocus: HTMLElement | undefined;
 /** The same control's redraw-proof key (cas-a5c6 QA F03). */
 let sheetFocusKey: string | undefined;
 function applyAttentionSheet(): void {
-  applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), attentionSheetOpen);
+  applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), attentionSheetOpen, contextSheetMode);
   if (!attentionSheetOpen) { sheetFocus = undefined; sheetFocusKey = undefined; return; }
   // A redraw (a catalog poll, a new turn) rebuilds the shell and moves the
   // rail's panel, which drops focus to the page. Put it back where it was.
@@ -4568,19 +4570,32 @@ document.addEventListener("focusin", (event) => {
   else if (layerAboveSheet(sheet)) return;
   else sheetFocusables(sheet)[0]?.focus();
 });
-function openAttentionSheet(): void {
+function openAttentionSheet(mode: "attention" | "progress" = "attention"): void {
+  contextSheetMode = mode;
   attentionSheetOpen = true;
   applyAttentionSheet();
-  document.querySelector<HTMLButtonElement>("#conversation-attention")?.setAttribute("aria-expanded", "true");
+  document.querySelector<HTMLButtonElement>(mode === "progress" ? "#conversation-progress" : "#conversation-attention")?.setAttribute("aria-expanded", "true");
   document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close")?.focus();
 }
 function closeAttentionSheet(): void {
   if (!attentionSheetOpen) return;
+  const mode = contextSheetMode;
   attentionSheetOpen = false;
+  contextSheetMode = "attention";
   applyAttentionSheet();
-  const badge = document.querySelector<HTMLButtonElement>("#conversation-attention");
+  const badge = document.querySelector<HTMLButtonElement>(mode === "progress" ? "#conversation-progress" : "#conversation-attention");
   badge?.setAttribute("aria-expanded", "false");
   if (badge && !badge.hidden) badge.focus(); else landFocus([focusTargets.thread]);
+}
+
+/** cas-5bef0: the phone's Tasks & progress button shows while the session reports agents or tasks. */
+function syncConversationProgress(status: Record<string, unknown> | undefined): void {
+  const button = document.querySelector<HTMLButtonElement>("#conversation-progress");
+  if (!button) return;
+  const count = ((status?.agents as unknown[]) ?? []).length + ((status?.tasks_in_progress as unknown[]) ?? []).length + ((status?.tasks_ready as unknown[]) ?? []).length;
+  button.hidden = count === 0;
+  button.setAttribute("aria-expanded", String(attentionSheetOpen && contextSheetMode === "progress"));
+  button.onclick = () => openAttentionSheet("progress");
 }
 
 /**

@@ -833,12 +833,20 @@ fn cas_9723_stop_docker_container_spares_reused_client_pid() {
 }
 
 #[cfg(unix)]
-fn detached_docker_start_fixture(running: bool) {
+fn detached_docker_start_fixture(running: Option<bool>) {
     let temp = tempfile::tempdir().unwrap();
     let docker = temp.path().join("docker");
     let state = temp.path().join("running");
     let inspected_id = temp.path().join("inspected-id");
-    fs::write(&state, if running { "true" } else { "false" }).unwrap();
+    fs::write(
+        &state,
+        match running {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "removed",
+        },
+    )
+    .unwrap();
     // An explicit executable exercises Docker dispatch without changing PATH
     // for parallel tests. The run client exits before the startup grace.
     crate::test_paths::warm_stub(
@@ -854,6 +862,10 @@ run)
   ;;
 inspect)
   printf '%s' "$3" > '{inspected}'
+  if [ "$(cat '{state}')" = removed ]; then
+    printf 'Error: No such object: removed-id\n' >&2
+    exit 1
+  fi
   cat '{state}'
   ;;
 stop) printf 'false' > '{state}' ;;
@@ -873,7 +885,7 @@ esac
             true,
         ),
     );
-    if running {
+    if running == Some(true) {
         let record = result.expect("a running container survives its exited client");
         assert_eq!(record.state, ServerState::Running);
         assert_ne!(liveness(&record), ServerLiveness::Live);
@@ -897,11 +909,17 @@ esac
 #[cfg(unix)]
 #[test]
 fn cas_7694_detached_docker_start_checks_container_instead_of_client() {
-    detached_docker_start_fixture(true);
+    detached_docker_start_fixture(Some(true));
 }
 
 #[cfg(unix)]
 #[test]
 fn cas_7694_detached_docker_exited_container_fails_with_log_tail() {
-    detached_docker_start_fixture(false);
+    detached_docker_start_fixture(Some(false));
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_7694_detached_docker_missing_container_fails_with_log_tail() {
+    detached_docker_start_fixture(None);
 }

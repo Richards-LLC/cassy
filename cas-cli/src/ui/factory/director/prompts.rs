@@ -2785,7 +2785,8 @@ mod tests {
             if status == TaskStatus::Closed && actor == "swift-fox" {
                 assert_eq!(notices.len(), 1, "one authoritative worker-close notice");
                 let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt).unwrap();
-                assert_eq!(envelope.actor, actor);
+                assert_eq!(envelope.task_id, task.id);
+                assert!(notices[0].prompt.contains(&format!("actor=\"{actor}\"")));
                 assert!(!notices[0].prompt.contains("Assign another task"));
             } else {
                 assert!(notices.is_empty(), "the supervisor gets no echo for their own close/cancel");

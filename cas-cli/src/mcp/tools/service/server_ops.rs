@@ -460,7 +460,11 @@ impl CasService {
 
         if lines.is_empty() {
             return Ok(Self::success(format!(
-                "{}No registered servers{} matching filters. Use status=all to include history.\n",
+                "{}No registered servers{} matching filters. Use status=all to include history.\n\n\
+                 Long-running servers belong in the registry: \
+                 `factory action=server_start command=\"npm run dev\" port=5173` \
+                 (add shared=true when it must outlive the task). A raw `npm run dev &` is \
+                 killed at worker teardown and is invisible here.",
                 if status == "running" {
                     "No servers currently running.\n"
                 } else {

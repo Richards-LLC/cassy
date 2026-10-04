@@ -263,14 +263,64 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         notes: &notes,
         deployed_origins: &qa.deployed_origins,
     };
-    run_close_gate_with_write_dir(
+    let tier = evidence_tier(&reasons, terminal_render);
+    // Waivers authorize missing implementer ledger evidence only at the exact
+    // delivered commit. Independent QA PASS and ancestor waivers do not do so.
+    let waiver = if matches!(tier, EvidenceTier::Ledger { .. }) {
+        cas_store::satisfying_qa_passes(cas_root, &task.id)
+            .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
+            .into_iter()
+            .find(|pass| pass.bound_head == head && pass.state == cas_types::QaPassState::Waived)
+    } else {
+        None
+    };
+    let mut pass = run_close_gate_with_write_dir(
         &ctx,
-        evidence_tier(&reasons, terminal_render),
+        if waiver.is_some() {
+            EvidenceTier::None
+        } else {
+            tier
+        },
         &reasons,
         &markers,
         &paths.task_dirs(&task.id)[0],
-    )
-    .map(|pass| pass.notes)
+    )?;
+    if let Some(waiver) = waiver {
+        pass.notes.push(format!(
+            "QA evidence ledger waived: head={} waiver={} supervisor={} reason={}",
+            head,
+            waiver.id,
+            waiver.issuer_agent_id.as_deref().unwrap_or(""),
+            waiver.summary.as_deref().unwrap_or("")
+        ));
+    }
+    if !pass.deferred_deployed.is_empty() {
+        let agents = crate::store::open_agent_store(cas_root)
+            .and_then(|store| store.list(None))
+            .map_err(|err| {
+                format!("QA EVIDENCE REJECTED: cannot validate deployed-verification owner: {err}")
+            })?;
+        for deferred in pass.deferred_deployed {
+            let by_id = agents.iter().find(|agent| agent.id == deferred.owner);
+            let named: Vec<_> = agents
+                .iter()
+                .filter(|agent| agent.name == deferred.owner)
+                .collect();
+            let owner = by_id.or_else(|| (named.len() == 1).then(|| named[0]));
+            let Some(owner) = owner.filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+            else {
+                return Err(format!(
+                    "QA EVIDENCE REJECTED: deployed-verification owner={} must identify one registered supervisor (use the agent id for ambiguous names)",
+                    deferred.owner
+                ));
+            };
+            pass.notes.push(format!(
+                "POST-DEPLOY OBLIGATION: task={} head={} row={} ledger={} owner={} ({}); deferred deployed verification, not PASS.",
+                task.id, head, deferred.row_id, deferred.ledger.display(), owner.name, owner.id
+            ));
+        }
+    }
+    Ok(pass.notes)
 }
 
 #[cfg(test)]

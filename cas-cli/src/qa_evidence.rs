@@ -1490,8 +1490,24 @@ fn expect_has_expect_ancestor(
 }
 
 /// Validate `<task>/LEDGER.md` for a demo-only (non-web) delivery: present,
-/// non-empty, fresher than the delivered commit, with at least one PASS row.
+/// non-empty and fresher than the delivered commit. A real-build PASS or a
+/// deployed-verification deferral is required; the close handler authenticates
+/// deferred owners and records their post-deploy obligations.
 pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
+    validate_ledger_receipt(ctx).map(|receipt| receipt.0)
+}
+
+/// A deployed check deferred to a registered supervisor. This is not a PASS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredDeployedVerification {
+    pub row_id: String,
+    pub owner: String,
+    pub ledger: PathBuf,
+}
+
+fn validate_ledger_receipt(
+    ctx: &EvidenceContext<'_>,
+) -> Result<(PathBuf, Vec<DeferredDeployedVerification>), EvidenceRefusal> {
     let ledger = ctx.task_artifacts_dir.join("LEDGER.md");
     let command = format!(
         "walk the demo_statement and write the evidence ledger to {} (cas-qa-craft references/evidence-ledger.md)",
@@ -1521,7 +1537,9 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             command,
         ));
     }
-    let has_pass = body.lines().any(|line| {
+    let mut has_pass = false;
+    let mut deferred = Vec::new();
+    for line in body.lines() {
         let cells: Vec<&str> = line
             .trim()
             .trim_matches('|')
@@ -1529,9 +1547,35 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             .map(str::trim)
             .collect();
         // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
-        cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build")
-    });
-    if !has_pass {
+        has_pass |= cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build");
+        if cells.get(4) != Some(&"DEFERRED") || cells.get(5) != Some(&"deployed-verification") {
+            continue;
+        }
+        let owner = cells
+            .get(6)
+            .and_then(|cell| cell.strip_prefix("deferred: deployed-verification owner="));
+        let Some(owner) = owner.filter(|owner| {
+            !owner.is_empty() && !owner.chars().any(|c| c.is_whitespace() || c.is_control())
+        }) else {
+            return Err(EvidenceRefusal::new(
+                "invalid deployed-verification deferral: expected `deferred: deployed-verification owner=<registered supervisor>`",
+                command,
+            ));
+        };
+        let row_id = cells[0];
+        if row_id.is_empty() {
+            return Err(EvidenceRefusal::new(
+                "invalid deployed-verification deferral: row id is empty",
+                command,
+            ));
+        }
+        deferred.push(DeferredDeployedVerification {
+            row_id: row_id.into(),
+            owner: owner.into(),
+            ledger: ledger.clone(),
+        });
+    }
+    if !has_pass && deferred.is_empty() {
         return Err(EvidenceRefusal::new(
             format!(
                 "unproven: {} has no row with verdict PASS and label real-build",
@@ -1540,7 +1584,7 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             command,
         ));
     }
-    Ok(ledger)
+    Ok((ledger, deferred))
 }
 
 /// First line of a passing cas-cli-craft `scripts/terminal-qa.mjs` report.
@@ -1822,6 +1866,8 @@ pub enum EvidenceTier {
 pub struct GatePass {
     /// Decision-note lines to append at close (allowed skips, receipts).
     pub notes: Vec<String>,
+    /// The close handler must authenticate each owner before accepting these.
+    pub deferred_deployed: Vec<DeferredDeployedVerification>,
 }
 
 /// Run the evidence and skip-marker checks and render the rejection text.
@@ -1916,8 +1962,9 @@ pub fn run_close_gate_with_write_dir(
             ));
         }
         EvidenceTier::Ledger { terminal_qa } => {
-            let ledger =
-                validate_ledger(ctx).map_err(|refusal| reject(refusal, "QA evidence ledger"))?;
+            let (ledger, deferred) = validate_ledger_receipt(ctx)
+                .map_err(|refusal| reject(refusal, "QA evidence ledger"))?;
+            pass.deferred_deployed = deferred;
             pass.notes.push(format!(
                 "QA evidence ledger accepted: {}.",
                 ledger.display()

@@ -510,6 +510,8 @@ mod tests {
         assert!(!should_prompt_for_profile(None, &profiles, true, false));
         assert!(!should_prompt_for_profile(Some("alt"), &profiles, true, true));
         assert!(should_prompt_for_profile(None, &profiles[..1], true, true));
+        assert!(!should_prompt_for_profile(None, &[], true, true));
+        assert!(!should_prompt_for_profile(None, &profiles, false, false));
     }
 
     #[test]

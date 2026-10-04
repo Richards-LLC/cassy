@@ -78,6 +78,8 @@ class TriageRecipe(unittest.TestCase):
     def test_fixed_and_obsolete_require_current_source_citations(self):
         for verdict in ("FIXED", "OBSOLETE"):
             source = state(verdict); source["retired_premise"] = "workflow removed"
+            if verdict == "OBSOLETE":
+                source["candidate_commits"] = []
             self.assertEqual(verdict, triage.route(source, evaluation(verdict))["verdict"])
             for change in ({"sha": "stale"}, {"line": 0}, {"snippet": ""},
                            {"path": "../escape.rs"}, {"path": "/absolute.rs"},

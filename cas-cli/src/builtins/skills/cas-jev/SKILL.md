@@ -54,6 +54,15 @@ metadata:
    ids, model, answers, input tokens, latency and request id; state and keys are
    omitted. Done when the decision and any independent action proof are cited.
 
+## File sweeps
+
+Use `jev action=files` or `cas jev files` with project paths/globs. Treat
+`status: incomplete` and `truncated: true` as abstention, never evidence of
+absence; increase `max_bytes` or supply a smaller complete file. Resume a
+capped sweep with `offset=next_offset` until it is null. Keep selectors fixed;
+use `rev` and the returned immutable `revision` SHA to keep every page on one
+Git snapshot. Missing revision paths and unreadable blobs have distinct reasons.
+
 ## Model, cost and latency
 
 Use `jev.model` (default `jev-1.13.0`) and `jev.enabled`; the default transport

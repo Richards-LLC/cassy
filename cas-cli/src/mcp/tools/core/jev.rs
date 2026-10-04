@@ -59,6 +59,8 @@ impl CasCore {
                             recursive: req.recursive,
                             max_files: req.max_files.unwrap_or(50),
                             max_bytes: req.max_bytes.unwrap_or(crate::jev::DEFAULT_FILE_BYTES),
+                            offset: req.offset.unwrap_or(0),
+                            rev: req.rev,
                         },
                         &req.questions,
                         "mcp:jev.files",
@@ -107,6 +109,8 @@ mod tests {
             recursive: false,
             max_files: None,
             max_bytes: None,
+            offset: None,
+            rev: None,
             questions: json!({"urgent":{"type":"noul","instructions":"Urgent?"}}),
             advisory: true,
         };

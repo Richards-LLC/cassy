@@ -1326,6 +1326,10 @@ pub struct JevRequest {
     pub max_files: Option<usize>,
     /// Per-file content byte cap: 1–131072, default 24576.
     pub max_bytes: Option<usize>,
+    /// Matching-candidate offset for files; resume with next_offset, default 0.
+    pub offset: Option<usize>,
+    /// Optional Git revision for files; reads immutable blobs instead of checkout bytes.
+    pub rev: Option<String>,
     /// Map of question ids to typed noul, choice or score questions.
     pub questions: serde_json::Value,
     /// Return typed unavailable on transport failure; defaults to false.

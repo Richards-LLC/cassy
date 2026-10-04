@@ -20,10 +20,12 @@ fn record(name: &str, shared: bool) -> RegisteredServer {
         expected_port: Some(5173),
         owner_task: Some("cas-7c93".to_string()),
         owner_worker: Some("young-finch-81".to_string()),
+        owner_agent_id: None,
         factory_session: Some("session-a".to_string()),
         shared,
         cgroup: None,
         log_path: None,
+        docker: None,
         started_at: Utc::now(),
         state: ServerState::Running,
         ended_at: None,
@@ -127,4 +129,36 @@ fn default_names_come_from_the_command_and_are_filename_safe() {
     assert_eq!(default_server_name("///"), "server");
     assert_eq!(default_server_name(""), "server");
     assert!(!default_server_name("../../etc/passwd").contains('/'));
+}
+
+#[test]
+fn cas_9723_server_ownership_rejects_identity_and_session_reuse() {
+    use crate::types::{Agent, AgentRole};
+    let mut server = record("owned", true);
+    let mut caller = Agent::new_with_role(
+        "worker-id".into(),
+        "young-finch-81".into(),
+        AgentRole::Worker,
+    );
+    caller.factory_session = server.factory_session.clone();
+    assert!(
+        owns_server(&server, &caller),
+        "legacy matching name and session remain stoppable"
+    );
+    caller.factory_session = Some("different-session".into());
+    assert!(!owns_server(&server, &caller));
+    caller.factory_session = server.factory_session.clone();
+    server.owner_agent_id = Some(caller.id.clone());
+    assert!(owns_server(&server, &caller));
+    caller.id = "replacement-id".into();
+    assert!(
+        !owns_server(&server, &caller),
+        "same-name replacement cannot stop the original owner's server"
+    );
+    server.owner_worker = None;
+    server.owner_agent_id = None;
+    assert!(
+        !owns_server(&server, &caller),
+        "unowned legacy entries are supervisor-only"
+    );
 }

@@ -78,7 +78,22 @@ pub(super) fn render_server_line(
     )
 }
 
+/// New entries bind registered identity; legacy entries use name + session.
+fn owns_server(record: &RegisteredServer, caller: &crate::types::Agent) -> bool {
+    if let Some(owner) = &record.owner_agent_id {
+        return owner == &caller.id && record.factory_session == caller.factory_session;
+    }
+    record.owner_worker.as_deref() == Some(caller.name.as_str())
+        && caller.factory_session.is_some()
+        && record.factory_session == caller.factory_session
+}
+
 impl CasService {
+    fn server_caller(&self) -> Option<crate::types::Agent> {
+        let id = self.inner.get_registered_agent_id_read_only().ok()?;
+        self.inner.open_agent_store().ok()?.get(&id).ok()
+    }
+
     /// Launch a long-running server under Cassy supervision.
     pub(super) async fn factory_server_start(
         &self,
@@ -143,6 +158,13 @@ impl CasService {
             ));
         }
 
+        let caller = self.server_caller();
+        if caller.is_none() && crate::harness_policy::is_worker_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "server_start requires a registered worker identity to record server ownership",
+            ));
+        }
         let shared = req.shared.unwrap_or(false);
         let spec = ServerSpec {
             name,
@@ -150,8 +172,15 @@ impl CasService {
             cwd,
             expected_port: port,
             owner_task: req.task_id.clone(),
-            owner_worker: std::env::var("CAS_AGENT_NAME").ok(),
-            factory_session: std::env::var("CAS_FACTORY_SESSION").ok(),
+            owner_worker: caller
+                .as_ref()
+                .map(|a| a.name.clone())
+                .or_else(|| std::env::var("CAS_AGENT_NAME").ok()),
+            factory_session: caller
+                .as_ref()
+                .map(|a| a.factory_session.clone())
+                .unwrap_or_else(|| std::env::var("CAS_FACTORY_SESSION").ok()),
+            owner_agent_id: caller.as_ref().map(|a| a.id.clone()),
             shared,
         };
 
@@ -227,6 +256,18 @@ impl CasService {
                 )
             })?;
 
+        let caller = self.server_caller();
+        let worker = caller
+            .as_ref()
+            .map(|a| a.role == crate::types::AgentRole::Worker)
+            .unwrap_or_else(crate::harness_policy::is_worker_from_env);
+        if worker && !caller.as_ref().is_some_and(|a| owns_server(&record, a)) {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "server_stop: workers may stop only servers they started; ask the supervisor to stop another owner's server",
+            ));
+        }
+
         let outcome = server_registry::stop(&self.inner.cas_root, &record).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -259,7 +300,7 @@ impl CasService {
             ),
             StopOutcome::RefusedUnverified(liveness) => format!(
                 "Refused to signal server '{}' (id {}): pid {} {}.\n\n\
-                 Nothing was killed. The entry is marked dead — Cassy never signals a pid it \
+                 {} The entry is marked dead — Cassy never signals a pid it \
                  cannot prove is still the process it started, because the pid may now belong \
                  to something else entirely.",
                 record.name,
@@ -268,6 +309,11 @@ impl CasService {
                 match liveness {
                     ServerLiveness::Replaced => "now belongs to a different process",
                     _ => "could not be verified",
+                },
+                if record.docker.is_some() {
+                    "The Docker container was stopped; the client pid was not signalled."
+                } else {
+                    "Nothing was killed."
                 }
             ),
         };

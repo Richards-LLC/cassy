@@ -16,6 +16,7 @@ use tempfile::TempDir;
 struct TestEnv {
     _temp: TempDir,
     workdir: PathBuf,
+    cas_root: PathBuf,
     service: CasService,
 }
 
@@ -27,9 +28,17 @@ impl TestEnv {
         std::fs::create_dir_all(&workdir).unwrap();
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing("server-registry-test".to_string());
+        cas::store::open_agent_store(&cas_root)
+            .unwrap()
+            .register(&cas::types::Agent::new(
+                "server-registry-test".to_string(),
+                "operator".to_string(),
+            ))
+            .unwrap();
         Self {
             _temp: temp,
             workdir,
+            cas_root,
             service: CasService::new(core, None),
         }
     }
@@ -300,4 +309,76 @@ async fn shared_servers_announce_that_they_outlive_teardown() {
 
     env.call(serde_json::json!({"action": "server_stop", "id": "shared-web"}))
         .await;
+}
+
+/// Registered identity controls both factory and legacy coordination routes.
+#[tokio::test]
+async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
+    use cas::types::{Agent, AgentRole};
+    let env = TestEnv::new();
+    let mut alice = Agent::new_with_role("alice-id".into(), "alice".into(), AgentRole::Worker);
+    alice.factory_session = Some("session-a".into());
+    let mut bob = Agent::new_with_role("bob-id".into(), "bob".into(), AgentRole::Worker);
+    bob.factory_session = Some("session-a".into());
+    let service = |agent: &Agent| {
+        let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+        cas::store::open_agent_store(&env.cas_root)
+            .unwrap()
+            .register(agent)
+            .unwrap();
+        core.set_agent_id_for_testing(agent.id.clone());
+        CasService::new(core, None)
+    };
+    let alice_service = service(&alice);
+    let bob_service = service(&bob);
+    let call = |svc: CasService, req: serde_json::Value| async move {
+        let result = svc
+            .factory(Parameters(serde_json::from_value(req).unwrap()))
+            .await;
+        match result {
+            Ok(result) => result
+                .content
+                .iter()
+                .filter_map(|c| match &c.raw {
+                    RawContent::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(error) => format!("MCP_ERROR: {error}"),
+        }
+    };
+    let started = call(
+        alice_service.clone(),
+        serde_json::json!({
+            "action":"server_start", "id":"owned", "command":"sleep 300", "cwd":env.workdir,
+        }),
+    )
+    .await;
+    assert!(started.contains("Started server"), "{started}");
+    let id = extract_id(&started);
+    let refused = call(
+        bob_service,
+        serde_json::json!({"action":"server_stop", "id":id}),
+    )
+    .await;
+    assert!(
+        refused.contains("workers may stop only servers they started"),
+        "{refused}"
+    );
+    let still_running = call(
+        alice_service.clone(),
+        serde_json::json!({"action":"server_list"}),
+    )
+    .await;
+    assert!(
+        still_running.contains("Running servers (1)"),
+        "refusal must preserve the workload: {still_running}"
+    );
+    let stopped = call(
+        alice_service,
+        serde_json::json!({"action":"server_stop", "id":id}),
+    )
+    .await;
+    assert!(stopped.contains("Stopped server"), "{stopped}");
 }

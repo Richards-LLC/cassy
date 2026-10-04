@@ -76,6 +76,14 @@ factory action=server_stop id=dev-web
 
 Takes the name or the id from `server_list`. Stops the whole server, not just its wrapper
 script — `npm run dev` is a launcher whose real server is a child process.
+Workers may stop servers they started; the supervisor may stop any registered server.
+Ownership is bound to the registered worker identity and factory session.
+
+For a direct `docker run ...` command, Cassy injects `--cidfile` and stops the
+captured container ID through Docker before stopping the client. This also works
+with `--rm` or `--detach`, because containers belong to the daemon. Omit your own
+`--cidfile`. Shell wrappers and Docker global options are not detected; use a
+direct `docker run` command for managed container teardown.
 
 Cassy refuses to signal a pid it cannot prove is still the process it started (pid reuse
 happens on long-lived machines). If you see that refusal, the server is already gone; the

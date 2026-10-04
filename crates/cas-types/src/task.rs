@@ -168,6 +168,8 @@ pub enum TaskTerminalOutcome {
     /// A measured experiment completed negatively and was intentionally not
     /// merged under the structured supervisor receipt.
     NegativeResult,
+    /// Successful report/artifact delivery intentionally excluded from code integration.
+    EvidenceOnly,
     /// A human/supervisor decision completed the task without code delivery.
     Decision,
     /// Planned work ended without delivery. `superseded_by` may identify the
@@ -488,6 +490,19 @@ pub struct NegativeResultEvidence {
     pub supervisor_name: String,
 }
 
+/// Audited successful evidence delivery that does not enter code integration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceOnlyEvidence {
+    pub artifact_path: String,
+    pub reference: String,
+    pub rationale: String,
+    pub supervisor_id: String,
+    pub supervisor_name: String,
+    pub commit_sha: String,
+    pub base_sha: String,
+    pub paths: Vec<String>,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
@@ -506,6 +521,9 @@ pub struct TaskDeliverables {
     /// a closed task is reopened into a fresh work cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negative_result: Option<NegativeResultEvidence>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_only: Option<EvidenceOnlyEvidence>,
 
     /// Files changed (excluding deletions)
     #[serde(default)]
@@ -608,6 +626,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     negative_result: Option<NegativeResultEvidence>,
     #[serde(default)]
+    evidence_only: Option<EvidenceOnlyEvidence>,
+    #[serde(default)]
     files_changed: Vec<String>,
     #[serde(default)]
     commit_hash: Option<String>,
@@ -639,6 +659,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             work_target: value.work_target,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
+            evidence_only: value.evidence_only,
             files_changed: value.files_changed,
             commit_hash: value.commit_hash,
             merge_commit: value.merge_commit,
@@ -911,6 +932,7 @@ impl TaskDeliverables {
         self.work_target.is_none()
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
+            && self.evidence_only.is_none()
             && self.files_changed.is_empty()
             && self.commit_hash.is_none()
             && self.merge_commit.is_none()
@@ -1169,6 +1191,9 @@ impl Task {
     /// legacy NULL rows. This never mutates or backfills persistence.
     pub fn effective_terminal_outcome(&self) -> Option<TaskTerminalOutcome> {
         self.terminal_outcome.clone().or_else(|| match self.status {
+            TaskStatus::Closed if self.deliverables.evidence_only.is_some() => {
+                Some(TaskTerminalOutcome::EvidenceOnly)
+            }
             TaskStatus::Closed if self.deliverables.negative_result.is_some() => {
                 Some(TaskTerminalOutcome::NegativeResult)
             }
@@ -1185,7 +1210,7 @@ impl Task {
         self.is_terminal()
             && matches!(
                 self.effective_terminal_outcome(),
-                Some(TaskTerminalOutcome::Delivered)
+                Some(TaskTerminalOutcome::Delivered | TaskTerminalOutcome::EvidenceOnly)
             )
     }
 
@@ -1197,7 +1222,8 @@ impl Task {
         !matches!(
             self.effective_terminal_outcome(),
             Some(
-                TaskTerminalOutcome::NegativeResult
+                TaskTerminalOutcome::EvidenceOnly
+                    | TaskTerminalOutcome::NegativeResult
                     | TaskTerminalOutcome::Decision
                     | TaskTerminalOutcome::Cancelled { .. }
             )

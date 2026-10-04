@@ -275,6 +275,7 @@ impl SqliteTaskStore {
                 persisted_deliverables.retain_factory_branch_anchor_as_history();
                 if reopening_terminal {
                     persisted_deliverables.negative_result = None;
+                    persisted_deliverables.evidence_only = None;
                     persisted_terminal_outcome = None;
                 }
             }

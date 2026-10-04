@@ -320,6 +320,9 @@ impl CasCore {
                 cas_types::TaskTerminalOutcome::Delivered => {
                     output.push_str("\nOutcome: delivered");
                 }
+                cas_types::TaskTerminalOutcome::EvidenceOnly => {
+                    output.push_str("\nOutcome: successful evidence-only delivery (not for integration)");
+                }
                 cas_types::TaskTerminalOutcome::NegativeResult => {
                     output.push_str("\nOutcome: measured negative result (no delivery)");
                 }

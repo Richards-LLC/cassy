@@ -223,6 +223,13 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
     }
 }
 
+/// Whether a delivery is already carried by the target, including squash tips.
+/// Integration alone does not satisfy QA: dispatch suppression also needs a
+/// passed or waived verdict for this exact delivery.
+fn delivery_tip_on_target(repo: &Path, head: &str, target: &str) -> bool {
+    is_ancestor(repo, head, target) || reviewed_tip_carried_by(repo, head, target, target)
+}
+
 /// cas-624f: rejected (failed) rounds on record for a delivery.
 pub(crate) fn failed_qa_rounds(cas_root: &Path, task_id: &str) -> u32 {
     cas_store::list_qa_passes(cas_root, task_id)
@@ -436,9 +443,23 @@ impl CasCore {
         // The close gate has already selected this task's delivery tip. A
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
+        let target = freshest_target_ref(repo, parent_branch);
+        if delivery_tip_on_target(repo, delivery_ref, &target)
+            && resolve_commit(repo, delivery_ref).is_some_and(|delivered| {
+                cas_store::list_qa_passes(&self.cas_root, &task.id)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|pass| {
+                        pass.state.satisfies_gate()
+                            && resolve_commit(repo, &pass.bound_head).as_deref() == Some(delivered.as_str())
+                    })
+            })
+        {
+            return None;
+        }
         let changed = match changed_paths_for_delivery(
             repo,
-            &freshest_target_ref(repo, parent_branch),
+            &target,
             delivery_ref,
         ) {
             Ok(paths) => Some(paths),
@@ -991,6 +1012,7 @@ impl CasCore {
         if !qa.independent_pass {
             return QaCloseGate::Clear;
         }
+        let classification_target = freshest_target_ref(repo, target_branch);
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
         let branch = task
             .deliverables
@@ -1008,7 +1030,7 @@ impl CasCore {
             // The live branch tip is the delivery only while it is itself
             // merged: months later it carries unrelated work.
             super::close_ops::resolve_branch_sha(repo, &branch)
-                .filter(|tip| is_ancestor(repo, tip, target_branch))
+                .filter(|tip| is_ancestor(repo, tip, &classification_target))
         });
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
@@ -1026,7 +1048,7 @@ impl CasCore {
         // it ever parked through the gate.
         let changed = head
             .as_deref()
-            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, target_branch));
+            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, &classification_target));
         // cas-2387: a no-code task owes no review only while it delivered no
         // user-facing code. Then any round an earlier close opened for it is
         // withdrawn, so it cannot hold the close.
@@ -1525,6 +1547,8 @@ mod squash_close_tests {
         tasks.add(&task).unwrap();
         let now = chrono::Utc::now();
         match state {
+            // An out-of-band squash can precede the delivery's first park.
+            QaPassState::Pending => {}
             QaPassState::Waived => {
                 cas_store::waive_qa_pass(
                     &cas_dir,
@@ -1582,6 +1606,70 @@ mod squash_close_tests {
         );
         git(repo, &["checkout", "-q", "factory/worker"]);
         (dir, core, task, squash)
+    }
+
+    #[test]
+    fn cas_b591_reviewed_squash_tip_does_not_dispatch_a_new_round() {
+        for state in [QaPassState::Passed, QaPassState::Waived] {
+            let mut env = TestEnvGuard::temp_home();
+            let (dir, core, mut task, _squash) = squash_fixture(&mut env, state);
+            let repo = dir.path();
+            let head = task.deliverables.factory_branch_anchor.clone().unwrap();
+            assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+            assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 1);
+            assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", None, None), QaCloseGate::Clear));
+
+            // An older verdict cannot waive new work added on this branch.
+            std::fs::write(repo.join("web/new.css"), ".new{color:red}\n").unwrap();
+            git(repo, &["add", "web/new.css"]);
+            git(repo, &["commit", "-q", "-m", "new unreviewed surface"]);
+            let new_head = git(repo, &["rev-parse", "HEAD"]);
+            task.deliverables.factory_branch_anchor = Some(new_head.clone());
+            let dispatch = core.dispatch_independent_qa(&task, repo, "main", Some(&new_head));
+            assert!(dispatch.unwrap().contains("INDEPENDENT QA DISPATCHED"));
+            assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn cas_b591_unreviewed_squash_still_dispatches_a_round() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+        let outcome = core.independent_qa_close_gate(&task, dir.path(), "main", None, None);
+        let QaCloseGate::Refuse(text) = outcome else {
+            panic!("an integrated delivery without a verdict still requires QA");
+        };
+        assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
+        let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].state, QaPassState::Pending);
+    }
+
+    #[test]
+    fn cas_b591_report_only_tip_excludes_target_only_stylesheets() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, mut task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+        let repo = dir.path();
+        git(repo, &["checkout", "-q", "main"]);
+        let stale = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("calendar.scss"), ".calendar{color:red}\n").unwrap();
+        git(repo, &["add", "calendar.scss"]);
+        git(repo, &["commit", "-q", "-m", "unrelated calendar style"]);
+        let fresh = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", &fresh]);
+        git(repo, &["branch", "-f", "factory/worker", &fresh]);
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["branch", "-f", "main", &stale]);
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/report.html"), "<main>QA report</main>\n").unwrap();
+        git(repo, &["add", "docs/report.html"]);
+        git(repo, &["commit", "-q", "-m", "report only"]);
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        task.execution_note = Some("no-code".into());
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+        assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", None, None), QaCloseGate::Clear));
+        assert!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().is_empty());
     }
 
     async fn worker_close_after_squash(state: QaPassState) {

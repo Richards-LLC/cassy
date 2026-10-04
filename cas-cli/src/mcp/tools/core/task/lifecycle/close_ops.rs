@@ -13128,6 +13128,13 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 batch.branch, batch.tip, batch.delivered_head, squash, batch.supervisor_id
             ));
         }
+        let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
+        if !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch) {
+            return MergeStateGateOutcome::Reject(format!(
+                "⚠️ MERGE REQUIRED\n\nintegration batch {}@{} is staged but not proven on {}. A squash must carry exactly the batch's changed paths, final blobs and modes; extra or missing paths are refused. Publish the complete batch, then retry close (or a registered supervisor can clear merged_into to choose a different integration path).",
+                batch.branch, batch.tip, parent_branch
+            ));
+        }
     }
     // cas-e33f (GH #1004): after a handoff the assignee (often the
     // supervisor) has no factory branch; measure the branch that actually
@@ -17624,7 +17631,9 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         if merge_evidence_note.is_some() { unmerged_count = 0; refs_unresolved = false; }
         let mut content_evolution_note = None;
         let mut dropped_paths = Vec::new();
-        let mut content_check_error = None;
+        let mut content_check_error = t.deliverables.integration_batch.as_ref().filter(|batch|
+            merge_evidence_note.is_none() && !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch)
+        ).map(|batch| format!("integration batch {}@{} is staged but its complete delta is not proven on {}", batch.branch, batch.tip, parent_branch));
         let mut content_directions = Vec::new();
         // A stranded live lane is the common close-gate case. Measure each
         // distinct branch once before attempting anchor reconciliation so the

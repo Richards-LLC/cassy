@@ -31,7 +31,7 @@ fn last_recorded_close_blocker(cas_root: &std::path::Path, task_id: &str) -> Opt
     let events = crate::store::open_event_store(cas_root).ok()?
         .list_by_type(cas_types::EventType::WorkerVerificationBlocked, 512).ok()?;
     for event in events {
-        let metadata = event.metadata.as_ref()?;
+        let Some(metadata) = event.metadata.as_ref() else { continue };
         if metadata.get("task_id").and_then(|v| v.as_str()) != Some(task_id)
             || metadata.get("close_rejected").and_then(|v| v.as_bool()) != Some(true)
         {
@@ -751,7 +751,7 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated. {} Retry task action=close id={} to refresh the actual gate; changing the target again will not repair it.",
+                        "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated. {} Retry task action=close id={} to report the current blocking gate before requesting another scope correction.",
                         last_recorded_close_blocker(&self.cas_root, &task.id)
                             .unwrap_or_else(|| "No close rejection is recorded for this task.".into()),
                         task.id,

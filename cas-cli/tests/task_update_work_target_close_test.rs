@@ -653,7 +653,6 @@ async fn branch_only_target_update_defaults_legacy_task_to_project_cas_4ae1() {
 
 #[tokio::test]
 async fn unchanged_proof_scope_fix_names_last_real_close_gate_cas_4ae1() {
-    use cas::store::EventStore;
     let _env = TestEnvGuard::temp_home();
     cas::store::known_repos::ensure_host_schema().unwrap();
     let repo = GitRepo::new();
@@ -683,6 +682,10 @@ async fn unchanged_proof_scope_fix_names_last_real_close_gate_cas_4ae1() {
         "task_id": "other-task", "close_rejected": true,
         "reason": "UNRELATED-BLOCKER-MUST-NOT-LEAK", "message": "other rejection",
     }))).unwrap();
+    events.record(&cas::types::Event::new(
+        cas::types::EventType::WorkerVerificationBlocked,
+        cas::types::EventEntityType::Agent, "unrelated-agent", "unstructured activity",
+    )).unwrap();
     let error = service.task(Parameters(task_request(serde_json::json!({
         "action": "update", "id": task.id, "proof_scope_fix": true,
         "target_branch": "main", "reason": "Retry unchanged target",

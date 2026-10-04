@@ -262,6 +262,17 @@ the number of matching entries. The legacy coordination route uses the same
 filters and limits. Regression coverage lives in `server_registry_mcp_test`
 and the service's `server_ops_tests`; no new CLI command is introduced.
 
+### Branch-only target correction
+
+`task action=update target_branch=<branch>` preserves the task's repository
+binding or defaults a legacy targetless task to the current project repository.
+The corrected branch is validated, so a deleted old epic branch can be repaired.
+The same default applies to supervisor `proof_scope_fix=true` corrections.
+An unchanged correction leaves the proof cycle intact and reports the last
+recorded close rejection for that task, including pre-close hook failures.
+Retry `task action=close` to refresh the current gate before correcting scope
+again; historical diagnostics do not replace a fresh close attempt.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured

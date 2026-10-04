@@ -15,6 +15,25 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
   const footer = page.locator("#hub-footer-badges");
   const banner = page.locator(".terminal-disconnected-banner");
+  // cas-846c/45ca: output provenance stays in the tooltip; reading/AX text
+  // appears only when the complete caption fits beside the name and controls.
+  const expectOutputActivity = async () => {
+    const caption = page.locator("#pane-grid .pane").first().locator(".pane-last-activity");
+    await expect.poll(() => caption.evaluate((element) => {
+      const text = element.textContent ?? "";
+      const title = element.getAttribute("title") ?? "";
+      const earlier = title === "Output from before this page opened; nothing new since";
+      const truthful = earlier ? text === "" || text === "Earlier output"
+        : Number.isFinite(Date.parse(title)) && (text === "" || /^(now|\d+[smhd])$/.test(text));
+      if (!text) return { truthful, wholeOrAbsent: element.getAttribute("aria-hidden") === "true" };
+      const box = element.getBoundingClientRect();
+      const range = document.createRange(); range.selectNodeContents(element);
+      const words = range.getBoundingClientRect();
+      const whole = words.left >= box.left - 0.02 && words.right <= box.right + 0.02
+        && words.top >= box.top - 0.02 && words.bottom <= box.bottom + 0.02;
+      return { truthful, wholeOrAbsent: !element.hasAttribute("aria-hidden") && whole };
+    }), { message: "output activity is truthful and either wholly readable or absent from reading/AX content" }).toEqual({ truthful: true, wholeOrAbsent: true });
+  };
   /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
   /** The journey's own turns as painted, top to bottom (cas-eb4b). */
   const SAID = ["Are you there?", "Are we back?", "Back. Nothing was lost."];
@@ -242,10 +261,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(before.rail).toBe("All clear");
     expect(before.mode).toBe("CONTROL");
     // Journey F42: the pane opened on the supervisor's "The supervisor is
-    // ready." (drawn in the terminal canvas), so its header names that
-    // output or its time, never "No output yet" above it.
-    const firstPane = page.locator("#pane-grid .pane").first();
-    await expect(firstPane.locator(".pane-last-activity")).toHaveText(/^(Earlier output|now|\d+[smhd])$/);
+    // ready." (drawn in the terminal canvas), so its tooltip names that
+    // output or its time, never "No output yet"; the caption may not fit.
+    await expectOutputActivity();
     await listen();
     hub.hold(PELICAN);
     hub.drop(PELICAN);
@@ -278,7 +296,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const outageLines = await page.locator("main").evaluate((main) => [...main.querySelectorAll<HTMLElement>("*")].filter((element) => element.childElementCount === 0 && element.getBoundingClientRect().width > 2 && /Lost connection to Atlas/.test(element.innerText)).map((element) => element.innerText));
     expect(outageLines, "one outage line in Terminal view").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
     expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
-    await expect(firstPane.locator(".pane-last-activity")).toHaveText(/^(Earlier output|now|\d+[smhd])$/);
+    await expectOutputActivity();
     // cas-71af (6929 QA F01): a click on the greyed Interrupt calls attention
     // to that line instead of adding a toast that repeats it a third time;
     // the line is also the button's description.

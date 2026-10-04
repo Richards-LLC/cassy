@@ -936,6 +936,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
         ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
+        ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),
         ("factory.message_max_chars", "3000", "3000"),
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),
@@ -1069,4 +1070,23 @@ fn factory_supervisor_only_resource_settings_round_trip_and_list_gh_1047() {
     let shared = cas_mux::worker_resources::load_worker_policy(Some(temp.path())).unwrap();
     assert!(shared.denies_env("VERCEL_TOKEN") && shared.denies_server("neon"));
     assert!(!FactoryConfig::default().worker_policy.denies_server("vercel"));
+}
+
+#[test]
+fn worker_credential_env_round_trip_and_shared_policy_cas_82bc() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    let key = "factory.worker_credential_env";
+    assert!(registry().get(key).is_some());
+    config.set(key, " GITHUB_TOKEN, VERCEL_TOKEN ").unwrap();
+    assert_eq!(config.get(key).as_deref(), Some("GITHUB_TOKEN,VERCEL_TOKEN"));
+    assert!(config.list().contains(&(key.into(), "GITHUB_TOKEN,VERCEL_TOKEN".into())));
+    config.save(temp.path()).unwrap();
+    let shared = cas_mux::worker_resources::load_worker_policy(Some(temp.path())).unwrap();
+    assert_eq!(shared.worker_credential_env, ["GITHUB_TOKEN", "VERCEL_TOKEN"]);
+    assert!(shared.is_empty(), "credential grants alone must not require strict MCP scope");
+    config.set(key, "").unwrap();
+    config.save(temp.path()).unwrap();
+    assert!(cas_mux::worker_resources::load_worker_policy(Some(temp.path()))
+        .unwrap().worker_credential_env.is_empty());
 }

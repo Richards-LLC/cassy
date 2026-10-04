@@ -13,6 +13,162 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+#[tokio::test]
+async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['GITHUB_TOKEN', 'VERCEL_TOKEN']\n").unwrap();
+    let credentials = env.home().join("credentials.env");
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
+    env.set("NEON_API_KEY", "not-granted-fixture");
+    env.set("CAS_FACTORY_WORKER_CREDENTIAL_WARNING", "stale-fixture");
+    env.remove("CAS_WORKER_GITHUB_READ_TOKEN");
+    for from_file in [false, true] {
+        if from_file {
+            env.remove("GITHUB_TOKEN");
+            env.remove("VERCEL_TOKEN");
+            std::fs::write(&credentials,
+                "export GITHUB_TOKEN='github-fixture'\nexport VERCEL_TOKEN='vercel-fixture'\n").unwrap();
+        } else {
+            env.set("GITHUB_TOKEN", "github-fixture");
+            env.set("VERCEL_TOKEN", "vercel-fixture");
+            std::fs::write(&credentials, "").unwrap();
+        }
+        for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let configs = Mux::factory_pane_configs(&MuxConfig {
+                cwd: project.path().into(), cas_root: Some(root.clone()),
+                workers: 1, worker_cli: cli, include_director: false,
+                ..Default::default()
+            });
+            let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+            assert_eq!(env_value(worker, "GITHUB_TOKEN"), Some("github-fixture"));
+            assert_eq!(env_value(worker, "VERCEL_TOKEN"), Some("vercel-fixture"));
+            assert!(env_value(worker, "NEON_API_KEY").is_none());
+            assert!(worker.env_remove.iter().any(|name| name == "NEON_API_KEY"));
+            assert!(!worker.env_remove.iter().any(|name| name == "GITHUB_TOKEN" || name == "VERCEL_TOKEN"));
+            assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING").is_none());
+            assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+            assert!(!worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            let mut probe = worker.clone();
+            probe.command = "/bin/sh".into();
+            probe.args = vec!["-c".into(),
+                "test \"$GITHUB_TOKEN\" = github-fixture && test \"$VERCEL_TOKEN\" = vercel-fixture && test -z \"${NEON_API_KEY+x}${CAS_FACTORY_WORKER_CREDENTIAL_WARNING+x}\" && printf 'declared-credentials-received\\n'".into()];
+            let mut pty = crate::pty::Pty::spawn("credential-probe", probe).unwrap();
+            let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut output = Vec::new();
+                loop {
+                    match pty.recv().await {
+                        Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                        Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                        Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                        None => panic!("credential probe ended without process status"),
+                    }
+                }
+                output
+            }).await.expect("bounded credential handoff probe");
+            assert!(String::from_utf8_lossy(&output).contains("declared-credentials-received"));
+        }
+    }
+}
+
+#[test]
+fn missing_declared_worker_credential_warns_without_refusing_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    env.remove("GITHUB_TOKEN");
+    env.remove("CAS_WORKER_GITHUB_READ_TOKEN");
+    let credentials = env.home().join("credentials.env");
+    std::fs::write(&credentials, "").unwrap();
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['GITHUB_TOKEN']\n").unwrap();
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()),
+            workers: 1, worker_cli: cli, include_director: false,
+            ..Default::default()
+        });
+        let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert!(env_value(worker, "GITHUB_TOKEN").is_none());
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING")
+            .unwrap().contains("missing=GITHUB_TOKEN"));
+    }
+}
+
+#[tokio::test]
+async fn supervisor_only_credential_conflict_warns_and_denies_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("VERCEL_TOKEN", "operator-fixture");
+    env.set("GH_TOKEN", "operator-fixture");
+    env.set("CAS_WORKER_GITHUB_READ_TOKEN", "read-token-fixture");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['VERCEL_TOKEN', 'GH_TOKEN']\nsupervisor_only_env = ['VERCEL_TOKEN', 'GH_TOKEN']\n").unwrap();
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()),
+            workers: 1, worker_cli: cli, include_director: false,
+            ..Default::default()
+        });
+        let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert!(env_value(worker, "VERCEL_TOKEN").is_none());
+        assert!(env_value(worker, "GH_TOKEN").is_none());
+        assert!(worker.env_remove.iter().any(|name| name == "VERCEL_TOKEN"));
+        assert!(worker.env_remove.iter().any(|name| name == "GH_TOKEN"));
+        let warning = env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING").unwrap();
+        assert!(warning.contains("supervisor_only=GH_TOKEN,VERCEL_TOKEN"));
+        assert!(!warning.contains("operator-fixture"));
+        assert!(!warning.contains("read-token-fixture"));
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        let mut probe = worker.clone();
+        probe.command = "/bin/sh".into();
+        probe.args = vec!["-c".into(),
+            "test -z \"${VERCEL_TOKEN+x}${GH_TOKEN+x}${CAS_FACTORY_WORKER_CREDENTIAL_WARNING+x}\" && printf 'conflicting-grants-denied\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("conflicting-credential-probe", probe).unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("conflicting credential probe ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded denial precedence probe");
+        assert!(String::from_utf8_lossy(&output).contains("conflicting-grants-denied"));
+    }
+}
+
+#[test]
+fn credential_allowlist_cannot_override_factory_identity_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['CAS_AGENT_ROLE']\n").unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(root), workers: 1,
+        worker_cli: SupervisorCli::Codex, include_director: false,
+        ..Default::default()
+    });
+    let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+    assert_eq!(env_value(worker, "CAS_AGENT_ROLE"), Some("worker"));
+    assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING")
+        .unwrap().contains("reserved=CAS_AGENT_ROLE"));
+}
+
 /// GH #1047: configured supervisor-only resources win over project proxy
 /// credential grants. Claude isolates local scopes; Codex disables named native
 /// servers and remains spawnable with environment restrictions.

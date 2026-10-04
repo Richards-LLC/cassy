@@ -7,6 +7,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     for (key, name, description) in [
         ("factory.supervisor_only_mcp", "Supervisor-only MCP Servers", "Exact MCP server names excluded from worker project configuration, inherited Claude MCP scopes, native Codex servers and proxy connections. Supervisors retain them; empty keeps existing policy."),
         ("factory.supervisor_only_env", "Supervisor-only Environment", "Environment variable names removed from every worker, even when a project proxy grants them. Machine credential bootstrap cannot restore them. Supervisors retain them; empty keeps existing credential protections."),
+        ("factory.worker_credential_env", "Worker Credential Environment", "Explicit environment names granted to every worker harness from the operator environment or existing credential-file/profile resolution. Missing names warn without refusing spawn; supervisor_only_env wins conflicts. Factory identity variables cannot be granted."),
     ] {
         registry.register(ConfigMeta {
             key, section: "factory", name, description,

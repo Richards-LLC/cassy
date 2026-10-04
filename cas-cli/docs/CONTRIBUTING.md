@@ -217,6 +217,28 @@ explicit `config_dir` removes `ANTHROPIC_API_KEY`, because that key overrides
 Claude subscription OAuth; propagated supervisor settings retain existing API
 key inheritance.
 
+For CLI chores that need operator credentials, explicitly grant environment
+names in the project's `.cas/config.toml`:
+
+```toml
+[factory]
+worker_credential_env = ["GITHUB_TOKEN", "VERCEL_TOKEN"]
+```
+
+This list defaults to empty, appears in `cas config list`, and applies equally
+to Claude and Codex workers. Only listed names override the default removal of
+protected operator tokens. Values come from the operator environment or the
+existing private credentials-file/login-profile reader; Cassy never executes
+an interactive shell. Configure these grants only when workers should perform
+the associated operations. Factory identity variables (`CAS_*`, except
+protected credential names such as `CAS_CLOUD_TOKEN`) cannot be granted.
+
+Missing names generate one names-only warning in the worker spawn receipt and
+the worker still starts. A name also listed in `supervisor_only_env` stays
+denied, with the conflict named in the same warning. An operation needing an
+unavailable credential then fails visibly; one missing token does not stop the
+fleet. Supervisors keep their own credentials and configuration.
+
 ## Testing
 
 ### MCP mutation timeout receipts

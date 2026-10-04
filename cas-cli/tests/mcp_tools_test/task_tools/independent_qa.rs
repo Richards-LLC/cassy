@@ -85,15 +85,26 @@ fn reviewer_core(cas_dir: &Path, name: &str) -> CasCore {
 fn fixture(
     test_env: &mut TestEnvGuard,
 ) -> (tempfile::TempDir, CasCore, std::path::PathBuf, String) {
+    fixture_with_project(test_env, None)
+}
+
+fn fixture_with_project(
+    test_env: &mut TestEnvGuard,
+    canonical_id: Option<&str>,
+) -> (tempfile::TempDir, CasCore, std::path::PathBuf, String) {
     let (temp, core) = setup_cas(test_env);
     let repo = temp.path().to_path_buf();
     let cas_dir = repo.join(".cas");
+    // Pin before creating any tasks: the store stamps their origin at creation.
+    let project_config = canonical_id
+        .map(|id| format!("\n[project]\ncanonical_id = {id:?}\n"))
+        .unwrap_or_default();
     std::fs::write(
         cas_dir.join("config.toml"),
         format!(
             // The implementer's own evidence gate (cas-0cd5) is covered by
             // qa_evidence_gate.rs; these tests exercise the independent pass.
-            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\n",
+            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\n{project_config}",
             repo.join("artifacts").display().to_string()
         ),
     )
@@ -109,6 +120,12 @@ fn fixture(
     task.status = TaskStatus::InProgress;
     task.assignee = Some("test-agent".to_string());
     tasks.add(&task).unwrap();
+    if let Some(id) = canonical_id {
+        assert_eq!(
+            tasks.get(&task_id).unwrap().origin_project.as_deref(),
+            Some(id)
+        );
+    }
     (temp, core, repo, task_id)
 }
 
@@ -418,17 +435,59 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
 #[tokio::test]
 async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    pre_existing_follow_up(&mut test_env, false).await;
+}
+
+#[tokio::test]
+async fn qa_record_follow_up_close_targets_the_open_epic_cas_1980() {
+    let mut test_env = TestEnvGuard::temp_home();
+    pre_existing_follow_up(&mut test_env, true).await;
+}
+
+async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
+    let (temp, core, repo, task_id) =
+        fixture_with_project(test_env, under_epic.then_some("qa-follow-up-fixture"));
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
+    let delivery_origin = tasks.get(&task_id).unwrap().origin_project;
 
-    close_text(&core, &task_id).await;
+    let epic_branch = "epic/qa-follow-ups";
+    if under_epic {
+        git(&repo, &["branch", epic_branch, "main"]);
+        for (id, status) in [
+            ("cas-old-epic", TaskStatus::Closed),
+            ("cas-live-epic", TaskStatus::Open),
+        ] {
+            let mut epic = cas::types::Task::new(id.to_string(), "QA fixture epic".to_string());
+            epic.task_type = cas::types::TaskType::Epic;
+            epic.status = status;
+            epic.branch = Some(epic_branch.to_string());
+            epic.delivery_mode = cas::types::DeliveryMode::LocalMerge;
+            epic.deliverables.work_target = Some(cas::types::WorkTarget {
+                repo_selector: "project:qa-follow-up-fixture".to_string(),
+                target_branch: "main".to_string(),
+            });
+            tasks.add(&epic).unwrap();
+            tasks
+                .add_dependency(&cas::types::Dependency::new(
+                    task_id.clone(),
+                    id.to_string(),
+                    DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+    }
+    let initial_park = close_text(&core, &task_id).await;
+    assert!(initial_park.contains("INDEPENDENT QA DISPATCHED"), "{initial_park}");
     let round_task = qa_task_id(&cas_dir, &task_id);
+    assert_eq!(tasks.get(&round_task).unwrap().origin_project, delivery_origin);
     let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
     let reviewer_service = CasService::new(reviewer.clone(), None);
     reviewer
-        .cas_task_start(Parameters(IdRequest { id: round_task.clone() }))
+        .cas_task_start(Parameters(IdRequest {
+            id: round_task.clone(),
+        }))
         .await
         .unwrap();
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
@@ -447,8 +506,15 @@ async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() 
         }))))
         .await
         .expect_err("a pre-existing defect never rejects a delivery on its own");
-    assert!(refused.message.contains("never rejects a delivery"), "{}", refused.message);
-    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
+    assert!(
+        refused.message.contains("never rejects a delivery"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(
+        tasks.get(&task_id).unwrap().status,
+        TaskStatus::AwaitingMerge
+    );
     assert_ne!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
 
     // Approving records it and files a linked follow-up.
@@ -466,7 +532,10 @@ async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() 
             .unwrap(),
     );
     assert!(approved.contains("APPROVAL"), "{approved}");
-    assert!(approved.contains("Pre-existing follow-ups filed"), "{approved}");
+    assert!(
+        approved.contains("Pre-existing follow-ups filed"),
+        "{approved}"
+    );
     let follow_ups: Vec<_> = tasks
         .list(None)
         .unwrap()
@@ -475,12 +544,21 @@ async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() 
         .collect();
     assert_eq!(follow_ups.len(), 1, "one follow-up per pre-existing issue");
     let follow_up = &follow_ups[0];
+    assert_eq!(follow_up.origin_project, delivery_origin);
     assert_eq!(
         follow_up.title,
         format!("Pre-existing: Footer links fail contrast at 3.1:1 (found in QA of {task_id})")
     );
-    assert!(follow_up.description.contains("use --ink-mid"), "{}", follow_up.description);
-    assert!(follow_up.description.contains(&ledger.display().to_string()));
+    assert!(
+        follow_up.description.contains("use --ink-mid"),
+        "{}",
+        follow_up.description
+    );
+    assert!(
+        follow_up
+            .description
+            .contains(&ledger.display().to_string())
+    );
     assert_eq!(follow_up.status, TaskStatus::Open);
     assert!(approved.contains(&follow_up.id), "{approved}");
     assert!(
@@ -498,6 +576,69 @@ async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() 
     // The approval stands: the tip may merge.
     let merge_cmd = "git merge --no-ff factory/test-agent";
     assert!(cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, merge_cmd).is_none());
+    if under_epic {
+        assert_eq!(
+            tasks.get_parent_epic(&follow_up.id).unwrap().unwrap().id,
+            "cas-live-epic"
+        );
+        let target = follow_up
+            .deliverables
+            .work_target
+            .as_ref()
+            .expect("durable work target");
+        assert_eq!(target.repo_selector, "project:qa-follow-up-fixture");
+        assert_eq!(target.target_branch, epic_branch);
+        assert_eq!(
+            follow_up.delivery_mode,
+            cas::types::DeliveryMode::LocalMerge
+        );
+        assert!(
+            follow_up.assignee.is_none(),
+            "QA does not assign its implementer"
+        );
+
+        // Isolate the follow-up's docs-only change from the reviewed UI branch.
+        let branch = format!("factory/test-agent-{}", follow_up.id);
+        git(&repo, &["checkout", "-q", "-b", &branch, epic_branch]);
+        let head = commit_file(
+            &repo,
+            "docs/follow-up.md",
+            "follow-up fix\n",
+            &format!("fix({}): follow-up", follow_up.id),
+        );
+        core.cas_task_start(Parameters(IdRequest {
+            id: follow_up.id.clone(),
+        }))
+        .await
+        .unwrap();
+        let mut request = close_req(&follow_up.id);
+        request.commit_receipt = Some(head.clone());
+        let parked = extract_text(core.cas_task_close(Parameters(request)).await.unwrap());
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert!(parked.contains(epic_branch), "{parked}");
+        let stored = tasks.get(&follow_up.id).unwrap();
+        assert_eq!(stored.status, TaskStatus::AwaitingMerge);
+        assert_eq!(
+            stored.deliverables.parked_branch.as_deref(),
+            Some(branch.as_str())
+        );
+        assert_eq!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            stored
+                .deliverables
+                .work_target
+                .as_ref()
+                .unwrap()
+                .target_branch,
+            epic_branch
+        );
+    } else {
+        assert!(tasks.get_parent_epic(&follow_up.id).unwrap().is_none());
+        assert!(follow_up.deliverables.work_target.is_none());
+    }
 }
 
 #[tokio::test]

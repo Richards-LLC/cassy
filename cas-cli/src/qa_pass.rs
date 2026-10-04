@@ -885,6 +885,49 @@ pub fn follow_up_description(
     body
 }
 
+/// The epic a QA follow-up joins: the reviewed delivery's parent epic.
+pub fn follow_up_epic(
+    store: &dyn cas_store::TaskStore,
+    delivery_id: &str,
+) -> cas_store::Result<Option<Task>> {
+    Ok(store
+        .get_parent_epic(delivery_id)?
+        .filter(|epic| !epic.is_terminal()))
+}
+
+/// The follow-up task for one pre-existing issue, before it is stored.
+pub fn follow_up_task(
+    id: &str,
+    delivery: &Task,
+    pass: &QaPass,
+    issue: &PreExistingIssue,
+    ledger_path: &str,
+    epic: Option<&Task>,
+) -> Task {
+    let mut task = Task::new(id.to_string(), follow_up_title(delivery, issue));
+    task.task_type = TaskType::Bug;
+    task.scope = crate::types::Scope::Project;
+    task.origin_project = delivery.origin_project.clone();
+    task.description = follow_up_description(delivery, pass, issue, ledger_path);
+    task.priority = follow_up_priority(&issue.severity);
+    task.risk = vec![cas_types::TaskRisk::None];
+    task.labels = vec!["qa-follow-up".to_string(), "pre-existing".to_string()];
+    task.external_ref = Some(ledger_path.to_string());
+    task.deliverables.work_target = delivery.deliverables.work_target.clone();
+    task.delivery_mode = delivery.delivery_mode;
+    if let Some(epic) = epic {
+        if let Some(target) =
+            crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
+                delivery, epic,
+            )
+        {
+            task.deliverables.work_target = Some(target);
+        }
+        task.delivery_mode = epic.delivery_mode;
+    }
+    task
+}
+
 /// Title of the QA work item for one round.
 pub fn qa_task_title(delivery: &Task, pass: &QaPass) -> String {
     let mut title = delivery.title.trim().to_string();
@@ -1628,6 +1671,167 @@ mod tests {
         assert_eq!(split_qa_issues(Some("  ")).unwrap(), (Vec::new(), 0));
         assert!(split_qa_issues(Some("{}")).unwrap_err().contains("JSON array"));
         assert!(split_qa_issues(Some("[")).unwrap_err().contains("not valid JSON"));
+    }
+
+    /// cas-1980: a delivery under epic E that once also hung under a closed
+    /// epic C (cas-9ebd's double parent). Returns the store, E and the delivery.
+    fn delivery_under_epic() -> (
+        tempfile::TempDir,
+        std::sync::Arc<dyn cas_store::TaskStore>,
+        Task,
+        Task,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut closed = Task::new("cas-c10d".to_string(), "Finished epic".to_string());
+        closed.task_type = TaskType::Epic;
+        closed.status = cas_types::TaskStatus::Closed;
+        closed.branch = Some("epic/finished".to_string());
+        store.add(&closed).unwrap();
+        let mut epic = Task::new("cas-e9e1".to_string(), "Live epic".to_string());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/live".to_string());
+        epic.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:cas-src".to_string(),
+            target_branch: "main".to_string(),
+        });
+        store.add(&epic).unwrap();
+        let delivery = task();
+        store.add(&delivery).unwrap();
+        for parent in [&closed.id, &epic.id] {
+            store
+                .add_dependency(&cas_types::Dependency::new(
+                    delivery.id.clone(),
+                    parent.clone(),
+                    cas_types::DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+        (dir, store, epic, delivery)
+    }
+
+    /// cas-1980: a QA follow-up joins the delivery's open epic and targets
+    /// its branch, so its close never targets main.
+    #[test]
+    fn a_qa_follow_up_joins_the_deliverys_open_epic_cas_1980() {
+        let (_dir, store, epic, delivery) = delivery_under_epic();
+        let parent = follow_up_epic(store.as_ref(), &delivery.id)
+            .unwrap()
+            .expect("the delivery has an open epic");
+        assert_eq!(
+            parent.id, epic.id,
+            "the closed parent is never the follow-up's epic"
+        );
+
+        let issue = PreExistingIssue {
+            severity: "normal".to_string(),
+            problem: "Footer contrast 3.1:1".to_string(),
+            suggestion: String::new(),
+            evidence: String::new(),
+        };
+        let round = pass("aaaa1111", cas_types::QaPassState::Passed);
+        let follow_up = follow_up_task(
+            "cas-f011",
+            &delivery,
+            &round,
+            &issue,
+            "/a/LEDGER.md",
+            Some(&parent),
+        );
+        assert_eq!(
+            follow_up
+                .deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str()),
+            Some("epic/live"),
+            "its close targets the epic's branch"
+        );
+        assert_eq!(follow_up.delivery_mode, cas_types::DeliveryMode::LocalMerge);
+        store
+            .create_atomic(&follow_up, &[], Some(&parent.id), Some("cas-qa-record"))
+            .unwrap();
+        assert_eq!(
+            store
+                .get_parent_epic("cas-f011")
+                .unwrap()
+                .map(|epic| epic.id),
+            Some(epic.id.clone())
+        );
+
+        // Without a parent epic the follow-up keeps the old shape.
+        let loose = follow_up_task("cas-f012", &delivery, &round, &issue, "/a/LEDGER.md", None);
+        assert!(loose.deliverables.work_target.is_none());
+    }
+
+    #[test]
+    fn follow_up_preserves_explicit_targets_and_skips_terminal_parent_cas_1980() {
+        let (_dir, store, epic, mut delivery) = delivery_under_epic();
+        let issue = PreExistingIssue {
+            severity: "normal".to_string(),
+            problem: "contrast".to_string(),
+            suggestion: String::new(),
+            evidence: String::new(),
+        };
+        let round = pass("aaaa1111", cas_types::QaPassState::Passed);
+        // A child still targeted to the epic's base follows its live lane.
+        delivery.deliverables.work_target = epic.deliverables.work_target.clone();
+        let inherited = follow_up_task(
+            "cas-f013",
+            &delivery,
+            &round,
+            &issue,
+            "/a/LEDGER.md",
+            Some(&epic),
+        );
+        assert_eq!(
+            inherited.deliverables.work_target.unwrap().target_branch,
+            "epic/live"
+        );
+        // A distinct explicit repository/branch remains authoritative.
+        for target in [
+            cas_types::WorkTarget {
+                repo_selector: "project:cas-src".into(),
+                target_branch: "release/custom".into(),
+            },
+            cas_types::WorkTarget {
+                repo_selector: "project:other".into(),
+                target_branch: "main".into(),
+            },
+        ] {
+            delivery.deliverables.work_target = Some(target.clone());
+            let follow_up = follow_up_task(
+                "cas-f014",
+                &delivery,
+                &round,
+                &issue,
+                "/a/LEDGER.md",
+                Some(&epic),
+            );
+            assert_eq!(follow_up.deliverables.work_target, Some(target));
+            assert!(follow_up.assignee.is_none());
+        }
+        store.remove_dependency(&delivery.id, &epic.id).unwrap();
+        assert!(
+            store
+                .get_parent_epic(&delivery.id)
+                .unwrap()
+                .unwrap()
+                .is_terminal()
+        );
+        assert!(
+            follow_up_epic(store.as_ref(), &delivery.id)
+                .unwrap()
+                .is_none()
+        );
+        store.remove_dependency(&delivery.id, "cas-c10d").unwrap();
+        assert!(
+            follow_up_epic(store.as_ref(), &delivery.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

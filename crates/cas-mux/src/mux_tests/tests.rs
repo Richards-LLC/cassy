@@ -101,15 +101,17 @@ fn missing_declared_worker_credential_warns_without_refusing_cas_82bc() {
     }
 }
 
-#[test]
-fn supervisor_only_credential_conflict_warns_and_denies_cas_82bc() {
+#[tokio::test]
+async fn supervisor_only_credential_conflict_warns_and_denies_cas_82bc() {
     let mut env = TestEnvGuard::temp_home();
     env.set("VERCEL_TOKEN", "operator-fixture");
+    env.set("GH_TOKEN", "operator-fixture");
+    env.set("CAS_WORKER_GITHUB_READ_TOKEN", "read-token-fixture");
     let project = tempfile::tempdir().unwrap();
     let root = project.path().join(".cas");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("config.toml"),
-        "[factory]\nworker_credential_env = ['VERCEL_TOKEN']\nsupervisor_only_env = ['VERCEL_TOKEN']\n").unwrap();
+        "[factory]\nworker_credential_env = ['VERCEL_TOKEN', 'GH_TOKEN']\nsupervisor_only_env = ['VERCEL_TOKEN', 'GH_TOKEN']\n").unwrap();
     for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
         let configs = Mux::factory_pane_configs(&MuxConfig {
             cwd: project.path().into(), cas_root: Some(root.clone()),
@@ -118,11 +120,32 @@ fn supervisor_only_credential_conflict_warns_and_denies_cas_82bc() {
         });
         let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
         assert!(env_value(worker, "VERCEL_TOKEN").is_none());
+        assert!(env_value(worker, "GH_TOKEN").is_none());
         assert!(worker.env_remove.iter().any(|name| name == "VERCEL_TOKEN"));
+        assert!(worker.env_remove.iter().any(|name| name == "GH_TOKEN"));
         let warning = env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING").unwrap();
-        assert!(warning.contains("supervisor_only=VERCEL_TOKEN"));
+        assert!(warning.contains("supervisor_only=GH_TOKEN,VERCEL_TOKEN"));
         assert!(!warning.contains("operator-fixture"));
+        assert!(!warning.contains("read-token-fixture"));
         assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        let mut probe = worker.clone();
+        probe.command = "/bin/sh".into();
+        probe.args = vec!["-c".into(),
+            "test -z \"${VERCEL_TOKEN+x}${GH_TOKEN+x}${CAS_FACTORY_WORKER_CREDENTIAL_WARNING+x}\" && printf 'conflicting-grants-denied\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("conflicting-credential-probe", probe).unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("conflicting credential probe ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded denial precedence probe");
+        assert!(String::from_utf8_lossy(&output).contains("conflicting-grants-denied"));
     }
 }
 

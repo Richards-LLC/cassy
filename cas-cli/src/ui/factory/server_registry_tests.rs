@@ -829,3 +829,77 @@ fn cas_9723_stop_docker_run_after_client_exit() {
 fn cas_9723_stop_docker_container_spares_reused_client_pid() {
     docker_stop_fixture(false, true);
 }
+
+#[cfg(unix)]
+fn detached_docker_start_fixture(running: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let docker = temp.path().join("docker");
+    let state = temp.path().join("running");
+    let inspected_id = temp.path().join("inspected-id");
+    fs::write(&state, if running { "true" } else { "false" }).unwrap();
+    // An explicit executable exercises Docker dispatch without changing PATH
+    // for parallel tests. The run client exits before the startup grace.
+    crate::test_paths::warm_stub(
+        &docker,
+        &format!(
+            r#"#!/bin/sh
+case "$1" in
+run)
+  printf '%064d' 1 > "$3"
+  printf 'detached container diagnostic\n'
+  printf '%064d\n' 1
+  exit 0
+  ;;
+inspect)
+  printf '%s' "$3" > '{inspected}'
+  cat '{state}'
+  ;;
+stop) printf 'false' > '{state}' ;;
+esac
+"#,
+            inspected = inspected_id.display(),
+            state = state.display(),
+        ),
+    );
+    let cas_root = temp.path().join("registry");
+    let result = start(
+        &cas_root,
+        &spec(
+            "detached",
+            &format!("{} run --detach example", docker.display()),
+            temp.path(),
+            true,
+        ),
+    );
+    if running {
+        let record = result.expect("a running container survives its exited client");
+        assert_eq!(record.state, ServerState::Running);
+        assert_ne!(liveness(&record), ServerLiveness::Live);
+        assert_eq!(fs::read_to_string(&state).unwrap(), "true");
+        assert_eq!(
+            fs::read_to_string(&inspected_id).unwrap(),
+            format!("{:064}", 1),
+            "startup must inspect the captured immutable container ID"
+        );
+        stop(&cas_root, &record).unwrap();
+        assert_eq!(fs::read_to_string(&state).unwrap(), "false");
+    } else {
+        let error = result.expect_err("an exited container must fail startup");
+        assert!(error.to_string().contains("detached container diagnostic"));
+        let records = list(&cas_root).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, ServerState::Dead);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_7694_detached_docker_start_checks_container_instead_of_client() {
+    detached_docker_start_fixture(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_7694_detached_docker_exited_container_fails_with_log_tail() {
+    detached_docker_start_fixture(false);
+}

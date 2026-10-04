@@ -3465,7 +3465,9 @@ dialog form > *,
 .conversation-pane-slot .secondary-pane-strip, .conversation-pane-slot .pane-header { display: none; }
 .conversation-pane-slot .pane { display: block; height: 100%; border: 0; border-radius: 0; background: var(--bg-root); color: var(--text-hi); }
 .conversation-pane-slot .terminal-mount { height: 100%; padding: 0; background: var(--bg-root); color: var(--text-hi); overflow: hidden; }
-.conversation-active > :not(.conversation-reading) { visibility: hidden; position: absolute; pointer-events: none; }
+/* Keep the terminal mounted and its grid intact, but exclude its hidden
+   descendants from the reading surface's scroll geometry (cas-ff3d). */
+.conversation-active > :not(.conversation-reading) { display: none; }
 
 /* ---- Pebble thread (cas-d167) --------------------------------------------
  * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:

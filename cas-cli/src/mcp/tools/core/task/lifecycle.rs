@@ -3011,6 +3011,27 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn gh1123_create_with_live_assignee_queues_dispatch() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "assigned-worker".into(), cas_types::AgentRole::Worker);
+        worker.factory_session = Some("assignment-session".into());
+        worker.metadata.insert("cli".into(), "codex".into());
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        let mut request = plain_task_request("Assigned creation dispatch");
+        request.assignee = Some(worker.name.clone());
+        core.cas_task_create(Parameters(request)).await.unwrap();
+        let task = core.open_task_store().unwrap().list(None).unwrap().pop().unwrap();
+        let queue = crate::store::open_prompt_queue_store(&core.cas_root).unwrap();
+        let rows = queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap();
+        assert_eq!(rows.len(), 1, "assigned creation must persist one dispatch without a director tick");
+        assert_eq!(rows[0].target, worker.name);
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(rows[0].prompt.contains(&format!("action=start id={}", task.id)));
+        assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
+    }
+
+    #[tokio::test]
     async fn create_path_enforces_and_persists_user_facing_demo_statement() {
         let temp = TempDir::new().expect("temporary project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

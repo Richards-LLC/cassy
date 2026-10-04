@@ -725,3 +725,47 @@ fn shared_server_uses_a_sibling_scope_that_survives_worker_reap() {
     assert!(matches!(outcome, StopOutcome::Stopped { .. }));
     assert!(wait_until_gone(shared.pid));
 }
+
+/// Docker workloads belong to the daemon, outside the client's process group.
+#[cfg(unix)]
+#[test]
+fn cas_9723_stop_docker_run_reaps_daemon_owned_container() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let docker = temp.path().join("docker");
+    let daemon_pid = temp.path().join("daemon.pid");
+    let stopped = temp.path().join("stopped");
+    fs::write(&docker, format!(r#"#!/bin/sh
+case "$1" in
+run)
+  shift
+  cidfile=""
+  if [ "$1" = "--cidfile" ]; then cidfile="$2"; shift 2; fi
+  /usr/bin/python3 -c 'import subprocess; print(subprocess.Popen(["sleep", "300"], start_new_session=True).pid)' > '{pid}'
+  if [ -n "$cidfile" ]; then printf '%064d' 1 > "$cidfile"; fi
+  sleep 300
+  ;;
+stop)
+  kill "$(cat '{pid}')"
+  printf '%s' "$3" > '{stopped}'
+  ;;
+inspect) printf 'false\n' ;;
+esac
+"#, pid=daemon_pid.display(), stopped=stopped.display())).unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+    let cas_root = temp.path().join("registry");
+    let record = start(&cas_root, &spec("docker", &format!("{} run --rm example", docker.display()), temp.path(), true)).unwrap();
+    for _ in 0..100 {
+        if fs::read_to_string(&daemon_pid).is_ok_and(|s| s.trim().parse::<u32>().is_ok()) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let pid: u32 = fs::read_to_string(&daemon_pid).unwrap().trim().parse().unwrap();
+    struct ContainerGuard(u32);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) { unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL); } }
+    }
+    let _guard = ContainerGuard(pid);
+    stop(&cas_root, &record).unwrap();
+    assert!(wait_until_gone(pid), "server_stop leaked daemon-owned container pid {pid}");
+    assert_eq!(fs::read_to_string(stopped).unwrap(), format!("{:064}", 1), "stop must target the captured immutable container ID");
+}

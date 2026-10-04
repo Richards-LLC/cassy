@@ -302,7 +302,7 @@ fn started_server_is_reparented_and_never_a_zombie_child() {
     let cas_root = temp.path().to_path_buf();
     let record = start(
         &cas_root,
-        &spec("short-lived", "sleep 0.2", temp.path(), false),
+        &spec("short-lived", "sleep 0.5", temp.path(), false),
     )
     .unwrap();
 
@@ -323,7 +323,7 @@ fn stop_does_not_claim_a_legacy_wrapper_is_the_whole_workload() {
     let cas_root = temp.path().to_path_buf();
     let mut record = start(
         &cas_root,
-        &spec("legacy-gone", "sleep 0.02", temp.path(), false),
+        &spec("legacy-gone", "sleep 0.4", temp.path(), false),
     )
     .unwrap();
     assert!(wait_until_gone(record.pid));
@@ -451,7 +451,7 @@ fn server_output_is_captured_to_a_log_not_inherited() {
         &cas_root,
         &spec(
             "chatty",
-            "echo hello-from-server; sleep 0.1",
+            "echo hello-from-server; sleep 0.5",
             temp.path(),
             false,
         ),

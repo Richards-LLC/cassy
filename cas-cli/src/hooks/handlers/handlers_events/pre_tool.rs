@@ -2699,7 +2699,11 @@ fn factory_shell_variable_values(
             continue;
         };
         if is_shell_variable_name(name) {
-            values.insert(name.to_string(), vec![value.to_string()]);
+            // Shell assignments expand their RHS using values already bound:
+            // `R=/artifacts; P=$R/task; mkdir -p $P` must not leave `$R`
+            // inside the target. Unknown values still remain unresolved.
+            let expanded = expand_factory_shell_word(value, &values);
+            values.insert(name.to_string(), expanded);
         }
     }
 
@@ -4239,6 +4243,41 @@ mod workspace_contract_tests {
                 "merged parser must retain guarded target {target:?}: {targets:?}"
             );
         }
+    }
+
+    #[test]
+    fn cas_2366_chained_assignments_resolve_before_workspace_checks() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let root_path = root.path().canonicalize().unwrap();
+        let worktree = root_path.join("worktree");
+        let artifacts = root_path.join("artifacts");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let artifacts_root = Some(artifacts.display().to_string());
+
+        for (suffix, command) in [
+            ("cas-2366/post", format!("R={}; P=$R/cas-2366/post; mkdir -p $P", artifacts.display())),
+            ("cas-2366/post/more", format!("R={}; P=$R/cas-2366/post; Q=${{P}}/more; mkdir -p \"$Q\"", artifacts.display())),
+        ] {
+            assert_eq!(bash_write_targets(&command), vec![artifacts.join(suffix).display().to_string()]);
+            assert_eq!(factory_write_violation(
+                &bash_input(&command, &worktree), &artifacts_root, None, true, Some(&worktree)
+            ), None, "known assignment chain must resolve inside artifacts: {command}");
+        }
+
+        let command = "R=..; mkdir -p $R/x";
+        assert_eq!(bash_write_targets(command), vec!["../x"]);
+        let violation = factory_write_violation(
+            &bash_input(command, &worktree), &artifacts_root, None, true, Some(&worktree)
+        ).expect("resolved path outside the worktree remains guarded");
+        assert_eq!(violation.resolved_path, root_path.join("x"));
+        assert_eq!(violation.matched_rule, "none");
+
+        let command = "P=$UNKNOWN/x; mkdir -p $P";
+        let violation = factory_write_violation(
+            &bash_input(command, &worktree), &artifacts_root, None, true, Some(&worktree)
+        ).expect("unknown values remain guarded");
+        assert_eq!(violation.matched_rule, "unresolved shell variable");
     }
 
     #[test]

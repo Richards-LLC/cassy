@@ -6482,7 +6482,7 @@ impl CasService {
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
         let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
         if !staged.is_empty() {
-            report.push_str("\nStaged integration batches (awaiting target merge):\n");
+            report.push_str("\nStaged integration batch receipts:\n");
             for (task, batch) in staged {
                 report.push_str(&format!("- {}: {}@{} (delivery {})\n", task.id, batch.branch, batch.tip, batch.delivered_head));
             }

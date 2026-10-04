@@ -935,6 +935,8 @@ fn classify_merge_alert_observations(
 /// classify the factory branch against immutable commit IDs. Unknown Git
 /// state never masquerades as zero.
 fn staged_integration_batch(repo_root: &Path, task_id: &str) -> bool {
+    // Freshness checks must not initialize a Cassy database in another target repo.
+    if !repo_root.join(".cas/cas.db").is_file() { return false; }
     crate::store::open_task_store(&repo_root.join(".cas"))
         .and_then(|store| Ok(store.get(task_id)?))
         .is_ok_and(|task| task.status == TaskStatus::AwaitingMerge && task.deliverables.integration_batch.is_some())

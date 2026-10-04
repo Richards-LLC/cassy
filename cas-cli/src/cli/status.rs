@@ -38,8 +38,8 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
     } else {
         (0, 0)
     };
-    let project_root = cas_root.parent().unwrap_or(std::path::Path::new("."));
-    let (repo_root, repository) = crate::daemon::indexing::resolve_repository(project_root);
+    let project_root = crate::daemon::indexing::code_project_root(cas_root);
+    let (repo_root, repository) = crate::daemon::indexing::resolve_repository(&project_root);
     let vector_store = cas_store::SqliteCodeVectorStore::open(cas_root).ok();
     // Same coverage source as `cas doctor` (cas-73e7): queue-row counts made
     // `cas status --json` and the doctor line disagree with each other, and both
@@ -50,7 +50,7 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
         .unwrap_or_default();
     let code_scan = vector_store
         .as_ref()
-        .and_then(|store| store.index_state(&repository).ok().flatten());
+        .and_then(|store| store.index_state(&crate::daemon::indexing::code_scan_key(&project_root)).ok().flatten());
     let current_head = repo_root
         .as_deref()
         .and_then(crate::daemon::indexing::head_commit);
@@ -60,14 +60,15 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
             .zip(scan.last_head.as_ref())
             .map(|(current, indexed)| current != indexed)
     });
-    let eligible_files = code_scan
-        .as_ref()
-        .map(|scan| scan.eligible_files)
-        .unwrap_or(0);
-    let indexed_files = code_scan
-        .as_ref()
-        .map(|scan| scan.indexed_files)
-        .unwrap_or(0);
+    let code_config = config.code();
+    let (eligible, _) = crate::daemon::indexing::checkout_source_files(
+        &project_root, &code_config.extensions, &code_config.exclude_patterns,
+    );
+    let eligible_files = eligible.len();
+    let indexed_files = open_code_store(cas_root).ok().map(|store| {
+        let files = store.list_files(&repository, None).unwrap_or_default();
+        crate::daemon::indexing::checkout_indexed_file_count(&files, &eligible)
+    }).unwrap_or(0);
     let failed_files = code_scan
         .as_ref()
         .map(|scan| scan.failed_files)

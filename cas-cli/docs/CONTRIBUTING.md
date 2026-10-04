@@ -86,9 +86,92 @@ silently reintroduce fixed bugs.
 
 **New migration**: Create file in `cas-cli/src/migration/migrations/` following naming convention `m{NNN}_{table}_{description}.rs`. Add to the `MIGRATIONS` array in `migrations/mod.rs`. Each migration needs: unique sequential ID, up SQL, and a detect query. See `cas-cli/docs/MIGRATIONS.md` for full details. Migration ID ranges: Entries 1-50, Rules 51-70, Skills 71-90, Agents 91-110, Entities/Worktrees 111+, Verification 131+, Loops/Events 151+.
 
+### Code index ownership across worktrees
+
+Code-file rows retain their normalized absolute source paths. Reconciliation
+only retires absent paths owned by the checkout it scanned; sibling and nested
+linked checkouts keep their rows. Retirement and scan receipts derive authority
+from configured scan roots; recursive watcher events cannot add a nested checkout.
+A full reconciliation uses a fresh scan of those roots. An explicitly configured
+nested checkout retains its own reconciliation scope. A configured subdirectory
+can retire its own absent files; it preserves the full-checkout scan receipt
+until a full checkout root is visited. Paths without an identifiable checkout
+remain untouched rather than being treated as another checkout's deletions.
+
+Code scan receipts use `worktree:<canonical checkout root>` in the existing
+`code_index_state.repository` TEXT key. Historical repository-name receipts
+remain stored but do not certify checkout coverage or HEAD. `cas doctor` and
+`cas status` count current eligible, decodable source files from disk. The
+manual index command and daemon select the current linked checkout when its
+Git common directory matches the explicit store's repository.
+
+A busy BM25 writer defers the remaining retirement sweep after one bounded wait;
+source rows remain its retry manifest. `cas index code --json` reports
+`files_deferred`, separately from errors, and the daemon schedules a fresh
+reconciliation without requiring another filesystem event. Doctor autofix keeps
+its warning while retirements are deferred and supplies `cas index code` to retry;
+it reports the symbol index fixed only after deferred work and errors are clear.
+
 ### cas-src close surfaces
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
+
+### Factory worker MCP and credential access
+
+Declare resources that stay on the supervisor in `.cas/config.toml`:
+
+```toml
+[factory]
+supervisor_only_mcp = ["vercel", "neon"]
+supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY"]
+```
+
+Both lists default to empty and appear in `cas config list`. Server names are
+exact. These denials override project proxy credential grants and read-only
+server declarations for every worker harness. The supervisor's configuration
+and environment are preserved. Spawn diagnostics record denied names only.
+
+Configured workers get a private, materialized MCP configuration under
+`<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`
+files stay unchanged, so provisioning keeps the tree clean and cannot commit
+supervisor-only removals into the project. Claude
+uses `--strict-mcp-config` so local and user scopes cannot add servers; allowed
+direct servers must be declared in the project file. Cassy remains available
+even if it was registered only in local scope. Every worker uses the same private
+store path, including shared-cwd workers. Codex disables the named native MCP servers, and
+its Cassy proxy filters those upstreams before startup and reload.
+Codex addresses dotted or otherwise special server names with a quoted key in
+a parent-table override so the name remains literal.
+Worker snapshots cannot overwrite the supervisor's shared proxy catalog/health.
+Listed environment names are removed from inherited and explicitly granted
+values, including machine credential bootstrap and retained proxy stdio
+servers' explicit environment maps, before credential resolution and reload.
+Codex workers remain spawnable with environment restrictions. Before launch,
+Cassy parses the selected user Codex home (`CODEX_HOME` or `~/.codex`) and the
+project `.codex/config.toml` files along the launch directory's ancestors,
+without running native inventory or discovery. A server whose literal `env`
+table contains any denied name is disabled for that worker. Keys retained
+from any parsed layer count, even if a later layer changes their values.
+Other native servers remain enabled, and the supervisor's files stay unchanged.
+
+This inspection covers parsed TOML, not expanded plugin or runtime
+contributions. Unknown plugin/layer contributions and unreadable or malformed
+Codex files produce one warning naming the unevaluated sources; the worker
+still spawns. Review those contributions before granting credentials. Process
+environment removal and the explicit supervisor-only server overrides still
+apply. This bounded policy deliberately preserves the standard Codex worker
+lane; it does not promise complete isolation of unknown native contributions.
+Grok and other native harnesses without supported per-launch MCP/environment
+isolation refuse a worker launch when either list is nonempty. They retain
+ordinary native discovery with empty lists; the supervisor remains unrestricted.
+The refusal does not select a different harness or provider. Invalid
+configuration or a failed materialization also refuses the worker launch.
+
+Deployment and production operations needing denied resources run through the
+supervisor. Workers never source an interactive shell to obtain operator
+credentials. Existing explicit project grants and the operator-provisioned
+read-only GitHub token remain available unless denied here; this policy adds
+no credentials to any harness.
 
 ### Factory worker account selection
 

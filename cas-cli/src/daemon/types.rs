@@ -225,6 +225,8 @@ pub struct CodeIndexResult {
     pub files_indexed: usize,
     /// Number of files deleted from index
     pub files_deleted: usize,
+    /// Deleted files retained for retry because another BM25 writer is busy.
+    pub files_deferred: usize,
     /// Number of symbols indexed
     pub symbols_indexed: usize,
     /// Errors encountered

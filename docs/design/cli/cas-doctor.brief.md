@@ -32,6 +32,20 @@ Non-GitHub projects omit this check. The existing JSON check shape and renderer
 remain unchanged. Fresh terminal capture against the assembled binary belongs to
 the supervisor; named tests prove the warning, remedy and JSON row.
 
+## Deferred symbol-index autofix (cas-e4aa)
+
+| Field | Sentence |
+| --- | --- |
+| First two lines | A busy symbol-index writer leaves a warning and a count of deferred retirements instead of a fixed verdict. |
+| Scannable | The existing auto-fix row shows one deferred count, the writer cause, and the actual error count. |
+| Readable | The row supplies one copyable retry command, `cas index code`, after the cause. |
+| Machine output | The existing JSON check object carries the warning status and the same deferred-work message. |
+| Omitted | Individual deferred filenames remain in the durable code-file retry manifest rather than repeated report rows. |
+
+Fresh terminal rendering and treatment runtime proof remain supervisor-owned:
+the worker was instructed to deliver Rust unbuilt. Existing palette, renderer
+and JSON document contracts apply; no new terminal PASS is claimed here.
+
 ## Rendering decisions
 
 - The verdict word is the count of findings (`2 warnings`, `1 error`, `healthy`); the healthy

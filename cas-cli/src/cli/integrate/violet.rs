@@ -1022,6 +1022,28 @@ fn load_shell_assignments(
 /// executed while reading the credentials/profile files.
 #[cfg(feature = "mcp-proxy")]
 pub fn load_machine_credentials_into_process_env() -> Result<usize> {
+    load_machine_credentials_into_process_env_except(&[])
+}
+
+/// Worker resource denials must also apply to machine-file bootstrap, which
+/// would otherwise restore variables removed at the PTY boundary.
+#[cfg(feature = "mcp-proxy")]
+pub fn load_machine_credentials_into_process_env_except(excluded: &[String]) -> Result<usize> {
+    load_machine_credentials_with_installer(excluded, |name, value| {
+        // SAFETY: this is process initialization, before the async proxy
+        // runtime starts and before any threads are spawned.
+        unsafe { std::env::set_var(name, value) };
+    })
+}
+
+/// Share credential parsing and exclusion with tests without calling the
+/// startup-only process setter. The test installer records restoration in its
+/// TestEnvGuard, including values absent before bootstrap.
+#[cfg(feature = "mcp-proxy")]
+fn load_machine_credentials_with_installer(
+    excluded: &[String],
+    mut install: impl FnMut(&str, &str),
+) -> Result<usize> {
     let paths = MachinePaths::from_env(&ProcessEnv)?;
     let mut values = std::collections::BTreeMap::new();
     let mut visited = std::collections::BTreeSet::new();
@@ -1031,12 +1053,10 @@ pub fn load_machine_credentials_into_process_env() -> Result<usize> {
     }
     let mut loaded = 0;
     for (name, value) in values {
-        if value.trim().is_empty() || std::env::var_os(&name).is_some() {
+        if excluded.contains(&name) || value.trim().is_empty() || std::env::var_os(&name).is_some() {
             continue;
         }
-        // SAFETY: this is process initialization, before the async proxy
-        // runtime starts and before any threads are spawned.
-        unsafe { std::env::set_var(&name, value) };
+        install(&name, &value);
         loaded += 1;
     }
     Ok(loaded)
@@ -2440,6 +2460,56 @@ mod tests {
     const FAKE_BYPASS: &str = "bypass-secret-do-not-leak";
     const TEST_LABEL: &str = "SOUNDWAVE";
     const TEST_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_SOUNDWAVE";
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn worker_machine_bootstrap_respects_denials_and_supervisor_retains_credentials_gh_1047() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let credentials = env.home().join("credentials.env");
+        std::fs::write(
+            &credentials,
+            "export WORKER_DENIED_FIXTURE_TOKEN='denied-fixture'\n\
+             export WORKER_ALLOWED_FIXTURE_TOKEN='allowed-fixture'\n\
+             export WORKER_EMPTY_FIXTURE_TOKEN='   '\n\
+             export WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN='file-fixture'\n",
+        )
+        .unwrap();
+        env.set("CAS_CREDENTIALS_FILE", &credentials);
+        env.remove("WORKER_DENIED_FIXTURE_TOKEN");
+        env.remove("WORKER_ALLOWED_FIXTURE_TOKEN");
+        env.remove("WORKER_EMPTY_FIXTURE_TOKEN");
+        env.set("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN", "");
+        assert_eq!(
+            load_machine_credentials_with_installer(
+                &["WORKER_DENIED_FIXTURE_TOKEN".into()],
+                |name, value| env.set(name, value),
+            ).unwrap(),
+            1,
+        );
+        assert!(std::env::var_os("WORKER_DENIED_FIXTURE_TOKEN").is_none());
+        assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "allowed-fixture");
+        assert!(std::env::var_os("WORKER_EMPTY_FIXTURE_TOKEN").is_none());
+        assert_eq!(std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(), "");
+        assert_eq!(
+            load_machine_credentials_with_installer(
+                &["WORKER_DENIED_FIXTURE_TOKEN".into()],
+                |name, value| env.set(name, value),
+            )
+            .unwrap(),
+            0,
+            "repeated worker bootstrap must not restore a denied credential",
+        );
+        env.set("WORKER_ALLOWED_FIXTURE_TOKEN", "existing-fixture");
+        assert_eq!(
+            load_machine_credentials_with_installer(&[], |name, value| env.set(name, value))
+                .unwrap(),
+            1,
+        );
+        assert_eq!(std::env::var("WORKER_DENIED_FIXTURE_TOKEN").unwrap(), "denied-fixture");
+        assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "existing-fixture");
+        assert!(std::env::var_os("WORKER_EMPTY_FIXTURE_TOKEN").is_none());
+        assert_eq!(std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(), "");
+    }
 
     struct FakeEnv(HashMap<String, String>);
 

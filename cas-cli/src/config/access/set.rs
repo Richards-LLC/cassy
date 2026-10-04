@@ -153,6 +153,16 @@ impl Config {
                 let root = value.trim();
                 factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
             }
+            "factory.supervisor_only_mcp" | "factory.supervisor_only_env" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let names = value.split(',').map(str::trim).filter(|name| !name.is_empty())
+                    .map(str::to_string).collect();
+                if key == "factory.supervisor_only_mcp" {
+                    factory.worker_policy.supervisor_only_mcp = names;
+                } else {
+                    factory.worker_policy.supervisor_only_env = names;
+                }
+            }
             "factory.ai_enrichment.enabled" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.ai_enrichment.enabled = value

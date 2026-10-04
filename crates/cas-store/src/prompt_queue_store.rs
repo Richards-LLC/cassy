@@ -3568,12 +3568,19 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let priority_cutoff = cutoff("priority", priority_threshold_secs)?;
         let normal_cutoff = cutoff("normal", normal_threshold_secs)?;
         let stale_cutoff = cutoff("stale TTL", PROMPT_QUEUE_STALE_TTL_SECS)?;
+        // Commander informational turns and pane mirrors need no reply. Keep
+        // untyped legacy rows and explicit asks/blockers monitored; transport
+        // delivery alone is still not a recipient read or acknowledgment.
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue q
              WHERE q.target <> 'all_workers'
                AND q.source <> 'all_workers'
+               AND NOT (lower(q.target) = 'operator' AND (
+                   COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
+                   OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
+               ))
                AND q.source NOT LIKE 'lifecycle:%'
                AND q.source NOT LIKE 'lifecycle-wake:%'
                AND q.factory_session = ?
@@ -3631,6 +3638,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      WHERE q.id = ?
                        AND q.target <> 'all_workers'
                        AND q.source <> 'all_workers'
+                       AND NOT (lower(q.target) = 'operator' AND (
+                           COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
+                           OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
+                       ))
                        AND q.source NOT LIKE 'lifecycle:%'
                        AND q.source NOT LIKE 'lifecycle-wake:%'
                        AND q.factory_session = ?
@@ -9625,6 +9636,116 @@ mod tests {
         // With a large timeout, the recently processed message should NOT appear
         let unacked = store.unacked(3600, 10).unwrap();
         assert!(unacked.is_empty());
+    }
+
+    #[test]
+    fn operator_stalls_only_action_required_turns_cas_8422() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        let mut action_ids = Vec::new();
+        let mut informational_ids = Vec::new();
+        for kind in ["status", "receipt", "answer", "ask", "blocker"] {
+            let id = store
+                .enqueue_with_session("supervisor", "operator", kind, "session")
+                .unwrap();
+            store.stamp_operator_reply(id, kind, &[]).unwrap();
+            store.mark_transport_delivered(id).unwrap();
+            backdate(&store, id, 31 * 60);
+            if matches!(kind, "ask" | "blocker") {
+                action_ids.push(id);
+            } else {
+                informational_ids.push(id);
+            }
+        }
+        let now = Utc::now();
+        let mirror = store
+            .mirror_supervisor_turn(
+                "session",
+                "commander-mirror:session:agent:turn",
+                now,
+                now,
+                r#"{"message":"pane answer","kind":"ask"}"#,
+                "pane mirror",
+                "phone",
+                "ask",
+            )
+            .unwrap()
+            .unwrap();
+        backdate(&store, mirror, 31 * 60);
+        informational_ids.push(mirror);
+        // Legacy untyped operator rows and all direct worker messages retain monitoring.
+        for target in ["operator", "worker"] {
+            let id = store
+                .enqueue_with_session("supervisor", target, "action required", "session")
+                .unwrap();
+            store.mark_transport_delivered(id).unwrap();
+            backdate(&store, id, 31 * 60);
+            action_ids.push(id);
+        }
+        let candidates = store
+            .delivery_stalled_candidates("session", 600, 1800, 50)
+            .unwrap();
+        assert_eq!(
+            candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
+            action_ids
+        );
+        for id in informational_ids {
+            assert!(
+                store
+                    .enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled")
+                    .unwrap()
+                    .is_none(),
+                "informational row {id} must remain safe even after scan races"
+            );
+        }
+        for id in action_ids {
+            assert!(
+                store
+                    .enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled")
+                    .unwrap()
+                    .is_some(),
+                "delivered is not read: unanswered action {id} still stalls"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_recipient_read_cancels_stall_without_forging_ack_cas_8422() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        let id = store
+            .enqueue_with_session("supervisor", "operator", "question", "session")
+            .unwrap();
+        store.stamp_operator_reply(id, "ask", &[]).unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        backdate(&store, id, 31 * 60);
+        assert_eq!(
+            store
+                .delivery_stalled_candidates("session", 600, 1800, 10)
+                .unwrap()[0]
+                .id,
+            id
+        );
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("operator", Some("session"), 10)
+                .unwrap()[0]
+                .id,
+            id
+        );
+        assert!(
+            store
+                .delivery_stalled_candidates("session", 600, 1800, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled")
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
     }
 
     #[test]

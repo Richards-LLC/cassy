@@ -118,8 +118,13 @@ Codex overrides require server names containing letters, digits, hyphens or
 underscores; ambiguous names refuse launch rather than bypass isolation.
 Worker snapshots cannot overwrite the supervisor's shared proxy catalog/health.
 Listed environment names are removed from inherited and explicitly granted
-values, including machine credential bootstrap. Invalid configuration or a
-failed materialization refuses the worker launch.
+values, including machine credential bootstrap and retained proxy stdio
+servers' explicit environment maps, before credential resolution and reload.
+Grok and other native harnesses without supported per-launch MCP/environment
+isolation refuse a worker launch when either list is nonempty. They retain
+ordinary native discovery with empty lists; the supervisor remains unrestricted.
+The refusal does not select a different harness or provider. Invalid
+configuration or a failed materialization also refuses the worker launch.
 
 Deployment and production operations needing denied resources run through the
 supervisor. Workers never source an interactive shell to obtain operator

@@ -1386,7 +1386,11 @@ fn code_index_autofix(root: &Path) -> Option<Check> {
 
 fn code_index_autofix_outcome(outcome: Result<crate::daemon::CodeIndexResult, crate::error::CasError>) -> Check {
     match outcome {
-        Ok(result) if result.errors.is_empty() => Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed)),
+        Ok(result) if result.errors.is_empty() && result.files_deferred == 0 => Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed)),
+        Ok(result) if result.files_deferred > 0 => Check::new("auto-fix", CheckStatus::Warning, format!(
+            "symbol index: {} file retirement(s) deferred; writer busy. {} error(s). Retry: cas index code",
+            result.files_deferred, result.errors.len()
+        )),
         Ok(result) => Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation had {} error(s)", result.errors.len())),
         Err(error) => Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation failed: {error}")),
     }
@@ -9645,25 +9649,31 @@ mod tests {
         assert!(fixture.scan(&fixture.main).errors.is_empty());
         fs::remove_file(fixture.main.join("new.rs")).unwrap();
         fs::remove_file(fixture.main.join("extra.rs")).unwrap();
+        // A previous failed scan makes the real doctor offer its autofix.
+        let scans = cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap();
+        let key = crate::daemon::indexing::code_scan_key(&fixture.main);
+        scans.record_scan(&key, 2, 2, 0, 0, None, None, Some("previous scan needs retry")).unwrap();
         let holder = cas_search::Bm25Index::open(&crate::daemon::indexing::code_index_dir(&fixture.cas_root)).unwrap();
         holder.delete_batch(["lock-probe"]).unwrap();
-        let outcome = crate::daemon::indexing::reconcile_code_tree(&[], &[fixture.main.clone()], &fixture.cas_root, false);
-        let result = outcome.as_ref().unwrap();
-        assert!(result.errors.is_empty());
-        assert_eq!(result.files_deferred, 2);
-        let warning = code_index_autofix_outcome(outcome);
+        let warning = code_index_autofix(&fixture.cas_root).expect("doctor offered the retry");
         assert!(matches!(warning.status, CheckStatus::Warning), "{}", warning.message);
         assert!(warning.message.contains("2 file retirement(s) deferred"), "{}", warning.message);
         assert!(warning.message.contains("cas index code"), "{}", warning.message);
         assert!(!warning.message.contains("fixed:"), "{}", warning.message);
         let store = crate::store::open_code_store(&fixture.cas_root).unwrap();
         assert_eq!(store.list_files("repo", None).unwrap().len(), 2, "retry manifest was lost");
+        let pending = gather_symbol_index_state_for(&fixture.cas_root, &fixture.main);
+        assert_eq!(pending.failed_files, 0, "writer contention inflated permanent failures");
+        assert!(pending.scan_error.as_ref().unwrap().contains("2 file retirement(s) deferred"));
+        assert!(matches!(symbol_index_check(pending, chrono::Utc::now()).status, CheckStatus::Warning));
         drop(holder);
-        let retry = crate::daemon::indexing::reconcile_code_tree(&[], &[fixture.main.clone()], &fixture.cas_root, false);
-        let success = code_index_autofix_outcome(retry);
+        // The persisted warning makes a subsequent real doctor retry possible
+        // even though both files disappeared and no new event will arrive.
+        let success = code_index_autofix(&fixture.cas_root).expect("deferred receipt offered retry");
         assert!(matches!(success.status, CheckStatus::Ok), "{}", success.message);
         assert!(success.message.contains("fixed: symbol index"));
         assert!(store.list_files("repo", None).unwrap().is_empty());
+        assert!(scans.index_state(&key).unwrap().unwrap().last_error.is_none());
     }
 
     #[test]

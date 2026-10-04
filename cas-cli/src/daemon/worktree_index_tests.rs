@@ -430,3 +430,103 @@ fn nested_watch_event_cannot_expand_outer_fullscan_authority_cas_e4aa() {
 fn explicitly_configured_nested_watch_root_still_reconciles_cas_e4aa() {
     nested_watch_cycle(true);
 }
+
+#[test]
+fn configured_subdirectory_preserves_outside_manifest_and_checkout_receipt_cas_e4aa() {
+    use super::{CodeWatcher, WatcherConfig};
+    let fixture = Worktrees::new();
+    let source = fixture.main.join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("inside.rs"), "pub fn inside() {}\n").unwrap();
+    assert!(fixture.scan(&fixture.main).errors.is_empty());
+    let scans = cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap();
+    let key = super::indexing::code_scan_key(&fixture.main);
+    let before = scans.index_state(&key).unwrap().unwrap();
+    std::fs::remove_file(source.join("inside.rs")).unwrap();
+    std::fs::remove_file(fixture.main.join("extra.rs")).unwrap();
+    std::fs::write(
+        fixture.main.join("new.rs"),
+        "pub fn outside_modified() {}\n",
+    )
+    .unwrap();
+    let mut watcher = CodeWatcher::new(WatcherConfig {
+        watch_paths: vec![source],
+        extensions: vec!["rs".into()],
+        ..Default::default()
+    });
+    watcher.emit_test_path(fixture.main.join("new.rs"));
+    watcher.emit_test_path(fixture.main.join("src/inside.rs"));
+    let cycle = super::indexing::run_code_index_cycle(&watcher, &fixture.cas_root).unwrap();
+    assert!(cycle.errors.is_empty(), "{:?}", cycle.errors);
+    assert_eq!(cycle.files_deleted, 1);
+    assert_eq!(
+        cycle.files_indexed, 0,
+        "outside event widened subdirectory visit"
+    );
+    let store = crate::store::open_code_store(&fixture.cas_root).unwrap();
+    assert!(
+        store
+            .get_file_by_path("repo", &fixture.main.join("extra.rs").to_string_lossy())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .get_file_by_path(
+                "repo",
+                &fixture.main.join("src/inside.rs").to_string_lossy()
+            )
+            .unwrap()
+            .is_none()
+    );
+    let after = scans.index_state(&key).unwrap().unwrap();
+    assert_eq!(after.last_scan_at, before.last_scan_at);
+    assert_eq!(
+        after.eligible_files, before.eligible_files,
+        "partial visit certified the checkout"
+    );
+    assert_eq!(after.last_head, before.last_head);
+}
+
+#[test]
+fn incidental_nested_modified_event_is_ignored_in_incremental_cycle_cas_e4aa() {
+    use super::{CodeWatcher, WatcherConfig};
+    let fixture = Worktrees::new();
+    let nested = fixture.main.join("nested/repo");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    git(
+        &fixture.main,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(fixture.scan(&fixture.main).errors.is_empty());
+    let mut watcher = CodeWatcher::new(WatcherConfig {
+        watch_paths: vec![fixture.main.clone()],
+        extensions: vec!["rs".into()],
+        ..Default::default()
+    });
+    watcher.emit_test_path(nested.join("new.rs"));
+    let cycle = super::indexing::run_code_index_cycle(&watcher, &fixture.cas_root).unwrap();
+    assert!(cycle.errors.is_empty(), "{:?}", cycle.errors);
+    assert_eq!(cycle.files_indexed, 0);
+    assert_eq!(cycle.files_deleted, 0);
+    assert!(
+        crate::store::open_code_store(&fixture.cas_root)
+            .unwrap()
+            .get_file_by_path("repo", &nested.join("new.rs").to_string_lossy())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        cas_store::SqliteCodeVectorStore::open(&fixture.cas_root)
+            .unwrap()
+            .index_state(&super::indexing::code_scan_key(&nested))
+            .unwrap()
+            .is_none()
+    );
+}

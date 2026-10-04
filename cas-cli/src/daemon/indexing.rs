@@ -173,6 +173,45 @@ pub(crate) fn code_project_root_from(cas_root: &Path, start: &Path) -> PathBuf {
     }
 }
 
+/// Canonicalize an existing ancestor as well as its missing suffix, so a
+/// deleted source or directory keeps its checkout/path ownership under aliases.
+fn canonical_source_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut cursor = Some(absolute.as_path());
+    while let Some(ancestor) = cursor {
+        if let Ok(canonical) = ancestor.canonicalize() {
+            return canonical.join(absolute.strip_prefix(ancestor).unwrap_or(Path::new("")));
+        }
+        cursor = ancestor.parent();
+    }
+    absolute
+}
+
+/// Incidental recursive watcher events never grant authority over a nested
+/// checkout or a path outside the configured scan roots. Explicitly listing
+/// that nested root grants its own source scope.
+pub(crate) fn source_file_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let path = canonical_source_path(path);
+    let owner = resolve_repository(&path)
+        .0
+        .map(|root| canonical_source_path(&root));
+    roots.iter().any(|root| {
+        let root = canonical_source_path(root);
+        let in_path = path == root || (!root.is_file() && path.starts_with(&root));
+        if !in_path {
+            return false;
+        }
+        let root_owner = resolve_repository(&root)
+            .0
+            .map(|root| canonical_source_path(&root));
+        root_owner == owner
+    })
+}
+
 /// Checkout-scoped receipt in the existing TEXT key. Historical repository
 /// receipts remain intact, but cannot certify a different checkout's scan.
 pub(crate) fn code_scan_key(repo_root: &Path) -> String {
@@ -793,7 +832,12 @@ pub fn reconcile_code_tree(
 ) -> Result<CodeIndexResult, CasError> {
     use crate::store::open_code_store;
 
-    let mut result = index_code_files_with(files, cas_root, force)?;
+    let authorized_files: Vec<_> = files
+        .iter()
+        .filter(|file| source_file_in_roots(file, roots))
+        .cloned()
+        .collect();
+    let mut result = index_code_files_with(&authorized_files, cas_root, force)?;
     let code_store = open_code_store(cas_root)?;
     // One shared wait budget for the whole retirement sweep: see
     // [`WriterLockBudget`] — 592 files must not each wait out the same lock.
@@ -818,7 +862,9 @@ pub fn reconcile_code_tree(
                 root.parent().unwrap_or(root).to_path_buf()
             }
         });
-        by_repo.entry((repository, repo_root)).or_default();
+        by_repo
+            .entry((repository, canonical_source_path(&repo_root)))
+            .or_default();
     }
     // The eligible denominator must exclude files we skipped: leaving them in
     // makes `eligible - indexed` count them as failures on every scan, which is
@@ -828,22 +874,24 @@ pub fn reconcile_code_tree(
         .iter()
         .map(|(path, _)| path.clone())
         .collect();
-    for file in files {
+    for file in &authorized_files {
         if skipped_paths.contains(file) {
             continue;
         }
         let (root, repository) = resolve_repository(file);
         let file_id = code_store.generate_file_id_for(&repository, &file.to_string_lossy());
         let root = root.unwrap_or_else(|| file.parent().unwrap_or(file).to_path_buf());
-        by_repo
-            .entry((repository, root))
-            .or_default()
-            .insert(file_id);
+        // Only explicit roots seeded above may retire rows or record a scan.
+        // Looking up a file's owner must never register a new full-tree scope.
+        if let Some(current_ids) = by_repo.get_mut(&(repository, canonical_source_path(&root))) {
+            current_ids.insert(file_id);
+        }
     }
 
     let mut retirement_busy = false;
     for ((repository, repo_root), current_ids) in by_repo {
         let errors_before_retirement = result.errors.len();
+        let deferred_before_retirement = result.files_deferred;
         let stored = match code_store.list_files(&repository, None) {
             Ok(stored) => stored,
             Err(error) => {
@@ -858,6 +906,7 @@ pub fn reconcile_code_tree(
             .filter(|file| {
                 !current_ids.contains(&file.id)
                     && code_file_in_root(&file.path, &repo_root)
+                    && source_file_in_roots(&stored_source_path(&file.path), roots)
                     && !stored_source_path(&file.path).try_exists().unwrap_or(true)
             })
             .collect();
@@ -883,6 +932,17 @@ pub fn reconcile_code_tree(
             }
         }
 
+        // A configured subdirectory can retire its own missing sources, but
+        // its partial visit cannot certify coverage or HEAD for the checkout.
+        // Preserve that checkout's earlier full-tree receipt until a full
+        // configured root is actually visited.
+        if !roots
+            .iter()
+            .any(|root| root.is_dir() && canonical_source_path(root) == repo_root)
+        {
+            continue;
+        }
+
         let current_indexed = code_store
             .list_files(&repository, None)
             .unwrap_or_default()
@@ -903,15 +963,16 @@ pub fn reconcile_code_tree(
             .filter(|(path, _)| path.starts_with(&repo_root))
             .map(|(path, reason)| format!("{}: {reason}", path.display()))
             .collect();
-        let scan_error = (!result.errors.is_empty()).then(|| {
-            result
-                .errors
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("; ")
-        });
+        let deferred_files = result.files_deferred - deferred_before_retirement;
+        let mut scan_messages: Vec<_> = result.errors.iter().take(3).cloned().collect();
+        if deferred_files > 0 {
+            // Preserve the retry warning in this checkout's receipt without
+            // counting transient writer contention as permanent file failures.
+            scan_messages.push(format!(
+                "{deferred_files} file retirement(s) deferred; writer busy. Retry: cas index code"
+            ));
+        }
+        let scan_error = (!scan_messages.is_empty()).then(|| scan_messages.join("; "));
         if let Err(error) = cas_store::SqliteCodeVectorStore::open(cas_root).and_then(|state| {
             state.record_scan(
                 &code_scan_key(&repo_root),
@@ -962,10 +1023,13 @@ pub fn run_code_index_cycle(
     let initial_reconcile = watcher.take_initial_reconcile() || has_deletions;
     let mut pending_files = watcher.take_pending();
     if initial_reconcile {
-        pending_files.extend(watcher.source_files());
+        // The fresh configured-root walk is the complete snapshot. Pending
+        // events are incremental hints, not another source of scan authority.
+        pending_files = watcher.source_files();
         pending_files.sort();
         pending_files.dedup();
     }
+    pending_files.retain(|file| source_file_in_roots(file, watcher.watch_paths()));
     if initial_reconcile || !pending_files.is_empty() {
         let index_result = if initial_reconcile {
             reconcile_code_tree(&pending_files, watcher.watch_paths(), cas_root, false)?

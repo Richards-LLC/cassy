@@ -90,8 +90,13 @@ silently reintroduce fixed bugs.
 
 Code-file rows retain their normalized absolute source paths. Reconciliation
 only retires absent paths owned by the checkout it scanned; sibling and nested
-linked checkouts keep their rows. Paths without an identifiable checkout remain
-untouched rather than being treated as another checkout's deletions.
+linked checkouts keep their rows. Retirement and scan receipts derive authority
+from configured scan roots; recursive watcher events cannot add a nested checkout.
+A full reconciliation uses a fresh scan of those roots. An explicitly configured
+nested checkout retains its own reconciliation scope. A configured subdirectory
+can retire its own absent files; it preserves the full-checkout scan receipt
+until a full checkout root is visited. Paths without an identifiable checkout
+remain untouched rather than being treated as another checkout's deletions.
 
 Code scan receipts use `worktree:<canonical checkout root>` in the existing
 `code_index_state.repository` TEXT key. Historical repository-name receipts
@@ -103,7 +108,9 @@ Git common directory matches the explicit store's repository.
 A busy BM25 writer defers the remaining retirement sweep after one bounded wait;
 source rows remain its retry manifest. `cas index code --json` reports
 `files_deferred`, separately from errors, and the daemon schedules a fresh
-reconciliation without requiring another filesystem event.
+reconciliation without requiring another filesystem event. Doctor autofix keeps
+its warning while retirements are deferred and supplies `cas index code` to retry;
+it reports the symbol index fixed only after deferred work and errors are clear.
 
 ### cas-src close surfaces
 

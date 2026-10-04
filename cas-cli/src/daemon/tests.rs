@@ -977,7 +977,7 @@ fn full_tree_reconciliation_retires_files_deleted_while_daemon_was_stopped() {
     );
     assert_eq!(vectors.stats().expect("vector stats").eligible, 1);
     let scan = vectors
-        .index_state("reconcile-repo")
+        .index_state(&crate::daemon::indexing::code_scan_key(&repo))
         .expect("scan receipt")
         .expect("recorded scan receipt");
     assert_eq!(scan.eligible_files, 1);
@@ -1064,7 +1064,7 @@ fn full_tree_reconciliation_retires_repository_when_eligible_set_becomes_empty()
     );
     assert_eq!(vectors.stats().expect("vector stats").eligible, 0);
     let scan = vectors
-        .index_state("empty-repo")
+        .index_state(&crate::daemon::indexing::code_scan_key(&repo))
         .expect("scan receipt")
         .expect("recorded scan receipt");
     assert_eq!(
@@ -1387,7 +1387,7 @@ fn skipped_files_leave_the_eligible_denominator_so_coverage_can_reach_100_percen
     assert_eq!(result.skipped.len(), 1);
 
     let state = cas_store::SqliteCodeVectorStore::open(&cas_root).expect("state store");
-    let repositories = ["cov-repo".to_string()];
+    let repositories = [crate::daemon::indexing::code_scan_key(&repo)];
     let scan = repositories
         .iter()
         .find_map(|repository| state.index_state(repository).ok().flatten())
@@ -1630,7 +1630,7 @@ fn retiring_a_deleted_file_waits_out_a_foreign_writer_instead_of_failing() {
     );
     let scan = cas_store::SqliteCodeVectorStore::open(&cas_root)
         .expect("vector state")
-        .index_state("busy-repo")
+        .index_state(&crate::daemon::indexing::code_scan_key(&repo))
         .expect("scan receipt")
         .expect("recorded scan receipt");
     assert_eq!(

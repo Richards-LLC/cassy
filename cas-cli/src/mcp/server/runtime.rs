@@ -226,7 +226,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
         let code_config = cas_config.code();
         let daemon_config = cas_config.daemon();
         let cloud_config = cas_config.cloud.clone().unwrap_or_default();
-        let project_dir = cas_root.parent().unwrap_or(&cas_root);
+        let project_dir = crate::daemon::indexing::code_project_root(&cas_root);
         let code_watch_paths: Vec<std::path::PathBuf> = code_config
             .watch_paths
             .iter()

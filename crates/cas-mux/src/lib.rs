@@ -37,6 +37,7 @@ mod pane;
 mod pty;
 mod render;
 mod spec;
+pub mod worker_resources;
 
 pub use backend::{
     Backend, SupervisorLaunchConfig, WORKER_GITHUB_READ_TOKEN_ENV, WorkerLaunchConfig,

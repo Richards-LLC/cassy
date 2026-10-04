@@ -90,6 +90,63 @@ silently reintroduce fixed bugs.
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
 
+### Factory worker MCP and credential access
+
+Declare resources that stay on the supervisor in `.cas/config.toml`:
+
+```toml
+[factory]
+supervisor_only_mcp = ["vercel", "neon"]
+supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY"]
+```
+
+Both lists default to empty and appear in `cas config list`. Server names are
+exact. These denials override project proxy credential grants and read-only
+server declarations for every worker harness. The supervisor's configuration
+and environment are preserved. Spawn diagnostics record denied names only.
+
+Configured workers get a private, materialized MCP configuration under
+`<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`
+files stay unchanged, so provisioning keeps the tree clean and cannot commit
+supervisor-only removals into the project. Claude
+uses `--strict-mcp-config` so local and user scopes cannot add servers; allowed
+direct servers must be declared in the project file. Cassy remains available
+even if it was registered only in local scope. Every worker uses the same private
+store path, including shared-cwd workers. Codex disables the named native MCP servers, and
+its Cassy proxy filters those upstreams before startup and reload.
+Codex server-only overrides require server names containing letters, digits, hyphens or
+underscores; ambiguous names refuse launch rather than bypass isolation.
+Worker snapshots cannot overwrite the supervisor's shared proxy catalog/health.
+Listed environment names are removed from inherited and explicitly granted
+values, including machine credential bootstrap and retained proxy stdio
+servers' explicit environment maps, before credential resolution and reload.
+Codex workers refuse **before native discovery** when `supervisor_only_env` is
+nonempty. Parent environment removal cannot prevent retained native MCP servers
+from restoring literal environment entries. Codex 0.160.0 offers no complete
+auth-free effective environment inventory: `mcp list` performs auth discovery,
+while `config/read` omits expanded plugin/runtime MCP contributions. Empty or
+sanitized TOML env overrides preserve omitted keys through recursive merging.
+The error names `[factory] supervisor_only_env` and explains this admission
+limit without exposing values. Route restricted tasks to the supervisor; use
+an empty environment policy only when unrestricted native access is intended.
+Unrestricted Codex workers and Codex server-only restrictions remain supported;
+the supervisor retains its environment and configuration. The original
+restricted-environment Codex successful-launch contract is replaced by early
+refusal and safe unrestricted launch. Future support requires a complete,
+bounded auth-free evaluator of the exact launch layers, plugins and retained
+stdio env keys, with unknown/conflicting sources refused before discovery.
+Grok and other native harnesses without supported per-launch MCP/environment
+isolation refuse a worker launch when either list is nonempty. They retain
+ordinary native discovery with empty lists; the supervisor remains unrestricted.
+The refusal does not select a different harness or provider. Invalid
+configuration or a failed materialization also refuses the worker launch.
+
+Deployment and production operations needing denied resources run through the
+supervisor. Workers never source an interactive shell to obtain operator
+credentials. Existing explicit project grants and the operator-provisioned
+read-only GitHub token remain available unless denied here; this policy adds
+no credentials to any harness.
+
 ### Factory worker account selection
 
 `coordination action=spawn_workers` accepts an optional `config_dir` for all

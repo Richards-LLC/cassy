@@ -143,6 +143,14 @@ pub(super) fn finish_worker_config(
         if !config.env_remove.contains(name) { config.env_remove.push(name.clone()); }
     }
     if !policy.is_empty() {
+        // Grok discovers original project/user MCP configuration and has no
+        // supported per-launch isolation override. Other unsupported native
+        // harnesses must also refuse, before Pty::spawn can start discovery.
+        if !matches!(config.effective_command(), "claude" | "codex") {
+            config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(),
+                "This worker harness cannot enforce supervisor-only MCP/environment policy; use an unrestricted policy or route the task to the supervisor".into()));
+            return;
+        }
         tracing::info!(supervisor_only_mcp = ?policy.supervisor_only_mcp,
             supervisor_only_env = ?policy.supervisor_only_env,
             "factory worker resource denials; tasks needing these resources route to supervisor");

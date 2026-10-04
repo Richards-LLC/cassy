@@ -1122,6 +1122,14 @@ pub(crate) fn load_proxy_config_for_process(cas_root: &std::path::Path) -> anyho
     let mut config = load_proxy_config(cas_root)?;
     if let Some(policy) = worker_proxy_policy(cas_root)? {
         config.servers.retain(|name, _| !policy.denies_server(name));
+        // Explicit stdio env is installed after inheriting the worker process
+        // environment. Remove denied keys here, before credential resolution,
+        // for both the initial engine and reloads of retained allowed servers.
+        for server in config.servers.values_mut() {
+            if let cmcp_core::config::ServerConfig::Stdio { env, .. } = server {
+                env.retain(|name, _| !policy.denies_env(name));
+            }
+        }
         config.allowlist.retain(|route| !policy.denies_server(&route.server));
         config.worker_access.retain(|name, _| !policy.denies_server(name));
     }

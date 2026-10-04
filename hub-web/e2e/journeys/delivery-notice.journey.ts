@@ -1,6 +1,7 @@
 import { test, expect, expectWholeFocusRing } from "./journey";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
+import { expectDetailsCopyRow } from "../details-copy-row";
 
 // cas-e829: the operator's 2026-10-01 Accounting screenshot. The live session
 // has a blocker from yesterday, a later message from the operator that does
@@ -134,9 +135,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // (the strict visual inspector) to find. Opening Details brings it back.
     expect(await notice.locator(".attention-copy").evaluate((node) => node.getBoundingClientRect().height), "a closed notice's Copy has no box").toBe(0);
     await notice.locator("summary").click();
-    const payloadBox = await notice.locator("pre").boundingBox();
-    const copyBox = await notice.getByRole("button", { name: "Copy" }).boundingBox();
-    expect(payloadBox!.y, "Copy has its own row, above the full Details text at390px").toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height);
+    await expectDetailsCopyRow(notice, "Copy has its own row, above the full Details text at390px");
     await expect(notice.locator("pre")).toContainText("9 minutes ago");
     // cas-ed87: Details reads as the message, never as a {summary, message} object.
     await expect(notice.locator("pre"), "Details is the message as text at 390px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
@@ -219,9 +218,20 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 
   await journey.stage("It retires once the update gets through", async () => {
     await page.setViewportSize(desktop);
-    const payloadBox = await attentionItems.locator("pre").boundingBox();
-    const copyBox = await attentionItems.getByRole("button", { name: "Copy" }).boundingBox();
-    expect(payloadBox!.y, "Copy has its own row at1280px too").toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height);
+    // cas-94b6: force the catalog redraw that previously landed during Copy's
+    // boundingBox call. A retained node loses its box, while the current
+    // Details stays open and must still satisfy the same layout assertion.
+    const staleCopy = await attentionItems.getByRole("button", { name: "Copy" }).elementHandle();
+    const sessions = hub.machine("atlas").sessions;
+    sessions.push({ name: "Accounting-bright-lark-8", supervisor: "bright-lark-8", project_dir: "/projects/Audit", workers: [], liveness: "live" });
+    await hub.announceCatalog("atlas");
+    await expect.poll(() => staleCopy!.evaluate((node) => node.isConnected)).toBe(false);
+    expect(await staleCopy!.boundingBox(), "the replaced Copy has no geometry").toBeNull();
+    await expect(attentionItems.locator("details")).toHaveAttribute("open", "");
+    await expectDetailsCopyRow(attentionItems, "Copy has its own row at1280px too after a catalog redraw");
+    sessions.pop();
+    await hub.announceCatalog("atlas");
+    await expectDetailsCopyRow(attentionItems, "Copy keeps its row after the catalog settles");
     await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
     // cas-177c: Copy says what it copied, the Details text, not an "event payload".
     await attentionItems.getByRole("button", { name: "Copy" }).click();

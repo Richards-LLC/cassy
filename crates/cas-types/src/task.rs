@@ -503,7 +503,6 @@ pub struct EvidenceOnlyEvidence {
     pub paths: Vec<String>,
 }
 
-/// Deliverables and durable lifecycle evidence for a task.
 /// Supervisor-pinned integration batch carrying one parked delivery. The batch
 /// remains awaiting merge until its aggregate delta lands on the task target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +515,7 @@ pub struct IntegrationBatchEvidence {
     pub recorded_at: DateTime<Utc>,
 }
 
+/// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]

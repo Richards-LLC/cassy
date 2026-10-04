@@ -15861,7 +15861,7 @@ fn delivery_is_proven_on_parent(
 /// explicit post-integration evolution on the current target. This is evidence
 /// for the merge-before-close case only; it does not mutate the task's durable
 /// commit-time anchor.
-fn resolve_task_commit_receipt_sha(
+pub(crate) fn resolve_task_commit_receipt_sha(
     repo_path: &std::path::Path,
     receipt: &str,
 ) -> Result<String, String> {

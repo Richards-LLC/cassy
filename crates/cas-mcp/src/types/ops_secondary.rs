@@ -619,9 +619,9 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub accept: Option<bool>,
 
-    /// Maximum child rows to inspect/render for epic_status.
+    /// Maximum rows to inspect/render for epic_status or server_list.
     #[schemars(
-        description = "epic_status only: maximum child rows to inspect/render; combine with offset for paging"
+        description = "epic_status: maximum child rows to inspect/render, with offset for paging. server_list: maximum server rows (default 20, capped at 50; must be positive)"
     )]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
@@ -646,12 +646,24 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub worker_names: Option<String>,
 
-    /// Task to pre-assign to the spawned worker (spawn_workers only).
+    /// Task to pre-assign to a worker, own a server, or filter server_list.
     #[schemars(
-        description = "spawn_workers only: task ID to pre-assign to the spawned worker once it boots (single-worker requests only — count must be 1 or worker_names must name exactly one worker). Eliminates the spawn-then-message race: the worker's first `task mine` already shows the task, no follow-up message required."
+        description = "spawn_workers: task ID to pre-assign once the worker boots (single-worker requests only). server_start: owning task. server_list: exact owning task filter."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Server lifecycle filter; history is opt-in.
+    #[schemars(
+        description = "server_list: 'running' (default), 'stopped', 'dead', 'unverified', or 'all' (includes history)"
+    )]
+    #[serde(default)]
+    pub status: Option<String>,
+
+    /// Exact registered worker name or immutable agent ID.
+    #[schemars(description = "server_list: exact owner worker name or registered agent ID")]
+    #[serde(default)]
+    pub owner: Option<String>,
 
     /// Factory delivery route for spawn_workers/focus_epic.
     #[schemars(
@@ -871,12 +883,13 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub id: Option<String>,
 
-    /// Task ID (for loop_start, worktree_create, spawn_workers, remind, or a
+    /// Task ID (for loop_start, worktree_create, spawn_workers, server_start,
+    /// server_list, remind, or a
     /// merge_request message).
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. For message with merge_request=true: identify the parked merge delivery. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
+        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For server_start: owning task. For server_list: exact owning task filter. For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. For message with merge_request=true: identify the parked merge delivery. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
@@ -992,7 +1005,9 @@ pub struct CoordinationRequest {
     pub clear: Option<bool>,
 
     /// Maximum items to return
-    #[schemars(description = "Maximum items to return")]
+    #[schemars(
+        description = "Maximum items to return; server_list defaults to 20 and caps at 50 (must be positive)"
+    )]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
@@ -1233,12 +1248,17 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub all: Option<bool>,
 
-    /// Worktree status filter (for worktree_list)
+    /// Worktree or server lifecycle status filter.
     #[schemars(
-        description = "Filter by status: 'active', 'merged', 'abandoned', 'conflict', 'removed'"
+        description = "worktree_list: 'active', 'merged', 'abandoned', 'conflict', 'removed'. server_list: 'running' (default), 'stopped', 'dead', 'unverified', or 'all' (includes history)"
     )]
     #[serde(default)]
     pub status: Option<String>,
+
+    /// Server owner filter.
+    #[schemars(description = "server_list: exact owner worker name or registered agent ID")]
+    #[serde(default)]
+    pub owner: Option<String>,
 
     /// Show only orphaned worktrees (for worktree_list)
     #[schemars(description = "Show only orphaned worktrees")]
@@ -1354,6 +1374,8 @@ impl CoordinationRequest {
                     .flatten()
             }),
             task_id: self.task_id.clone(),
+            status: self.status.clone(),
+            owner: self.owner.clone(),
             delivery_mode: self.delivery_mode.clone(),
             target: self.target.clone().or_else(|| {
                 matches!(self.action.as_str(), "hold_worker" | "release_worker")

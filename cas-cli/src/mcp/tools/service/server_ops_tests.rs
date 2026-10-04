@@ -129,8 +129,68 @@ fn cas_ced2_server_rows_are_single_line_and_bounded() {
     let ports: Vec<_> = (1..=1000).collect();
     let line = render_server_line(&server, ServerLiveness::Live, &ports);
     assert_eq!(line.lines().count(), 1, "a server must occupy one line");
-    assert!(line.len() <= 1024, "row emitted {} bytes", line.len());
+    assert!(line.len() <= 512, "row emitted {} bytes", line.len());
     assert!(!line.contains(['\r', '\t']));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn cas_ced2_server_list_caps_running_and_excludes_unverified() {
+    use crate::mcp::{CasCore, CasService};
+    use rmcp::model::RawContent;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let service = CasService::new(CasCore::with_daemon(root.clone(), None, None), None);
+    let pid = std::process::id();
+    let starttime =
+        crate::mcp::daemon::read_pid_starttime(pid).expect("current process fingerprint");
+    for i in 0..25 {
+        let mut server = record(&format!("live-{i}"), true);
+        server.pid = pid;
+        server.pgid = None;
+        server.pid_starttime = Some(starttime);
+        server_registry::write_record(&root, &server).unwrap();
+    }
+    let mut unverified = record("unverified-server", true);
+    unverified.pid = pid;
+    unverified.pid_starttime = None;
+    server_registry::write_record(&root, &unverified).unwrap();
+    let text = |result: CallToolResult| {
+        result
+            .content
+            .into_iter()
+            .filter_map(|c| match c.raw {
+                RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let req = serde_json::from_value(serde_json::json!({"action": "server_list"})).unwrap();
+    let listed = text(service.factory_server_list(req).await.unwrap());
+    assert_eq!(
+        listed.lines().filter(|line| line.starts_with("  ")).count(),
+        20,
+        "{listed}"
+    );
+    assert!(listed.contains("Showing 20 of 25 matches"), "{listed}");
+    assert!(!listed.contains("unverified-server"), "{listed}");
+
+    let req = serde_json::from_value(
+        serde_json::json!({"action": "server_list", "status": "unverified"}),
+    )
+    .unwrap();
+    let listed = text(service.factory_server_list(req).await.unwrap());
+    assert!(
+        listed.contains("unverified-server") && listed.contains("unverified"),
+        "{listed}"
+    );
+    assert_eq!(
+        listed.lines().filter(|line| line.starts_with("  ")).count(),
+        1,
+        "{listed}"
+    );
 }
 
 #[test]

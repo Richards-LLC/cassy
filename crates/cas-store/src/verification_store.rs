@@ -1712,6 +1712,21 @@ pub fn correct_parked_delivery_proof_targets(
     )
 }
 
+/// Correct methodology without rewriting an immutable merge fact. Unlike
+/// proof-target/risk corrections this also supports an investigation's
+/// task-only proof cycle, which has no delivery transaction.
+pub fn correct_parked_delivery_execution_note(
+    cas_dir: &Path,
+    corrected_task: &Task,
+    expected_updated_at: DateTime<Utc>,
+    supervisor_agent_id: &str,
+    reason: &str,
+) -> Result<ProofScopeCorrectionOutcome> {
+    correct_parked_delivery_proof_scope_inner(
+        cas_dir, corrected_task, expected_updated_at, supervisor_agent_id, reason, true, false,
+    )
+}
+
 fn correct_parked_delivery_proof_scope_inner(
     cas_dir: &Path,
     corrected_task: &Task,
@@ -1873,6 +1888,7 @@ fn correct_parked_delivery_proof_scope_inner(
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
+         , execution_note = ?8, external_ref = ?9
          WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress', 'blocked') AND updated_at = ?7",
         params![
             corrected_task.id,
@@ -1897,6 +1913,8 @@ fn correct_parked_delivery_proof_scope_inner(
             },
             now.to_rfc3339(),
             expected_updated_at.to_rfc3339(),
+            corrected_task.execution_note,
+            corrected_task.external_ref,
         ],
     )?;
     if changed != 1 {

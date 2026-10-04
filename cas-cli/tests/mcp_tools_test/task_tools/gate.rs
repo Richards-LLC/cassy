@@ -26,8 +26,13 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
     task.status = TaskStatus::InProgress;
     task.assignee = Some("worker".into());
     task.execution_note = Some(stored.into());
+    if merged {
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task.deliverables.files_changed = vec!["src/style.css".into()];
+    }
     store.add(&task).unwrap();
     let mut delivery_id = None;
+    let dispatch;
     if merged {
         let receipt = cas_store::build_worker_completion_receipt(
             &WorkerCompletionReceiptInput {
@@ -39,8 +44,9 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
                 scope_summary: "comment-only CSS delivery".into(), artifact_path: None,
             }, "worker", chrono::Utc::now(),
         );
-        let delivery = cas_store::create_worker_delivery(
-            &root, &receipt, WorkerDeliveryState::AwaitingMerge, "worker",
+        let (delivery, bound) = cas_store::create_worker_delivery_with_dispatch(
+            &root, &receipt, WorkerDeliveryState::AwaitingMerge, "worker", "supervisor",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
         ).unwrap();
         cas_store::transition_worker_delivery(
             &root, &delivery.id, &[WorkerDeliveryState::AwaitingMerge],
@@ -48,12 +54,14 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
             None, Some(&"d".repeat(40)), None,
         ).unwrap();
         delivery_id = Some(delivery.id);
+        dispatch = bound;
+    } else {
+        dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, "worker", "supervisor",
+            &cas::types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
     }
-    let dispatch = cas_store::create_verification_dispatch_bound(
-        &root, &task.id, "worker", "supervisor",
-        &cas::types::VerificationProofBoundary::task(),
-        chrono::Utc::now() + chrono::Duration::minutes(10), false,
-    ).unwrap();
     let service = CasService::new(core, None);
     let send = |value: serde_json::Value| {
         let service = service.clone();
@@ -69,6 +77,13 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
     })).await;
     assert!(ordinary.contains("DELIVERY PROOF SCOPE LOCKED"), "{ordinary}");
     assert!(ordinary.contains("proof_scope_fix=true"), "{ordinary}");
+    if replacement == "no-code" {
+        let inline = send(serde_json::json!({
+            "action":"close", "id":task.id, "execution_note":"no-code",
+            "external_ref":"artifact:methodology-investigation",
+        })).await;
+        assert!(inline.contains("INLINE NO-CODE INTENT REJECTED") && inline.contains("proof_scope_fix=true"), "{inline}");
+    }
     let mut repair = serde_json::json!({
         "action":"update", "id":task.id, "execution_note":replacement,
         "proof_scope_fix":true, "reason":"Reviewed incorrect execution methodology",
@@ -80,6 +95,18 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
     assert!(denied.contains("only a live registered supervisor"), "{denied}");
     assert_eq!(store.get(&task.id).unwrap().execution_note, task.execution_note);
     set_test_agent_role(&root, AgentRole::Supervisor);
+    let mut missing_reason = repair.clone();
+    missing_reason["reason"] = serde_json::json!("");
+    assert!(send(missing_reason).await.contains("non-empty reason"));
+    let mut unchanged = repair.clone();
+    unchanged["execution_note"] = serde_json::json!(stored);
+    unchanged.as_object_mut().unwrap().remove("external_ref");
+    assert!(send(unchanged).await.contains("unchanged"));
+    if replacement == "no-code" {
+        let mut local_proof = repair.clone();
+        local_proof["external_ref"] = serde_json::json!("/tmp/report.html");
+        assert!(send(local_proof).await.contains("local absolute path"));
+    }
     let mut bundled = repair.clone();
     bundled["title"] = serde_json::json!("unreviewed scope");
     assert!(send(bundled).await.contains("unrelated field"));
@@ -89,8 +116,9 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
     assert!(fixed.contains("Corrected proof scope"), "{fixed}");
     let corrected = store.get(&task.id).unwrap();
     assert_eq!(corrected.status, TaskStatus::Open);
-    assert_eq!(corrected.execution_note.as_deref(), Some(replacement));
+    assert_eq!(corrected.execution_note.as_deref(), if replacement.is_empty() { None } else { Some(replacement) });
     assert_eq!(corrected.assignee, task.assignee);
+    assert_eq!(corrected.deliverables.factory_branch_anchor, task.deliverables.factory_branch_anchor);
     assert!(corrected.notes.contains("Execution methodology corrected"), "{}", corrected.notes);
     assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
         cas::types::VerificationDispatchState::Invalidated);
@@ -111,6 +139,11 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
 #[tokio::test]
 async fn no_code_to_code_merged_methodology_repair_cas_1b74() {
     execution_note_repair_cas_1b74("no-code", "test-first", true).await;
+}
+
+#[tokio::test]
+async fn clear_no_code_merged_methodology_repair_cas_1b74() {
+    execution_note_repair_cas_1b74("no-code", "", true).await;
 }
 
 #[tokio::test]

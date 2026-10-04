@@ -1464,7 +1464,8 @@ pub fn generate_prompt_at(
             // instead of catching it.
             //
             // State resolution:
-            //   - task absent from ready+in_progress → closed (expected path)
+            //   - task absent from ready+in_progress → terminal or otherwise
+            //     unavailable; actor-aware close notices come from lifecycle
             //   - task in ready_tasks as Open       → lease expired, still needs close
             //   - task in in_progress_tasks         → still being worked (edge case)
             let in_ready = unfiltered_data
@@ -1491,15 +1492,13 @@ pub fn generate_prompt_at(
                 // Still in progress — stale event, nothing to do.
                 return None;
             } else {
-                // Task is already closed (the normal path after a successful close).
-                // Do NOT instruct the supervisor to ask the worker to close it again.
-                format!(
-                    "Worker {worker} has closed task {task_id} ({task_title}).\n\n\
-                     Next steps:\n\
-                     - Assign another task to this worker, OR\n\
-                     - If all subtasks are done, verify and close the epic\n\n\
-                     Remember: workers close their own tasks, supervisors close epics."
-                )
+                // GH #1124: disappearance from active sets carries the old
+                // assignee, not the closing actor (and may be cancellation).
+                // Actual closes already use the durable lifecycle relay, which
+                // records the authenticated actor and suppresses supervisor
+                // self-echoes. Do not add a second, falsely attributed notice
+                // or recommend assigning work to a possibly shut-down assignee.
+                return None;
             };
 
             Some(Prompt {
@@ -2770,11 +2769,19 @@ mod tests {
                 // The real close handler calls this durable relay with its
                 // authenticated actor; supervisor_override does not change it.
                 emit_task_lifecycle_transition(
-                    sq.as_ref(), Some(pq.as_ref()), agents.as_ref(),
-                    &task.id, &task.title, TaskStatus::InProgress, status, actor,
+                    sq.as_ref(),
+                    Some(pq.as_ref()),
+                    agents.as_ref(),
+                    &task.id,
+                    &task.title,
+                    TaskStatus::InProgress,
+                    status,
+                    actor,
                     Some("supervisor_override=true: merged delivery verified"),
-                    LifecycleTransition::Closed, &task.updated_at.to_rfc3339(),
-                ).unwrap();
+                    LifecycleTransition::Closed,
+                    &task.updated_at.to_rfc3339(),
+                )
+                .unwrap();
                 let durable = sq.peek("sup-id", 10).unwrap();
                 assert_eq!(durable.len(), 1);
                 let payload: serde_json::Value = serde_json::from_str(&durable[0].payload).unwrap();
@@ -2784,23 +2791,38 @@ mod tests {
             let notices = pq.peek_all(10).unwrap();
             if status == TaskStatus::Closed && actor == "swift-fox" {
                 assert_eq!(notices.len(), 1, "one authoritative worker-close notice");
-                let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt).unwrap();
+                let envelope =
+                    crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt).unwrap();
                 assert_eq!(envelope.task_id, task.id);
                 assert!(notices[0].prompt.contains(&format!("actor=\"{actor}\"")));
                 assert!(!notices[0].prompt.contains("Assign another task"));
             } else {
-                assert!(notices.is_empty(), "the supervisor gets no echo for their own close/cancel");
+                assert!(
+                    notices.is_empty(),
+                    "the supervisor gets no echo for their own close/cancel"
+                );
             }
             let data = DirectorData::load_fast(&dir).unwrap();
             let inferred = DirectorEvent::TaskCompleted {
-                task_id: task.id.clone(), task_title: task.title.clone(),
+                task_id: task.id.clone(),
+                task_title: task.title.clone(),
                 worker: task.assignee.clone().unwrap(),
             };
             let prompt = generate_prompt(
-                &inferred, &data, &data, "supervisor", &default_config(),
-                claude(), codex(), &HashSet::new(), None,
+                &inferred,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                claude(),
+                codex(),
+                &HashSet::new(),
+                None,
             );
-            assert!(prompt.is_none(), "{status:?} by {actor}, shutdown={shutdown}: actorless completion cannot credit the assignee or suggest assigning them: {prompt:?}");
+            assert!(
+                prompt.is_none(),
+                "{status:?} by {actor}, shutdown={shutdown}: actorless completion cannot credit the assignee or suggest assigning them: {prompt:?}"
+            );
         }
     }
 
@@ -2929,7 +2951,7 @@ mod tests {
         }
     }
 
-    /// cas-6aaf: TaskCompleted with task already closed (the normal path).
+    /// GH #1124: an inferred terminal completion must not duplicate lifecycle delivery.
     /// The prompt must NOT instruct the supervisor to ask the worker to close
     /// the task — it was already closed when the event fired.
     #[test]
@@ -2953,30 +2975,12 @@ mod tests {
             codex(),
             &HashSet::new(),
             None,
-        )
-        .unwrap();
+        );
 
-        assert_eq!(prompt.target, "supervisor");
-        assert!(prompt.text.contains("swift-fox"));
-        assert!(prompt.text.contains("task-123"));
-        // Must say "closed" not "completed" — reflects actual final state.
         assert!(
-            prompt.text.contains("closed"),
-            "cas-6aaf: TaskCompleted prompt must say 'closed' (task is already closed): {}",
-            prompt.text
+            prompt.is_none(),
+            "the durable lifecycle relay owns close notices: {prompt:?}"
         );
-        // Must NOT instruct supervisor to close an already-closed task.
-        assert!(
-            !prompt.text.to_lowercase().contains("task action=close"),
-            "cas-6aaf: TaskCompleted must not emit close instruction for already-closed task: {}",
-            prompt.text
-        );
-        // Should clarify verification ownership.
-        assert!(prompt.text.contains("workers close their own tasks"));
-        assert!(prompt.text.contains("supervisors close epics"));
-        // Response instructions should point to the worker.
-        assert!(prompt.text.contains("To respond to this message, use:"));
-        assert!(prompt.text.contains("target=swift-fox"));
     }
 
     /// cas-6aaf: TaskCompleted when task regressed to Open (lease expired).
@@ -5218,7 +5222,7 @@ mod tests {
     /// reported to a Claude supervisor.
     ///
     /// cas-6aaf added state-aware routing for TaskCompleted:
-    ///   - Task already closed (not in ready/in_progress) → "Worker has closed" path,
+    ///   - Task absent from ready/in_progress → no actorless close notice,
     ///     NO close instruction in body.  Regression guard: supervisor must NOT be
     ///     told to re-close a task the worker already closed.
     ///   - Task regressed to Open (lease expired) → "ask worker to close" path,
@@ -5230,9 +5234,8 @@ mod tests {
     ///
     /// Two sub-tests cover both branches.
 
-    /// cas-efc4 AC5 normal (closed) path: TaskCompleted when task is already
-    /// closed must NOT emit a close instruction. Verifies cas-6aaf stale-guidance
-    /// suppression in the heterogeneous case (Claude sup + Codex worker).
+    /// GH #1124: heterogeneous sessions also leave terminal close notices to
+    /// the actor-aware lifecycle relay, with no stale worker-close instruction.
     #[test]
     fn test_efc4_task_completed_already_closed_no_stale_close_instruction() {
         let event = DirectorEvent::TaskCompleted {
@@ -5254,36 +5257,11 @@ mod tests {
             codex(),
             &HashSet::new(),
             None,
-        )
-        .expect("TaskCompleted (closed path) must produce a prompt");
+        );
 
-        assert_eq!(
-            prompt.target, "supervisor",
-            "cas-efc4 AC5: TaskCompleted prompt goes to supervisor"
-        );
-        // cas-6aaf: stale-guidance suppression — no "please close" for already-closed task
         assert!(
-            !prompt.text.contains("action=close"),
-            "cas-efc4 / cas-6aaf: already-closed path must NOT emit a close instruction: {}",
-            prompt.text
-        );
-        assert!(
-            prompt.text.contains("closed"),
-            "cas-efc4: prompt must confirm the task is already closed: {}",
-            prompt.text
-        );
-        // Response instruction: supervisor (Claude) uses its own coordination tool
-        assert!(
-            prompt
-                .text
-                .contains("mcp__cas__coordination action=message"),
-            "cas-efc4 AC5: response instruction must use Claude supervisor prefix: {}",
-            prompt.text
-        );
-        assert!(
-            prompt.text.contains("target=codex-worker"),
-            "cas-efc4 AC5: response instruction must address the Codex worker: {}",
-            prompt.text
+            prompt.is_none(),
+            "the durable lifecycle relay owns close notices: {prompt:?}"
         );
     }
 

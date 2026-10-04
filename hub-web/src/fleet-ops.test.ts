@@ -16,7 +16,7 @@ import {
   type FleetAgent,
   type FleetTask,
 } from "./fleet-ops";
-import { agentControls, headerControls, taskControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
 import type { Scope } from "./types";
 
 const ORIGIN = "https://commander.example";
@@ -213,4 +213,59 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     expect(undo).toHaveBeenCalledOnce();
     expect(undoBar(document, { ...context(CONTROL, state), now: UNDO_WINDOW_MS + 1 })).toBeUndefined();
   });
+});
+
+
+describe("S6 phone controls", () => {
+  it("has one task trigger, gates its action, and opens Assign rather than sending anything", () => {
+    const state = new FleetOpsState(); state.menuFor = "task:cas-2001";
+    const toggleAssign = vi.fn(), choose = vi.fn();
+    const allowed = taskControls(document, { ...context([...CONTROL, "factory-operate"], state, { toggleAssign, choose }), phone: true }, ready)!;
+    expect(allowed.querySelectorAll(":scope > button")).toHaveLength(1);
+    expect(allowed.querySelector("button")?.getAttribute("aria-label")).toBe("Actions for cas-2001");
+    allowed.querySelector<HTMLButtonElement>('[role="menuitem"]')!.click();
+    expect(toggleAssign).toHaveBeenCalledWith("task:cas-2001"); expect(choose).not.toHaveBeenCalled();
+    const denied = taskControls(document, { ...context(CONTROL, state, { toggleAssign }), phone: true }, ready)!;
+    denied.querySelector<HTMLButtonElement>('[role="menuitem"]')!.click();
+    expect(toggleAssign).toHaveBeenCalledTimes(1);
+    expect(denied.querySelector('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("searches idle workers locally, recovers from no match and keeps the query across redraw", () => {
+    const state = new FleetOpsState(); state.assignFor = "task:cas-2001";
+    const ctx = { ...context([...CONTROL, "factory-operate"], state), phone: true };
+    const view = taskControls(document, ctx, ready)!;
+    const search = view.querySelector<HTMLInputElement>('input[type="search"]')!;
+    search.value = "absent"; search.dispatchEvent(new Event("input"));
+    expect(view.querySelector<HTMLElement>('[role="menuitem"]')?.hidden).toBe(true);
+    expect(view.querySelector<HTMLElement>(".fleet-ops-no-match")?.hidden).toBe(false);
+    expect(taskControls(document, ctx, ready)!.querySelector<HTMLInputElement>("input")?.value).toBe("absent");
+    search.value = "quiet"; search.dispatchEvent(new Event("input"));
+    expect(view.querySelector<HTMLElement>('[role="menuitem"]')?.hidden).toBe(false);
+    expect(ctx.on.choose).not.toHaveBeenCalled();
+    state.closeMenus(); expect(state.pickerQuery).toBe("");
+  });
+
+  it("uses a searchable epic picker and keeps the merge preview behind one task trigger", () => {
+    const ctx = { ...context([...CONTROL, "factory-operate"]), phone: true };
+    expect(headerControls(document, ctx, "focus").querySelector("input")?.getAttribute("aria-label")).toBe("Search focus epic");
+    ctx.state.preview = { rowKey: "task:cas-1999", task: parked };
+    const preview = taskControls(document, ctx, parked)!;
+    expect(preview.querySelectorAll(":scope > button")).toHaveLength(1);
+    expect(preview.querySelector(".fleet-ops-preview-text")?.textContent).toBe(mergeRequestMessage(parked));
+  });
+});
+
+
+it("keeps an Undo refusal readable after the phone progress sheet closes", () => {
+  const state = new FleetOpsState(); const action = holdAction(lark, false);
+  state.started("agent:swift-lark-3", action);
+  const pending = phoneFleetNotice(document, context(CONTROL, state))!;
+  expect(pending.textContent).toBe(action.progress);
+  expect(pending.dataset.fleetFocus).toBe("agent:swift-lark-3:progress");
+  state.failed("agent:swift-lark-3", action, { stale: true, current: { worker: lark.name, generation: 3 } });
+  const refused = phoneFleetNotice(document, context(CONTROL, state))!;
+  expect(refused.textContent).toContain("already restarted");
+  expect(refused.dataset.fleetFocus).toBe("agent:swift-lark-3:note");
+  expect(undoBar(document, context(CONTROL, state))).toBeUndefined();
 });

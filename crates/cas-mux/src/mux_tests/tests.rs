@@ -147,6 +147,43 @@ fn worker_resource_policy_uses_effective_command_for_nice_wrappers_gh_1047() {
     }
 }
 
+/// Grok's native project/user MCP discovery has no per-launch isolation flag.
+/// Refuse a restricted worker while leaving the unrestricted adapter intact.
+#[test]
+fn restricted_grok_adapter_refuses_native_discovery_without_substitution_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let original = r#"{"mcpServers":{"denied-fixture":{"command":"never-executed-fixture"}}}"#;
+    std::fs::write(project.path().join(".mcp.json"), original).unwrap();
+    for (policy, restricted) in [
+        ("[factory]\n", false),
+        ("[factory]\nsupervisor_only_mcp = ['denied-fixture']\n", true),
+        ("[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true),
+        ("[factory]\nsupervisor_only_mcp = []\nsupervisor_only_env = []\n", false),
+    ] {
+        std::fs::write(cas_root.join("config.toml"), policy).unwrap();
+        let config = MuxConfig {
+            cwd: project.path().to_path_buf(),
+            cas_root: Some(cas_root.clone()),
+            workers: 1,
+            worker_cli: SupervisorCli::Grok,
+            supervisor_cli: SupervisorCli::Grok,
+            include_director: false,
+            ..Default::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        let supervisor = &configs.iter().find(|(name, _)| name == &config.supervisor_name).unwrap().1;
+        assert_eq!(worker.effective_command(), "grok");
+        assert_eq!(supervisor.effective_command(), "grok");
+        assert_eq!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_some(), restricted);
+        assert!(env_value(supervisor, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(), original);
+    }
+}
+
 /// The real PTY command builder must remove inherited AND explicitly granted
 /// credentials; a configuration-only assertion cannot prove that boundary.
 #[tokio::test]

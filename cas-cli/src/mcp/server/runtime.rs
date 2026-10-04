@@ -1399,6 +1399,41 @@ pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_
 mod tests {
     #[cfg(feature = "mcp-proxy")]
     #[test]
+    fn worker_proxy_strips_denied_literal_stdio_env_before_connect_and_reload_gh_1047() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n",
+        ).unwrap();
+        std::fs::write(root.join("proxy.toml"), r#"
+allowlist = ["allowed-fixture.*"]
+[servers.allowed-fixture]
+transport = "stdio"
+command = "never-executed-fixture"
+env = { DENIED_LITERAL_FIXTURE_TOKEN = "synthetic-denied", ALLOWED_LITERAL_FIXTURE = "synthetic-allowed" }
+"#).unwrap();
+        env.remove("DENIED_LITERAL_FIXTURE_TOKEN");
+        env.set("CAS_AGENT_ROLE", "worker");
+        for _ in 0..2 {
+            let worker = super::load_proxy_config_for_process(&root).unwrap();
+            let cmcp_core::config::ServerConfig::Stdio { env, .. } =
+                &worker.servers["allowed-fixture"] else { panic!("stdio fixture retained") };
+            assert!(!env.contains_key("DENIED_LITERAL_FIXTURE_TOKEN"));
+            assert_eq!(env.get("ALLOWED_LITERAL_FIXTURE").map(String::as_str), Some("synthetic-allowed"));
+        }
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let supervisor = super::load_proxy_config_for_process(&root).unwrap();
+        let cmcp_core::config::ServerConfig::Stdio { env, .. } =
+            &supervisor.servers["allowed-fixture"] else { panic!("stdio fixture retained") };
+        assert_eq!(env.get("DENIED_LITERAL_FIXTURE_TOKEN").map(String::as_str), Some("synthetic-denied"));
+        assert_eq!(env.get("ALLOWED_LITERAL_FIXTURE").map(String::as_str), Some("synthetic-allowed"));
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
     fn worker_proxy_filters_boot_and_reload_config_preserving_supervisor_gh_1047() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();

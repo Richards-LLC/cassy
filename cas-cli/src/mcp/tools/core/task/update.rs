@@ -511,11 +511,17 @@ impl CasCore {
             }
             let proof_targets_fix = req.proof_targets.is_some();
             let risk_fix = req.risk.is_some();
-            if target_repo.is_none() && target_branch.is_none() && !proof_targets_fix && !risk_fix {
+            let methodology_fix = req.execution_note.is_some();
+            let corrected_methodology = req.execution_note.as_deref()
+                .map(|raw| crate::mcp::tools::types::validate_execution_note(Some(raw)))
+                .transpose().map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None,
+                })?;
+            if target_repo.is_none() && target_branch.is_none() && !proof_targets_fix && !risk_fix && !methodology_fix {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: supply target_repo/target_branch, widened proof_targets, or corrected risk to repair the delivery scope."
+                        "PROOF-SCOPE FIX REJECTED: supply target_repo/target_branch, widened proof_targets, corrected risk, or execution_note to repair the delivery scope."
                             .to_string(),
                     ),
                     data: None,
@@ -523,12 +529,13 @@ impl CasCore {
             }
             let correction_kinds = proof_targets_fix as u8
                 + risk_fix as u8
+                + methodology_fix as u8
                 + (target_repo.is_some() || target_branch.is_some()) as u8;
             if correction_kinds > 1 {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: change only one of proof_targets, risk, or the work target in one correction."
+                        "PROOF-SCOPE FIX REJECTED: change only one of proof_targets, risk, execution_note, or the work target in one correction."
                             .to_string(),
                     ),
                     data: None,
@@ -558,6 +565,28 @@ impl CasCore {
                     data: None,
                 });
             }
+            if methodology_fix && corrected_methodology.as_ref() == Some(&task.execution_note) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("PROOF-SCOPE FIX REJECTED: execution methodology is unchanged."), data: None,
+                });
+            }
+            let paired_no_code_proof = methodology_fix
+                && corrected_methodology.as_ref().and_then(|note| note.as_deref()) == Some("no-code");
+            if paired_no_code_proof {
+                let reference = req.external_ref.as_deref().or(task.external_ref.as_deref());
+                let reference = reference.map(str::trim).filter(|value| !value.is_empty())
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from("PROOF-SCOPE FIX REJECTED: execution_note=no-code requires a portable external_ref."), data: None,
+                    })?;
+                if let Some(reason) = super::lifecycle::close_ops::delivery_audit_text_rejection(reference) {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: external_ref {reason}.")), data: None,
+                    });
+                }
+            }
             let unrelated = [
                 ("title", req.title.is_some()),
                 ("notes", req.notes.is_some()),
@@ -568,13 +597,12 @@ impl CasCore {
                 ("design", req.design.is_some()),
                 ("acceptance_criteria", req.acceptance_criteria.is_some()),
                 ("demo_statement", req.demo_statement.is_some()),
-                ("execution_note", req.execution_note.is_some()),
                 (
                     "proof_targets",
                     req.proof_targets.is_some() && !proof_targets_fix,
                 ),
                 ("door", req.door.is_some()),
-                ("external_ref", req.external_ref.is_some()),
+                ("external_ref", req.external_ref.is_some() && !paired_no_code_proof),
                 ("assignee", req.assignee.is_some()),
                 ("status", req.status.is_some()),
                 ("epic", req.epic.is_some()),
@@ -593,7 +621,7 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "PROOF-SCOPE FIX REJECTED: this administrative path may change only the work target, proof_targets, or risk; unrelated field(s) supplied: {}.",
+                        "PROOF-SCOPE FIX REJECTED: this administrative path may change only the work target, proof_targets, risk, or execution_note (with portable external_ref for no-code); unrelated field(s) supplied: {}.",
                         unrelated.join(", ")
                     )),
                     data: None,
@@ -623,7 +651,7 @@ impl CasCore {
             let parked_anchor = task.deliverables.factory_branch_anchor.clone()
                 .or_else(|| task.deliverables.historical_factory_branch_anchors.last().cloned());
 
-            let corrected_target = if proof_targets_fix || risk_fix {
+            let corrected_target = if proof_targets_fix || risk_fix || methodology_fix {
                 task.deliverables.work_target.clone()
             } else if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
                 if task.execution_note.as_deref() != Some("no-code") {
@@ -697,7 +725,7 @@ impl CasCore {
                     target_branch: branch,
                 })
             };
-            if !proof_targets_fix && !risk_fix
+            if !proof_targets_fix && !risk_fix && !methodology_fix
                 && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
             {
                 return Err(McpError {
@@ -717,13 +745,21 @@ impl CasCore {
             if risk_fix {
                 task.risk = effective_risk.clone();
             }
+            if let Some(methodology) = corrected_methodology {
+                task.execution_note = methodology;
+                if paired_no_code_proof && let Some(reference) = req.external_ref.as_deref() {
+                    task.external_ref = Some(reference.trim().to_string());
+                }
+            }
             task.deliverables.review_envelope = None;
             task.deliverables.pre_close_hook = None;
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
             task.updated_at = chrono::Utc::now();
-            let target_description = if risk_fix {
+            let target_description = if methodology_fix {
+                format!("Execution methodology corrected to {}.", task.execution_note.as_deref().unwrap_or("<cleared>"))
+            } else if risk_fix {
                 format!(
                     "Risk corrected to {}.",
                     task.risk.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
@@ -785,7 +821,11 @@ impl CasCore {
                     data: None,
                 })?;
             }
-            let correction = if proof_targets_fix || risk_fix {
+            let correction = if methodology_fix {
+                cas_store::correct_parked_delivery_execution_note(
+                    &self.cas_root, &task, original_updated_at, &supervisor.id, reason,
+                )
+            } else if proof_targets_fix || risk_fix {
                 cas_store::correct_parked_delivery_proof_targets(
                     &self.cas_root,
                     &task,
@@ -807,7 +847,9 @@ impl CasCore {
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
-            let result_target = if risk_fix {
+            let result_target = if methodology_fix {
+                format!("Execution methodology corrected to {}. Ordinary delivery and close proofs still apply.", task.execution_note.as_deref().unwrap_or("<cleared>"))
+            } else if risk_fix {
                 format!(
                     "Risk corrected to {}.",
                     task.risk.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")

@@ -37,6 +37,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod docker;
+use docker::DockerRun;
+
 const SERVER_DIR: &str = "factory-servers";
 const LOG_DIR: &str = "logs";
 
@@ -124,6 +127,9 @@ pub(crate) struct RegisteredServer {
     pub owner_task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_worker: Option<String>,
+    /// Immutable registered caller identity; legacy entries use name + session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_session: Option<String>,
     /// Whether this server was placed outside worker containment.
@@ -138,6 +144,9 @@ pub(crate) struct RegisteredServer {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_path: Option<PathBuf>,
+    /// Daemon-owned Docker workload, independent of the client process group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<DockerRun>,
     pub started_at: DateTime<Utc>,
     pub state: ServerState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +166,7 @@ pub(crate) struct ServerSpec {
     pub owner_task: Option<String>,
     pub owner_worker: Option<String>,
     pub factory_session: Option<String>,
+    pub owner_agent_id: Option<String>,
     pub shared: bool,
 }
 
@@ -410,6 +420,8 @@ fn start_inner(
         }
     }));
 
+    let (command, docker) = docker::prepare(&spec.command, &spec.cwd, &registry_dir(cas_root))?;
+
     // The pid handshake file lives in the registry's own directory rather than
     // the system temp dir: `/tmp` is tmpfs on many hosts, and the registry
     // directory is already guaranteed writable here.
@@ -433,7 +445,7 @@ fn start_inner(
          while [ ! -f '{launch_file}' ]; do sleep 0.01; done; \
          {command} & printf '%s' \"$!\" > '{pid_file}'",
         log = log_path.display(),
-        command = spec.command,
+        command = command,
         pid_file = pid_file.display(),
         launcher_pid_file = launcher_pid_file.display(),
         launch_file = launch_file.display(),
@@ -566,10 +578,12 @@ fn start_inner(
         expected_port: spec.expected_port,
         owner_task: spec.owner_task.clone(),
         owner_worker: spec.owner_worker.clone(),
+        owner_agent_id: spec.owner_agent_id.clone(),
         factory_session: spec.factory_session.clone(),
         shared: spec.shared,
         cgroup,
         log_path: Some(log_path),
+        docker,
         started_at: Utc::now(),
         state: ServerState::Running,
         ended_at: None,
@@ -688,6 +702,11 @@ fn stop_inner(
     scope_ops: &dyn super::cgroup::ScopeOps,
 ) -> io::Result<StopOutcome> {
     let mut record = record.clone();
+    // Containers are owned by the Docker daemon, even if their client exited
+    // or its pid was reused. Target only the immutable ID written by this run.
+    if let Some(ref docker) = record.docker {
+        docker.stop(&record.cwd)?;
+    }
     let outcome = match liveness(&record) {
         ServerLiveness::Live => {
             let ports = listening_ports(&record);
@@ -704,6 +723,10 @@ fn stop_inner(
             terminate_server(&record, scope_ops)?;
             StopOutcome::AlreadyGone
         }
+        ServerLiveness::Gone if record.docker.is_some() => StopOutcome::Stopped {
+            pid: record.pid,
+            ports: Vec::new(),
+        },
         ServerLiveness::Gone => {
             return Err(io::Error::other(format!(
                 "registered pid {} for server '{}' is gone, but this legacy record has no \

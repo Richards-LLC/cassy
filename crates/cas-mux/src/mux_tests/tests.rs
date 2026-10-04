@@ -13,8 +13,8 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
-#[test]
-fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc() {
+#[tokio::test]
+async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc() {
     let mut env = TestEnvGuard::temp_home();
     let project = tempfile::tempdir().unwrap();
     let root = project.path().join(".cas");
@@ -51,6 +51,24 @@ fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc(
             assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING").is_none());
             assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
             assert!(!worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            let mut probe = worker.clone();
+            probe.command = "/bin/sh".into();
+            probe.args = vec!["-c".into(),
+                "test \"$GITHUB_TOKEN\" = github-fixture && test \"$VERCEL_TOKEN\" = vercel-fixture && test -z \"${NEON_API_KEY+x}${CAS_FACTORY_WORKER_CREDENTIAL_WARNING+x}\" && printf 'declared-credentials-received\\n'".into()];
+            let mut pty = crate::pty::Pty::spawn("credential-probe", probe).unwrap();
+            let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut output = Vec::new();
+                loop {
+                    match pty.recv().await {
+                        Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                        Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                        Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                        None => panic!("credential probe ended without process status"),
+                    }
+                }
+                output
+            }).await.expect("bounded credential handoff probe");
+            assert!(String::from_utf8_lossy(&output).contains("declared-credentials-received"));
         }
     }
 }
@@ -105,6 +123,26 @@ fn supervisor_only_credential_conflict_warns_and_denies_cas_82bc() {
         assert!(!warning.contains("operator-fixture"));
         assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
     }
+}
+
+#[test]
+fn credential_allowlist_cannot_override_factory_identity_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['CAS_AGENT_ROLE']\n").unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(root), workers: 1,
+        worker_cli: SupervisorCli::Codex, include_director: false,
+        ..Default::default()
+    });
+    let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+    assert_eq!(env_value(worker, "CAS_AGENT_ROLE"), Some("worker"));
+    assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING")
+        .unwrap().contains("reserved=CAS_AGENT_ROLE"));
 }
 
 /// GH #1047: configured supervisor-only resources win over project proxy

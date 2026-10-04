@@ -142,6 +142,25 @@ pub(super) fn finish_worker_config(
     for name in &policy.supervisor_only_env {
         if !config.env_remove.contains(name) { config.env_remove.push(name.clone()); }
     }
+    let mut missing = BTreeSet::new();
+    let mut conflicts = BTreeSet::new();
+    let mut reserved = BTreeSet::new();
+    for name in &policy.worker_credential_env {
+        if policy.denies_env(name) {
+            conflicts.insert(name.as_str());
+        } else if !grantable_worker_credential(name) {
+            reserved.insert(name.as_str());
+        } else if !config.env.iter().any(|(key, value)| key == name && !value.trim().is_empty()) {
+            missing.insert(name.as_str());
+        }
+    }
+    let warning = [("missing", missing), ("supervisor_only", conflicts), ("reserved", reserved)]
+        .into_iter().filter(|(_, names)| !names.is_empty())
+        .map(|(reason, names)| format!("{reason}={}", names.into_iter().collect::<Vec<_>>().join(",")))
+        .collect::<Vec<_>>().join("; ");
+    if !warning.is_empty() {
+        config.env.push((cas_pty::WORKER_CREDENTIAL_WARNING_ENV.into(), warning));
+    }
     if !policy.is_empty() {
         // Grok discovers original project/user MCP configuration and has no
         // supported per-launch isolation override. Other unsupported native
@@ -227,7 +246,9 @@ fn grant_worker_github_read_token(config: &mut PtyConfig, project_grants: &BTree
 /// worker in this project. Only the project `.cas/proxy.toml` is an auditable
 /// worker grant source.
 fn project_proxy_credential_names(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
+    let mut names: BTreeSet<String> = policy.worker_credential_env.iter()
+        .filter(|name| grantable_worker_credential(name) && !policy.denies_env(name))
+        .cloned().collect();
     let Some(cas_root) = cas_root else {
         return names;
     };
@@ -313,7 +334,9 @@ fn user_proxy_config_document() -> Option<toml::Value> {
 /// credentials file and shell profile used by `cas integrate violet` as a
 /// fallback, while keeping an explicitly exported value authoritative.
 fn proxy_credential_environment(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> Vec<(String, String)> {
-    let mut names = BTreeSet::new();
+    let mut names: BTreeSet<String> = policy.worker_credential_env.iter()
+        .filter(|name| grantable_worker_credential(name) && !policy.denies_env(name))
+        .cloned().collect();
     let mut values = BTreeMap::new();
     let mut paths = Vec::new();
     if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
@@ -404,6 +427,11 @@ fn valid_environment_name(name: &str) -> bool {
             byte == b'_'
                 || (byte.is_ascii_alphanumeric() && (index > 0 || byte.is_ascii_alphabetic()))
         })
+}
+
+fn grantable_worker_credential(name: &str) -> bool {
+    valid_environment_name(name)
+        && (!name.starts_with("CAS_") || PROTECTED_OPERATOR_ENV.contains(&name))
 }
 
 /// Parse the simple `export NAME='value'` form emitted by the integration

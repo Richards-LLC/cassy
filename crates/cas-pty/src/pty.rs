@@ -460,6 +460,8 @@ pub const PROTECTED_OPERATOR_ENV: &[&str] = &[
 // exposing a credential value or adding a public struct field. Pty::spawn
 // consumes it as launch metadata rather than passing it to the child process.
 const WORKER_CREDENTIAL_GRANT_ENV: &str = "CAS_FACTORY_WORKER_CREDENTIAL_GRANT";
+/// Names-only warning consumed in the spawn receipt, never passed to the child.
+pub const WORKER_CREDENTIAL_WARNING_ENV: &str = "CAS_FACTORY_WORKER_CREDENTIAL_WARNING";
 
 fn worker_credential_grant_nonce() -> &'static str {
     static NONCE: OnceLock<String> = OnceLock::new();
@@ -2315,6 +2317,7 @@ struct WorkerSpawnAudit<'a> {
     account_env: &'static str,
     account: String,
     source: &'static str,
+    credential_warning: Option<&'a str>,
 }
 
 fn worker_spawn_audit(
@@ -2368,6 +2371,7 @@ fn worker_spawn_audit(
         account_env,
         account,
         source,
+        credential_warning: env(WORKER_CREDENTIAL_WARNING_ENV),
     })
 }
 
@@ -2427,7 +2431,7 @@ impl Pty {
         }
 
         for (key, value) in &config.env {
-            if key != WORKER_CREDENTIAL_GRANT_ENV {
+            if key != WORKER_CREDENTIAL_GRANT_ENV && key != WORKER_CREDENTIAL_WARNING_ENV {
                 cmd.env(key, value);
             }
         }
@@ -2474,6 +2478,10 @@ impl Pty {
             .map_err(|e| Error::pty(format!("Failed to spawn command: {e}")))?;
 
         if let Some(audit) = worker_spawn_audit(&config, |key| std::env::var(key).ok()) {
+            if let Some(warning) = audit.credential_warning {
+                tracing::warn!(worker = audit.worker, cli = audit.cli, credentials = warning,
+                    "factory worker credential warning; review factory.worker_credential_env");
+            }
             tracing::info!(
                 worker = audit.worker,
                 cli = audit.cli,
@@ -3679,6 +3687,25 @@ mod tests {
         };
         supervisor.apply_worker_credential_policy();
         assert!(supervisor.env_remove.is_empty());
+    }
+
+    #[test]
+    fn worker_spawn_receipt_retains_names_only_credential_warning_cas_82bc() {
+        for cli in ["claude", "codex"] {
+            let config = PtyConfig {
+                command: cli.into(),
+                env: vec![
+                    ("CAS_AGENT_ROLE".into(), "worker".into()),
+                    (WORKER_CREDENTIAL_WARNING_ENV.into(),
+                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into()),
+                ],
+                ..Default::default()
+            };
+            let audit = worker_spawn_audit(&config, |_| None).unwrap();
+            assert_eq!(audit.cli, cli);
+            assert_eq!(audit.credential_warning,
+                Some("missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN"));
+        }
     }
 
     #[test]

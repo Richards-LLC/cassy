@@ -223,9 +223,9 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
     }
 }
 
-/// Integration and review are separate facts. Avoid dispatching a pre-merge
-/// review of content already delivered, including rewritten squash tips;
-/// the close gate still requires a recorded verdict or supervisor waiver.
+/// Whether a delivery is already carried by the target, including squash tips.
+/// Integration alone does not satisfy QA: dispatch suppression also needs a
+/// passed or waived verdict for this exact delivery.
 fn delivery_tip_on_target(repo: &Path, head: &str, target: &str) -> bool {
     is_ancestor(repo, head, target) || reviewed_tip_carried_by(repo, head, target, target)
 }
@@ -444,7 +444,17 @@ impl CasCore {
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
         let target = freshest_target_ref(repo, parent_branch);
-        if delivery_tip_on_target(repo, delivery_ref, &target) {
+        if delivery_tip_on_target(repo, delivery_ref, &target)
+            && resolve_commit(repo, delivery_ref).is_some_and(|delivered| {
+                cas_store::list_qa_passes(&self.cas_root, &task.id)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|pass| {
+                        pass.state.satisfies_gate()
+                            && resolve_commit(repo, &pass.bound_head).as_deref() == Some(delivered.as_str())
+                    })
+            })
+        {
             return None;
         }
         let changed = match changed_paths_for_delivery(
@@ -1133,15 +1143,6 @@ impl CasCore {
                 &head[..head.len().min(8)],
             ));
         }
-        if delivery_tip_on_target(repo, &head, &classification_target) {
-            return QaCloseGate::Refuse(format!(
-                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already \
-                 integrated into {classification_target} with no passed or waived QA round. \
-                 No pre-merge QA round was opened for the integrated content. {remedy}.",
-                task.id,
-                &head[..head.len().min(8)],
-            ));
-        }
         let location = close_delivery_location(repo, &head, target_branch);
         let dispatch = self.independent_qa_for_paths(
             task,
@@ -1608,28 +1609,40 @@ mod squash_close_tests {
     }
 
     #[test]
-    fn cas_b591_squash_integrated_tip_does_not_dispatch_a_new_round() {
-        let mut env = TestEnvGuard::temp_home();
-        let (dir, core, mut task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
-        let repo = dir.path();
-        let head = task.deliverables.factory_branch_anchor.clone().unwrap();
-        assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
-        assert!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().is_empty());
-        // Closing an unreviewed integration still needs a logged disposition;
-        // it must not start a pre-merge review for the old, rewritten tip.
-        let outcome = core.independent_qa_close_gate(&task, repo, "main", None, None);
-        assert!(matches!(outcome, QaCloseGate::Refuse(_)));
-        assert!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().is_empty());
+    fn cas_b591_reviewed_squash_tip_does_not_dispatch_a_new_round() {
+        for state in [QaPassState::Passed, QaPassState::Waived] {
+            let mut env = TestEnvGuard::temp_home();
+            let (dir, core, mut task, _squash) = squash_fixture(&mut env, state);
+            let repo = dir.path();
+            let head = task.deliverables.factory_branch_anchor.clone().unwrap();
+            assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+            assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 1);
+            assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", None, None), QaCloseGate::Clear));
 
-        // A new surface change on top of the already-integrated tip owes QA.
-        std::fs::write(repo.join("web/new.css"), ".new{color:red}\n").unwrap();
-        git(repo, &["add", "web/new.css"]);
-        git(repo, &["commit", "-q", "-m", "new unreviewed surface"]);
-        let new_head = git(repo, &["rev-parse", "HEAD"]);
-        task.deliverables.factory_branch_anchor = Some(new_head.clone());
-        let dispatch = core.dispatch_independent_qa(&task, repo, "main", Some(&new_head));
-        assert!(dispatch.unwrap().contains("INDEPENDENT QA DISPATCHED"));
-        assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 1);
+            // An older verdict cannot waive new work added on this branch.
+            std::fs::write(repo.join("web/new.css"), ".new{color:red}\n").unwrap();
+            git(repo, &["add", "web/new.css"]);
+            git(repo, &["commit", "-q", "-m", "new unreviewed surface"]);
+            let new_head = git(repo, &["rev-parse", "HEAD"]);
+            task.deliverables.factory_branch_anchor = Some(new_head.clone());
+            let dispatch = core.dispatch_independent_qa(&task, repo, "main", Some(&new_head));
+            assert!(dispatch.unwrap().contains("INDEPENDENT QA DISPATCHED"));
+            assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn cas_b591_unreviewed_squash_still_dispatches_a_round() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+        let outcome = core.independent_qa_close_gate(&task, dir.path(), "main", None, None);
+        let QaCloseGate::Refuse(text) = outcome else {
+            panic!("an integrated delivery without a verdict still requires QA");
+        };
+        assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
+        let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].state, QaPassState::Pending);
     }
 
     #[test]

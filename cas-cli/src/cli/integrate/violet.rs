@@ -2538,6 +2538,71 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingProbe(RefCell<Vec<(String, String, String)>>);
+
+    impl HubProbe for RecordingProbe {
+        fn list_tools(&self, url: &str, token_env: &str, bypass_env: &str) -> ProbeOutcome {
+            self.0.borrow_mut().push((url.into(), token_env.into(), bypass_env.into()));
+            live_tools()
+        }
+    }
+
+    fn staging_probe_fixture(dir: &Path) -> (PathBuf, FakeEnv) {
+        let project = write_project_proxy(dir, &format!(
+            "allowlist = {:?}\n[servers.violet]\ntransport = \"http\"\nurl = \"https://staging.example.test/mcp/slack\"\nauth = \"env:STAGING_TOKEN\"\n[servers.violet.headers]\n{VIOLET_BYPASS_HEADER} = \"env:STAGING_BYPASS\"\nx-project-key = \"env:STAGING_KEY\"\n",
+            canonical_entries()
+        ));
+        let mut env = ready_env();
+        for name in ["STAGING_TOKEN", "STAGING_BYPASS", "STAGING_KEY"] {
+            env.0.insert(name.into(), "fixture-secret".into());
+        }
+        (project, env)
+    }
+
+    #[test]
+    fn cas_8121_integrate_probes_project_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let (project, env) = staging_probe_fixture(dir.path());
+        let probe = RecordingProbe::default();
+        let report = run(&test_args(), Some(&project), &paths, &env, &probe).unwrap();
+        assert_eq!(probe.0.borrow().as_slice(), &[(
+            "https://staging.example.test/mcp/slack".into(),
+            "STAGING_TOKEN".into(), "STAGING_BYPASS".into()
+        )]);
+        assert!(report.is_green(), "{report:?}");
+    }
+
+    #[test]
+    fn cas_8121_doctor_probes_project_override_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let (project, env) = staging_probe_fixture(dir.path());
+        run(&test_args(), None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let probe = RecordingProbe::default();
+        let row = doctor_row(Some(&project), &paths, &env, &probe);
+        assert_eq!(probe.0.borrow().as_slice(), &[(
+            "https://staging.example.test/mcp/slack".into(),
+            "STAGING_TOKEN".into(), "STAGING_BYPASS".into()
+        )]);
+        assert_eq!(row.severity, DoctorSeverity::Ok);
+        assert!(row.message.contains("https://staging.example.test/mcp/slack"));
+    }
+
+    #[test]
+    fn cas_8121_doctor_probes_machine_url_without_project_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let args = VioletArgs { url: "https://machine.example.test/mcp/slack".into(), ..test_args() };
+        let env = ready_env();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let probe = RecordingProbe::default();
+        let row = doctor_row(None, &paths, &env, &probe);
+        assert_eq!(probe.0.borrow()[0].0, args.url);
+        assert!(row.message.contains(&args.url));
+    }
+
     struct FakeHub {
         creates: RefCell<Vec<std::result::Result<(String, Option<String>), HubClientError>>>,
         bypasses: RefCell<Vec<std::result::Result<String, HubClientError>>>,

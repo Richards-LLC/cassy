@@ -143,6 +143,12 @@ experiments retain their separate `negative_result=true` outcome.
 
 ### Factory worker MCP and credential access
 
+A supervisor can waive independent QA before a delivery parks with
+`verification action=qa_waive task_id=<id> head_sha=<full pushed SHA> summary="<reason>"`.
+The supplied SHA must equal the live origin tip of the task's factory branch;
+the waiver covers only that commit. Without `head_sha`, the existing recorded
+delivery and rebase rules choose the binding. This operation is MCP-only.
+
 Declare resources that stay on the supervisor in `.cas/config.toml`:
 
 ```toml

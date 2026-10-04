@@ -327,6 +327,30 @@ pub fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
     (out.status.success() && !sha.is_empty()).then_some(sha)
 }
 
+/// Read the exact pushed head, rather than trusting a stale tracking ref.
+pub(crate) fn pushed_branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let remote_ref = format!("refs/heads/{branch}");
+    let timeout = std::time::Duration::from_secs(10);
+    let mut command = Command::new("git");
+    command
+        .current_dir(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["ls-remote", "--heads", "--refs", "origin", &remote_ref]);
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find_map(|(sha, name)| (name == remote_ref && !sha.is_empty()).then(|| sha.to_string()))
+}
+
 /// Whether `tip` is a rebased copy of `recorded` against `target`: `recorded`
 /// is no longer on `tip`'s history, and the change each brings over its
 /// merge-base with `target` has the same `git patch-id --stable`.

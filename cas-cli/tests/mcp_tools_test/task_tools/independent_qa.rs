@@ -1074,6 +1074,121 @@ fn reopened_to_in_progress(cas_dir: &Path, task_id: &str) {
 }
 
 #[tokio::test]
+async fn cas_dd29_waives_an_explicit_pushed_tip_before_park() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "factory/test-agent"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    let agent = open_agent_store(&cas_dir)
+        .unwrap()
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.name == "test-agent")
+        .unwrap();
+    task.assignee = Some(agent.id);
+    tasks.update(&task).unwrap();
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let definition = service
+        .tool_definitions()
+        .into_iter()
+        .find(|tool| tool.name == "verification")
+        .unwrap();
+    assert!(
+        definition.input_schema["properties"]
+            .get("head_sha")
+            .is_some()
+    );
+    let _role = SupervisorRole::enter(&mut test_env);
+    let result = service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_waive", "task_id": task_id,
+            "head_sha": head, "summary": "operator reviewed the pushed delivery",
+        }))))
+        .await
+        .expect("a pushed delivery can be waived without parking first");
+    assert!(extract_text(result).contains("waived"));
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1);
+    assert_eq!(passes[0].state, cas::types::QaPassState::Waived);
+    assert_eq!(passes[0].bound_head, head);
+    let task = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
+    assert_eq!(task.status, TaskStatus::InProgress);
+    assert!(task.deliverables.factory_branch_anchor.is_none());
+    assert!(task.notes.contains("operator reviewed the pushed delivery"));
+}
+
+#[tokio::test]
+async fn cas_dd29_refuses_a_head_that_is_not_the_pushed_branch_tip() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "factory/test-agent"]);
+    let pushed = git(&repo, &["rev-parse", "HEAD"]);
+    let unpushed = commit_file(&repo, "web/new.css", "a{color:red}\n", "unpushed work");
+    // A stale/misleading tracking ref is not proof of what origin carries.
+    git(
+        &repo,
+        &[
+            "update-ref",
+            "refs/remotes/origin/factory/test-agent",
+            &unpushed,
+        ],
+    );
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let _role = SupervisorRole::enter(&mut test_env);
+    for head in [&unpushed, &git(&repo, &["rev-parse", "main"])] {
+        let error = service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_waive", "task_id": task_id,
+                "head_sha": head, "summary": "reviewed",
+            }))))
+            .await
+            .expect_err("only the exact pushed tip may be waived");
+        assert!(error.message.contains("head_sha"), "{}", error.message);
+        assert!(error.message.contains(&pushed), "{}", error.message);
+        assert!(
+            cas_store::list_qa_passes(&cas_dir, &task_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    git(&repo, &["remote", "remove", "origin"]);
+    let error = service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_waive", "task_id": task_id,
+            "head_sha": pushed, "summary": "reviewed",
+        }))))
+        .await
+        .expect_err("an unreadable remote cannot authorize a pre-park waiver");
+    assert!(
+        error.message.contains("no readable pushed tip"),
+        "{}",
+        error.message
+    );
+    assert!(
+        cas_store::list_qa_passes(&cas_dir, &task_id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn docs_and_test_only_deliveries_are_never_gated_even_with_a_demo() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, _) = fixture(&mut test_env);

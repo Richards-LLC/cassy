@@ -454,6 +454,13 @@ pub struct VerificationRequest {
     #[schemars(description = "qa_record: absolute path of this round's LEDGER.md")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_path: Option<String>,
+
+    /// Explicit pre-park waiver binding, checked against the live pushed tip.
+    #[schemars(
+        description = "qa_waive: full SHA of the delivery's pushed factory branch tip; allows a waiver before parking. Must match the live origin branch exactly."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
 }
 
 /// Unified published-artifact operations request (cassy#910).

@@ -132,7 +132,19 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
             "action":"close", "id":task.id, "reason":"Investigation completed",
             "supervisor_override":true,
         })).await;
+        assert!(closed.contains("VERIFICATION REQUIRED"), "{closed}");
+        let fresh = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        assert_ne!(fresh.id, dispatch.id, "the old methodology's proof must not authorize close");
+        service.verification(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"add", "task_id":task.id, "dispatch_id":fresh.id,
+            "status":"approved", "summary":"Reviewed corrected no-code investigation and portable proof",
+        })).unwrap())).await.unwrap();
+        let closed = send(serde_json::json!({
+            "action":"close", "id":task.id, "reason":"Investigation completed",
+            "supervisor_override":true,
+        })).await;
         assert!(closed.contains("Closed task"), "{closed}");
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
     }
 }
 

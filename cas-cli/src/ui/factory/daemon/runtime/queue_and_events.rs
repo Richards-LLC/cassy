@@ -1632,13 +1632,8 @@ fn record_worker_wake_decline(
     queue: &dyn cas_store::PromptQueueStore,
     id: i64,
     decision: WakeDecision,
-    tool_call: ToolCallEvidence,
+    _tool_call: ToolCallEvidence,
 ) -> cas_store::Result<Option<u32>> {
-    if tool_call == ToolCallEvidence::InFlight {
-        queue.record_pending_reason(id, cas_store::PendingReason::GatedNotReady,
-            Some("wake budget paused while the recipient has a tool call in flight"))?;
-        return Ok(None);
-    }
     queue.record_wake_gate_decline(id, &decision.status_detail()).map(Some)
 }
 
@@ -14756,13 +14751,14 @@ mod wake_recipient_regressions_gh1101 {
     fn gh1101_in_flight_wakes_preserve_budget_until_tool_result() {
         use cas_store::PromptQueueStore;
         let temp = tempfile::TempDir::new().unwrap();
-        let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let id = queue
             .enqueue("supervisor", "worker", "fix findings")
             .unwrap();
         for _ in 0..4 {
             record_worker_wake_decline(
-                &queue,
+                queue.as_ref(),
                 id,
                 WakeDecision::deny("busy"),
                 ToolCallEvidence::InFlight,
@@ -14771,11 +14767,11 @@ mod wake_recipient_regressions_gh1101 {
         }
         assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
         for tool in [ToolCallEvidence::Idle, ToolCallEvidence::Unknown] {
-            record_worker_wake_decline(&queue, id, WakeDecision::deny("busy"), tool).unwrap();
+            record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), tool).unwrap();
         }
         assert_eq!(queue.wake_gate_state(id).unwrap().0, 2);
         let saved = queue.wake_gate_state(id).unwrap();
-        assert!(record_worker_wake_decline(&queue, id, WakeDecision::deny("busy"), ToolCallEvidence::InFlight).unwrap().is_none());
+        assert!(record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), ToolCallEvidence::InFlight).unwrap().is_none());
         assert_eq!(queue.wake_gate_state(id).unwrap(), saved);
     }
 
@@ -14877,5 +14873,12 @@ mod wake_recipient_regressions_gh1101 {
             queue.queued_prompt(other).unwrap().unwrap().target,
             "old-worker"
         );
+        assert_eq!(queue.queued_prompt(spoof).unwrap().unwrap().target, "old-worker");
+        assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
+        task.assignee = None;
+        tasks.update(&task).unwrap();
+        queue.refresh_qa_rejection_targets("session", Some(id)).unwrap();
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some());
+
     }
 }

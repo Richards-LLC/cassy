@@ -1,11 +1,16 @@
-import { HubRequestError } from "./connection";
+import { AuthenticationError, HubRequestError } from "./connection";
 import { newOperationId, type FleetAction, type FleetOpsState, type OperationRequest } from "./fleet-ops";
 
 type SendOperation = (request: OperationRequest & { op_id: string }) => Promise<{ outcome?: Readonly<Record<string, unknown>> } | undefined>;
 
 /** Transport diagnostics belong in logs; the operator needs a cause and next step. */
-function transportDetail(error: HubRequestError | undefined): string {
-  if (!error) return "the machine could not be reached. Check its connection and try again.";
+function transportDetail(error: unknown): string {
+  if (error instanceof AuthenticationError) {
+    return error.kind === "scope-mismatch"
+      ? "this pairing does not allow the action. Check its permissions in Paired machines."
+      : "the pairing is no longer accepted. Pair the machine again.";
+  }
+  if (!(error instanceof HubRequestError)) return "the machine could not be reached. Check its connection and try again.";
   if (error.status === 403) return "this pairing does not allow the action. Check its permissions in Paired machines.";
   if (error.status === 401) return "the pairing is no longer accepted. Pair the machine again.";
   if (error.status >= 500) return "the machine returned an error. Try again.";
@@ -30,7 +35,7 @@ export async function runFleetOperation(state: FleetOpsState, rowKey: string, ac
     state.failed(rowKey, action, {
       stale: refused?.status === 409 && refused.code === "stale",
       ...(current && typeof current === "object" ? { current: current as Record<string, unknown> } : {}),
-      detail: detail ?? transportDetail(refused),
+      detail: detail ?? transportDetail(error),
       ...(!detail && typeof subject === "string" && !action.label.includes(subject) ? { subject } : {}),
     });
     return "failed";

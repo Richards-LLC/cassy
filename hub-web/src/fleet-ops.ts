@@ -415,7 +415,10 @@ export class FleetOpsState {
     const detail = failure.detail ?? "the machine refused it";
     const suffix = /[.!?…]\s*$/.test(detail) ? "" : ".";
     const subject = failure.subject ? ` ${failure.subject}` : "";
-    const text = failure.stale ? staleMessage(action, failure.current) : `Could not ${action.label.replace(/…$/, "").toLowerCase()}${subject}: ${detail}${suffix}`;
+    const label = action.operation === "assign-task"
+      ? action.request.op.assignee ? `assign ${action.request.op.task_id} to ${action.request.op.assignee}` : `unassign ${action.request.op.task_id}`
+      : `${action.label.replace(/…$/, "").toLowerCase()}${subject}`;
+    const text = failure.stale ? staleMessage(action, failure.current) : `Could not ${label}: ${detail}${suffix}`;
     this.notes.set(rowKey, { text, tone: failure.stale ? "stale" : "error" });
     this.announcement = text;
   }

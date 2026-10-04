@@ -122,7 +122,7 @@ export class ScopeGrantError extends HubRequestError {
   constructor(status: number, message: string, code?: string, detail?: string) { super(message, status, code, detail); }
 }
 
-class AuthenticationError extends Error {
+export class AuthenticationError extends Error {
   constructor(readonly kind: AuthFailureKind, message: string) { super(message); }
 }
 

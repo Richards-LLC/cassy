@@ -62,6 +62,34 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await expect(row.locator(".fleet-ops-note")).not.toContainText(/POST|\/v1\/|Failed to fetch|500/);
         await expect(row.locator(".status-chip")).toHaveText("active");
       });
+      for (const [status, reason, detail] of [
+        [403, "scope_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
+        [401, "revoked", "the pairing is no longer accepted. Pair the machine again."],
+      ] as const) {
+        await journey.stage(`A ${status} refusal names the pairing problem and recovery`, async () => {
+          await page.unroute("**/v1/sessions/*/operations");
+          await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status, json: { error: "unauthorized", reason, retryable: false } }));
+          await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
+          await panel().getByRole("menuitem", { name: "Pause" }).click();
+          const text = `Could not pause swift-lark-3: ${detail}`;
+          await expect(result).toHaveText(text);
+          await expect(row.locator(".fleet-ops-note")).toHaveText(text);
+          await expect(row.locator(".status-chip")).toHaveText("active");
+          if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
+        });
+      }
+      await journey.stage("A failed assignment names the task before its assignee", async () => {
+        await page.unroute("**/v1/sessions/*/operations");
+        await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, contentType: "text/html", body: "Internal Server Error" }));
+        const task = page.locator("#status-view .status-task", { hasText: "cas-2001" });
+        await task.getByRole("button", { name: "Assign cas-2001" }).click();
+        const menu = width === 390 ? page.locator("dialog.fleet-action-sheet") : task;
+        await menu.getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click();
+        const text = "Could not assign cas-2001 to quiet-owl-7: the machine returned an error. Try again.";
+        await expect(result).toHaveText(text);
+        await expect(task.locator(".fleet-ops-note")).toHaveText(text);
+        if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
+      });
       await journey.stage("A successful retry clears failure feedback and offers Undo", async () => {
         await page.unroute("**/v1/sessions/*/operations");
         await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();

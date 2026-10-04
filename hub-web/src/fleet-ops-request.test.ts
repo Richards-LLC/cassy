@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { HubRequestError } from "./connection";
-import { FleetOpsState, holdAction, stopAction, type OperationRequest } from "./fleet-ops";
+import { HubConnectionSupervisor, HubRequestError, type HubCallbacks } from "./connection";
+import { FleetOpsState, assignAction, holdAction, stopAction, type OperationRequest } from "./fleet-ops";
+import type { StoredMachine } from "./types";
 import { runFleetOperation } from "./fleet-ops-request";
 
 function deferred<T>() {
@@ -16,6 +17,31 @@ const stale = () => new HubRequestError("Stop refused", 409, "stale", "restarted
 type Answer = { outcome?: Record<string, unknown> };
 
 describe("fleet async selection/request ownership (cas-5bef0)", () => {
+  it.each([
+    [403, "permission_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
+    [401, "revoked", "the pairing is no longer accepted. Pair the machine again."],
+    [401, "expired", "the pairing is no longer accepted. Pair the machine again."],
+  ])("explains the actual connection request's auth refusal (%s %s)", async (status, reason, detail) => {
+    const connection = new HubConnectionSupervisor({ expiresAt: "2099-01-01T00:00:00Z" } as StoredMachine, {} as HubCallbacks);
+    // Stub the authenticated transport, preserving request's real error class.
+    Object.assign(connection, { authorizedFetch: vi.fn().mockResolvedValue({ response: new Response(null, { status }), refusal: { reason, retryable: false } }) });
+    const state = new FleetOpsState(); state.select("atlas:PELICAN");
+    await runFleetOperation(state, row, holdAction(agent), (request) => connection.request("POST", "/v1/sessions/PELICAN/operations", request), vi.fn());
+    const text = `Could not pause swift-lark-3: ${detail}`;
+    expect(state.notes.get(row)).toEqual({ text, tone: "error" });
+    expect(state.announcement).toBe(text);
+    expect(state.pending.size).toBe(0); expect(state.currentUndo(Date.now())).toBeUndefined();
+  });
+
+  it.each(["quiet-owl-7", null])("names the task before its assignee in failed assignments (%s)", async (worker) => {
+    const state = new FleetOpsState(); state.select("atlas:PELICAN");
+    const action = assignAction({ id: "cas-2001", assignee: null }, worker);
+    await runFleetOperation(state, "task:cas-2001", action, async () => { throw new HubRequestError("POST /private failed (500)", 500); }, vi.fn());
+    const text = `Could not ${worker ? `assign cas-2001 to ${worker}` : "unassign cas-2001"}: the machine returned an error. Try again.`;
+    expect(state.notes.get("task:cas-2001")).toEqual({ text, tone: "error" });
+    expect(state.announcement).toBe(text);
+  });
+
   it.each([
     [new HubRequestError("POST /v1/sessions/private-session/operations failed (500)", 500), "the machine returned an error. Try again."],
     [new TypeError("Failed to fetch https://private-machine/v1/sessions/private-session/operations"), "the machine could not be reached. Check its connection and try again."],

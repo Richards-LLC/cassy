@@ -191,6 +191,19 @@ impl CasService {
         let implementer = task
             .assignee
             .clone()
+            .map(|assigned| {
+                self.inner
+                    .open_agent_store()
+                    .ok()
+                    .and_then(|store| {
+                        crate::mcp::tools::core::task::resolve_agent_identity(
+                            store.as_ref(),
+                            &assigned,
+                        )
+                    })
+                    .map(|agent| agent.name)
+                    .unwrap_or(assigned)
+            })
             .or_else(|| {
                 task.deliverables
                     .parked_branch
@@ -231,15 +244,35 @@ impl CasService {
             .map(|target| target.target_branch.clone())
             .filter(|target| !target.trim().is_empty())
             .unwrap_or_else(|| "main".to_string());
-        let chosen = crate::qa_pass::waiver_head(&task, &passes, current_tip.as_deref(), |recorded, tip| {
-            crate::qa_pass::is_rebased_copy(&repo, recorded, tip, &target)
-        });
+        let chosen = if let Some(requested) = req.head_sha.as_deref() {
+            let pushed = crate::qa_pass::pushed_branch_tip(&repo, &branch).ok_or_else(|| {
+                Self::error(ErrorCode::INVALID_PARAMS, format!(
+                    "qa_waive: cannot validate head_sha: {branch} has no readable pushed tip on origin; push the delivery branch and retry"
+                ))
+            })?;
+            if requested.trim() != pushed {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("qa_waive: head_sha must equal {branch}'s pushed tip {pushed}"),
+                ));
+            }
+            Some(crate::qa_pass::WaiverHead {
+                head: pushed,
+                advanced_from: None,
+                why: None,
+            })
+        } else {
+            crate::qa_pass::waiver_head(&task, &passes, current_tip.as_deref(), |recorded, tip| {
+                crate::qa_pass::is_rebased_copy(&repo, recorded, tip, &target)
+            })
+        };
         let Some(chosen) = chosen else {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
                     "qa_waive: {task_id} has no delivered commit on record to bind a waiver to: it never \
-                     parked, no QA round was opened, and no merge commit is recorded. If it was merged \
+                     parked, no QA round was opened, and no merge commit is recorded. For a pushed \
+                     delivery, pass head_sha=<full pushed branch SHA>. If it was merged \
                      before close, close it with supervisor_override=true, a reason and \
                      commit_receipt=<merged sha>; the QA gate records the waiver against that commit."
                 ),

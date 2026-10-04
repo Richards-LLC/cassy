@@ -203,26 +203,17 @@ pub enum ProbeOutcome {
 
 /// An authenticated `tools/list` against the hub.
 pub trait HubProbe {
-    fn list_tools(&self, url: &str, token_env: &str, bypass_env: &str) -> ProbeOutcome;
+    fn list_tools(&self, server: &ServerConfig) -> ProbeOutcome;
 }
 
-/// Live probe: builds the *same* env-referencing server config that is written
-/// to disk and lets the proxy resolve both credentials in-process.
+/// Live probe: passes the effective server unchanged to the proxy, which
+/// resolves its authentication and header references in-process.
 pub struct ProxyHubProbe;
 
 impl HubProbe for ProxyHubProbe {
-    fn list_tools(&self, url: &str, token_env: &str, bypass_env: &str) -> ProbeOutcome {
+    fn list_tools(&self, server: &ServerConfig) -> ProbeOutcome {
         use std::collections::HashMap;
-
-        let server = cmcp_core::config::ServerConfig::Http {
-            url: url.to_string(),
-            auth: Some(format!("env:{token_env}")),
-            headers: HashMap::from([(
-                VIOLET_BYPASS_HEADER.to_string(),
-                format!("env:{bypass_env}"),
-            )]),
-            oauth: false,
-        };
+        let server = server.clone();
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1131,6 +1122,8 @@ pub struct VioletReport {
     pub project_proxy: Option<ProjectProxyEntry>,
     pub harnesses: Vec<HarnessEntry>,
     pub probe: ProbeOutcome,
+    /// References required by the effective project/machine server.
+    pub probe_env_states: Vec<(String, EnvState)>,
     /// How the hub's live tool list disagrees with the allowlist, if at all.
     pub drift: ToolDrift,
     /// Exact next command or edit, when the operator must do something.
@@ -1139,10 +1132,12 @@ pub struct VioletReport {
 
 impl VioletReport {
     pub fn credentials_ready(&self) -> bool {
-        self.token_env_state.is_usable() && self.bypass_env_state.is_usable()
+        self.probe_env_states
+            .iter()
+            .all(|(_, state)| state.is_usable())
     }
 
-    /// Green means: both variables usable, the registration is on disk, and
+    /// Green means: effective credential references usable, registration on disk, and
     /// the hub answered with exactly the allowlisted tools. A skipped probe is
     /// deliberately *not* green — an unverified setup has never been proven.
     pub fn is_green(&self) -> bool {
@@ -1283,6 +1278,7 @@ struct ProjectProxyPlan {
     /// project allowlist replaces the machine one, this *is* the effective
     /// dispatch policy for this project.
     effective_tools: Vec<String>,
+    server_override: Option<ServerConfig>,
     /// True when the file governs policy here but names no hub route, so no
     /// rewrite of the machine file can make the hub reachable.
     shadows_without_routes: bool,
@@ -1325,6 +1321,39 @@ fn server_endpoint(server: &ServerConfig) -> &str {
         ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url,
         ServerConfig::Stdio { command, .. } => command,
     }
+}
+
+/// Validate the references the proxy resolves, including custom headers.
+fn probe_env_states(server: &ServerConfig, env: &dyn EnvLookup) -> Vec<(String, EnvState)> {
+    let (auth, headers) = match server {
+        ServerConfig::Http { auth, headers, .. } | ServerConfig::Sse { auth, headers, .. } => {
+            (auth, headers)
+        }
+        ServerConfig::Stdio { .. } => return Vec::new(),
+    };
+    let mut values = Vec::new();
+    values.extend(auth.as_deref());
+    let mut headers = headers.iter().collect::<Vec<_>>();
+    headers.sort_by_key(|(name, _)| *name);
+    values.extend(headers.into_iter().map(|(_, value)| value.as_str()));
+    let mut states = Vec::new();
+    for name in values
+        .into_iter()
+        .filter_map(|value| value.strip_prefix("env:"))
+    {
+        if !states.iter().any(|(existing, _)| existing == name) {
+            states.push((name.to_string(), EnvState::of(env, name)));
+        }
+    }
+    states
+}
+
+fn missing_probe_credentials(states: &[(String, EnvState)]) -> Vec<String> {
+    states
+        .iter()
+        .filter(|(_, state)| !state.is_usable())
+        .map(|(name, state)| format!("{name} ({})", state.as_str()))
+        .collect()
 }
 
 /// What to do with the project file's own `[servers.violet]` block.
@@ -1384,6 +1413,7 @@ fn plan_project_proxy(
         return Ok(ProjectProxyPlan {
             rewritten: None,
             effective_tools: Vec::new(),
+            server_override: None,
             shadows_without_routes: true,
             note: format!(
                 "names no {VIOLET_SERVER} route and is authoritative for dispatch policy \
@@ -1432,6 +1462,7 @@ fn plan_project_proxy(
         return Ok(ProjectProxyPlan {
             rewritten: migrated_legacy.then(|| document.to_string()),
             effective_tools: existing_tools,
+            server_override: project_server,
             shadows_without_routes: false,
             note,
         });
@@ -1503,6 +1534,11 @@ fn plan_project_proxy(
     Ok(ProjectProxyPlan {
         rewritten: Some(document.to_string()),
         effective_tools: VIOLET_TOOLS.iter().map(|t| (*t).to_string()).collect(),
+        server_override: if server_action == ServerAction::Keep {
+            project_server
+        } else {
+            None
+        },
         shadows_without_routes: false,
         note: changes.join("; "),
     })
@@ -1544,7 +1580,6 @@ fn run_with_credentials(
 
     let token_env_state = EnvState::of(env, &token_env);
     let bypass_env_state = EnvState::of(env, &bypass_env);
-    let credentials_ready = token_env_state.is_usable() && bypass_env_state.is_usable();
     let login_profile_path = paths
         .login_profile
         .as_deref()
@@ -1673,24 +1708,27 @@ fn run_with_credentials(
         ]
     };
 
+    let probe_server = project
+        .as_ref()
+        .and_then(|(_, plan)| plan.server_override.as_ref())
+        .or(machine_server.as_ref())
+        .context("Violet server registration is missing")?;
+    let probe_env_states = probe_env_states(probe_server, env);
+    let missing = missing_probe_credentials(&probe_env_states);
     let probe_outcome = if args.skip_verify {
         ProbeOutcome::Skipped {
             reason: "--skip-verify".to_string(),
         }
-    } else if !credentials_ready {
+    } else if !missing.is_empty() {
         ProbeOutcome::Skipped {
-            reason: format!(
-                "{token_env} is {} and {bypass_env} is {}",
-                token_env_state.as_str(),
-                bypass_env_state.as_str()
-            ),
+            reason: format!("Set {}", missing.join(" and ")),
         }
     } else if args.dry_run {
         ProbeOutcome::Skipped {
             reason: "--dry-run".to_string(),
         }
     } else {
-        probe.list_tools(&args.url, &token_env, &bypass_env)
+        probe.list_tools(probe_server)
     };
 
     // After a successful write the allowlist is exactly the constant, so any
@@ -1735,17 +1773,10 @@ fn run_with_credentials(
             ),
         });
 
-    let remedy = build_remedy(
-        &token_env,
-        token_env_state,
-        &bypass_env,
-        bypass_env_state,
-        &probe_outcome,
-        drift_remedy,
-    );
+    let remedy = build_remedy(&probe_env_states, &probe_outcome, drift_remedy);
 
     Ok(VioletReport {
-        url: args.url.clone(),
+        url: server_endpoint(probe_server).to_string(),
         token_env,
         bypass_env,
         token_env_state,
@@ -1760,26 +1791,18 @@ fn run_with_credentials(
         project_proxy: project.map(|(entry, _)| entry),
         harnesses,
         probe: probe_outcome,
+        probe_env_states,
         drift,
         remedy,
     })
 }
 
 fn build_remedy(
-    token_env: &str,
-    token_state: EnvState,
-    bypass_env: &str,
-    bypass_state: EnvState,
+    env_states: &[(String, EnvState)],
     probe: &ProbeOutcome,
     drift: Option<String>,
 ) -> Option<String> {
-    let mut missing = Vec::new();
-    if !token_state.is_usable() {
-        missing.push(format!("{token_env} ({})", token_state.as_str()));
-    }
-    if !bypass_state.is_usable() {
-        missing.push(format!("{bypass_env} ({})", bypass_state.as_str()));
-    }
+    let missing = missing_probe_credentials(env_states);
     if !missing.is_empty() {
         return Some(format!("Set {}; {CREDENTIALS_HINT}", missing.join(" and ")));
     }
@@ -2025,7 +2048,7 @@ pub fn doctor_row(
             }
         };
 
-    let Some((token_env, bypass_env)) = merged.violet_env_names() else {
+    let Some(server) = merged.servers.get(VIOLET_SERVER) else {
         return DoctorRow {
             severity: DoctorSeverity::Warning,
             message: format!(
@@ -2034,6 +2057,12 @@ pub fn doctor_row(
                 paths.user_proxy.display()
             ),
         };
+    };
+    let token_env = match server {
+        ServerConfig::Http { auth, .. } | ServerConfig::Sse { auth, .. } => {
+            auth.as_deref().and_then(|auth| auth.strip_prefix("env:"))
+        }
+        ServerConfig::Stdio { .. } => None,
     };
     let Some(token_env) = token_env else {
         return DoctorRow {
@@ -2045,10 +2074,9 @@ pub fn doctor_row(
             ),
         };
     };
-    let bypass_env = bypass_env.unwrap_or_else(|| VIOLET_DEFAULT_BYPASS_ENV.to_string());
-
-    let token_state = EnvState::of(env, &token_env);
-    let bypass_state = EnvState::of(env, &bypass_env);
+    let states = probe_env_states(server, env);
+    let endpoint = server_endpoint(server);
+    let token_state = EnvState::of(env, token_env);
     let allowlist = merged.violet_allowlisted_tools();
 
     if allowlist.is_empty() {
@@ -2072,28 +2100,30 @@ pub fn doctor_row(
         };
     }
 
-    if !token_state.is_usable() || !bypass_state.is_usable() {
-        let mut missing = Vec::new();
-        if !token_state.is_usable() {
-            missing.push(format!("{token_env} is {}", token_state.as_str()));
-        }
-        if !bypass_state.is_usable() {
-            missing.push(format!("{bypass_env} is {}", bypass_state.as_str()));
-        }
+    let missing = missing_probe_credentials(&states);
+    if !missing.is_empty() {
         return DoctorRow {
             severity: DoctorSeverity::Error,
-            message: format!("{}; {CREDENTIALS_HINT}", missing.join(", ")),
+            message: format!(
+                "hub {endpoint}: {}; {CREDENTIALS_HINT}",
+                missing.join(", ")
+            ),
         };
     }
+    let credentials = states
+        .iter()
+        .map(|(name, _)| format!("{name} set"))
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    match probe.list_tools(violet_hub_url(), &token_env, &bypass_env) {
+    match probe.list_tools(server) {
         ProbeOutcome::Tools { tools } => {
             let drift = tool_drift(&allowlist, &tools);
             if drift.is_empty() {
                 DoctorRow {
                     severity: DoctorSeverity::Ok,
                     message: format!(
-                        "registered ({token_env} set, {bypass_env} set); hub answered with {} tool(s): {}",
+                        "registered ({credentials}); hub {endpoint} answered with {} tool(s): {}",
                         tools.len(),
                         tools.join(", ")
                     ),
@@ -2116,7 +2146,7 @@ pub fn doctor_row(
                         DoctorSeverity::Warning
                     },
                     message: format!(
-                        "{}. Run `cas integrate violet` to rewrite that file",
+                        "{} (hub: {endpoint}). Run `cas integrate violet` to rewrite that file",
                         drift.describe(&tools, &allowlist, Some(source)),
                     ),
                 }
@@ -2125,20 +2155,20 @@ pub fn doctor_row(
         ProbeOutcome::Unauthorized => DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
-                "hub rejected this machine (HTTP 401; Authorization: Bearer <set>). Confirm \
+                "hub {endpoint} rejected this machine (HTTP 401; Authorization: Bearer <set>). Confirm \
                  `cas login`, then run `cas integrate violet`"
             ),
         },
         ProbeOutcome::Unreachable { code } => DoctorRow {
             severity: DoctorSeverity::Warning,
             message: format!(
-                "registered, but {}; run `cas integrate violet` once connectivity is back",
+                "registered, but {} (hub: {endpoint}); run `cas integrate violet` once connectivity is back",
                 probe_failure_detail(&code)
             ),
         },
         ProbeOutcome::Skipped { reason } => DoctorRow {
             severity: DoctorSeverity::Warning,
-            message: format!("registered, but not verified ({reason})"),
+            message: format!("registered, but not verified ({reason}; hub: {endpoint})"),
         },
     }
 }
@@ -2329,11 +2359,13 @@ pub fn execute(args: &VioletArgs, json: bool) -> Result<IntegrationOutcome> {
     let mut outcome = IntegrationOutcome::new(Platform::Violet, IntegrationAction::Init, status);
     outcome.summary.push(format!("hub: {}", report.url));
     outcome.summary.push(format!(
-        "credentials: {} {}, {} {}",
-        report.token_env,
-        report.token_env_state.as_str(),
-        report.bypass_env,
-        report.bypass_env_state.as_str()
+        "credentials: {}",
+        report
+            .probe_env_states
+            .iter()
+            .map(|(name, state)| format!("{name} {}", state.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
     outcome.summary.push(format!(
         "credentials file: {} ({})",
@@ -2533,9 +2565,148 @@ mod tests {
     struct FakeProbe(ProbeOutcome);
 
     impl HubProbe for FakeProbe {
-        fn list_tools(&self, _url: &str, _token_env: &str, _bypass_env: &str) -> ProbeOutcome {
+        fn list_tools(&self, _server: &ServerConfig) -> ProbeOutcome {
             self.0.clone()
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingProbe(RefCell<Vec<ServerConfig>>);
+
+    impl HubProbe for RecordingProbe {
+        fn list_tools(&self, server: &ServerConfig) -> ProbeOutcome {
+            self.0.borrow_mut().push(server.clone());
+            live_tools()
+        }
+    }
+
+    fn staging_probe_fixture(dir: &Path) -> (PathBuf, FakeEnv) {
+        let project = write_project_proxy(
+            dir,
+            &format!(
+                "allowlist = {:?}\n[servers.violet]\ntransport = \"http\"\nurl = \"https://staging.example.test/mcp/slack\"\nauth = \"env:STAGING_TOKEN\"\n[servers.violet.headers]\n{VIOLET_BYPASS_HEADER} = \"env:STAGING_BYPASS\"\nx-project-key = \"env:STAGING_KEY\"\n",
+                canonical_entries()
+            ),
+        );
+        let mut env = ready_env();
+        for name in ["STAGING_TOKEN", "STAGING_BYPASS", "STAGING_KEY"] {
+            env.0.insert(name.into(), "fixture-secret".into());
+        }
+        (project, env)
+    }
+
+    #[test]
+    fn cas_8121_integrate_probes_project_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let (project, env) = staging_probe_fixture(dir.path());
+        let probe = RecordingProbe::default();
+        let report = run(&test_args(), Some(&project), &paths, &env, &probe).unwrap();
+        let config = ProxyConfig::load_from(&project).unwrap();
+        assert_eq!(
+            probe.0.borrow().as_slice(),
+            &[config.servers[VIOLET_SERVER].clone()]
+        );
+        assert!(report.is_green(), "{report:?}");
+        assert_eq!(report.url, "https://staging.example.test/mcp/slack");
+    }
+
+    #[test]
+    fn cas_8121_doctor_probes_project_override_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let (project, env) = staging_probe_fixture(dir.path());
+        run(&test_args(), None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let probe = RecordingProbe::default();
+        let row = doctor_row(Some(&project), &paths, &env, &probe);
+        let config = ProxyConfig::load_from(&project).unwrap();
+        assert_eq!(
+            probe.0.borrow().as_slice(),
+            &[config.servers[VIOLET_SERVER].clone()]
+        );
+        assert_eq!(row.severity, DoctorSeverity::Ok);
+        assert!(
+            row.message
+                .contains("https://staging.example.test/mcp/slack")
+        );
+    }
+
+    #[test]
+    fn cas_8121_doctor_probes_machine_url_without_project_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let args = VioletArgs {
+            url: "https://machine.example.test/mcp/slack".into(),
+            ..test_args()
+        };
+        let env = ready_env();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let probe = RecordingProbe::default();
+        let row = doctor_row(None, &paths, &env, &probe);
+        assert_eq!(server_endpoint(&probe.0.borrow()[0]), args.url);
+        assert!(row.message.contains(&args.url));
+    }
+
+    #[test]
+    fn cas_8121_project_credentials_do_not_require_machine_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let (project, mut env) = staging_probe_fixture(dir.path());
+        env.0.retain(|name, _| name.starts_with("STAGING_"));
+        let probe = RecordingProbe::default();
+        let report = run(&test_args(), Some(&project), &paths, &env, &probe).unwrap();
+        assert!(report.is_green(), "{report:?}");
+        assert!(report.remedy.is_none(), "{report:?}");
+        assert_eq!(probe.0.borrow().len(), 1);
+        assert_eq!(
+            doctor_row(Some(&project), &paths, &env, &probe).severity,
+            DoctorSeverity::Ok
+        );
+        assert_eq!(probe.0.borrow().len(), 2);
+    }
+
+    #[test]
+    fn cas_8121_missing_custom_header_stops_probe_without_exposing_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let (project, mut env) = staging_probe_fixture(dir.path());
+        env.0.remove("STAGING_KEY");
+        let probe = RecordingProbe::default();
+        let report = run(&test_args(), Some(&project), &paths, &env, &probe).unwrap();
+        assert!(!report.credentials_ready());
+        assert!(matches!(report.probe, ProbeOutcome::Skipped { .. }));
+        assert!(report.remedy.unwrap().contains("STAGING_KEY"));
+        let row = doctor_row(Some(&project), &paths, &env, &probe);
+        assert_eq!(row.severity, DoctorSeverity::Error);
+        assert!(row.message.contains("STAGING_KEY"));
+        assert!(!row.message.contains("fixture-secret"));
+        assert!(probe.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn cas_8121_sse_override_preserves_transport_and_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let (project, env) = staging_probe_fixture(dir.path());
+        let content = std::fs::read_to_string(&project)
+            .unwrap()
+            .replace("transport = \"http\"", "transport = \"sse\"");
+        std::fs::write(&project, content).unwrap();
+        let probe = RecordingProbe::default();
+        run(&test_args(), Some(&project), &paths, &env, &probe).unwrap();
+        assert_eq!(
+            doctor_row(Some(&project), &paths, &env, &probe).severity,
+            DoctorSeverity::Ok
+        );
+        let config = ProxyConfig::load_from(&project).unwrap();
+        assert!(matches!(&probe.0.borrow()[0], ServerConfig::Sse { .. }));
+        assert_eq!(
+            probe.0.borrow().as_slice(),
+            &[
+                config.servers[VIOLET_SERVER].clone(),
+                config.servers[VIOLET_SERVER].clone()
+            ]
+        );
     }
 
     struct FakeHub {

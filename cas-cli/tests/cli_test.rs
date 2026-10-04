@@ -829,6 +829,75 @@ fn test_config_export_import() {
     assert!(stdout.contains("6000"));
 }
 
+#[cfg(feature = "mcp-proxy")]
+#[test]
+fn cas_8121_cli_names_project_hub_in_integrate_and_doctor() {
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env_remove("CAS_CLONE_PATH")
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+    let proxy = temp.path().join(".cas/proxy.toml");
+    let original = "allowlist = [\"violet.violet_read\", \"violet.violet_post\"]\n[servers.violet]\ntransport = \"http\"\nurl = \"https://staging.example.test/mcp/slack\"\nauth = \"env:CAS_8121_STAGING_TOKEN\"\n";
+    std::fs::write(&proxy, original).unwrap();
+    let integrate = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env_remove("CAS_CLONE_PATH")
+        .env_remove("CAS_8121_STAGING_TOKEN")
+        .args([
+            "integrate",
+            "violet",
+            "--dry-run",
+            "--skip-verify",
+            "--no-harness",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        integrate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&integrate.stderr)
+    );
+    let report = String::from_utf8(integrate.stdout).unwrap();
+    assert!(
+        report
+            .lines()
+            .any(|line| line.trim() == "hub: https://staging.example.test/mcp/slack"),
+        "{report}"
+    );
+    assert_eq!(std::fs::read_to_string(&proxy).unwrap(), original);
+    let doctor = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env_remove("CAS_CLONE_PATH")
+        .env_remove("CAS_8121_STAGING_TOKEN")
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let checks: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let row = checks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "violet")
+        .expect("project Violet probe must appear in doctor");
+    assert_eq!(row["status"], "error");
+    assert!(
+        row["message"]
+            .as_str()
+            .unwrap()
+            .contains("https://staging.example.test/mcp/slack")
+    );
+    assert!(
+        row["message"]
+            .as_str()
+            .unwrap()
+            .contains("CAS_8121_STAGING_TOKEN")
+    );
+    assert_eq!(std::fs::read_to_string(&proxy).unwrap(), original);
+}
+
 #[test]
 fn test_doctor_json() {
     let temp = TempDir::new().unwrap();

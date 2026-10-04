@@ -530,3 +530,132 @@ fn incidental_nested_modified_event_is_ignored_in_incremental_cycle_cas_e4aa() {
             .is_none()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn alias_skipped_source_is_attributed_once_with_original_detail_cas_cf58() {
+    use std::os::unix::fs::symlink;
+    let fixture = Worktrees::new();
+    let alias = fixture.main.parent().unwrap().join("alias");
+    symlink(&fixture.main, &alias).unwrap();
+    std::fs::write(
+        fixture.main.join("binary.rs"),
+        [0x89, b'P', b'N', b'G', 0xFF, 0x00],
+    )
+    .unwrap();
+    let result = fixture.scan(&alias);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.skipped.len(), 1);
+    assert_eq!((result.files_deleted, result.files_deferred), (0, 0));
+    let scans = cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap();
+    let key = super::indexing::code_scan_key(&fixture.main);
+    let scan = scans.index_state(&key).unwrap().unwrap();
+    assert_eq!(
+        (
+            scan.eligible_files,
+            scan.indexed_files,
+            scan.failed_files,
+            scan.skipped_files
+        ),
+        (2, 2, 0, 1)
+    );
+    let detail = scan.skipped_detail.unwrap();
+    assert!(
+        detail.contains(&alias.join("binary.rs").display().to_string()),
+        "{detail}"
+    );
+    assert!(detail.contains("not valid UTF-8"), "{detail}");
+
+    // The same skipped source can be visited through both configured spellings.
+    // Deduplicate the receipt only; the raw result still reports both visits.
+    let duplicate = reconcile_code_tree(
+        &[
+            alias.join("binary.rs"),
+            fixture.main.join("binary.rs"),
+            alias.join("new.rs"),
+            alias.join("extra.rs"),
+        ],
+        &[alias.clone(), fixture.main.clone()],
+        &fixture.cas_root,
+        false,
+    )
+    .unwrap();
+    assert!(duplicate.errors.is_empty(), "{:?}", duplicate.errors);
+    assert_eq!(
+        duplicate.skipped.len(),
+        2,
+        "raw skip visits must remain unchanged"
+    );
+    assert_eq!((duplicate.files_deleted, duplicate.files_deferred), (0, 0));
+    let scan = scans.index_state(&key).unwrap().unwrap();
+    assert_eq!(
+        (
+            scan.eligible_files,
+            scan.indexed_files,
+            scan.failed_files,
+            scan.skipped_files
+        ),
+        (2, 2, 0, 1)
+    );
+    assert_eq!(scan.skipped_detail.unwrap(), detail);
+}
+
+#[test]
+fn explicit_nested_skipped_sources_stay_in_their_checkout_receipts_cas_cf58() {
+    let fixture = Worktrees::new();
+    let nested = fixture.main.join("nested/repo");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    git(
+        &fixture.main,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    std::fs::write(fixture.main.join("outer-binary.rs"), [0xFF, 0x00]).unwrap();
+    std::fs::write(nested.join("nested-binary.rs"), [0xFF, 0x00]).unwrap();
+    let roots = vec![fixture.main.clone(), nested.clone()];
+    let cfg = crate::config::Config::load(&fixture.cas_root)
+        .unwrap()
+        .code();
+    let files = collect_source_files(&roots, &cfg.extensions, &cfg.exclude_patterns);
+    let result = reconcile_code_tree(&files, &roots, &fixture.cas_root, false).unwrap();
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.skipped.len(), 2);
+    assert_eq!((result.files_deleted, result.files_deferred), (0, 0));
+    let scans = cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap();
+    for (root, own_name, other_name) in [
+        (&fixture.main, "outer-binary.rs", "nested-binary.rs"),
+        (&nested, "nested-binary.rs", "outer-binary.rs"),
+    ] {
+        let scan = scans
+            .index_state(&super::indexing::code_scan_key(root))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                scan.eligible_files,
+                scan.indexed_files,
+                scan.failed_files,
+                scan.skipped_files
+            ),
+            (2, 2, 0, 1)
+        );
+        let detail = scan.skipped_detail.unwrap();
+        assert!(detail.contains(own_name), "{detail}");
+        assert!(
+            !detail.contains(other_name),
+            "cross-checkout skip leaked: {detail}"
+        );
+    }
+    // Inverse scan: a nested-only visit preserves the outer checkout's receipt.
+    let key = super::indexing::code_scan_key(&fixture.main);
+    let outer_before = scans.index_state(&key).unwrap().unwrap();
+    assert!(fixture.scan(&nested).errors.is_empty());
+    let outer_after = scans.index_state(&key).unwrap().unwrap();
+    assert_eq!(outer_before.last_scan_at, outer_after.last_scan_at);
+    assert_eq!(outer_before.skipped_detail, outer_after.skipped_detail);
+}

@@ -302,14 +302,9 @@ impl JevClient {
             output.next_offset = Some(options.offset.saturating_add(selected.len()));
         }
         for rel in exact.difference(&found).filter(|_| !output.limit_reached) {
-            output.files.push(skipped(
-                label(rel),
-                if output.limit_reached {
-                    "selection limit reached"
-                } else {
-                    "ignored by file selection rules"
-                },
-            ));
+            output
+                .files
+                .push(skipped(label(rel), "ignored by file selection rules"));
         }
         let mut first_error = None;
         for rel in selected {

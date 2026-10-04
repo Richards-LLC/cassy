@@ -45,6 +45,11 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         const text = "Could not stop swift-lark-3: the machine returned an error. Try again.";
         await expect(result).toHaveText(text);
         await expect(row.locator(".fleet-ops-note")).toHaveText(text);
+        expect(await row.evaluate((element) => {
+          const trigger = element.querySelector(".fleet-ops-trigger")!.getBoundingClientRect();
+          const range = document.createRange(); range.selectNodeContents(element.querySelector(".fleet-ops-note")!);
+          return Array.from(range.getClientRects()).every((rect) => rect.bottom <= trigger.top || rect.top >= trigger.bottom || rect.right <= trigger.left);
+        }), "the action button does not cover error text").toBe(true);
         if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
         await expect(row.locator(".status-chip")).toHaveText("active");
       });

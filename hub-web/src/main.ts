@@ -46,6 +46,7 @@ import { firstAttachRetry, machineConnection, sessionConnection } from "./sessio
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { relativeTimestamp } from "./time";
 import { paneActivityLabel, paneShowsOutput } from "./pane-activity";
+import { fitPaneActivityCaption, fitPaneActivityCaptions, updatePaneActivityCaption } from "./pane-activity-view";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, newOperationId, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
 import { agentControls, headerControls, taskControls, undoBar, type FleetOpsViewContext } from "./fleet-ops-view";
@@ -626,9 +627,21 @@ function paneBufferShowsOutput(key: string): boolean {
 
 function updatePaneActivity(element: HTMLElement, key: string): void {
   const label = paneActivityLabel(paneLastActivity.get(key), paneBufferShowsOutput(key));
-  if (element.textContent !== label.text) element.textContent = label.text;
-  element.title = label.title;
+  updatePaneActivityCaption(element, label);
 }
+
+let paneActivityFitFrame: number | undefined;
+function queuePaneActivityFit(): void {
+  if (paneActivityFitFrame !== undefined) return;
+  paneActivityFitFrame = window.requestAnimationFrame(() => {
+    paneActivityFitFrame = undefined;
+    fitPaneActivityCaptions(document);
+  });
+}
+window.addEventListener("resize", queuePaneActivityFit, { passive: true });
+window.visualViewport?.addEventListener("resize", queuePaneActivityFit, { passive: true });
+void document.fonts?.ready.then(queuePaneActivityFit);
+document.fonts?.addEventListener("loadingdone", queuePaneActivityFit);
 
 function focusPane(machineId: string, session: string, paneId: string): void {
   const selectedKey = sessionKey(machineId, session);
@@ -2253,6 +2266,9 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       viewToggle.dataset.view = paneView;
     }
     placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);
+    // Creation measured a detached card; controls and placement now own their
+    // final room. A heartbeat re-fit never moves a control or changes focus.
+    fitPaneActivityCaption(card.querySelector<HTMLElement>(".pane-last-activity")!);
     const collapsedOnPhone = phoneLayout() && secondaryOnPhone;
     const existingSurface = surfaces.get(key);
     existingSurface?.setControlMode(leases.get(selectedKey)?.held_by_me === true);

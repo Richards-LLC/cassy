@@ -767,15 +767,6 @@ impl CasCore {
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
-            if let Some(batch) = staged_batch {
-            let note = batch.as_ref().map(|batch| format!(
-                "integration batch staged: {}@{} base={} delivery={} supervisor={}",
-                batch.branch, batch.tip, batch.base, batch.delivered_head, batch.supervisor_id
-            )).unwrap_or_else(|| "integration batch staging cleared by registered supervisor".into());
-            task.deliverables.integration_batch = batch;
-            if !task.notes.is_empty() { task.notes.push('\n'); }
-            task.notes.push_str(&note);
-        }
         task.updated_at = chrono::Utc::now();
             let target_description = if methodology_fix {
                 format!("Execution methodology corrected to {}.", task.execution_note.as_deref().unwrap_or("<cleared>"))
@@ -2043,6 +2034,17 @@ impl CasCore {
 
         if state_patch.is_some() {
             changes.push("execution_state");
+        }
+
+        if let Some(batch) = staged_batch {
+            let note = batch.as_ref().map(|batch| format!(
+                "integration batch staged: {}@{} base={} delivery={} supervisor={}",
+                batch.branch, batch.tip, batch.base, batch.delivered_head, batch.supervisor_id
+            )).unwrap_or_else(|| "integration batch staging cleared by registered supervisor".into());
+            task.deliverables.integration_batch = batch;
+            changes.push("merged_into");
+            if !task.notes.is_empty() { task.notes.push('\n'); }
+            task.notes.push_str(&note);
         }
 
         if changes.is_empty() {

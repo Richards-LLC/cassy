@@ -82,8 +82,11 @@ async fn stage(core: CasCore, head: &str) -> Result<String, String> {
         .map(extract_text)
         .map_err(|err| err.to_string())
 }
-async fn close(core: CasCore) -> String {
-    let request = serde_json::from_value(serde_json::json!({"action":"close", "id":TASK})).unwrap();
+async fn close(core: CasCore, receipt: Option<&str>) -> String {
+    let request = serde_json::from_value(
+        serde_json::json!({"action":"close", "id":TASK, "commit_receipt":receipt}),
+    )
+    .unwrap();
     match CasService::new(core, None).task(Parameters(request)).await {
         Ok(result) => extract_text(result),
         Err(err) => err.to_string(),
@@ -95,7 +98,7 @@ fn squash(repo: &Path, drop_path: bool) {
     commit(repo, "later.txt", "target advanced\n");
     git(repo, &["merge", "--squash", "batch/X"]);
     if drop_path {
-        git(repo, &["rm", "-q", "src/two.rs"]);
+        git(repo, &["rm", "-q", "-f", "src/two.rs"]);
     }
     git(
         repo,
@@ -107,28 +110,38 @@ fn squash(repo: &Path, drop_path: bool) {
 #[tokio::test]
 async fn cas_4b26f_matching_batch_squash_auto_closes() {
     let mut env = TestEnvGuard::temp_home();
-    let (temp, worker, supervisor, head) = fixture(&mut env);
-    stage(supervisor, &head).await.unwrap();
-    squash(temp.path(), false);
-    let text = close(worker).await;
-    assert_eq!(
-        open_task_store(&temp.path().join(".cas"))
+    for explicit_receipt in [false, true] {
+        let (temp, worker, supervisor, head) = fixture(&mut env);
+        stage(supervisor, &head).await.unwrap();
+        let staged = open_task_store(&temp.path().join(".cas"))
             .unwrap()
             .get(TASK)
+            .unwrap();
+        assert_eq!(
+            staged.deliverables.integration_batch.as_ref().unwrap().tip,
+            head
+        );
+        squash(temp.path(), false);
+        let squash_tip = git(temp.path(), &["rev-parse", "main"]);
+        let text = close(worker, explicit_receipt.then_some(squash_tip.as_str())).await;
+        let task = open_task_store(&temp.path().join(".cas"))
             .unwrap()
-            .status,
-        TaskStatus::Closed,
-        "{text}"
-    );
-    let task = open_task_store(&temp.path().join(".cas"))
-        .unwrap()
-        .get(TASK)
-        .unwrap();
-    assert!(
-        task.notes.contains("integration batch") && task.notes.contains(&head),
-        "{}",
-        task.notes
-    );
+            .get(TASK)
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        assert_eq!(
+            task.deliverables.factory_branch_anchor.as_deref(),
+            Some(head.as_str())
+        );
+        if let Some(scope) = task.deliverables.pre_close_hook.as_ref() {
+            assert_eq!(scope.task_tip.as_deref(), Some(head.as_str()));
+        }
+        assert!(
+            task.notes.contains("integration batch") && task.notes.contains(&head),
+            "{}",
+            task.notes
+        );
+    }
 }
 
 #[tokio::test]
@@ -137,7 +150,7 @@ async fn cas_4b26f_dropped_batch_path_is_rejected() {
     let (temp, worker, supervisor, head) = fixture(&mut env);
     stage(supervisor, &head).await.unwrap();
     squash(temp.path(), true);
-    assert!(close(worker).await.contains("MERGE REQUIRED"));
+    assert!(close(worker, None).await.contains("MERGE REQUIRED"));
     assert_eq!(
         open_task_store(&temp.path().join(".cas"))
             .unwrap()
@@ -160,4 +173,3 @@ async fn cas_4b26f_non_supervisor_cannot_stage_batch() {
         .unwrap();
     assert!(!task.notes.contains("integration batch"));
 }
-

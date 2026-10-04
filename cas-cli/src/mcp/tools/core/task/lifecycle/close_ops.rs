@@ -6384,7 +6384,7 @@ impl CasCore {
 
     pub async fn cas_task_close_with_dispositions(
         &self,
-        Parameters(req): Parameters<TaskCloseRequest>,
+        Parameters(mut req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
         external_verification_receipt: Option<String>,
         negative_result: Option<NegativeResultCloseRequest>,
@@ -7229,6 +7229,28 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(format!("EVIDENCE ONLY CLOSE REJECTED: {message}"))),
             }
         } else { None };
+
+        // An integration receipt names the squash, while executable hooks and
+        // implementer/independent QA still judge the original reviewed anchor.
+        if let Some(batch) = task.deliverables.integration_batch.as_ref()
+            && let Some(receipt) = req.commit_receipt.as_deref()
+            && receipt != batch.delivered_head
+        {
+            fetch_parent_branch_best_effort(&close_project_root, &resolved_parent_branch);
+            let supplied = resolve_task_commit_receipt_sha(&close_project_root, receipt).ok();
+            let landed = super::super::integration_batch::landed_batch_squash(
+                &task, &close_project_root, &resolved_parent_branch, Some(receipt),
+            );
+            if supplied.is_none() || supplied != landed {
+                return Ok(Self::tool_error("INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash"));
+            }
+            let original = batch.delivered_head.clone();
+            append_close_decision_note(task_store.as_ref(), &mut task, &format!(
+                "integration batch receipt {} accepted; QA and executable hooks retain delivery anchor {}.",
+                supplied.expect("validated above"), original
+            ));
+            req.commit_receipt = Some(original);
+        }
 
         // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
         // repository this close is bound to. The cross-repo delivery in the

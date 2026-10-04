@@ -381,13 +381,16 @@ commit, push unless delivery_mode=local_merge, then `{prefix}task action=close i
 reason=\"...\"` or hand off before starting another. Successful task action=start is authoritative \
 assignment acceptance; no prose ACK is required. Add milestone notes with `{prefix}task \
 action=notes id=<task-id> note_type=progress notes=\"...\"`. Read the cas-worker skill at \
-startup; its conditional references cover checks, delivery and recovery. Load only \
-`{prefix}task` and `{prefix}coordination`; the supervisor `{prefix}factory` tool is not yours, \
+startup; its conditional references cover checks, delivery and recovery. Load \
+`{prefix}task` and `{prefix}coordination`. For an assigned QA-pass task, also load \
+`{prefix}verification` and record your own verdict with `{prefix}verification action=qa_record \
+task_id=<delivery-id> status=approved|rejected summary=\"...\" ledger_path=<LEDGER.md>`. \
+Recording the verdict closes the QA task. The supervisor `{prefix}factory` tool is not yours, \
 except server_start/server_list for an assigned server task. Ordinary updates reach the \
 inbox on the next turn. Only authenticated typed blocker, merge, verification or lifecycle \
 events wake an idle supervisor: blocker=true for blockers, merge_request=true for merges. \
 A blocker needs a task note, status=blocked, and `{prefix}coordination action=message \
-target=supervisor blocker=true summary=\"...\" message=\"...\"`. For verification-required close, \
+target=supervisor blocker=true summary=\"...\" message=\"...\"`. For implementation-task verification-required close, \
 ask the supervisor to verify and close on your behalf. For MERGE REQUIRED, request the merge \
 of your delivered branch and SHA, then re-close after it lands; local_merge stays local. \
 WORK HALTED: a legitimate task action=start on your new assignment clears the urgent-stop halt. \

@@ -1018,12 +1018,14 @@ pub fn qa_task_description(
          journeys/<ID>/ folder per journey. Run visual-qa.mjs --strict against your own local \
          serve of {head}, never the production URL: qa_record refuses a claimed visual-QA pass \
          without that local run.\n\n\
-         Record the verdict with: mcp__cas__verification action=qa_record task_id={task} \
+         {tool_naming}\n\n\
+         Load verification. Record the verdict with: verification action=qa_record task_id={task} \
          status=approved|rejected summary=\"...\" issues='[...]' ledger_path={ledger}/LEDGER.md \
          — a rejection sends {task} back to its implementer with your ledger. Recording closes \
          this QA task and cannot be revised. If you change your mind after recording, do not \
          record again: message the supervisor (blocker=true) asking for request_changes on \
          {task}, and name the finding.",
+        tool_naming = crate::builtins::TOOL_NAMING_LINE,
         bar = QA_REJECTION_BAR,
         task = delivery.id,
         round = pass.round,

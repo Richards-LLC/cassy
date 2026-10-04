@@ -211,11 +211,25 @@ fn cas_bb7e_qa_reviewers_load_verification_in_worker_contract() {
         ("grok", "cas__"),
     ] {
         let contract = cas_mux::rendered_contract_surface(harness, cas_mux::ContractRole::Worker);
-        assert!(contract.contains(&format!("`{prefix}verification`")), "{contract}");
-        assert!(contract.contains(&format!("{prefix}verification action=qa_record")), "{contract}");
+        assert!(
+            contract.contains(&format!("`{prefix}verification`")),
+            "{contract}"
+        );
+        assert!(
+            contract.contains(&format!("{prefix}verification action=qa_record")),
+            "{contract}"
+        );
         assert!(contract.contains("QA-pass task"), "{contract}");
-        assert!(!contract.contains(&format!("Load only `{prefix}task` and `{prefix}coordination`;")), "{contract}");
-        assert!(contract.contains("ask the supervisor to verify and close"), "{contract}");
+        assert!(
+            !contract.contains(&format!(
+                "Load only `{prefix}task` and `{prefix}coordination`;"
+            )),
+            "{contract}"
+        );
+        assert!(
+            contract.contains("ask the supervisor to verify and close"),
+            "{contract}"
+        );
     }
 }
 
@@ -224,11 +238,18 @@ fn cas_bb7e_qa_record_is_in_the_published_codex_mcp_catalog() {
     // Codex injects `cas serve` as `cs`; this is the same compact catalog
     // tools/list returns, rather than an inventory maintained by this test.
     let tools = cas::mcp::tools::service::CasService::tool_definitions_for_build();
-    let verification = tools.iter().find(|tool| tool.name == "verification")
+    let verification = tools
+        .iter()
+        .find(|tool| tool.name == "verification")
         .expect("Codex's mcp__cs__verification must be discoverable");
     let properties = verification.input_schema.get("properties").unwrap();
-    assert!(properties["action"]["enum"].as_array().unwrap()
-        .iter().any(|action| action == "qa_record"));
+    assert!(
+        properties["action"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action == "qa_record")
+    );
     for field in ["task_id", "status", "summary", "issues", "ledger_path"] {
         assert!(properties.get(field).is_some(), "qa_record needs {field}");
     }
@@ -240,9 +261,15 @@ fn cas_bb7e_worker_skill_allows_independent_qa_verdicts_in_every_flavor() {
         let details = load(&source_root().join(format!(
             "cas-cli/src/builtins/{flavor}skills/cas-worker/references/details.md"
         )));
-        assert!(details.contains("verification action=qa_record"), "{flavor}: {details}");
+        assert!(
+            details.contains("verification action=qa_record"),
+            "{flavor}: {details}"
+        );
         assert!(details.contains("QA-pass task"), "{flavor}: {details}");
-        assert!(!details.contains("Load only `task` and `coordination`;"), "{flavor}: {details}");
+        assert!(
+            !details.contains("Load only `task` and `coordination`;"),
+            "{flavor}: {details}"
+        );
     }
 }
 

@@ -21,6 +21,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    assignment acceptance; no prose ACK is required. Read its criteria, depth,
    execution note and project instructions. Reused checkout: `git rebase <target>`
    onto the supervisor's named target after checkpointing dirt.
+   For an assigned QA-pass task, follow cas-qa-craft's Independent pass and
+   `verification action=qa_record`; recording the verdict closes the QA task.
 3. Implement its scope, commit logical units with the task ID, and push unless
    `delivery_mode=local_merge`. Add milestone `note_type=progress` notes.
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)

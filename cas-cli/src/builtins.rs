@@ -365,6 +365,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/scripts/triage.py",
+        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1033,6 +1037,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/scripts/triage.py",
+        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1691,6 +1699,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-jev/references/triage-questions.json",
         content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-jev/scripts/triage.py",
+        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",

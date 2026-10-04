@@ -205,7 +205,8 @@ impl Fx {
 #[tokio::test]
 async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer; spacing is even",
     );
@@ -237,7 +238,8 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
 #[tokio::test]
 async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer; spacing is even",
     );
@@ -274,7 +276,11 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
 #[tokio::test]
 async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env, &[("docs/guide.md", "# Guide\n")], "Read the guide");
+    let fx = fixture(
+        &mut test_env,
+        &[("docs/guide.md", "# Guide\n")],
+        "Read the guide",
+    );
 
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
@@ -284,7 +290,8 @@ async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
 #[tokio::test]
 async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
@@ -313,7 +320,8 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
 #[tokio::test]
 async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
@@ -337,7 +345,8 @@ async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
 #[tokio::test]
 async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[(
             "hub-web/e2e/generated/fleet.spec.ts",
             "import { test } from \"@playwright/test\";\ntest(\"fleet\", async () => {\n  test.fixme(true, \"verdict disagrees\");\n});\n",
@@ -375,7 +384,8 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
 #[tokio::test]
 async fn evidence_gate_can_be_disabled_per_project() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer",
     );
@@ -394,7 +404,8 @@ async fn evidence_gate_can_be_disabled_per_project() {
 #[tokio::test]
 async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("cas-cli/src/ui/status.rs", "pub fn draw() {}\n")],
         "Run cas status; the table fits 80 columns",
     );
@@ -430,18 +441,44 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
     // Historical input and winsize changes share these mixed-purpose files;
     // a stdout capture cannot exercise their interactive pane transitions.
     for paths in [
-        vec!["cas-cli/src/ui/factory/app/sidecar_and_selection.rs", "cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "crates/cas-mux/src/pane/mod.rs"],
-        vec!["cas-cli/src/ui/factory/app/mod.rs", "cas-cli/src/ui/factory/daemon/runtime/output.rs", "crates/cas-pty/src/pty.rs"],
+        vec![
+            "cas-cli/src/ui/factory/app/sidecar_and_selection.rs",
+            "cas-cli/src/ui/factory/daemon/runtime/client_input.rs",
+            "crates/cas-mux/src/pane/mod.rs",
+        ],
+        vec![
+            "cas-cli/src/ui/factory/app/mod.rs",
+            "cas-cli/src/ui/factory/daemon/runtime/output.rs",
+            "crates/cas-pty/src/pty.rs",
+        ],
     ] {
-        let delivered: Vec<_> = paths.iter().map(|path| (*path, "pub fn interaction() {}\n")).collect();
-        let fx = fixture(&mut test_env, &delivered, "Run the real factory; click and resize a pane");
+        let delivered: Vec<_> = paths
+            .iter()
+            .map(|path| (*path, "pub fn interaction() {}\n"))
+            .collect();
+        let fx = fixture(
+            &mut test_env,
+            &delivered,
+            "Run the real factory; click and resize a pane",
+        );
         let task_dir = fx.artifacts.join(TASK);
         std::fs::create_dir_all(&task_dir).unwrap();
         let ledger = task_dir.join("LEDGER.md");
-        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n").unwrap();
+        std::fs::write(
+            &ledger,
+            "| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n",
+        )
+        .unwrap();
         let refused = close_text(&fx.core, TASK).await;
-        assert!(refused.contains("no row with verdict PASS and label real-build"), "{refused}");
-        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n").unwrap();
+        assert!(
+            refused.contains("no row with verdict PASS and label real-build"),
+            "{refused}"
+        );
+        std::fs::write(
+            &ledger,
+            "| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n",
+        )
+        .unwrap();
         let parked = close_text(&fx.core, TASK).await;
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
         assert!(fx.notes().contains("QA evidence ledger accepted"));
@@ -452,15 +489,32 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
 #[tokio::test]
 async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env, &[
-        ("cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "pub fn click() {}\n"),
-        ("cas-cli/src/cli/status.rs", "pub fn status() { println!(\"Ready\"); }\n"),
-    ], "Run the factory and cas status");
+    let fx = fixture(
+        &mut test_env,
+        &[
+            (
+                "cas-cli/src/ui/factory/daemon/runtime/client_input.rs",
+                "pub fn click() {}\n",
+            ),
+            (
+                "cas-cli/src/cli/status.rs",
+                "pub fn status() { println!(\"Ready\"); }\n",
+            ),
+        ],
+        "Run the factory and cas status",
+    );
     let task_dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&task_dir).unwrap();
-    std::fs::write(task_dir.join("LEDGER.md"), "| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n").unwrap();
+    std::fs::write(
+        task_dir.join("LEDGER.md"),
+        "| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n",
+    )
+    .unwrap();
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("terminal-qa receipt is missing"), "{refused}");
+    assert!(
+        refused.contains("terminal-qa receipt is missing"),
+        "{refused}"
+    );
     let report = task_dir.join("terminal-qa/cas-status/report.md");
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, "terminal-qa: PASS cas-status · 11 runs · 0 fail\n").unwrap();
@@ -470,7 +524,8 @@ async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
 #[tokio::test]
 async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer",
     );
@@ -521,7 +576,12 @@ fn start_next_task_on_the_lane(fx: &Fx, id: &str, status: TaskStatus, path: &str
     tasks.add(&next).unwrap();
     cas::store::open_agent_store(&cas_dir)
         .unwrap()
-        .try_claim(id, &format!("test-session-{}", std::process::id()), 600, Some("start"))
+        .try_claim(
+            id,
+            &format!("test-session-{}", std::process::id()),
+            600,
+            Some("start"),
+        )
         .unwrap();
     commit_file(&fx.repo, path, "// next task\n")
 }
@@ -537,7 +597,17 @@ fn anchor(fx: &Fx) -> Option<String> {
 
 fn merge_into_main(fx: &Fx, commit: &str) {
     git(&fx.repo, &["checkout", "-q", "main"]);
-    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge parked delivery", commit]);
+    git(
+        &fx.repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge parked delivery",
+            commit,
+        ],
+    );
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
 }
 
@@ -548,7 +618,8 @@ fn merge_into_main(fx: &Fx, commit: &str) {
 #[tokio::test]
 async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_lane_cas_ba4a() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer; spacing is even",
     );
@@ -559,7 +630,10 @@ async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_la
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
     assert_eq!(anchor(&fx).as_deref(), Some(parked_at.as_str()));
 
-    for (id, status) in [("cas-b0b1", TaskStatus::Open), ("cas-b0b2", TaskStatus::Blocked)] {
+    for (id, status) in [
+        ("cas-b0b1", TaskStatus::Open),
+        ("cas-b0b2", TaskStatus::Blocked),
+    ] {
         let lane_tip =
             start_next_task_on_the_lane(&fx, id, status, &format!("web/next-{status:?}.css"));
         let retry = close_text(&fx.core, TASK).await;
@@ -589,8 +663,14 @@ async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
     let cas_dir = fx.repo.join(".cas");
     let agent_id = format!("test-session-{}", std::process::id());
     let agents = cas::store::open_agent_store(&cas_dir).unwrap();
-    agents.try_claim(TASK, &agent_id, 600, Some("start A")).unwrap();
-    let parked_at = commit_file(&fx.repo, "crates/widget/src/composer.rs", "pub fn composer() {}\n");
+    agents
+        .try_claim(TASK, &agent_id, 600, Some("start A"))
+        .unwrap();
+    let parked_at = commit_file(
+        &fx.repo,
+        "crates/widget/src/composer.rs",
+        "pub fn composer() {}\n",
+    );
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(TASK).unwrap();
     task.risk = vec![cas::types::TaskRisk::BlastRadius];
@@ -600,7 +680,12 @@ async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
     tasks.update(&task).unwrap();
     agents.release_lease(TASK, &agent_id).unwrap();
 
-    start_next_task_on_the_lane(&fx, "cas-b0b3", TaskStatus::Blocked, "crates/widget/src/other.rs");
+    start_next_task_on_the_lane(
+        &fx,
+        "cas-b0b3",
+        TaskStatus::Blocked,
+        "crates/widget/src/other.rs",
+    );
     merge_into_main(&fx, &parked_at);
 
     let closed = close_text(&fx.core, TASK).await;
@@ -608,13 +693,17 @@ async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
     assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
 }
 
-
 fn cas_6f10_supervisor(fx: &Fx) -> CasCore {
     let cas_dir = fx.repo.join(".cas");
     let id = format!("cas-6f10-supervisor-{}", std::process::id());
-    cas::store::open_agent_store(&cas_dir).unwrap().register(
-        &cas::types::Agent::new_with_role(id.clone(), "deployed-owner".into(), cas::types::AgentRole::Supervisor)
-    ).unwrap();
+    cas::store::open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&cas::types::Agent::new_with_role(
+            id.clone(),
+            "deployed-owner".into(),
+            cas::types::AgentRole::Supervisor,
+        ))
+        .unwrap();
     let core = CasCore::with_daemon(cas_dir, None, None);
     core.set_agent_id_for_testing(id);
     core
@@ -623,7 +712,11 @@ fn cas_6f10_supervisor(fx: &Fx) -> CasCore {
 #[tokio::test]
 async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env, &[("src/feature.rs", "pub fn feature() {}\n")], "Verify deployed endpoint after batch release");
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint after batch release",
+    );
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
     let mut task = tasks.get(TASK).unwrap();
@@ -637,28 +730,46 @@ async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
     agents.update(&worker).unwrap();
     let dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("LEDGER.md"), "| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n").unwrap();
-    assert!(close_text(&fx.core, TASK).await.contains("label real-build"));
+    std::fs::write(
+        dir.join("LEDGER.md"),
+        "| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n",
+    )
+    .unwrap();
+    assert!(
+        close_text(&fx.core, TASK)
+            .await
+            .contains("label real-build")
+    );
     let supervisor = cas_6f10_supervisor(&fx);
     let service = cas::mcp::CasService::new(supervisor, None);
+    env.set("CAS_AGENT_ROLE", "supervisor");
     let waived = extract_text(service.verification(Parameters(serde_json::from_value(serde_json::json!({
-        "action": "qa_waive", "task_id": TASK, "reason": "Supervisor owns deployed verification after the batch"
+        "action": "qa_waive", "task_id": TASK, "summary": "Supervisor owns deployed verification after the batch"
     })).unwrap())).await.unwrap());
     assert!(waived.contains("waived"), "{waived}");
+    env.remove("CAS_AGENT_ROLE");
     merge_into_main(&fx, &head);
     let mut request = close_req(TASK);
     request.commit_receipt = Some(head.clone());
     let closed = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
     assert!(closed.contains("Closed task:"), "{closed}");
     assert_eq!(fx.status(), TaskStatus::Closed);
-    assert!(fx.notes().contains("QA evidence ledger waived"), "{}", fx.notes());
+    assert!(
+        fx.notes().contains("QA evidence ledger waived"),
+        "{}",
+        fx.notes()
+    );
     assert!(fx.notes().contains(&head));
 }
 
 #[tokio::test]
 async fn cas_6f10_deferred_deployed_row_parks_with_named_obligation() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env, &[("src/feature.rs", "pub fn feature() {}\n")], "Verify deployed endpoint after batch release");
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint after batch release",
+    );
     let _supervisor = cas_6f10_supervisor(&fx);
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let dir = fx.artifacts.join(TASK);
@@ -669,5 +780,8 @@ async fn cas_6f10_deferred_deployed_row_parks_with_named_obligation() {
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
     let notes = fx.notes();
     assert!(notes.contains("POST-DEPLOY OBLIGATION"), "{notes}");
-    assert!(notes.contains("deployed-owner") && notes.contains(&head), "{notes}");
+    assert!(
+        notes.contains("deployed-owner") && notes.contains(&head),
+        "{notes}"
+    );
 }

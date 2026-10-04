@@ -11214,6 +11214,19 @@ mod tests {
     /// that drops the receipt write from a success arm fails here rather than
     /// in production three releases later.
     #[test]
+    fn cas_27ad_transport_receipt_excludes_hook_and_poll() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store.enqueue_with_session("worker", "supervisor", "single message", "session").unwrap();
+        FactoryDaemon::record_transport_receipt(&store, id, "supervisor");
+        store.mark_transport_delivered(id).unwrap();
+        assert!(store.surface_unseen_for_recipient_delivered_after("supervisor", Some("session"), 10,
+            chrono::Utc::now() - chrono::Duration::minutes(1)).unwrap().is_empty());
+        assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_transport_delivered_row_stays_pollable_until_the_recipient_claims_it() {
         use cas_store::PromptQueueStore;
         let temp = tempfile::TempDir::new().unwrap();

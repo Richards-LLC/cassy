@@ -168,10 +168,11 @@ function menu(document: Document, context: FleetOpsViewContext, rowKey: string, 
   }
   list.onkeydown = (event) => {
     if ((event.target as HTMLElement).tagName === "INPUT") return;
-    const entries = [...list.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    const entries = [...list.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].filter((entry) => !entry.hidden);
     const at = entries.indexOf(document.activeElement as HTMLButtonElement);
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
+      if (!entries.length) return;
       const next = entries[(at + (event.key === "ArrowDown" ? 1 : entries.length - 1)) % entries.length];
       next?.focus();
     }
@@ -365,5 +366,19 @@ export function undoBar(document: Document, context: FleetOpsViewContext): HTMLE
   bar.className = "fleet-ops-undo";
   const text = document.createElement("span"); text.textContent = offer.label;
   bar.append(text, button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo()));
+  return bar;
+}
+
+/** Undo's in-flight or refused result remains visible even after the progress sheet closes. */
+export function phoneFleetNotice(document: Document, context: FleetOpsViewContext): HTMLElement | undefined {
+  const pending = [...context.state.pending].at(-1);
+  const refused = [...context.state.notes].at(-1);
+  if (!pending && !refused) return undefined;
+  const [row, value] = pending ?? refused!;
+  const bar = document.createElement("div");
+  bar.className = "fleet-ops-undo";
+  bar.tabIndex = -1;
+  bar.dataset.fleetFocus = `${row}:${pending ? "progress" : "note"}`;
+  bar.textContent = "progress" in value ? value.progress : value.text;
   return bar;
 }

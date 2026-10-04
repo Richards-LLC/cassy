@@ -4421,7 +4421,7 @@ button.chip:disabled { cursor: default; }
   #conversation-fleet { display: flex; align-items: center; justify-content: center; min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font-size: var(--fs-lg); }
   .fleet-sheet-open > .conversation-context .context-section:not([data-section="progress"]) { display: none; }
   .fleet-sheet-open > .conversation-context .context-section[data-section="progress"] { display: block; }
-  .conversation-shell.fleet-sheet-open > .conversation-context { padding-bottom: calc(var(--space-16) + var(--space-6)); height: var(--keyboard-viewport-height, 100dvh); box-sizing: border-box; }
+  .conversation-shell.fleet-sheet-open > .conversation-context { height: var(--keyboard-viewport-height, 100dvh); box-sizing: border-box; }
   .status-task { position: relative; }
   .status-task > .status-line, .status-task > .status-task-title { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
   .status-task > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
@@ -4434,7 +4434,13 @@ button.chip:disabled { cursor: default; }
   .fleet-action-sheet .fleet-ops-item, .fleet-action-sheet .fleet-ops-confirm-actions button, .fleet-action-sheet select, .fleet-action-sheet input, .fleet-action-sheet .fleet-ops-add-go { width: 100%; min-height: var(--rail-item-min); box-sizing: border-box; }
   .fleet-action-sheet .fleet-ops-picker { align-content: start; }
   .fleet-action-sheet input { font: var(--weight-regular) var(--fs-md)/var(--line-ui) var(--font-ui); padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane); background: var(--bg-panel); color: var(--text-hi); }
-  #fleet-phone-undo { position: fixed; z-index: 30; left: var(--space-3); right: var(--space-3); bottom: calc(100dvh - var(--keyboard-viewport-height, 100dvh) + var(--space-16) + env(safe-area-inset-bottom)); margin: 0; border: var(--line-width) solid var(--line-strong); box-shadow: var(--lift); }
+  #conversation-composer-slot:has(#fleet-phone-undo) { flex-shrink: 0; }
+  #fleet-phone-undo { margin: 0 var(--space-3) var(--space-2); border: var(--line-width) solid var(--line-strong); box-shadow: var(--lift); }
+  .conversation-context > #fleet-phone-undo { margin: var(--space-3) 0 0; }
+  #fleet-phone-undo > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #fleet-phone-undo > button { flex: none; min-width: var(--rail-item-min); }
+  .fleet-ops-picker h2 { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }
+  .fleet-picker-context { margin: 0; color: var(--text-mid); overflow-wrap: anywhere; }
 }
 @media (forced-colors: active) {
   .fleet-action-sheet, #fleet-phone-undo { border-color: Highlight; }

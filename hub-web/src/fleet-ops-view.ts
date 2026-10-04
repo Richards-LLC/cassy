@@ -22,6 +22,8 @@ import {
   type FleetAgent,
   type FleetOpsState,
   type FleetTask,
+  type RowNote,
+  type UndoOffer,
 } from "./fleet-ops";
 import { fleetControlGate, type FleetControlGate } from "./fleet-permissions";
 import type { Scope } from "./types";
@@ -53,6 +55,7 @@ export interface FleetOpsHandlers {
   toggleAssign(rowKey: string): void;
   toggleHeader(panel: "add" | "focus"): void;
   undo(): void;
+  dismissNotice?(): void;
 }
 
 export const agentRowKey = (agent: FleetAgent): string => `agent:${agent.name}`;
@@ -181,12 +184,18 @@ function menu(document: Document, context: FleetOpsViewContext, rowKey: string, 
 }
 
 /** Form state belongs to the controller; filtering never refetches or sends an operation. */
-function picker(document: Document, context: FleetOpsViewContext, rowKey: string, actions: readonly FleetAction[], label: string): HTMLElement {
+function picker(document: Document, context: FleetOpsViewContext, rowKey: string, actions: readonly FleetAction[], label: string, subject?: string): HTMLElement {
   const list = menu(document, context, rowKey, actions, label);
   if (!context.phone) return list;
   const panel = document.createElement("div");
   panel.className = "fleet-ops-picker";
   panel.setAttribute("aria-label", label);
+  const title = document.createElement("h2"); title.textContent = label;
+  panel.append(title);
+  if (subject) {
+    const current = document.createElement("p"); current.className = "fleet-picker-context"; current.textContent = subject;
+    panel.append(current);
+  }
   const search = document.createElement("input");
   search.type = "search";
   search.setAttribute("aria-label", `Search ${label.toLowerCase()}`);
@@ -350,7 +359,7 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   }
   if (panel === "focus" && focusGate.allowed) {
     const actions = context.epics.filter((epic) => epic !== context.currentEpic).map((epic) => focusEpicAction(epic, context.currentEpic));
-    if (actions.length || context.phone) wrap.append(picker(document, context, "header", actions, "Focus epic"));
+    if (actions.length || context.phone) wrap.append(picker(document, context, "header", actions, "Focus epic", context.currentEpic ? `Current focus: ${context.currentEpic}` : "No epic focused."));
     else { const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No other epic to focus."; wrap.append(none); }
   }
   const note = noteLine(document, context, "header");
@@ -361,12 +370,23 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
 /** The Undo offer for the last reversible action, while it lasts. */
 export function undoBar(document: Document, context: FleetOpsViewContext): HTMLElement | undefined {
   const offer = context.state.currentUndo(context.now);
-  if (!offer) return undefined;
+  if (!offer || (context.phone && context.state.phoneNoticeDismissed(offer))) return undefined;
   const bar = document.createElement("div");
   bar.className = "fleet-ops-undo";
   const text = document.createElement("span"); text.textContent = offer.label;
   bar.append(text, button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo()));
+  if (context.phone) appendNoticeDismiss(document, context, bar, offer);
   return bar;
+}
+
+function appendNoticeDismiss(document: Document, context: FleetOpsViewContext, bar: HTMLElement, notice: FleetAction | RowNote | UndoOffer): void {
+  const close = button(document, "×", "fleet-notice-dismiss", "phone-notice-dismiss", () => {
+    context.state.dismissPhoneNotice(notice);
+    context.on.dismissNotice?.();
+  });
+  close.setAttribute("aria-label", "Dismiss fleet notice");
+  close.id = "fleet-phone-notice-dismiss";
+  bar.append(close);
 }
 
 /** Undo's in-flight or refused result remains visible even after the progress sheet closes. */
@@ -375,10 +395,13 @@ export function phoneFleetNotice(document: Document, context: FleetOpsViewContex
   const refused = [...context.state.notes].at(-1);
   if (!pending && !refused) return undefined;
   const [row, value] = pending ?? refused!;
+  if (context.state.phoneNoticeDismissed(value)) return undefined;
   const bar = document.createElement("div");
   bar.className = "fleet-ops-undo";
   bar.tabIndex = -1;
   bar.dataset.fleetFocus = `${row}:${pending ? "progress" : "note"}`;
-  bar.textContent = "progress" in value ? value.progress : value.text;
+  const text = document.createElement("span"); text.textContent = "progress" in value ? value.progress : value.text;
+  bar.append(text);
+  appendNoticeDismiss(document, context, bar, value);
   return bar;
 }

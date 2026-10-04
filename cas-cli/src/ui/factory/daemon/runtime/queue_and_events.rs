@@ -14954,3 +14954,36 @@ mod wake_recipient_regressions_gh1101 {
         );
     }
 }
+
+#[cfg(test)]
+mod stalled_recipient_episode_tests_gh1119 {
+    #[test]
+    fn gh1119_one_stall_notice_per_recipient_episode() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut sender = cas_types::Agent::new_with_role("sender-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        sender.factory_session = Some("session".into());
+        crate::store::open_agent_store(&dir).unwrap().register(&sender).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&dir).unwrap();
+        let mut notices = Vec::new();
+        for n in 0..3 {
+            let original = queue.enqueue_with_session("supervisor", "paused-worker", &format!("request {n}"), "session").unwrap();
+            if let Some(id) = queue.enqueue_delivery_stalled_bounce(original, "session", "Delivery stalled", "stalled").unwrap() {
+                notices.push(id);
+            }
+        }
+        assert_eq!(notices.len(), 1, "three unread requests must cause one notice until recipient reads");
+        let alerts = queue.peek_for_targets(&["supervisor"], Some("session"), 10).unwrap();
+        assert_eq!(alerts.len(), 1);
+        queue.ack(notices[0]).unwrap();
+        let more = queue.enqueue_with_session("supervisor", "paused-worker", "still paused", "session").unwrap();
+        assert!(queue.enqueue_delivery_stalled_bounce(more, "session", "still stalled", "stalled").unwrap().is_none(),
+            "sender acknowledging the alert cannot reset the recipient episode");
+        queue.poll_unseen_for_recipient("paused-worker", Some("session"), 10).unwrap();
+        let resumed = queue.enqueue_with_session("supervisor", "paused-worker", "new stall", "session").unwrap();
+        let next = queue.enqueue_delivery_stalled_bounce(resumed, "session", "new stalled episode", "stalled").unwrap().unwrap();
+        assert_ne!(next, notices[0], "a recipient read allows a new stall episode");
+        let other = queue.enqueue_with_session("supervisor", "other-worker", "different channel", "session").unwrap();
+        assert!(queue.enqueue_delivery_stalled_bounce(other, "session", "other stalled", "stalled").unwrap().is_some());
+    }
+}

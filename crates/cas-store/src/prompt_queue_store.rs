@@ -1982,6 +1982,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// Peek at pending prompts without marking as processed
     fn peek_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>>;
 
+    /// Resolve daemon QA rejection notices from the task's current assignee
+    /// before roster-based selection. Returns changed rows for daemon cache eviction.
+    fn refresh_qa_rejection_targets(&self, factory_session: &str) -> Result<Vec<i64>>;
+
     /// Peek at pending prompts for specific targets only.
     ///
     /// # Eligibility (applied before LIMIT)
@@ -4199,6 +4203,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(prompts)
+    }
+
+    fn refresh_qa_rejection_targets(&self, _factory_session: &str) -> Result<Vec<i64>> {
+        Ok(Vec::new())
     }
 
     fn peek_for_targets(

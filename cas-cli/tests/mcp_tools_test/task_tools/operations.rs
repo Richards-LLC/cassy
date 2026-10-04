@@ -4704,6 +4704,87 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
 }
 
 // =============================================================================
+fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git").arg("-C").arg(path)
+        .args(args).output().unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn transfer_adopt_branch_rebinds_delivery_and_real_commit_guard_cas_38a7() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
+    let root = temp.path();
+    let destination = tempfile::TempDir::new().unwrap();
+    branch_transfer_git(root, &["init", "-b", "factory/test-agent"]);
+    branch_transfer_git(root, &["config", "user.name", "Test"]);
+    branch_transfer_git(root, &["config", "user.email", "test@example.test"]);
+    std::fs::write(root.join(".gitignore"), ".cas/\n").unwrap();
+    branch_transfer_git(root, &["add", ".gitignore"]);
+    branch_transfer_git(root, &["commit", "-m", "base"]);
+    branch_transfer_git(root, &["worktree", "add", "-b", "factory/new-worker",
+        destination.path().to_str().unwrap()]);
+    std::fs::write(root.join("delivery.txt"), "inherited work").unwrap();
+    branch_transfer_git(root, &["add", "delivery.txt"]);
+    branch_transfer_git(root, &["commit", "-m", "delivery"]);
+    let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
+    let cas_dir = root.join(".cas");
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let source_id = format!("test-session-{}", std::process::id());
+    let mut source = agents.get(&source_id).unwrap();
+    source.metadata.insert("clone_path".into(), root.display().to_string());
+    agents.update(&source).unwrap();
+    let mut receiver = Agent::new_with_role("new-worker-id".into(), "new-worker".into(), AgentRole::Worker);
+    receiver.metadata.insert("clone_path".into(), destination.path().display().to_string());
+    agents.register(&receiver).unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = Task::new("cas-branch1100".into(), "Branch transfer".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    task.assignee = Some(source.name.clone());
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    tasks.add(&task).unwrap();
+    assert!(agents.try_claim(&task.id, &source.id, 600, None).unwrap().is_success());
+    let service = CasService::new(core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+    })).unwrap();
+    service.task(Parameters(request)).await.expect("branch adoption transfer");
+    let expected = "factory/new-worker-cas-branch1100";
+    assert_eq!(branch_transfer_git(destination.path(), &["branch", "--show-current"]), expected);
+    assert_eq!(branch_transfer_git(destination.path(), &["rev-parse", "HEAD"]), tip);
+    assert_eq!(std::fs::read_to_string(destination.path().join("delivery.txt")).unwrap(), "inherited work");
+    let after = tasks.get(&task.id).unwrap();
+    assert_eq!(after.assignee.as_deref(), Some("new-worker"));
+    assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected));
+    assert_eq!(after.deliverables.factory_branch_anchor, Some(tip));
+    assert!(after.deliverables.handoff_branches.contains(&"factory/test-agent".into()));
+
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_CLONE_PATH", destination.path());
+    env.set("CAS_AGENT_NAME", &receiver.name);
+    env.set("CAS_AGENT_ID", &receiver.id);
+    let hook = |session: &str| -> cas::hooks::HookInput {
+        serde_json::from_value(serde_json::json!({
+            "session_id": session, "cwd": destination.path(), "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m continued"},
+        })).unwrap()
+    };
+    let allowed = cas::hooks::handle_pre_tool_use(&hook(&receiver.id), Some(&cas_dir)).unwrap();
+    let allowed = serde_json::to_value(allowed).unwrap();
+    assert_ne!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{allowed}");
+    std::fs::write(destination.path().join("continued.txt"), "new owner work").unwrap();
+    branch_transfer_git(destination.path(), &["add", "continued.txt"]);
+    branch_transfer_git(destination.path(), &["commit", "-m", "continued"]);
+    env.set("CAS_AGENT_NAME", &source.name);
+    env.set("CAS_AGENT_ID", &source.id);
+    let denied = cas::hooks::handle_pre_tool_use(&hook(&source.id), Some(&cas_dir)).unwrap();
+    let denied = serde_json::to_value(denied).unwrap();
+    assert_eq!(denied.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{denied}");
+}
+
 // cas-3ed5: supervisor force-transfer (bypass live-worker lease without shutdown)
 // =============================================================================
 

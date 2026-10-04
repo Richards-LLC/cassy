@@ -117,11 +117,20 @@ impl CasService {
             None => None,
         };
 
-        let name = req
-            .id
+        if req
+            .name
             .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "server_start name must not be blank",
+            ));
+        }
+        let name = req
+            .name
+            .as_deref()
+            .or_else(|| req.id.as_deref().map(str::trim).filter(|n| !n.is_empty()))
             .map(str::to_string)
             .unwrap_or_else(|| default_server_name(command));
 
@@ -353,9 +362,48 @@ impl CasService {
 /// Name a server after its command when the caller did not name it, so
 /// `server_list` reads as something other than a wall of ids.
 pub(super) fn default_server_name(command: &str) -> String {
-    let stem: String = command
-        .split_whitespace()
+    let words = shell_words::split(command)
+        .unwrap_or_else(|_| command.split_whitespace().map(str::to_string).collect());
+    let assignment = |word: &str| {
+        let Some((key, _)) = word.split_once('=') else {
+            return false;
+        };
+        !key.is_empty()
+            && key
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+    };
+    let mut index = 0;
+    while words.get(index).is_some_and(|w| assignment(w)) {
+        index += 1;
+    }
+    if words.get(index).is_some_and(|w| {
+        std::path::Path::new(w)
+            .file_name()
+            .is_some_and(|n| n == "env")
+    }) {
+        index += 1;
+        while let Some(word) = words.get(index) {
+            match word.as_str() {
+                "--" => {
+                    index += 1;
+                    break;
+                }
+                "-u" | "--unset" | "-C" | "--chdir" => index += 2,
+                _ if word.starts_with('-') || assignment(word) => index += 1,
+                _ => break,
+            }
+        }
+    }
+    while words.get(index).is_some_and(|w| assignment(w)) {
+        index += 1;
+    }
+    let stem = words
+        .iter()
+        .skip(index)
         .take(2)
+        .cloned()
         .collect::<Vec<_>>()
         .join("-");
     let cleaned: String = stem

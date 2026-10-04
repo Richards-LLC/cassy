@@ -386,11 +386,16 @@
       "a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94"
     ],
     "skills/cas-jev/references/triage-questions.json": [
-      "0b2acab7924ecfb7904b6075ab41019ffd9e8b8a8c51a8c25f2e99133e9a3133"
+      "0b2acab7924ecfb7904b6075ab41019ffd9e8b8a8c51a8c25f2e99133e9a3133",
+      "fe32be97dbb66487a8be23c4532c3e464afcb8324b233e9e43fadd34966f269f"
     ],
     "skills/cas-jev/references/triage.md": [
       "01df2b130971733758672e5b9905f8688d362da9eeff5d3a846c7478610a4700",
-      "c33c016edbe1638df3504001648f45588d3ec7c1c1a0ccd8e4cc2710fe77c4e9"
+      "c33c016edbe1638df3504001648f45588d3ec7c1c1a0ccd8e4cc2710fe77c4e9",
+      "f91acfeb579c8a165c7df8ff33363852bf62521acb5c6a80a9f05f58fb7e8472"
+    ],
+    "skills/cas-jev/scripts/triage.py": [
+      "7c0a60d7b8fbfbd32841fbd7af72d91668c617be36d53d0c68756e15372857e5"
     ],
     "skills/cas-memory-management/references/body-templates.md": [
       "1f4e4f8739271932bf6e89400ffde8d38b63da093571b39df1e3bc0e5a76f8a8",

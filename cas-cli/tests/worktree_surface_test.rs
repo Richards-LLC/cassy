@@ -277,6 +277,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cross_session: None,
         all: None,
         status: None,
+        owner: None,
         orphans: None,
         dry_run: None,
         command: None,

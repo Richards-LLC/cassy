@@ -241,6 +241,19 @@ fleet. Supervisors keep their own credentials and configuration.
 
 ## Testing
 
+### Server-list MCP contract
+
+`factory action=server_list` reports verified running servers by default.
+Use `status=stopped`, `status=dead`, `status=unverified`, or `status=all` to
+inspect history or entries whose process identity cannot be verified.
+`task_id` filters by exact owning task; `owner` accepts an exact worker name
+or registered agent ID. Filters combine. `limit` defaults to 20, must be
+positive, and is capped at 50. Each server occupies one line of at most 512
+bytes; long fields and port lists are abbreviated. A truncation notice gives
+the number of matching entries. The legacy coordination route uses the same
+filters and limits. Regression coverage lives in `server_registry_mcp_test`
+and the service's `server_ops_tests`; no new CLI command is introduced.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured

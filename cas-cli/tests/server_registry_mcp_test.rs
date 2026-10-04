@@ -58,6 +58,143 @@ impl TestEnv {
             Err(error) => format!("MCP_ERROR: {error}"),
         }
     }
+
+    async fn factory_list(&self, fields: serde_json::Value) -> String {
+        let mut req = fields;
+        req["action"] = "server_list".into();
+        let req: CoordinationRequest = serde_json::from_value(req).unwrap();
+        match self.service.factory(Parameters(req)).await {
+            Ok(result) => result
+                .content
+                .iter()
+                .filter_map(|c| match &c.raw {
+                    RawContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(error) => format!("MCP_ERROR: {error}"),
+        }
+    }
+
+    fn seed_history(&self) {
+        let dir = self.cas_root.join("factory-servers");
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..125 {
+            let record = serde_json::json!({
+                "id": format!("srv-history-{i}"),
+                "name": format!("history-{i}"),
+                "command": "界\n".repeat(2000),
+                "cwd": "/repo/app",
+                "pid": i32::MAX,
+                "pid_starttime": 1,
+                "owner_task": if i % 2 == 0 { "cas-a" } else { "cas-b" },
+                "owner_worker": if i % 3 == 0 { "alice" } else { "bob" },
+                "owner_agent_id": if i % 3 == 0 { "agent-alice" } else { "agent-bob" },
+                "shared": false,
+                "started_at": "2026-01-01T00:00:00Z",
+                "state": if i == 0 { "running" } else { "stopped" },
+                "ended_at": chrono::Utc::now(),
+            });
+            std::fs::write(
+                dir.join(format!("srv-history-{i}.json")),
+                record.to_string(),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn cas_ced2_server_list_defaults_to_running_without_history() {
+    let env = TestEnv::new();
+    env.seed_history();
+    let listed = env.factory_list(serde_json::json!({})).await;
+    assert!(listed.contains("No servers currently running"), "{listed}");
+    assert!(
+        !listed.contains("history-"),
+        "historical entries leaked into the default listing"
+    );
+    assert!(
+        listed.len() < 1024,
+        "default listing emitted {} bytes",
+        listed.len()
+    );
+}
+
+#[tokio::test]
+async fn cas_ced2_server_list_filters_and_caps_history() {
+    let env = TestEnv::new();
+    env.seed_history();
+    let rows = |text: &str| text.lines().filter(|line| line.starts_with("  ")).count();
+
+    let all = env.factory_list(serde_json::json!({"status": "all"})).await;
+    assert_eq!(rows(&all), 20, "{all}");
+    assert!(all.contains("Showing 20 of 125 matches"), "{all}");
+
+    let capped = env
+        .factory_list(serde_json::json!({"status": "all", "limit": 10000}))
+        .await;
+    assert_eq!(rows(&capped), 50, "{capped}");
+    assert!(
+        capped.len() < 27000,
+        "listing emitted {} bytes",
+        capped.len()
+    );
+    assert!(
+        capped
+            .lines()
+            .filter(|line| line.starts_with("  "))
+            .all(|line| line.len() <= 512)
+    );
+
+    let filtered = env
+        .factory_list(serde_json::json!({
+            "status": " stopped ", "task_id": " cas-a ", "owner": " alice ", "limit": 3,
+        }))
+        .await;
+    assert_eq!(rows(&filtered), 3, "{filtered}");
+    for row in filtered.lines().filter(|line| line.starts_with("  ")) {
+        assert!(
+            row.contains("stopped") && row.contains("started by alice for cas-a"),
+            "{row}"
+        );
+    }
+    assert!(filtered.contains("Showing 3 of 20 matches"), "{filtered}");
+
+    let by_id = env
+        .factory_list(serde_json::json!({"status": "all", "owner": "agent-bob", "limit": 1}))
+        .await;
+    assert_eq!(rows(&by_id), 1, "{by_id}");
+    assert!(by_id.contains("started by bob"), "{by_id}");
+
+    let dead = env
+        .factory_list(serde_json::json!({"status": "dead"}))
+        .await;
+    assert_eq!(rows(&dead), 1, "{dead}");
+    assert!(
+        dead.contains("history-0") && dead.contains("dead"),
+        "{dead}"
+    );
+
+    let none = env
+        .factory_list(serde_json::json!({"status": "all", "owner": "missing"}))
+        .await;
+    assert_eq!(rows(&none), 0, "{none}");
+    assert!(none.contains("No registered servers"), "{none}");
+
+    let invalid = env
+        .factory_list(serde_json::json!({"status": "typo"}))
+        .await;
+    assert!(
+        invalid.contains("MCP_ERROR") && invalid.contains("status must be"),
+        "{invalid}"
+    );
+    let zero = env.factory_list(serde_json::json!({"limit": 0})).await;
+    assert!(
+        zero.contains("MCP_ERROR") && zero.contains("greater than zero"),
+        "{zero}"
+    );
 }
 
 fn extract_id(output: &str) -> String {
@@ -149,9 +286,13 @@ async fn server_start_list_stop_round_trip() {
         after.contains("No servers currently running"),
         "a stopped server must leave the running set: {after}"
     );
+    assert!(!after.contains(&id), "history is opt-in: {after}");
+    let history = env
+        .call(serde_json::json!({"action": "server_list", "status": "all"}))
+        .await;
     assert!(
-        after.contains("Recent history"),
-        "and remain visible as history: {after}"
+        history.contains(&id) && history.contains("stopped"),
+        "history remains available: {history}"
     );
 }
 

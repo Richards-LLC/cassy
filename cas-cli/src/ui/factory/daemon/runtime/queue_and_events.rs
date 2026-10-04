@@ -1626,6 +1626,46 @@ pub(super) fn claude_turn_aware_retry_with_evidence(
     }
 }
 
+/// Persist a declined worker wake only when the recipient is not inside an
+/// observed tool call. Pausing leaves both the count and cadence clock intact.
+fn record_worker_wake_decline(
+    queue: &dyn cas_store::PromptQueueStore,
+    id: i64,
+    decision: WakeDecision,
+    tool_call: ToolCallEvidence,
+) -> cas_store::Result<Option<u32>> {
+    if tool_call == ToolCallEvidence::InFlight {
+        queue.record_pending_reason(
+            id,
+            cas_store::PendingReason::GatedNotReady,
+            Some("wake budget paused while the recipient has a tool call in flight"),
+        )?;
+        return Ok(None);
+    }
+    queue
+        .record_wake_gate_decline(id, &decision.status_detail())
+        .map(Some)
+}
+
+fn worker_recipient_shut_down(
+    target: &str,
+    dead: &std::collections::HashSet<String>,
+    live: &[String],
+    agents: &[cas_types::Agent],
+) -> bool {
+    // Registration IDs retire independently of reusable pane names. Only the
+    // newest registration for a name may veto a live replacement.
+    if agents
+        .iter()
+        .filter(|agent| agent.name == target || agent.id == target)
+        .max_by_key(|agent| agent.registered_at)
+        .is_some_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
+    {
+        return true;
+    }
+    dead.contains(target) && !live.iter().any(|name| name == target)
+}
+
 /// Whether a completed harness turn is newer than the wake attempt that
 /// declined to interrupt it. Kept pure so timestamp ordering stays explicit
 /// and testable at the queue boundary.
@@ -4838,6 +4878,25 @@ impl FactoryDaemon {
 
         let queue = open_prompt_queue_store(self.app.cas_dir())?;
 
+        // Revalidate before watchdogs and roster selection: an old assignee
+        // may already have left the roster, but its task's notice is still live.
+        for id in queue.refresh_qa_rejection_targets(&self.session_name, None)? {
+            self.forget_row_delivery_state(id);
+        }
+        let registered_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
+        let mut retired_candidates = registered_prompt_sweep_agents(&registered_agents, &self.session_name);
+        retired_candidates.extend(self.dead_workers.iter().cloned());
+        retired_candidates.sort();
+        retired_candidates.dedup();
+        for name in retired_candidates {
+            if worker_recipient_shut_down(&name, &self.dead_workers, self.app.worker_names(), &registered_agents) {
+                queue.cancel_unread_for_shutdown(&name, Some(&self.session_name),
+                    "wake withdrawn: recipient has shut down")?;
+                self.normal_delivery_probes.retain(|_, probe| probe.pane != name && probe.target != name);
+                self.urgent_wake_probes.retain(|_, probe| probe.pane != name && probe.target != name);
+            }
+        }
+
         // cas-45c4 (GH #102): advance every pane's quiet streak once per poll,
         // before any delivery decision reads it.
         self.refresh_pane_quiet_samples();
@@ -4861,10 +4920,6 @@ impl FactoryDaemon {
         // Native-extension agents consume their own queue rows. Excluding them
         // from the daemon's target universe prevents this PTY/inbox processor
         // from repeatedly selecting rows it deliberately cannot consume.
-        let registered_agents = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .unwrap_or_default();
         let native_agents: std::collections::HashSet<String> = registered_agents
             .iter()
             .filter(|agent| {
@@ -5037,7 +5092,20 @@ impl FactoryDaemon {
         // wake-slot comment at the decision site.
         let mut supervisor_wake_sent = false;
 
-        for queued in prompts {
+        for selected in prompts {
+            // The assignee may have changed while earlier rows were delivered.
+            for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
+                self.forget_row_delivery_state(id);
+            }
+            let Some(queued) = queue.queued_prompt(selected.id)? else { continue };
+            if queued.processed_at.is_some() { continue; }
+            let current_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
+            if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), &current_agents) {
+                queue.cancel_unread_for_shutdown(&queued.target, Some(&self.session_name),
+                    "wake withdrawn: recipient has shut down")?;
+                self.forget_row_delivery_state(queued.id);
+                continue;
+            }
             let target = &queued.target;
             // cas-d9a8: resolve the row's server-stamped sender ONCE per row.
             // Every wake question below — is this a wake signal at all, may it
@@ -5586,7 +5654,10 @@ impl FactoryDaemon {
                 // cas-5129: a busy or still-booting recipient keeps the
                 // budget; only a silent long turn or an unreachable worker
                 // spends it and reaches the supervisor.
-                let turn_aware = claude_turn_aware_retry_with_evidence(
+                let turn_aware = if self.recipient_tool_call_evidence(pane_target) == ToolCallEvidence::InFlight {
+                    TurnAwareRetry::Wait
+                } else {
+                    claude_turn_aware_retry_with_evidence(
                     attempts,
                     self.recipient_mid_turn(pane_target),
                     self.pane_wake_state(pane_target)
@@ -5595,7 +5666,8 @@ impl FactoryDaemon {
                     last_attempt,
                     chrono::Utc::now(),
                     self.recipient_wake_evidence(pane_target),
-                );
+                    )
+                };
                 if retry_at_turn_end {
                     tracing::debug!(
                         target: "cas::coordination",
@@ -6000,6 +6072,8 @@ impl FactoryDaemon {
                     .filter(|name| {
                         // Skip native extension agents (they self-serve via extension polling).
                         !native_agents.contains(name.as_str())
+                            && !worker_recipient_shut_down(name, &self.dead_workers,
+                                self.app.worker_names(), &current_agents)
                     })
                     .cloned()
                     .collect();
@@ -6371,10 +6445,11 @@ impl FactoryDaemon {
                         // cas-d9a8: persist the OUTCOME KIND alongside the
                         // reason so `message_status` separates "this was never
                         // a wake" from "this was eligible and refused".
-                        match queue
-                            .record_wake_gate_decline(queued.id, &wake_decision.status_detail())
+                        match record_worker_wake_decline(
+                            queue.as_ref(), queued.id, wake_decision, pane_state.tool_call,
+                        )
                         {
-                            Ok(declines) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
+                            Ok(Some(declines)) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
                                 let detail = format!(
                                     "wake gate declined {declines} consecutive re-offers while the recipient remained busy; \
                                      flagged undelivered_after instead of waiting indefinitely for pane silence"
@@ -14679,5 +14754,203 @@ mod declined_wake_retry_tests_cas_913c {
             None,
             Some(Duration::from_secs(4 * 60))
         ));
+    }
+}
+
+#[cfg(test)]
+mod wake_recipient_regressions_gh1101 {
+    use super::*;
+    use cas_types::Task;
+    #[test]
+    fn gh1101_in_flight_wakes_preserve_budget_until_tool_result() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let id = queue
+            .enqueue("supervisor", "worker", "fix findings")
+            .unwrap();
+        for _ in 0..4 {
+            record_worker_wake_decline(
+                queue.as_ref(),
+                id,
+                WakeDecision::deny("busy"),
+                ToolCallEvidence::InFlight,
+            )
+            .unwrap();
+        }
+        assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
+        for tool in [ToolCallEvidence::Idle, ToolCallEvidence::Unknown] {
+            record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), tool)
+                .unwrap();
+        }
+        assert_eq!(queue.wake_gate_state(id).unwrap().0, 2);
+        let saved = queue.wake_gate_state(id).unwrap();
+        assert!(
+            record_worker_wake_decline(
+                queue.as_ref(),
+                id,
+                WakeDecision::deny("busy"),
+                ToolCallEvidence::InFlight
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(queue.wake_gate_state(id).unwrap(), saved);
+    }
+
+    #[test]
+    fn gh1101_shutdown_recipient_is_skipped_and_name_reuse_is_live() {
+        let dead = std::collections::HashSet::from(["old-worker".to_string()]);
+        assert!(worker_recipient_shut_down("old-worker", &dead, &[], &[]));
+        let live = vec!["old-worker".to_string()];
+        assert!(!worker_recipient_shut_down("old-worker", &dead, &live, &[]));
+        let mut agent = cas_types::Agent::new("shutdown-id".into(), "shutdown-worker".into());
+        agent.mark_shutdown();
+        assert!(worker_recipient_shut_down(
+            "shutdown-worker",
+            &dead,
+            &[],
+            &[agent]
+        ));
+        assert!(!worker_recipient_shut_down("new-worker", &dead, &[], &[]));
+        let mut old = cas_types::Agent::new("old-id".into(), "reused-name".into());
+        old.mark_shutdown();
+        let mut replacement = cas_types::Agent::new("new-id".into(), "reused-name".into());
+        replacement.registered_at = old.registered_at + chrono::Duration::seconds(1);
+        assert!(!worker_recipient_shut_down(
+            "reused-name",
+            &dead,
+            &["reused-name".into()],
+            &[old, replacement]
+        ));
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let id = queue
+            .enqueue_with_session("supervisor", "old-worker", "fix findings", "session")
+            .unwrap();
+        if worker_recipient_shut_down("old-worker", &dead, &[], &[]) {
+            queue
+                .cancel_unread_for_shutdown("old-worker", Some("session"), "recipient shutdown")
+                .unwrap();
+        }
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+        assert_eq!(
+            report.pending_reason,
+            Some(cas_store::PendingReason::ShutdownCancelled)
+        );
+        assert_eq!(report.wake_gate_declines, 0);
+    }
+
+    #[test]
+    fn gh1101_qa_wake_uses_current_assignee_before_roster_selection() {
+        use cas_store::{EnqueueIdempotentResult, PromptQueueStore};
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-gh1101".into(), "reassigned QA".into());
+        task.assignee = Some("old-worker".into());
+        tasks.add(&task).unwrap();
+        let pass = cas_store::open_qa_pass(
+            &cas_dir,
+            &cas_store::NewQaPass {
+                task_id: &task.id,
+                implementer_agent_id: "old-worker",
+                branch: "factory/old-worker",
+                bound_head: "0123456789abcdef",
+                deadline_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                max_rounds: 3,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let cas_store::QaPassOpen::Dispatched(pass) = pass else {
+            panic!("fresh QA pass")
+        };
+        let key = format!("qa-verdict:{}:implementer", pass.id);
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let enqueue = |session: &str, origin: cas_store::QueueOrigin| match queue
+            .enqueue_idempotent(
+                &key,
+                "old-worker",
+                "fix QA",
+                Some(session),
+                None,
+                None,
+                &format!("{key}:{session}"),
+                Some(&origin),
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => panic!("fresh row"),
+        };
+        // Production uses the exact key as its dedupe key.
+        let id = match queue
+            .enqueue_idempotent(
+                &key,
+                "old-worker",
+                "fix QA",
+                Some("session"),
+                None,
+                None,
+                &key,
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => panic!("fresh row"),
+        };
+        let other = enqueue("other-session", cas_store::QueueOrigin::Daemon);
+        let spoof = enqueue("session", cas_store::QueueOrigin::Unattributed);
+        queue
+            .record_wake_gate_decline(id, "old recipient busy")
+            .unwrap();
+        queue.record_deferred_inbox(id, 99).unwrap();
+        let new_agent = cas_types::Agent::new("new-worker-id".into(), "new-worker".into());
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&new_agent)
+            .unwrap();
+        task.assignee = Some(new_agent.id.clone());
+        tasks.update(&task).unwrap();
+        queue.refresh_qa_rejection_targets("session", None).unwrap();
+        assert_eq!(
+            queue.queued_prompt(id).unwrap().unwrap().target,
+            "new-worker"
+        );
+        assert_eq!(
+            queue
+                .peek_for_targets(&["new-worker"], Some("session"), 10)
+                .unwrap()[0]
+                .id,
+            id
+        );
+        assert_eq!(
+            queue.queued_prompt(other).unwrap().unwrap().target,
+            "old-worker"
+        );
+        assert_eq!(
+            queue.queued_prompt(spoof).unwrap().unwrap().target,
+            "old-worker"
+        );
+        assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
+        assert_eq!(queue.deferred_inbox_state(id).unwrap(), None);
+        task.assignee = None;
+        tasks.update(&task).unwrap();
+        queue
+            .refresh_qa_rejection_targets("session", Some(id))
+            .unwrap();
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
     }
 }

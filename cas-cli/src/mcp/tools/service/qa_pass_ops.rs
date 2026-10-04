@@ -30,7 +30,13 @@ impl CasService {
         // cas-e371 (GH #1023 finding 1): issues marked pre-existing are the
         // page's backlog, not the delivery's defects. They never carry a
         // rejection on their own, and each one becomes a linked follow-up.
-        let (pre_existing, delivery_issues) = crate::qa_pass::split_qa_issues(req.issues.as_deref())
+        let (mut pre_existing, delivery_issues) = crate::qa_pass::split_qa_issues(req.issues.as_deref())
+            .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {problem}")))?;
+        // cas-2849: a pre-existing issue takes its text from the ledger's
+        // "F10 NORMAL: <text>" line when issues gave only its id; one with no
+        // text anywhere is refused before anything is recorded.
+        let ledger_text = std::fs::read_to_string(ledger_path).unwrap_or_default();
+        crate::qa_pass::complete_pre_existing_issues(&mut pre_existing, &ledger_text)
             .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {problem}")))?;
         if let Some(refusal) =
             crate::qa_pass::rejection_scope_refusal(verdict, pre_existing.len(), delivery_issues)
@@ -450,7 +456,20 @@ impl CasService {
                 );
             }
         };
+        let mut tracked = Vec::new();
         for issue in issues {
+            // cas-2849: a finding that names its existing follow-up is linked,
+            // not filed again.
+            if let Some(existing) =
+                crate::qa_pass::tracked_follow_up(issue, delivery_id, |id| store.get(id).is_ok())
+            {
+                let related =
+                    Dependency::new(existing.clone(), delivery.id.clone(), DependencyType::Related);
+                let _ = store.add_dependency(&related);
+                let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
+                tracked.push(format!("{label} by {existing}"));
+                continue;
+            }
             let id = match store.generate_id() {
                 Ok(id) => id,
                 Err(error) => {
@@ -490,6 +509,12 @@ impl CasService {
             out.push_str(&format!(
                 "\nPre-existing follow-ups filed (related to {delivery_id}): {}.",
                 filed.join(", ")
+            ));
+        }
+        if !tracked.is_empty() {
+            out.push_str(&format!(
+                "\nAlready tracked, not filed again: {}.",
+                tracked.join("; ")
             ));
         }
         if !failed.is_empty() {

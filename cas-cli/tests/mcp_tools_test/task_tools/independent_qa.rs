@@ -444,6 +444,50 @@ async fn qa_record_follow_up_close_targets_the_open_epic_cas_1980() {
     pre_existing_follow_up(&mut test_env, true).await;
 }
 
+#[tokio::test]
+async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    tasks.add(&cas::types::Task::new("cas-2a33".to_string(), "Existing fixture defect".to_string())).unwrap();
+    assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+    let round_task = qa_task_id(&cas_dir, &task_id);
+    let reviewer = reviewer_core(&cas_dir, "ledger-reviewer");
+    reviewer.cas_task_start(Parameters(IdRequest { id: round_task.clone() })).await.unwrap();
+    let service = CasService::new(reviewer, None);
+    let head = git(&repo, &["rev-parse", "factory/test-agent"]);
+    let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
+    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\n").unwrap();
+    let record = |issues: serde_json::Value| verification(serde_json::json!({
+        "action": "qa_record", "task_id": task_id, "status": "approved",
+        "summary": "delivery passes; older defects are tracked separately",
+        "ledger_path": ledger.display().to_string(), "issues": issues.to_string(),
+    }));
+    let error = service.verification(Parameters(record(serde_json::json!([
+        {"id":"F99", "scope":"pre-existing"}
+    ])))).await.expect_err("a finding without problem text must not resolve the round");
+    assert!(error.message.contains("F99") && error.message.contains("problem"), "{}", error.message);
+    assert_eq!(cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now()).unwrap().unwrap().state,
+        cas::types::QaPassState::Claimed);
+    assert_ne!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
+    assert!(!tasks.list(None).unwrap().iter().any(|task| task.labels.iter().any(|label| label == "qa-follow-up")));
+
+    let result = extract_text(service.verification(Parameters(record(serde_json::json!([
+        {"id":"F10", "scope":"pre-existing"}, {"id":"F11", "scope":"pre-existing"}
+    ])))).await.unwrap());
+    assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33"), "{result}");
+    let follow_ups: Vec<_> = tasks.list(None).unwrap().into_iter()
+        .filter(|task| task.labels.iter().any(|label| label == "qa-follow-up")).collect();
+    assert_eq!(follow_ups.len(), 1, "F10 already has a task; only F11 is filed");
+    assert!(follow_ups[0].title.contains("Strict contrast capture instability"));
+    assert!(follow_ups[0].description.contains("Problem: Strict contrast capture instability."));
+    assert!(!follow_ups[0].description.contains("(not described)"));
+    assert!(tasks.get_dependencies("cas-2a33").unwrap().iter()
+        .any(|dep| dep.to_id == task_id && dep.dep_type == DependencyType::Related));
+    assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
+}
+
 async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
     let (temp, core, repo, task_id) =
         fixture_with_project(test_env, under_epic.then_some("qa-follow-up-fixture"));

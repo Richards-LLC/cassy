@@ -410,7 +410,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("keeps palette rows project-led while indexing project names and optional session summaries", async () => {
     // Behaviour is pinned in palette-commands.test.ts (cas-cfcb); this keeps main.ts on that one renderer.
     const [source, palette] = await Promise.all([readSource("main.ts"), readFile(new URL("palette-commands.ts", import.meta.url), "utf8")]);
-    expect(source).toContain("sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)))");
+    expect(source).toContain("sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)), { current, needsYou: conversationNeedsYou(machine.id, session.name) })");
     expect(palette).toContain("<span>Jump to ${escapeHtml(project ?? session.name)}</span>");
     expect(palette).toContain('data-search-text="${escapeHtml(searchText)}"');
     expect(source).toContain('command.dataset.searchText ?? ""');

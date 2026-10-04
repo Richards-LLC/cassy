@@ -296,7 +296,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Entry:** `/commander/` on a 390 px wide phone with two paired machines, plus one that is switched off
 - **Goal:** I reply to a supervisor from my phone and get back to the list
 - **Touches:** `hub-web/src/viewport.ts`, `hub-web/src/pane-layout.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/composer-markup.ts`
-- **Suite:** `hub-web/e2e/journeys/phone.journey.ts`
+- **Suite:** `hub-web/e2e/journeys/phone.journey.ts`, `hub-web/e2e/journeys/conversation-layout.journey.ts`
 - **Gaps:** a real on-screen keyboard resize is not emulated
 
 #### Steps
@@ -320,6 +320,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - The "Write to a supervisor" button opens a thread straight away.
 - Attention and machine problems live in the desktop rail and are hidden on a phone.
+- The hidden terminal grid does not widen the conversation reading mount; Terminal view keeps its full grid and returning restores composer focus (cas-ff3d).
 
 ### HUB-J10 · Switch to dark and keep reading
 

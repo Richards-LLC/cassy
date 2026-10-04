@@ -296,7 +296,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     }
     if !pass.deferred_deployed.is_empty() {
         let agents = crate::store::open_agent_store(cas_root)
-            .and_then(|store| store.list(None))
+            .and_then(|store| Ok(store.list(None)?))
             .map_err(|err| {
                 format!("QA EVIDENCE REJECTED: cannot validate deployed-verification owner: {err}")
             })?;

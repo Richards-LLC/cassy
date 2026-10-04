@@ -778,3 +778,31 @@ async fn jev_files_choice_confidence_and_strict_advisory_log_all_calls() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn truncated_files_abstain_instead_of_confident_negatives_cas_c5e8() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("large.sh"), format!("{}\ndate -d tomorrow", "x".repeat(DEFAULT_FILE_BYTES))).unwrap();
+    let negative = json!({"model":"jev-1.13.0", "answers":{"urgent":{"type":"noul","noul":0.12}}, "usage":{"input_tokens":1,"output_tokens":1}});
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(negative)).mount(&server).await;
+    let client = fixture(&server, &dir, false);
+    let result = tokio::task::spawn_blocking(move || client.files(dir.path(), &FilesOptions { paths: vec!["large.sh".into()], ..Default::default() }, &questions(), "truncated", false)).await.unwrap().unwrap();
+    let encoded = serde_json::to_value(result).unwrap();
+    assert_eq!(encoded["files"][0]["status"], "incomplete", "a truncated prefix cannot prove absence: {encoded}");
+    assert!(encoded["files"][0].get("answers").is_none());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn capped_file_sweep_reports_continuation_cas_c5e8() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    for n in 0..51 { fs::write(dir.path().join(format!("{n:03}.txt")), "complete").unwrap(); }
+    let mut client = fixture(&server, &dir, false);
+    client.config.enabled = false;
+    let result = tokio::task::spawn_blocking(move || client.files(dir.path(), &FilesOptions { globs: vec!["*.txt".into()], ..Default::default() }, &questions(), "page", true)).await.unwrap().unwrap();
+    let encoded = serde_json::to_value(result).unwrap();
+    assert_eq!(encoded["files"].as_array().unwrap().len(), 50);
+    assert_eq!(encoded["next_offset"], 50, "capped sweep needs continuation: {encoded}");
+}

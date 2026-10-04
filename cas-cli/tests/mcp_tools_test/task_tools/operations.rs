@@ -4760,12 +4760,24 @@ fn branch_adoption_fixture(env: &mut TestEnvGuard) -> BranchAdoptionFixture {
 
 #[tokio::test]
 async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
-    for mode in ["dirty", "diverged", "foreign"] {
+    for mode in ["dirty", "dirty-force", "diverged", "foreign"] {
         let mut env = TestEnvGuard::temp_home();
         let fixture = branch_adoption_fixture(&mut env);
         let foreign = tempfile::TempDir::new().unwrap();
         let cas_dir = fixture.temp.path().join(".cas");
         let agents = open_agent_store(&cas_dir).unwrap();
+        let mut original_holder = fixture.source.id.clone();
+        if mode == "dirty-force" {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let mut supervisor = fixture.source.clone();
+            supervisor.role = AgentRole::Supervisor;
+            agents.update(&supervisor).unwrap();
+            let holder = Agent::new_with_role("live-holder".into(), "live-holder".into(), AgentRole::Worker);
+            agents.register(&holder).unwrap();
+            agents.release_lease(&fixture.task.id, &fixture.source.id).unwrap();
+            assert!(agents.try_claim(&fixture.task.id, &holder.id, 600, None).unwrap().is_success());
+            original_holder = holder.id;
+        }
         if mode == "foreign" {
             branch_transfer_git(foreign.path(), &["init", "-b", "factory/new-worker"]);
             branch_transfer_git(foreign.path(), &["config", "user.name", "Test"]);
@@ -4783,14 +4795,14 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
         }
         let request = serde_json::from_value(serde_json::json!({
             "action": "transfer", "id": fixture.task.id, "to_agent": fixture.receiver.name,
-            "adopt_branch": true,
+            "adopt_branch": true, "supervisor_override": mode == "dirty-force",
         })).unwrap();
         let error = fixture.service.task(Parameters(request)).await.expect_err(mode);
         assert!(error.message.contains("BRANCH ADOPTION REFUSED"), "{mode}: {error:?}");
         let after = open_task_store(&cas_dir).unwrap().get(&fixture.task.id).unwrap();
         assert_eq!(after.assignee, fixture.task.assignee, "{mode}");
         assert_eq!(after.deliverables.parked_branch, fixture.task.deliverables.parked_branch, "{mode}");
-        assert_eq!(agents.get_lease(&fixture.task.id).unwrap().unwrap().agent_id, fixture.source.id, "{mode}");
+        assert_eq!(agents.get_lease(&fixture.task.id).unwrap().unwrap().agent_id, original_holder, "{mode}");
         assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), "factory/new-worker");
     }
 }
@@ -4838,7 +4850,7 @@ async fn transfer_adopt_branch_rebinds_delivery_and_real_commit_guard_cas_38a7()
     };
     let allowed = cas::hooks::handle_pre_tool_use(&hook(&receiver.id), Some(&cas_dir)).unwrap();
     let allowed = serde_json::to_value(allowed).unwrap();
-    assert_ne!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{allowed}");
+    assert_eq!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("allow"), "{allowed}");
     std::fs::write(destination.path().join("continued.txt"), "new owner work").unwrap();
     branch_transfer_git(destination.path(), &["add", "continued.txt"]);
     branch_transfer_git(destination.path(), &["commit", "-m", "continued"]);

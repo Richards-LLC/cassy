@@ -155,7 +155,7 @@ fn latest_turn_with_start(
 /// normal prompt hook did not serve the turn.
 pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String> {
     if crate::internal_llm::is_internal_invocation()
-        || !crate::harness_policy::is_factory_agent(input)
+        || !super::handlers::handlers_middle::factory_inbox::owns_factory_inbox(input)
     {
         return None;
     }

@@ -88,11 +88,23 @@ fn recipient_aliases(input: &HookInput) -> Vec<String> {
     )
 }
 
+/// Factory environment is inherited by children. Only the parent owns its
+/// inbox and turn-context receipt; child hook payloads identify themselves.
+pub(crate) fn owns_factory_inbox(input: &HookInput) -> bool {
+    crate::harness_policy::is_factory_agent(input)
+        && input.agent_id.is_none()
+        && input.agent_type.is_none()
+        && input.subagent_type.is_none()
+        && !input.transcript_path.as_deref().is_some_and(|path| {
+            Path::new(path).components().any(|part| part.as_os_str() == "subagents")
+        })
+}
+
 /// cas-b5e4 (GH #989): the newest inbox stamp (epoch milliseconds) across
 /// every recipient name this agent answers to, read without opening a store.
 /// `None` when nothing was ever enqueued for it.
 pub(crate) fn inbox_signal_stamp(cas_root: &Path, input: &HookInput) -> Option<i64> {
-    if !crate::harness_policy::is_factory_agent(input) {
+    if !owns_factory_inbox(input) {
         return None;
     }
     let mut names = recipient_aliases(input);
@@ -153,7 +165,7 @@ fn surface_factory_inbox_with_transport_delivery(
     input: &HookInput,
     surfacing: Surfacing<'_>,
 ) -> Option<String> {
-    if !crate::harness_policy::is_factory_agent(input) {
+    if !owns_factory_inbox(input) {
         return None;
     }
     let cas_root = cas_root?;
@@ -286,7 +298,7 @@ fn render_surfaced_with_header(rows: &[QueuedPrompt], header: &str) -> String {
             row.source,
             row.id,
             if row.urgent { ", urgent" } else { "" },
-            crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(row),
+            crate::mcp::tools::service::agent_search_system::message::first_message_provenance(row),
             reply_hint,
             row.prompt.trim()
         ));

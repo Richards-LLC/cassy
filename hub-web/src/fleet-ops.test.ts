@@ -136,6 +136,25 @@ describe("menu, confirm and undo state (cas-a474)", () => {
     state.failed("agent:quiet-owl-7", holdAction(owl), { detail: "audit log unavailable" });
     expect(state.notes.get("agent:quiet-owl-7")?.text).toBe("Could not pause: audit log unavailable.");
   });
+
+  it.each([
+    ["Audit log unavailable. No worker was paused.", "Audit log unavailable. No worker was paused."],
+    ["Audit log unavailable", "Audit log unavailable."],
+    ["Try again!", "Try again!"],
+    ["Is the machine available?", "Is the machine available?"],
+    ["Machine unavailable…", "Machine unavailable…"],
+    ["No worker was paused. \n", "No worker was paused. \n"],
+  ])("preserves failure detail punctuation (cas-5203): %s", (detail, expected) => {
+    const state = new FleetOpsState();
+    const row = "agent:swift-lark-3", pause = holdAction(lark);
+    state.started(row, pause);
+    state.failed(row, pause, { detail });
+    expect(state.notes.get(row)).toEqual({ text: `Could not pause: ${expected}`, tone: "error" });
+    expect(state.announcement).toBe(`Could not pause: ${expected}`);
+    expect(state.pending.has(row)).toBe(false);
+    expect(state.currentUndo(0)).toBeUndefined();
+    expect(lark.status).toBe("active");
+  });
 });
 
 function context(scopes: Scope[], state = new FleetOpsState(), on: Partial<FleetOpsHandlers> = {}): FleetOpsViewContext {

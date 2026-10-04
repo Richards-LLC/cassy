@@ -1019,7 +1019,8 @@ pub fn qa_task_description(
          serve of {head}, never the production URL: qa_record refuses a claimed visual-QA pass \
          without that local run.\n\n\
          {tool_naming}\n\n\
-         Load verification. Record the verdict with: verification action=qa_record task_id={task} \
+         Replace {{prefix}} with your harness's prefix above. Load verification.\n\
+         Record the verdict with: {{prefix}}verification action=qa_record task_id={task} \
          status=approved|rejected summary=\"...\" issues='[...]' ledger_path={ledger}/LEDGER.md \
          — a rejection sends {task} back to its implementer with your ledger. Recording closes \
          this QA task and cannot be revised. If you change your mind after recording, do not \
@@ -1601,7 +1602,7 @@ mod tests {
             "epic/x",
         );
         assert!(text.contains(crate::builtins::TOOL_NAMING_LINE), "{text}");
-        assert!(text.contains("verification action=qa_record task_id=cas-ui1"), "{text}");
+        assert!(text.contains("{prefix}verification action=qa_record task_id=cas-ui1"), "{text}");
         assert!(!text.contains("mcp__cas__verification action=qa_record"), "{text}");
     }
 

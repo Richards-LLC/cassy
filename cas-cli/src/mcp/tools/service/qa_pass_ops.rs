@@ -558,6 +558,7 @@ impl CasService {
         };
         if let Some(owner) = self.inner.open_task_store().ok()
             .and_then(|store| store.get(&pass.task_id).ok())
+            .filter(|task| !task.is_terminal())
             .and_then(|task| task.assignee)
         {
             let target = self.inner.open_agent_store().ok()

@@ -1632,9 +1632,19 @@ fn record_worker_wake_decline(
     queue: &dyn cas_store::PromptQueueStore,
     id: i64,
     decision: WakeDecision,
-    _tool_call: ToolCallEvidence,
+    tool_call: ToolCallEvidence,
 ) -> cas_store::Result<Option<u32>> {
-    queue.record_wake_gate_decline(id, &decision.status_detail()).map(Some)
+    if tool_call == ToolCallEvidence::InFlight {
+        queue.record_pending_reason(
+            id,
+            cas_store::PendingReason::GatedNotReady,
+            Some("wake budget paused while the recipient has a tool call in flight"),
+        )?;
+        return Ok(None);
+    }
+    queue
+        .record_wake_gate_decline(id, &decision.status_detail())
+        .map(Some)
 }
 
 fn worker_recipient_shut_down(
@@ -1645,7 +1655,9 @@ fn worker_recipient_shut_down(
 ) -> bool {
     // Registration IDs retire independently of reusable pane names. Only the
     // newest registration for a name may veto a live replacement.
-    if agents.iter().filter(|agent| agent.name == target || agent.id == target)
+    if agents
+        .iter()
+        .filter(|agent| agent.name == target || agent.id == target)
         .max_by_key(|agent| agent.registered_at)
         .is_some_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
     {
@@ -6060,6 +6072,8 @@ impl FactoryDaemon {
                     .filter(|name| {
                         // Skip native extension agents (they self-serve via extension polling).
                         !native_agents.contains(name.as_str())
+                            && !worker_recipient_shut_down(name, &self.dead_workers,
+                                self.app.worker_names(), &current_agents)
                     })
                     .cloned()
                     .collect();
@@ -14767,11 +14781,21 @@ mod wake_recipient_regressions_gh1101 {
         }
         assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
         for tool in [ToolCallEvidence::Idle, ToolCallEvidence::Unknown] {
-            record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), tool).unwrap();
+            record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), tool)
+                .unwrap();
         }
         assert_eq!(queue.wake_gate_state(id).unwrap().0, 2);
         let saved = queue.wake_gate_state(id).unwrap();
-        assert!(record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), ToolCallEvidence::InFlight).unwrap().is_none());
+        assert!(
+            record_worker_wake_decline(
+                queue.as_ref(),
+                id,
+                WakeDecision::deny("busy"),
+                ToolCallEvidence::InFlight
+            )
+            .unwrap()
+            .is_none()
+        );
         assert_eq!(queue.wake_gate_state(id).unwrap(), saved);
     }
 
@@ -14790,6 +14814,34 @@ mod wake_recipient_regressions_gh1101 {
             &[agent]
         ));
         assert!(!worker_recipient_shut_down("new-worker", &dead, &[], &[]));
+        let mut old = cas_types::Agent::new("old-id".into(), "reused-name".into());
+        old.mark_shutdown();
+        let mut replacement = cas_types::Agent::new("new-id".into(), "reused-name".into());
+        replacement.registered_at = old.registered_at + chrono::Duration::seconds(1);
+        assert!(!worker_recipient_shut_down(
+            "reused-name",
+            &dead,
+            &["reused-name".into()],
+            &[old, replacement]
+        ));
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let id = queue
+            .enqueue_with_session("supervisor", "old-worker", "fix findings", "session")
+            .unwrap();
+        if worker_recipient_shut_down("old-worker", &dead, &[], &[]) {
+            queue
+                .cancel_unread_for_shutdown("old-worker", Some("session"), "recipient shutdown")
+                .unwrap();
+        }
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+        assert_eq!(
+            report.pending_reason,
+            Some(cas_store::PendingReason::ShutdownCancelled)
+        );
+        assert_eq!(report.wake_gate_declines, 0);
     }
 
     #[test]
@@ -14854,8 +14906,16 @@ mod wake_recipient_regressions_gh1101 {
         };
         let other = enqueue("other-session", cas_store::QueueOrigin::Daemon);
         let spoof = enqueue("session", cas_store::QueueOrigin::Unattributed);
-        queue.record_wake_gate_decline(id, "old recipient busy").unwrap();
-        task.assignee = Some("new-worker".into());
+        queue
+            .record_wake_gate_decline(id, "old recipient busy")
+            .unwrap();
+        queue.record_deferred_inbox(id, 99).unwrap();
+        let new_agent = cas_types::Agent::new("new-worker-id".into(), "new-worker".into());
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&new_agent)
+            .unwrap();
+        task.assignee = Some(new_agent.id.clone());
         tasks.update(&task).unwrap();
         queue.refresh_qa_rejection_targets("session", None).unwrap();
         assert_eq!(
@@ -14873,12 +14933,24 @@ mod wake_recipient_regressions_gh1101 {
             queue.queued_prompt(other).unwrap().unwrap().target,
             "old-worker"
         );
-        assert_eq!(queue.queued_prompt(spoof).unwrap().unwrap().target, "old-worker");
+        assert_eq!(
+            queue.queued_prompt(spoof).unwrap().unwrap().target,
+            "old-worker"
+        );
         assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
+        assert_eq!(queue.deferred_inbox_state(id).unwrap(), None);
         task.assignee = None;
         tasks.update(&task).unwrap();
-        queue.refresh_qa_rejection_targets("session", Some(id)).unwrap();
-        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some());
-
+        queue
+            .refresh_qa_rejection_targets("session", Some(id))
+            .unwrap();
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
     }
 }

@@ -104,13 +104,18 @@ async fn close(core: CasCore, receipt: Option<&str>) -> String {
         Err(err) => err.to_string(),
     }
 }
-fn squash(repo: &Path, drop_path: bool) {
+fn squash(repo: &Path, drop_path: Option<&str>) {
     git(repo, &["checkout", "-q", "main"]);
     // Target advances after the batch was cut; its first parent is not the batch base.
     commit(repo, "later.txt", "target advanced\n");
     git(repo, &["merge", "--squash", "batch/X"]);
-    if drop_path {
-        git(repo, &["rm", "-q", "-f", "src/two.rs"]);
+    if let Some(path) = drop_path {
+        if path == "extra" {
+            std::fs::write(repo.join("extra.txt"), "unrecorded squash change\n").unwrap();
+            git(repo, &["add", "extra.txt"]);
+        } else {
+            git(repo, &["rm", "-q", "-f", path]);
+        }
     }
     git(
         repo,
@@ -164,7 +169,7 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
             staged.deliverables.integration_batch.as_ref().unwrap().tip,
             head
         );
-        squash(temp.path(), false);
+        squash(temp.path(), None);
         let squash_tip = git(temp.path(), &["rev-parse", "main"]);
         let text = close(worker, explicit_receipt.then_some(squash_tip.as_str())).await;
         let task = open_task_store(&temp.path().join(".cas"))
@@ -204,18 +209,35 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
 #[tokio::test]
 async fn cas_4b26f_dropped_batch_path_is_rejected() {
     let mut env = TestEnvGuard::temp_home();
-    let (temp, worker, supervisor, head) = fixture(&mut env);
-    stage(supervisor, &head).await.unwrap();
-    squash(temp.path(), true);
-    assert!(close(worker, None).await.contains("MERGE REQUIRED"));
-    assert_eq!(
-        open_task_store(&temp.path().join(".cas"))
-            .unwrap()
-            .get(TASK)
-            .unwrap()
-            .status,
-        TaskStatus::AwaitingMerge
-    );
+    for dropped in ["src/two.rs", "src/sibling.rs", "extra"] {
+        let (temp, worker, supervisor, _) = fixture(&mut env);
+        // The batch includes a sibling's work outside this task's own branch.
+        // Even when this task's two files landed, partial batch proof must fail.
+        git(temp.path(), &["checkout", "-q", "batch/X"]);
+        std::fs::write(temp.path().join("src/sibling.rs"), "pub fn sibling() {}\n").unwrap();
+        git(temp.path(), &["add", "src/sibling.rs"]);
+        git(
+            temp.path(),
+            &["commit", "-q", "-m", "cas-b402: sibling delivery"],
+        );
+        let batch_tip = git(temp.path(), &["rev-parse", "HEAD"]);
+        git(temp.path(), &["checkout", "-q", "factory/test-agent"]);
+        stage(supervisor, &batch_tip).await.unwrap();
+        squash(temp.path(), Some(dropped));
+        let refused = close(worker, None).await;
+        assert!(
+            refused.contains("MERGE REQUIRED") && refused.contains("extra or missing paths"),
+            "{refused}"
+        );
+        assert_eq!(
+            open_task_store(&temp.path().join(".cas"))
+                .unwrap()
+                .get(TASK)
+                .unwrap()
+                .status,
+            TaskStatus::AwaitingMerge
+        );
+    }
 }
 
 #[tokio::test]

@@ -2729,6 +2729,81 @@ mod tests {
     }
 
     #[test]
+    fn gh1124_terminal_notice_uses_real_actor_without_assignee_echo() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, emit_task_lifecycle_transition,
+        };
+        use cas_types::{Agent, AgentRole, Task};
+
+        for (status, actor, shutdown) in [
+            (TaskStatus::Closed, "supervisor", true),
+            (TaskStatus::Closed, "swift-fox", false),
+            (TaskStatus::Closed, "swift-fox", true),
+            (TaskStatus::Cancelled, "supervisor", true),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            let agents = crate::store::open_agent_store(&dir).unwrap();
+            let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or("gh1124".into());
+            for (id, name, role) in [
+                ("sup-id", "supervisor", AgentRole::Supervisor),
+                ("worker-id", "swift-fox", AgentRole::Worker),
+            ] {
+                let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+                agent.factory_session = Some(session.clone());
+                if role == AgentRole::Worker && shutdown {
+                    agent.mark_shutdown();
+                }
+                agents.register(&agent).unwrap();
+            }
+            let tasks = crate::store::open_task_store(&dir).unwrap();
+            let mut task = Task::new("cas-gh1124".into(), "Delivered work".into());
+            task.assignee = Some("swift-fox".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            task.status = status;
+            task.closed_at = Some(chrono::Utc::now());
+            task.updated_at = tasks.update(&task).unwrap();
+            let sq = crate::store::open_supervisor_queue_store(&dir).unwrap();
+            let pq = crate::store::open_prompt_queue_store(&dir).unwrap();
+            if status == TaskStatus::Closed {
+                // The real close handler calls this durable relay with its
+                // authenticated actor; supervisor_override does not change it.
+                emit_task_lifecycle_transition(
+                    sq.as_ref(), Some(pq.as_ref()), agents.as_ref(),
+                    &task.id, &task.title, TaskStatus::InProgress, status, actor,
+                    Some("supervisor_override=true: merged delivery verified"),
+                    LifecycleTransition::Closed, &task.updated_at.to_rfc3339(),
+                ).unwrap();
+                let durable = sq.peek("sup-id", 10).unwrap();
+                assert_eq!(durable.len(), 1);
+                let payload: serde_json::Value = serde_json::from_str(&durable[0].payload).unwrap();
+                assert_eq!(payload["actor"], actor);
+                assert!(durable[0].prompt_delivered_at.is_some());
+            }
+            let notices = pq.peek_all(10).unwrap();
+            if status == TaskStatus::Closed && actor == "swift-fox" {
+                assert_eq!(notices.len(), 1, "one authoritative worker-close notice");
+                let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt).unwrap();
+                assert_eq!(envelope.actor, actor);
+                assert!(!notices[0].prompt.contains("Assign another task"));
+            } else {
+                assert!(notices.is_empty(), "the supervisor gets no echo for their own close/cancel");
+            }
+            let data = DirectorData::load_fast(&dir).unwrap();
+            let inferred = DirectorEvent::TaskCompleted {
+                task_id: task.id.clone(), task_title: task.title.clone(),
+                worker: task.assignee.clone().unwrap(),
+            };
+            let prompt = generate_prompt(
+                &inferred, &data, &data, "supervisor", &default_config(),
+                claude(), codex(), &HashSet::new(), None,
+            );
+            assert!(prompt.is_none(), "{status:?} by {actor}, shutdown={shutdown}: actorless completion cannot credit the assignee or suggest assigning them: {prompt:?}");
+        }
+    }
+
+    #[test]
     fn test_task_assigned_prompt() {
         let event = DirectorEvent::TaskAssigned {
             task_id: "task-123".to_string(),

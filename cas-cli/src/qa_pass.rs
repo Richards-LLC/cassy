@@ -1783,6 +1783,7 @@ mod tests {
             problem: "Footer contrast 3.1:1".to_string(),
             suggestion: String::new(),
             evidence: String::new(),
+            ..Default::default()
         };
         let round = pass("aaaa1111", cas_types::QaPassState::Passed);
         let follow_up = follow_up_task(
@@ -1827,6 +1828,7 @@ mod tests {
             problem: "contrast".to_string(),
             suggestion: String::new(),
             evidence: String::new(),
+            ..Default::default()
         };
         let round = pass("aaaa1111", cas_types::QaPassState::Passed);
         // A child still targeted to the epic's base follows its live lane.

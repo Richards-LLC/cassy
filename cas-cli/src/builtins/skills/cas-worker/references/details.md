@@ -67,7 +67,7 @@ Fields are `phase`, `receipts` (`command`, `exit_status`), `files_touched`,
 For a database branch, ask the supervisor with `blocker=true`, task ID and
 reason. The supervisor writes `DATABASE_URL` to `.env.cas-db`; source it without
 printing or committing it. Workers do not create branches or hold Neon credentials.
-Load only `task` and `coordination`; `server_start`/`server_list` are the assigned
+Load only `task` and `coordination`; `server_start`/`server_list`/`server_stop` (owned servers only) are the assigned
 server exception, with `cas-servers`. Fleet, merges, cleanup and database control
 belong to the supervisor even where the runtime exposes them.
 

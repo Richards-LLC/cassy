@@ -383,7 +383,7 @@ assignment acceptance; no prose ACK is required. Add milestone notes with `{pref
 action=notes id=<task-id> note_type=progress notes=\"...\"`. Read the cas-worker skill at \
 startup; its conditional references cover checks, delivery and recovery. Load only \
 `{prefix}task` and `{prefix}coordination`; the supervisor `{prefix}factory` tool is not yours, \
-except server_start/server_list for an assigned server task. Ordinary updates reach the \
+except server_start/server_list/server_stop (owned servers only) for an assigned server task. Ordinary updates reach the \
 inbox on the next turn. Only authenticated typed blocker, merge, verification or lifecycle \
 events wake an idle supervisor: blocker=true for blockers, merge_request=true for merges. \
 A blocker needs a task note, status=blocked, and `{prefix}coordination action=message \

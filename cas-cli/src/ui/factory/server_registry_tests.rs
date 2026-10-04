@@ -29,6 +29,7 @@ fn spec(name: &str, command: &str, cwd: &Path, shared: bool) -> ServerSpec {
         expected_port: None,
         owner_task: Some("cas-7c93".to_string()),
         owner_worker: Some("young-finch-81".to_string()),
+        owner_agent_id: None,
         factory_session: Some("registry-test".to_string()),
         shared,
     }
@@ -728,8 +729,7 @@ fn shared_server_uses_a_sibling_scope_that_survives_worker_reap() {
 
 /// Docker workloads belong to the daemon, outside the client's process group.
 #[cfg(unix)]
-#[test]
-fn cas_9723_stop_docker_run_reaps_daemon_owned_container() {
+fn docker_stop_fixture(client_gone: bool, reused: bool) {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let docker = temp.path().join("docker");
@@ -754,18 +754,78 @@ esac
 "#, pid=daemon_pid.display(), stopped=stopped.display())).unwrap();
     fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
     let cas_root = temp.path().join("registry");
-    let record = start(&cas_root, &spec("docker", &format!("{} run --rm example", docker.display()), temp.path(), true)).unwrap();
+    let mut record = start(
+        &cas_root,
+        &spec(
+            "docker",
+            &format!("{} run --rm example", docker.display()),
+            temp.path(),
+            true,
+        ),
+    )
+    .unwrap();
     for _ in 0..100 {
-        if fs::read_to_string(&daemon_pid).is_ok_and(|s| s.trim().parse::<u32>().is_ok()) { break; }
+        if fs::read_to_string(&daemon_pid).is_ok_and(|s| s.trim().parse::<u32>().is_ok()) {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let pid: u32 = fs::read_to_string(&daemon_pid).unwrap().trim().parse().unwrap();
+    let pid: u32 = fs::read_to_string(&daemon_pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     struct ContainerGuard(u32);
     impl Drop for ContainerGuard {
-        fn drop(&mut self) { unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL); } }
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0 as libc::pid_t, libc::SIGKILL);
+            }
+        }
     }
     let _guard = ContainerGuard(pid);
-    stop(&cas_root, &record).unwrap();
-    assert!(wait_until_gone(pid), "server_stop leaked daemon-owned container pid {pid}");
-    assert_eq!(fs::read_to_string(stopped).unwrap(), format!("{:064}", 1), "stop must target the captured immutable container ID");
+    if client_gone {
+        terminate_server(&record, &FakeScopeOps::default()).unwrap();
+        record.cgroup = None;
+        record.state = ServerState::Dead;
+        write_record(&cas_root, &record).unwrap();
+    }
+    if reused {
+        let original = record.clone();
+        record.pid = std::process::id();
+        record.pid_starttime = Some(0);
+        let result = stop(&cas_root, &record).unwrap();
+        assert!(matches!(result, StopOutcome::RefusedUnverified(_)));
+        // Our live test process proves the unrelated replacement was spared.
+        terminate_server(&original, &FakeScopeOps::default()).unwrap();
+    } else {
+        stop(&cas_root, &record).unwrap();
+    }
+    assert!(
+        wait_until_gone(pid),
+        "server_stop leaked daemon-owned container pid {pid}"
+    );
+    assert_eq!(
+        fs::read_to_string(stopped).unwrap(),
+        format!("{:064}", 1),
+        "stop must target the captured immutable container ID"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_9723_stop_docker_run_reaps_daemon_owned_container() {
+    docker_stop_fixture(false, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_9723_stop_docker_run_after_client_exit() {
+    docker_stop_fixture(true, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_9723_stop_docker_container_spares_reused_client_pid() {
+    docker_stop_fixture(false, true);
 }

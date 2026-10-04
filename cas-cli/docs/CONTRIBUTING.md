@@ -262,6 +262,21 @@ the number of matching entries. The legacy coordination route uses the same
 filters and limits. Regression coverage lives in `server_registry_mcp_test`
 and the service's `server_ops_tests`; no new CLI command is introduced.
 
+### Task branch adoption
+
+For an inherited factory delivery, use `task action=transfer id=<task-id>
+to_agent=<worker> adopt_branch=true` (add `supervisor_override=true` when a
+supervisor transfers another worker's active lease). Cassy copies the task's
+recorded delivery tip to `factory/<receiver>-<task-id>` in the receiver's
+registered worktree, then updates its assignment and delivery anchor. Commit
+there; the isolation guard still rejects the old owner on that branch.
+
+The receiver must have a clean isolated worktree in the task's repository,
+with HEAD able to fast-forward to the delivery. Dirty, divergent and foreign
+checkouts are refused before assignment or lease changes. The original branch
+is preserved as handoff history. Omitting `adopt_branch` keeps the existing
+assignment-only transfer behavior.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured

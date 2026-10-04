@@ -860,17 +860,8 @@ impl CasCore {
                             data: None,
                         });
                     }
-                    // Supervisor force-transfer: release the live worker's lease.
+                    // Defer releasing the live lease until target/branch validation succeeds.
                     let holder = l.agent_id.clone();
-                    agent_store
-                        .release_lease_for_task(&req.task_id, "Supervisor force-transfer")
-                        .map_err(|e| McpError {
-                            code: ErrorCode::INTERNAL_ERROR,
-                            message: Cow::from(format!(
-                                "Supervisor force-transfer: failed to release live lease: {e}"
-                            )),
-                            data: None,
-                        })?;
                     Some(holder)
                 } else {
                     return Err(McpError {
@@ -944,6 +935,19 @@ impl CasCore {
             });
         }
 
+        // Validate/copy the branch before releasing a lease or changing the
+        // assignment. A rejected adoption leaves the old owner working.
+        let adoption = if req.adopt_branch.unwrap_or(false) {
+            Some(super::branch_adoption::adopt_task_branch(&self.cas_root, &task, &target_agent)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("BRANCH ADOPTION REFUSED: {error}")),
+                    data: None,
+                })?)
+        } else {
+            None
+        };
+
         // cas-1638: notes and the receipt name the worker; an id given as
         // `to_agent` stays visible beside the name it resolved to.
         let target_label = if target_agent.name == req.to_agent.trim() {
@@ -1001,6 +1005,15 @@ impl CasCore {
             task.deliverables
                 .record_handoff_branch(&format!("factory/{prior}"));
         }
+        if let Some(adoption) = &adoption {
+            task.deliverables.record_handoff_branch(&adoption.source_branch);
+            task.deliverables.parked_branch = Some(adoption.branch.clone());
+            task.deliverables.factory_branch_anchor = Some(adoption.tip.clone());
+            task.notes.push_str(&format!(
+                "\n[{timestamp}] BRANCH ADOPTED: {} -> {} at {} by {agent_id}",
+                adoption.source_branch, adoption.branch, adoption.tip,
+            ));
+        }
         // Update assignee to the target agent
         task.assignee = Some(target_name);
         task.updated_at = chrono::Utc::now();
@@ -1011,10 +1024,17 @@ impl CasCore {
             data: None,
         })?;
 
-        // Release our lease (only needed for the normal transfer path; the
-        // supervisor force-transfer path already released the live lease above,
-        // and a transfer without a lease has none to release).
-        if prior_lease_holder.is_none() && !transferred_without_lease {
+        // Release the prior lease after assignment and any branch adoption
+        // succeed. A transfer without a lease has nothing to release.
+        if prior_lease_holder.is_some() {
+            agent_store
+                .release_lease_for_task(&req.task_id, "Supervisor force-transfer")
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Supervisor force-transfer: failed to release live lease: {e}")),
+                    data: None,
+                })?;
+        } else if !transferred_without_lease {
             agent_store
                 .release_lease(&req.task_id, &agent_id)
                 .map_err(|e| McpError {
@@ -1051,14 +1071,20 @@ impl CasCore {
             ""
         };
 
+        let adoption_note = adoption.as_ref().map(|adoption| format!(
+            "\nBranch adopted on {} at {} in the receiver's registered worktree.",
+            adoption.branch, adoption.tip,
+        )).unwrap_or_default();
+
         Ok(Self::success(format!(
-            "Transferred task {} from {} to {}\n{}\nNote: {}{}",
+            "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
             req.task_id,
             agent_id,
             target_label,
             claim_msg,
             req.note.as_deref().unwrap_or("(none)"),
-            override_note
+            override_note,
+            adoption_note
         )))
     }
 

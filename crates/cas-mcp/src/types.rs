@@ -489,6 +489,11 @@ pub struct TaskRequest {
     #[serde(default)]
     pub to_agent: Option<String>,
 
+    /// Copy inherited task work to the receiver's own per-task branch.
+    #[schemars(description = "For transfer: fast-forward a clean registered receiver worktree to the task delivery tip on factory/<receiver>-<task>, and rebind its delivery anchor. Refuses dirty/divergent or foreign repositories; preserves the original branch.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub adopt_branch: Option<bool>,
+
     /// Limit for list operations
     #[schemars(description = "Maximum items to return")]
     #[serde(default, deserialize_with = "deser::option_usize")]

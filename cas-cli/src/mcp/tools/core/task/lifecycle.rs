@@ -94,6 +94,7 @@ const RELATED_RECALL_LIMIT: usize = 3;
 const RELATED_RECALL_CHAR_CAP: usize = 1_200;
 const EPIC_PLANNING_RACE_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
 const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
+const GENERIC_TITLE_SIMILARITY_THRESHOLD: f64 = 0.95;
 const DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD: f64 = 0.2;
 const MIN_SHARED_DISTINCTIVE_IDENTIFIERS: usize = 2;
 
@@ -442,6 +443,25 @@ fn description_similarity(left: &str, right: &str) -> f64 {
     left.intersection(&right).count() as f64 / union as f64
 }
 
+// Generic planning language is not a code identifier merely because it is
+// uppercase, quoted, or joined with a prose slash (GH #1108). Underscores,
+// extensions and line numbers remain technical markers; quoted domain names
+// such as Inbox/ideas are retained for the GH #679 duplicate contract.
+fn is_generic_task_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    lower.split(['/', '-']).all(|part| matches!(part,
+        "a" | "an" | "the" | "and" | "or" | "not" | "no" | "do" | "does" | "is"
+        | "are" | "be" | "been" | "to" | "of" | "for" | "in" | "on" | "with" | "without"
+        | "before" | "after" | "all" | "only" | "when" | "then" | "this" | "that"
+        | "must" | "should" | "can" | "will" | "use" | "using" | "add" | "remove"
+        | "update" | "create" | "publish" | "prepare" | "review" | "report" | "reports"
+        | "task" | "tasks" | "release" | "releases" | "note" | "notes" | "test" | "tests"
+        | "change" | "changes" | "output" | "input" | "result" | "results" | "status"
+        | "file" | "files" | "command" | "commands" | "code" | "service" | "build"
+        | "batch" | "done" | "true" | "false" | "none" | "warning" | "warnings"
+    ))
+}
+
 fn distinctive_identifier_terms(text: &str) -> std::collections::HashSet<String> {
     let mut identifiers = std::collections::HashSet::new();
 
@@ -506,6 +526,7 @@ fn distinctive_identifier_terms(text: &str) -> std::collections::HashSet<String>
         }
     }
 
+    identifiers.retain(|identifier| !is_generic_task_token(identifier));
     identifiers
 }
 
@@ -527,7 +548,16 @@ fn task_similarity(
         })
         .collect::<Vec<_>>();
     shared_identifiers.sort_unstable();
-    if title_score >= DUPLICATE_TITLE_SIMILARITY_THRESHOLD {
+    let candidate_title = title_terms(title);
+    let existing_title = title_terms(existing_title);
+    let generic_title_overlap = candidate_title.intersection(&existing_title)
+        .all(|term| is_generic_task_token(term));
+    let title_threshold = if generic_title_overlap && shared_identifiers.is_empty() {
+        GENERIC_TITLE_SIMILARITY_THRESHOLD
+    } else {
+        DUPLICATE_TITLE_SIMILARITY_THRESHOLD
+    };
+    if title_score >= title_threshold {
         return Some((title_score, shared_identifiers));
     }
 

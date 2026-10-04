@@ -241,6 +241,13 @@ fleet. Supervisors keep their own credentials and configuration.
 
 ## Testing
 
+### Duplicate-task warnings
+
+Task creation excludes common planning words and prose such as `NOT` and
+`before/after` from distinctive identifiers. Generic-only title overlaps
+require near identity; exact duplicate titles and concrete code/path overlap
+still warn. Intentional duplicates retain the `confirm_warning=true` escape.
+
 ### Task lease release
 
 `task action=release` lets a live registered supervisor release a worker's

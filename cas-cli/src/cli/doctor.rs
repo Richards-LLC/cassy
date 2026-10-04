@@ -2660,11 +2660,21 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     recorder.mark("integrations", &checks);
-    // Check 13b: Violet hub reachability (cas-8fad). Machine-scoped, so
-    // it is not part of `integration_checks` (which walks per-project keep
-    // blocks). Unlike the platform rows this one *can* be an Error: a missing
-    // variable, a rejected bearer, or a drifted tool contract each mean the
-    // next release post will fail, and each has an exact remedy.
+    // The host summary covers the machine registration. A project proxy can
+    // override that endpoint/auth, so it needs its own visible probe row.
+    #[cfg(feature = "mcp-proxy")]
+    {
+        let proxy = cas_root.join("proxy.toml");
+        if proxy.is_file()
+            && let Some(row) = crate::cli::integrate::violet::doctor_row_from_env(Some(&proxy))
+        {
+            checks.push(Check::new("violet", match row.severity {
+                crate::cli::integrate::violet::DoctorSeverity::Ok => CheckStatus::Ok,
+                crate::cli::integrate::violet::DoctorSeverity::Warning => CheckStatus::Warning,
+                crate::cli::integrate::violet::DoctorSeverity::Error => CheckStatus::Error,
+            }, row.message));
+        }
+    }
     recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes

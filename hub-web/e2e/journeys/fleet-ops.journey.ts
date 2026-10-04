@@ -205,6 +205,12 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
       await actions().getByRole("menuitem", { name: "Stop…" }).click();
       await expect(actions().getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(actions().getByRole("button", { name: "Stop", exact: true })).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(actions().getByRole("button", { name: "Close actions", exact: true })).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(actions().getByRole("button", { name: "Stop", exact: true })).toBeFocused();
       await target(actions().getByRole("button", { name: "Stop", exact: true }));
       await actions().getByRole("button", { name: "Stop", exact: true }).click(); await expect(result).toHaveText("brisk-wren-9 stopped.");
       await expect(agent("brisk-wren-9")).toHaveCount(0);

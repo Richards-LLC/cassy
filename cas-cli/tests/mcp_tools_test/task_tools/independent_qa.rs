@@ -85,15 +85,26 @@ fn reviewer_core(cas_dir: &Path, name: &str) -> CasCore {
 fn fixture(
     test_env: &mut TestEnvGuard,
 ) -> (tempfile::TempDir, CasCore, std::path::PathBuf, String) {
+    fixture_with_project(test_env, None)
+}
+
+fn fixture_with_project(
+    test_env: &mut TestEnvGuard,
+    canonical_id: Option<&str>,
+) -> (tempfile::TempDir, CasCore, std::path::PathBuf, String) {
     let (temp, core) = setup_cas(test_env);
     let repo = temp.path().to_path_buf();
     let cas_dir = repo.join(".cas");
+    // Pin before creating any tasks: the store stamps their origin at creation.
+    let project_config = canonical_id
+        .map(|id| format!("\n[project]\ncanonical_id = {id:?}\n"))
+        .unwrap_or_default();
     std::fs::write(
         cas_dir.join("config.toml"),
         format!(
             // The implementer's own evidence gate (cas-0cd5) is covered by
             // qa_evidence_gate.rs; these tests exercise the independent pass.
-            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\n",
+            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\n{project_config}",
             repo.join("artifacts").display().to_string()
         ),
     )
@@ -109,6 +120,12 @@ fn fixture(
     task.status = TaskStatus::InProgress;
     task.assignee = Some("test-agent".to_string());
     tasks.add(&task).unwrap();
+    if let Some(id) = canonical_id {
+        assert_eq!(
+            tasks.get(&task_id).unwrap().origin_project.as_deref(),
+            Some(id)
+        );
+    }
     (temp, core, repo, task_id)
 }
 
@@ -428,18 +445,15 @@ async fn qa_record_follow_up_close_targets_the_open_epic_cas_1980() {
 }
 
 async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
-    let (temp, core, repo, task_id) = fixture(test_env);
+    let (temp, core, repo, task_id) =
+        fixture_with_project(test_env, under_epic.then_some("qa-follow-up-fixture"));
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
+    let delivery_origin = tasks.get(&task_id).unwrap().origin_project;
 
     let epic_branch = "epic/qa-follow-ups";
     if under_epic {
-        // Bind the fixture's WorkTarget to its disposable checkout only.
-        let config = cas_dir.join("config.toml");
-        let mut body = std::fs::read_to_string(&config).unwrap();
-        body.push_str("\n[project]\ncanonical_id = \"qa-follow-up-fixture\"\n");
-        std::fs::write(config, body).unwrap();
         git(&repo, &["branch", epic_branch, "main"]);
         for (id, status) in [
             ("cas-old-epic", TaskStatus::Closed),
@@ -467,6 +481,7 @@ async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
     let initial_park = close_text(&core, &task_id).await;
     assert!(initial_park.contains("INDEPENDENT QA DISPATCHED"), "{initial_park}");
     let round_task = qa_task_id(&cas_dir, &task_id);
+    assert_eq!(tasks.get(&round_task).unwrap().origin_project, delivery_origin);
     let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
     let reviewer_service = CasService::new(reviewer.clone(), None);
     reviewer
@@ -529,6 +544,7 @@ async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
         .collect();
     assert_eq!(follow_ups.len(), 1, "one follow-up per pre-existing issue");
     let follow_up = &follow_ups[0];
+    assert_eq!(follow_up.origin_project, delivery_origin);
     assert_eq!(
         follow_up.title,
         format!("Pre-existing: Footer links fail contrast at 3.1:1 (found in QA of {task_id})")

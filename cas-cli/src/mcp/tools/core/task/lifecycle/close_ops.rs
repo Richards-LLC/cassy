@@ -1,5 +1,6 @@
 pub(crate) mod gate_text;
 mod task_attribution;
+mod evidence_only;
 mod delivery_evolution;
 mod snapshot_approval;
 mod epic_verdict_cache;
@@ -444,7 +445,7 @@ fn validate_completion_artifact_path(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NegativeResultCloseReceipt {
+struct NonIntegrationCloseReceipt {
     artifact_path: String,
     reference: String,
     rationale: String,
@@ -473,6 +474,7 @@ pub(crate) enum SupervisorAuthorityError {
 enum TaskCloseDisposition {
     Delivered,
     NegativeResult,
+    EvidenceOnly,
     Decision,
 }
 
@@ -485,6 +487,7 @@ impl TaskCloseDisposition {
         match self {
             Self::Delivered => cas_types::TaskTerminalOutcome::Delivered,
             Self::NegativeResult => cas_types::TaskTerminalOutcome::NegativeResult,
+            Self::EvidenceOnly => cas_types::TaskTerminalOutcome::EvidenceOnly,
             Self::Decision => cas_types::TaskTerminalOutcome::Decision,
         }
     }
@@ -4750,6 +4753,7 @@ pub(crate) enum VerificationSkipReason {
     /// durable evidence and a closed-unmerged PR/branch receipt. No delivery
     /// is being approved, so delivery review/verification gates do not apply.
     SupervisorNegativeResult,
+    SupervisorEvidenceOnly,
     /// A live registered supervisor closed a Gate after recording the
     /// decision in the task timeline. No code delivery is being approved.
     SupervisorDecision,
@@ -4794,6 +4798,9 @@ impl VerificationSkipReason {
                 " (verification skipped — supervisor override via supervisor_override=true)"
                     .to_string()
             }
+            VerificationSkipReason::SupervisorEvidenceOnly => {
+                " (successful evidence-only — supervisor-authorized, not for integration)".to_string()
+            }
             VerificationSkipReason::SupervisorNegativeResult => {
                 " (measured negative result — supervisor-authorized, delivery intentionally unmerged)"
                     .to_string()
@@ -4835,6 +4842,9 @@ impl VerificationSkipReason {
                 "Closed via supervisor override — supervisor_override=true explicitly set by \
                  supervisor while assignee was still active."
                     .to_string()
+            }
+            VerificationSkipReason::SupervisorEvidenceOnly => {
+                "Successful evidence-only close authorized by a registered supervisor after measuring docs/artifacts-only history; no code integration required.".to_string()
             }
             VerificationSkipReason::SupervisorNegativeResult => {
                 "Closed as a measured negative result by a registered supervisor after durable \
@@ -4940,28 +4950,30 @@ impl CasCore {
         Ok(())
     }
 
-    fn validate_negative_result_close(
+    fn validate_nonintegration_close(
         &self,
         task_id: &str,
         req: &TaskCloseRequest,
         negative_result: Option<&NegativeResultCloseRequest>,
-    ) -> Result<Option<NegativeResultCloseReceipt>, String> {
+        flag: &str,
+    ) -> Result<Option<NonIntegrationCloseReceipt>, String> {
         let Some(negative_result) = negative_result else {
             return Ok(None);
         };
 
+        let label = if flag == "evidence_only" { "EVIDENCE ONLY" } else { "NEGATIVE RESULT" };
         let caller = self.resolve_live_supervisor_authority().map_err(|error| match error {
             SupervisorAuthorityError::Identity(error) => format!(
-                "NEGATIVE RESULT CLOSE REJECTED: negative_result=true requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
+                "{label} CLOSE REJECTED: {flag}=true requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
             ),
             SupervisorAuthorityError::Store(error) => format!(
-                "NEGATIVE RESULT CLOSE REJECTED: supervisor authority could not be checked ({error})."
+                "{label} CLOSE REJECTED: supervisor authority could not be checked ({error})."
             ),
             SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
-                "NEGATIVE RESULT CLOSE REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
+                "{label} CLOSE REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
             ),
             SupervisorAuthorityError::NotLive(caller) => format!(
-                "NEGATIVE RESULT CLOSE REJECTED: only a live registered supervisor may use negative_result=true. Caller `{}` has role {}. The normal MERGE REQUIRED delivery gate remains in force.",
+                "{label} CLOSE REJECTED: only a live registered supervisor may use {flag}=true. Caller `{}` has role {}. The normal MERGE REQUIRED delivery gate remains in force.",
                 caller.name, caller.role
             ),
         })?;
@@ -4969,8 +4981,8 @@ impl CasCore {
         let missing = negative_result_missing_receipts(req, negative_result);
         if !missing.is_empty() {
             return Err(format!(
-                "NEGATIVE RESULT CLOSE REJECTED: negative_result=true is missing required receipt field(s): {}. Supply durable evidence under configured [factory] artifacts_root/<project-key>/<task-id>/, a closed-unmerged PR/branch reference, and a non-empty supervisor decision rationale.",
-                missing.join(", ")
+                "{label} CLOSE REJECTED: {flag}=true is missing required receipt field(s): {}. Supply durable evidence under configured [factory] artifacts_root/<project-key>/<task-id>/, a closed-unmerged PR/branch reference, and a non-empty supervisor decision rationale.",
+                missing.join(", ").replace("negative_result", flag)
             ));
         }
 
@@ -4982,7 +4994,7 @@ impl CasCore {
         validate_completion_artifact_path(&self.cas_root, task_id, artifact_path).map_err(
             |error| {
                 format!(
-                    "NEGATIVE RESULT CLOSE REJECTED: invalid negative_result_artifact_path: {error}"
+                    "{label} CLOSE REJECTED: invalid {flag}_artifact_path: {error}"
                 )
             },
         )?;
@@ -4993,9 +5005,9 @@ impl CasCore {
             .expect("missing receipt list checked reference")
             .trim();
         validate_negative_result_reference(reference)
-            .map_err(|error| format!("NEGATIVE RESULT CLOSE REJECTED: {error}"))?;
+            .map_err(|error| format!("{label} CLOSE REJECTED: {}", error.to_string().replace("negative_result", flag)))?;
 
-        Ok(Some(NegativeResultCloseReceipt {
+        Ok(Some(NonIntegrationCloseReceipt {
             artifact_path: artifact_path.to_string(),
             reference: reference.to_string(),
             rationale: req
@@ -6358,10 +6370,25 @@ impl CasCore {
 
     pub async fn cas_task_close_with_completion(
         &self,
+        params: Parameters<TaskCloseRequest>,
+        completion_receipt: Option<String>,
+        external_verification_receipt: Option<String>,
+        negative_result: Option<NegativeResultCloseRequest>,
+        inline_external_ref: Option<String>,
+        inline_execution_note: Option<String>,
+    ) -> Result<CallToolResult, McpError> {
+        self.cas_task_close_with_dispositions(params, completion_receipt,
+            external_verification_receipt, negative_result, None,
+            inline_external_ref, inline_execution_note).await
+    }
+
+    pub async fn cas_task_close_with_dispositions(
+        &self,
         Parameters(req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
         external_verification_receipt: Option<String>,
         negative_result: Option<NegativeResultCloseRequest>,
+        evidence_only: Option<EvidenceOnlyCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
@@ -6411,6 +6438,17 @@ impl CasCore {
         // Validate its supervisor authority and all three receipts before any
         // close projection. Ordinary requests take the `None` path and retain
         // the existing gate sequence and response text unchanged.
+        if evidence_only.is_some() && (negative_result.is_some()
+            || completion_receipt.is_some() || external_verification_receipt.is_some()
+            || task.task_type == TaskType::Gate || task.task_type == TaskType::Epic)
+        {
+            return Ok(Self::tool_error("EVIDENCE ONLY CLOSE REJECTED: evidence_only is a distinct non-integration disposition for individual report tasks; cannot combine with negative_result, completion_receipt, external_verification_receipt, Gate or Epic.".to_string()));
+        }
+        let evidence_only_receipt = match self.validate_nonintegration_close(
+            &req.id, &req, evidence_only.as_ref(), "evidence_only") {
+            Ok(receipt) => receipt,
+            Err(message) => return Ok(Self::tool_error(message)),
+        };
         if task.task_type == TaskType::Gate && completion_receipt.is_some() {
             return Ok(Self::tool_error(format!(
                 "GATE CLOSE REJECTED: task {} closes directly on a recorded DECISION note; a worker completion receipt is not applicable.",
@@ -6443,7 +6481,7 @@ impl CasCore {
         }
 
         let negative_result_receipt =
-            match self.validate_negative_result_close(&req.id, &req, negative_result.as_ref()) {
+            match self.validate_nonintegration_close(&req.id, &req, negative_result.as_ref(), "negative_result") {
                 Ok(receipt) => receipt,
                 Err(message) => return Ok(Self::tool_error(message)),
             };
@@ -6452,6 +6490,8 @@ impl CasCore {
                 return Ok(Self::tool_error(message.to_string()));
             }
             TaskCloseDisposition::Decision
+        } else if evidence_only_receipt.is_some() {
+            TaskCloseDisposition::EvidenceOnly
         } else if negative_result_receipt.is_some() {
             TaskCloseDisposition::NegativeResult
         } else {
@@ -6873,7 +6913,7 @@ impl CasCore {
                 &context.target_branch,
             )
         });
-        let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision
+        let worker_worktree_path = if matches!(close_disposition, TaskCloseDisposition::Decision | TaskCloseDisposition::EvidenceOnly)
             || supervisor_closing_merged_anchor
             || supervisor_closing_merged_receipt
         {
@@ -7183,6 +7223,13 @@ impl CasCore {
             Err(_) if !close_repo_verified && worker_worktree_path.is_none() => String::new(),
             Err(message) => return Ok(Self::tool_error(message)),
         };
+        let measured_evidence = if evidence_only_receipt.is_some() {
+            match evidence_only::measure(&close_project_root, &task, &resolved_parent_branch) {
+                Ok(measured) => Some(measured),
+                Err(message) => return Ok(Self::tool_error(format!("EVIDENCE ONLY CLOSE REJECTED: {message}"))),
+            }
+        } else { None };
+
         // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
         // repository this close is bound to. The cross-repo delivery in the
         // report supplied a SHA that lived solely in the repo where the work
@@ -7558,6 +7605,8 @@ impl CasCore {
         // defaulting to "assignee inactive" for every lookup failure.
         let skip_reason = if close_disposition == TaskCloseDisposition::Decision {
             VerificationSkipReason::SupervisorDecision
+        } else if close_disposition == TaskCloseDisposition::EvidenceOnly {
+            VerificationSkipReason::SupervisorEvidenceOnly
         } else if !close_disposition.requires_delivery_gates() {
             VerificationSkipReason::SupervisorNegativeResult
         } else if verification_enabled && is_supervisor_from_env() {
@@ -9296,6 +9345,12 @@ impl CasCore {
                     supervisor_id: receipt.supervisor_id.clone(),
                     supervisor_name: receipt.supervisor_name.clone(),
                 });
+        task.deliverables.evidence_only = evidence_only_receipt.as_ref().zip(measured_evidence.as_ref()).map(|(receipt, measured)| cas_types::EvidenceOnlyEvidence {
+            artifact_path: receipt.artifact_path.clone(), reference: receipt.reference.clone(),
+            rationale: receipt.rationale.clone(), supervisor_id: receipt.supervisor_id.clone(),
+            supervisor_name: receipt.supervisor_name.clone(), commit_sha: measured.tip.clone(),
+            base_sha: measured.base.clone(), paths: measured.paths.clone(),
+        });
         // cas-eaf8: preserve the task-specific factory anchor after close.
         // The epic close guard needs this durable receipt to distinguish
         // this task's merged work from later, unrelated commits added when
@@ -9448,6 +9503,14 @@ impl CasCore {
             } else {
                 task.notes = format!("{}\n\n{}", task.notes, decision_note);
             }
+        }
+
+        if let Some(receipt) = task.deliverables.evidence_only.as_ref() {
+            task.notes.push_str(&format!(
+                "\n\n[{}] DECISION: supervisor {} ({}) accepted successful evidence-only delivery intentionally not merged. Durable evidence: {}. PR/branch: {}. Measured base: {}. Delivery: {}. Paths: {}. Rationale: {}",
+                now.format("%Y-%m-%d %H:%M"), receipt.supervisor_name, receipt.supervisor_id,
+                receipt.artifact_path, receipt.reference, receipt.base_sha, receipt.commit_sha,
+                receipt.paths.join(", "), receipt.rationale));
         }
 
         // cas-49f1: apply the zero-hit search-manifest warning (computed

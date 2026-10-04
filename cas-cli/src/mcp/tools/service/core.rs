@@ -468,6 +468,12 @@ impl CasService {
         // verification had locked the ordinary update path.
         let inline_execution_note = req.execution_note.clone();
         let effective_supervisor_override = req.effective_supervisor_override();
+        let evidence_only = req.evidence_only.unwrap_or(false).then(|| {
+            crate::mcp::tools::EvidenceOnlyCloseRequest {
+                artifact_path: req.evidence_only_artifact_path,
+                reference: req.evidence_only_reference,
+            }
+        });
         let negative_result = req.negative_result.unwrap_or(false).then(|| {
             crate::mcp::tools::NegativeResultCloseRequest {
                 artifact_path: req.negative_result_artifact_path,
@@ -486,11 +492,12 @@ impl CasService {
             commit_receipt: req.commit_receipt,
         };
         self.inner
-            .cas_task_close_with_completion(
+            .cas_task_close_with_dispositions(
                 Parameters(inner_req),
                 req.completion_receipt,
                 req.external_verification_receipt,
                 negative_result,
+                evidence_only,
                 inline_external_ref,
                 inline_execution_note,
             )

@@ -351,6 +351,17 @@ pub struct TaskRequest {
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
 
+    /// Successful docs/artifact delivery deliberately retained outside integration.
+    #[schemars(description = "Supervisor-only successful evidence close. Requires evidence_only_artifact_path, evidence_only_reference and a non-empty reason. CAS measures the immutable delivery history and permits only regular docs/artifacts files; records the supervisor, SHA and paths. Mutually exclusive with negative_result and completion/external verification receipts.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub evidence_only: Option<bool>,
+    #[schemars(description = "Existing durable evidence beneath configured [factory] artifacts_root/<project-key>/<task-id>/; required with evidence_only=true.")]
+    #[serde(default)]
+    pub evidence_only_artifact_path: Option<String>,
+    #[schemars(description = "Portable PR URL or branch:factory/name audit reference for intentionally unmerged evidence; required with evidence_only=true.")]
+    #[serde(default)]
+    pub evidence_only_reference: Option<String>,
+
     /// Supervisor-authorized close for a measured negative result whose
     /// experimental branch is deliberately not merged.
     ///

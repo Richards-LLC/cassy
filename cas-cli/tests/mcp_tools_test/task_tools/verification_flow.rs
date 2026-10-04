@@ -11566,3 +11566,144 @@ fn supervisor_scopes_restore_prior_values_on_unwind_cas_525b() {
     }
     assert!(std::env::var_os("CAS_FACTORY_WORKER_CLI").is_none());
 }
+
+
+// GH #1121: successful evidence must close without a product-code merge.
+#[tokio::test]
+async fn cas_e205_supervisor_closes_evidence_without_integration() {
+    cas_e205_evidence_close(AgentRole::Supervisor, "report").await;
+}
+
+#[tokio::test]
+async fn cas_e205_worker_cannot_declare_evidence_only() {
+    cas_e205_evidence_close(AgentRole::Worker, "report").await;
+}
+
+#[tokio::test]
+async fn cas_e205_supervisor_cannot_discard_source_as_evidence() {
+    cas_e205_evidence_close(AgentRole::Supervisor, "source").await;
+}
+
+#[tokio::test]
+async fn cas_e205_reverted_source_is_not_evidence_only() {
+    cas_e205_evidence_close(AgentRole::Supervisor, "reverted").await;
+}
+
+#[tokio::test]
+async fn cas_e205_code_renamed_to_docs_is_not_evidence_only() {
+    cas_e205_evidence_close(AgentRole::Supervisor, "renamed").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cas_e205_docs_symlink_is_not_evidence_only() {
+    cas_e205_evidence_close(AgentRole::Supervisor, "symlink").await;
+}
+
+async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas_as(&mut env, role);
+    let root = temp.path();
+    let cas_dir = root.join(".cas");
+    let artifacts = root.join("durable-artifacts");
+    std::fs::write(cas_dir.join("config.toml"), format!(
+        "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n",
+        artifacts.display().to_string()
+    )).unwrap();
+    proof_boundary_git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join(".gitignore"), ".cas/\ndurable-artifacts/\n").unwrap();
+    proof_boundary_git(root, &["add", ".gitignore"]);
+    proof_boundary_git(root, &["commit", "-q", "-m", "seed"]);
+    proof_boundary_git(root, &["checkout", "-q", "-b", "factory/report-worker"]);
+    std::fs::create_dir_all(root.join("docs/qa/reports")).unwrap();
+    std::fs::write(root.join("docs/qa/reports/audit.md"), "QA completed successfully\n").unwrap();
+    proof_boundary_git(root, &["add", "docs"]);
+    proof_boundary_git(root, &["commit", "-q", "-m", "docs: deployed QA evidence (cas-e205)"]);
+    if matches!(mutation, "source" | "reverted" | "renamed") {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/product.rs"), "pub fn changed() {}\n").unwrap();
+        proof_boundary_git(root, &["add", "src"]);
+        proof_boundary_git(root, &["commit", "-q", "-m", "source change (cas-e205)"]);
+        if mutation == "reverted" {
+            proof_boundary_git(root, &["rm", "src/product.rs"]);
+            proof_boundary_git(root, &["commit", "-q", "-m", "revert source (cas-e205)"]);
+        } else if mutation == "renamed" {
+            proof_boundary_git(root, &["mv", "src/product.rs", "docs/qa/reports/disguised.md"]);
+            proof_boundary_git(root, &["commit", "-q", "-m", "rename source (cas-e205)"]);
+        }
+    }
+    #[cfg(unix)]
+    if mutation == "symlink" {
+        std::os::unix::fs::symlink("../../../src/product.rs", root.join("docs/qa/reports/link.md")).unwrap();
+        proof_boundary_git(root, &["add", "docs"]);
+        proof_boundary_git(root, &["commit", "-q", "-m", "symlink disguised as report (cas-e205)"]);
+    }
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-e205".into(), "Deployed QA report".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("report-worker".into());
+    store.add(&task).unwrap();
+    let proof = artifacts.join("cas-e205/report.md");
+    std::fs::create_dir_all(proof.parent().unwrap()).unwrap();
+    std::fs::write(&proof, "Portable QA evidence\n").unwrap();
+    let service = CasService::new(core, None);
+    if role == AgentRole::Supervisor {
+        let ordinary: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": "cas-e205", "supervisor_override": true, "reason": "Report completed"
+        })).unwrap();
+        let parked = extract_text(service.task(Parameters(ordinary)).await.unwrap());
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert!(parked.contains("evidence_only=true"), "{parked}");
+        assert_eq!(store.get("cas-e205").unwrap().status, TaskStatus::AwaitingMerge);
+        let missing: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": "cas-e205", "evidence_only": true
+        })).unwrap();
+        let refused = extract_text(service.task(Parameters(missing)).await.unwrap());
+        for field in ["evidence_only_artifact_path", "evidence_only_reference", "reason"] {
+            assert!(refused.contains(field), "{refused}");
+        }
+        if mutation == "report" {
+            // The old task answers for the parked report SHA after lane reuse.
+            std::fs::write(root.join("next-task.rs"), "new task code\n").unwrap();
+            proof_boundary_git(root, &["add", "next-task.rs"]);
+            proof_boundary_git(root, &["commit", "-q", "-m", "next task, after parked report"]);
+        }
+    }
+    let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "close", "id": "cas-e205", "reason": "Successful QA report retained as evidence, drafts do not ship",
+        "evidence_only": true, "evidence_only_artifact_path": proof,
+        "evidence_only_reference": "branch:factory/report-worker"
+    })).unwrap();
+    let response = extract_text(service.task(Parameters(request)).await.unwrap());
+    let persisted = store.get("cas-e205").unwrap();
+    if role == AgentRole::Worker {
+        assert!(response.contains("EVIDENCE ONLY CLOSE REJECTED"), "{response}");
+        assert!(response.contains("live registered supervisor"), "{response}");
+        assert_eq!(persisted.status, TaskStatus::InProgress);
+    } else if mutation != "report" {
+        assert!(response.contains("EVIDENCE ONLY CLOSE REJECTED"), "{response}");
+        assert!(response.contains("non-evidence path") || response.contains("symlink"), "{response}");
+        assert_eq!(persisted.status, TaskStatus::AwaitingMerge);
+        assert!(persisted.deliverables.negative_result.is_none());
+    } else {
+        assert!(response.contains("Closed task:"), "{response}");
+        assert_eq!(persisted.status, TaskStatus::Closed);
+        assert!(persisted.notes.contains("successful evidence-only"), "{}", persisted.notes);
+        assert!(persisted.notes.contains("docs/qa/reports/audit.md"));
+        assert!(!persisted.has_delivery_to_integrate());
+        assert!(persisted.counts_as_delivered());
+        let evidence = persisted.deliverables.evidence_only.as_ref().unwrap();
+        assert_eq!(evidence.commit_sha, persisted.deliverables.factory_branch_anchor.clone().unwrap());
+        assert_eq!(evidence.paths, vec!["docs/qa/reports/audit.md"]);
+        assert_eq!(evidence.supervisor_id, format!("test-session-{}", std::process::id()));
+        assert_eq!(serde_json::to_value(&persisted.terminal_outcome).unwrap()["kind"], "evidence_only");
+        assert!(persisted.deliverables.negative_result.is_none());
+        let mut reopened = persisted.clone();
+        reopened.status = TaskStatus::Open;
+        store.update(&reopened).unwrap();
+        let reopened = store.get("cas-e205").unwrap();
+        assert!(reopened.deliverables.evidence_only.is_none());
+        assert!(reopened.terminal_outcome.is_none());
+        assert!(reopened.has_delivery_to_integrate());
+    }
+}

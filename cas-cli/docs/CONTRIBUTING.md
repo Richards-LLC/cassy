@@ -116,6 +116,31 @@ it reports the symbol index fixed only after deferred work and errors are clear.
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
 
+### Evidence-only task close
+
+Successful QA reports, ledgers and release drafts intentionally retained outside
+integration can close through the MCP task tool with `action=close`,
+`evidence_only=true`, `evidence_only_artifact_path=<existing durable evidence>`,
+`evidence_only_reference=<PR URL or branch:factory/name>`, and a non-empty
+`reason`. Only a live registered supervisor can authorize this disposition.
+There is no CLI task-lifecycle command; the unified MCP task tool owns dispatch.
+
+CAS measures the recorded delivery anchor (or the assigned worker branch before
+parking) against the fresh integration target. Every unmerged commit must touch
+only regular, non-executable evidence formats under `docs/` or `artifacts/`:
+Markdown, text, HTML, PDF, SVG, images, JSON, CSV/TSV, logs or YAML. Source changes,
+code renamed into docs, reverted code, symlinks and submodules are refused.
+Measurement is bounded to 256 commits and fails closed when Git cannot prove it.
+The artifact must exist beneath this project's configured task artifacts directory;
+local paths and secret-shaped values are forbidden in the portable PR/branch reference.
+
+The successful `evidence_only` terminal outcome counts completed report delivery,
+requires no parent-epic code integration, and logs supervisor identity, rationale,
+base SHA, delivery SHA and measured paths. Reopening clears the structured receipt.
+It cannot combine with negative-result, completion or external-verification receipts,
+or close a Gate/Epic. Ordinary closes keep the merge gate; measured negative
+experiments retain their separate `negative_result=true` outcome.
+
 ### Factory worker MCP and credential access
 
 Declare resources that stay on the supervisor in `.cas/config.toml`:

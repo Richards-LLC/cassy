@@ -9158,13 +9158,23 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
+        let factory_session = "factory-cas-8422";
         for (target, expected) in [("operator", "commander"), ("worker", "codex")] {
             let id = store
-                .enqueue("supervisor", target, "unanswered ask")
+                .enqueue_with_session("supervisor", target, "unanswered ask", factory_session)
                 .unwrap();
+            if target == "operator" {
+                store.stamp_operator_reply(id, "ask", &[]).unwrap();
+            }
             store.mark_transport_delivered(id).unwrap();
             let row = store.queued_prompt(id).unwrap().unwrap();
+            assert_eq!(row.factory_session.as_deref(), Some(factory_session));
+            assert!(row.acked_at.is_none());
             let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(
+                report.confirmation_source,
+                cas_store::ConfirmationSource::Unconfirmed
+            );
             let text =
                 super::delivery_stalled_notice(&row, cas_mux::SupervisorCli::Codex, Some(&report));
             assert!(

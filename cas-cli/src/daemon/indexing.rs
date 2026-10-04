@@ -135,7 +135,8 @@ pub fn resolve_repository(file_path: &Path) -> (Option<PathBuf>, String) {
 
     while let Some(dir) = cursor {
         if dir.join(".git").exists() {
-            let name = dir
+            let physical_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            let name = physical_root
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
@@ -150,6 +151,155 @@ pub fn resolve_repository(file_path: &Path) -> (Option<PathBuf>, String) {
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     (None, fallback)
+}
+
+/// The checkout whose code this process should scan. Shared store location
+/// is not checkout identity: accept cwd only when Git's common directory
+/// matches the store's repository, otherwise retain the explicit store root.
+pub(crate) fn code_project_root(cas_root: &Path) -> PathBuf {
+    code_project_root_from(cas_root, &std::env::current_dir().unwrap_or_default())
+}
+
+pub(crate) fn code_project_root_from(cas_root: &Path, start: &Path) -> PathBuf {
+    let fallback = cas_root.parent().unwrap_or(cas_root);
+    let Some(checkout) = resolve_repository(start).0 else {
+        return fallback.to_path_buf();
+    };
+    let main_key = crate::worktree::GitOperations::new(fallback.to_path_buf()).canonical_repo_key();
+    let checkout_key = crate::worktree::GitOperations::new(checkout.clone()).canonical_repo_key();
+    match (main_key, checkout_key) {
+        (Ok(main), Ok(current)) if main == current => checkout,
+        _ => fallback.to_path_buf(),
+    }
+}
+
+/// Canonicalize an existing ancestor as well as its missing suffix, so a
+/// deleted source or directory keeps its checkout/path ownership under aliases.
+fn canonical_source_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut cursor = Some(absolute.as_path());
+    while let Some(ancestor) = cursor {
+        if let Ok(canonical) = ancestor.canonicalize() {
+            return canonical.join(absolute.strip_prefix(ancestor).unwrap_or(Path::new("")));
+        }
+        cursor = ancestor.parent();
+    }
+    absolute
+}
+
+/// Incidental recursive watcher events never grant authority over a nested
+/// checkout or a path outside the configured scan roots. Explicitly listing
+/// that nested root grants its own source scope.
+pub(crate) fn source_file_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let path = canonical_source_path(path);
+    let owner = resolve_repository(&path)
+        .0
+        .map(|root| canonical_source_path(&root));
+    roots.iter().any(|root| {
+        let root = canonical_source_path(root);
+        let in_path = path == root || (!root.is_file() && path.starts_with(&root));
+        if !in_path {
+            return false;
+        }
+        let root_owner = resolve_repository(&root)
+            .0
+            .map(|root| canonical_source_path(&root));
+        root_owner == owner
+    })
+}
+
+/// Checkout-scoped receipt in the existing TEXT key. Historical repository
+/// receipts remain intact, but cannot certify a different checkout's scan.
+pub(crate) fn code_scan_key(repo_root: &Path) -> String {
+    let root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    format!("worktree:{}", root.display())
+}
+
+/// code_files stores normalized absolute paths (including removal of `/`).
+/// Compare path components, not string prefixes, and reject a nested linked
+/// checkout even when its path lies under this checkout's directory.
+pub(crate) fn code_file_in_root(stored_path: &str, root: &Path) -> bool {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    for spelling in [root, canonical.as_path()] {
+        let normalized = cas_store::SqliteCodeStore::normalize_path(&spelling.to_string_lossy());
+        if let Ok(relative) = Path::new(stored_path).strip_prefix(Path::new(&normalized)) {
+            let candidate = spelling.join(relative);
+            if let Some(owner) = resolve_repository(&candidate).0 {
+                return owner.canonicalize().unwrap_or(owner) == canonical;
+            }
+            return true;
+        }
+    }
+    // A persisted spelling can use a symlink alias absent from the scan
+    // roots (notably /var versus /private/var). Resolve its owning .git entry
+    // through the filesystem, including when the source itself was deleted.
+    let absolute = stored_source_path(stored_path);
+    if let Some(owner) = resolve_repository(&absolute).0 {
+        return owner.canonicalize().unwrap_or(owner) == canonical;
+    }
+    // Old relative rows carry no checkout ownership. Never guess and delete
+    // another worktree's manifest; a future explicit rebuild can replace them.
+    false
+}
+
+/// Current disk denominator, with the same undecodable-file policy as parsing.
+/// A receipt from yesterday or from another checkout never defines eligibility.
+pub(crate) fn checkout_source_files(
+    root: &Path,
+    extensions: &[String],
+    excludes: &[String],
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut eligible = Vec::new();
+    let mut skipped = Vec::new();
+    for path in collect_source_files(&[root.to_path_buf()], extensions, excludes) {
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Err(reason) = crate::daemon::source_text::decode_source(&bytes) {
+                skipped.push(format!("{}: {}", path.display(), reason.as_str()));
+                continue;
+            }
+        }
+        eligible.push(path);
+    }
+    (eligible, skipped)
+}
+
+fn stored_source_path(stored_path: &str) -> PathBuf {
+    if Path::new(stored_path).is_absolute() {
+        PathBuf::from(stored_path)
+    } else {
+        Path::new(std::path::MAIN_SEPARATOR_STR).join(stored_path)
+    }
+}
+
+pub(crate) fn checkout_indexed_file_count(
+    files: &[cas_code::CodeFile],
+    eligible: &[PathBuf],
+) -> usize {
+    let normalize =
+        |path: &Path| cas_store::SqliteCodeStore::normalize_path(&path.to_string_lossy());
+    let mut indexed = HashSet::new();
+    for file in files {
+        indexed.insert(file.path.clone());
+        if let Ok(canonical) = stored_source_path(&file.path).canonicalize() {
+            indexed.insert(normalize(&canonical));
+        }
+    }
+    eligible
+        .iter()
+        .filter(|path| {
+            indexed.contains(&normalize(path))
+                || path
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|canonical| indexed.contains(&normalize(&canonical)))
+        })
+        .count()
 }
 
 /// Current `HEAD` commit of a work tree, or `None` when git cannot answer
@@ -202,7 +352,14 @@ pub(crate) fn collect_source_files(
             }
             continue;
         }
+        let scan_root = root.clone();
+        let inside_git = resolve_repository(root).0.is_some();
         for entry in ignore::WalkBuilder::new(root)
+            // A linked checkout nested beneath this one is a separate source
+            // tree even when ordinary excludes do not mention its directory.
+            .filter_entry(move |entry| {
+                !inside_git || entry.path() == scan_root || !entry.path().join(".git").exists()
+            })
             .hidden(true)
             .git_ignore(true)
             .build()
@@ -303,8 +460,8 @@ const WRITER_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(1
 ///
 /// Per-call retries would multiply: a run retiring 592 files behind a writer
 /// that is held for the whole run would wait its backoff 592 times. The budget
-/// is spent once — after that the run stops waiting and records the failures,
-/// which the next run retries.
+/// is spent once — after that the caller can defer the rest of the sweep,
+/// retaining its durable manifest for the next run.
 pub(crate) struct WriterLockBudget {
     remaining: std::time::Duration,
 }
@@ -675,17 +832,22 @@ pub fn reconcile_code_tree(
 ) -> Result<CodeIndexResult, CasError> {
     use crate::store::open_code_store;
 
-    let mut result = index_code_files_with(files, cas_root, force)?;
+    let authorized_files: Vec<_> = files
+        .iter()
+        .filter(|file| source_file_in_roots(file, roots))
+        .cloned()
+        .collect();
+    let mut result = index_code_files_with(&authorized_files, cas_root, force)?;
     let code_store = open_code_store(cas_root)?;
     // One shared wait budget for the whole retirement sweep: see
     // [`WriterLockBudget`] — 592 files must not each wait out the same lock.
     let mut writer_budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
 
-    let mut by_repo: std::collections::HashMap<String, (PathBuf, HashSet<String>)> =
+    let mut by_repo: std::collections::HashMap<(String, PathBuf), HashSet<String>> =
         std::collections::HashMap::new();
     // Seed repositories from scan roots, not only from eligible files. An
     // empty eligible set is still an authoritative full-tree snapshot and
-    // must retire every previously indexed row for that repository.
+    // must retire absent rows owned by that checkout.
     for root in roots {
         let identity_probe = if root.is_dir() {
             root.join(".cas-reconciliation-root")
@@ -693,18 +855,16 @@ pub fn reconcile_code_tree(
             root.clone()
         };
         let (repo_root, repository) = resolve_repository(&identity_probe);
-        by_repo.entry(repository).or_insert_with(|| {
-            (
-                repo_root.unwrap_or_else(|| {
-                    if root.is_dir() {
-                        root.clone()
-                    } else {
-                        root.parent().unwrap_or(root).to_path_buf()
-                    }
-                }),
-                HashSet::new(),
-            )
+        let repo_root = repo_root.unwrap_or_else(|| {
+            if root.is_dir() {
+                root.clone()
+            } else {
+                root.parent().unwrap_or(root).to_path_buf()
+            }
         });
+        by_repo
+            .entry((repository, canonical_source_path(&repo_root)))
+            .or_default();
     }
     // The eligible denominator must exclude files we skipped: leaving them in
     // makes `eligible - indexed` count them as failures on every scan, which is
@@ -714,26 +874,24 @@ pub fn reconcile_code_tree(
         .iter()
         .map(|(path, _)| path.clone())
         .collect();
-    for file in files {
+    for file in &authorized_files {
         if skipped_paths.contains(file) {
             continue;
         }
         let (root, repository) = resolve_repository(file);
         let file_id = code_store.generate_file_id_for(&repository, &file.to_string_lossy());
-        by_repo
-            .entry(repository)
-            .or_insert_with(|| {
-                (
-                    root.unwrap_or_else(|| file.parent().unwrap_or(file).to_path_buf()),
-                    HashSet::new(),
-                )
-            })
-            .1
-            .insert(file_id);
+        let root = root.unwrap_or_else(|| file.parent().unwrap_or(file).to_path_buf());
+        // Only explicit roots seeded above may retire rows or record a scan.
+        // Looking up a file's owner must never register a new full-tree scope.
+        if let Some(current_ids) = by_repo.get_mut(&(repository, canonical_source_path(&root))) {
+            current_ids.insert(file_id);
+        }
     }
 
-    for (repository, (repo_root, current_ids)) in by_repo {
+    let mut retirement_busy = false;
+    for ((repository, repo_root), current_ids) in by_repo {
         let errors_before_retirement = result.errors.len();
+        let deferred_before_retirement = result.files_deferred;
         let stored = match code_store.list_files(&repository, None) {
             Ok(stored) => stored,
             Err(error) => {
@@ -743,14 +901,46 @@ pub fn reconcile_code_tree(
                 Vec::new()
             }
         };
-        for stale in stored.iter().filter(|file| !current_ids.contains(&file.id)) {
+        let stale_files: Vec<_> = stored
+            .iter()
+            .filter(|file| {
+                !current_ids.contains(&file.id)
+                    && code_file_in_root(&file.path, &repo_root)
+                    && source_file_in_roots(&stored_source_path(&file.path), roots)
+                    && !stored_source_path(&file.path).try_exists().unwrap_or(true)
+            })
+            .collect();
+        for (position, stale) in stale_files.iter().enumerate() {
+            if retirement_busy {
+                result.files_deferred += stale_files.len() - position;
+                break;
+            }
             match retire_code_file(cas_root, code_store.as_ref(), stale, &mut writer_budget) {
                 Ok(_) => result.files_deleted += 1,
+                Err(error) if is_index_lock_busy(&error) => {
+                    // The durable rows are the retry manifest. Stop acquiring
+                    // the same held writer for every file in this sweep.
+                    retirement_busy = true;
+                    result.files_deferred += stale_files.len() - position;
+                    tracing::debug!("code retirement deferred: {error}");
+                    break;
+                }
                 Err(error) => result.errors.push(format!(
                     "{}: failed to retire deleted source file: {error}",
                     stale.path
                 )),
             }
+        }
+
+        // A configured subdirectory can retire its own missing sources, but
+        // its partial visit cannot certify coverage or HEAD for the checkout.
+        // Preserve that checkout's earlier full-tree receipt until a full
+        // configured root is actually visited.
+        if !roots
+            .iter()
+            .any(|root| root.is_dir() && canonical_source_path(root) == repo_root)
+        {
+            continue;
         }
 
         let current_indexed = code_store
@@ -773,23 +963,26 @@ pub fn reconcile_code_tree(
             .filter(|(path, _)| path.starts_with(&repo_root))
             .map(|(path, reason)| format!("{}: {reason}", path.display()))
             .collect();
-        let scan_error = (!result.errors.is_empty()).then(|| {
-            result
-                .errors
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("; ")
-        });
+        let deferred_files = result.files_deferred - deferred_before_retirement;
+        let mut scan_messages: Vec<_> = result.errors.iter().take(3).cloned().collect();
+        if deferred_files > 0 {
+            // Preserve the retry warning in this checkout's receipt without
+            // counting transient writer contention as permanent file failures.
+            scan_messages.push(format!(
+                "{deferred_files} file retirement(s) deferred; writer busy. Retry: cas index code"
+            ));
+        }
+        let scan_error = (!scan_messages.is_empty()).then(|| scan_messages.join("; "));
         if let Err(error) = cas_store::SqliteCodeVectorStore::open(cas_root).and_then(|state| {
             state.record_scan(
-                &repository,
+                &code_scan_key(&repo_root),
                 current_ids.len(),
                 current_indexed,
                 failed_files,
                 repo_skipped.len(),
-                (!repo_skipped.is_empty()).then(|| repo_skipped.join("; ")).as_deref(),
+                (!repo_skipped.is_empty())
+                    .then(|| repo_skipped.join("; "))
+                    .as_deref(),
                 head_commit(&repo_root).as_deref(),
                 scan_error.as_deref(),
             )
@@ -811,15 +1004,12 @@ pub fn run_code_index_cycle(
     watcher: &CodeWatcher,
     cas_root: &Path,
 ) -> Result<CodeIndexResult, CasError> {
-    use crate::store::open_code_store;
-
     let mut result = CodeIndexResult::default();
-    let mut deleted_paths: Vec<PathBuf> = Vec::new();
-
+    let mut has_deletions = false;
     while let Some(event) = watcher.try_recv() {
         match event {
-            WatchEvent::Modified(_path) => {}
-            WatchEvent::Deleted(path) => deleted_paths.push(path),
+            WatchEvent::Modified(_) => {}
+            WatchEvent::Deleted(_) => has_deletions = true,
             WatchEvent::Error(message) => {
                 eprintln!("[Cassy] Watcher error: {message}");
                 result.errors.push(format!("Watcher: {message}"));
@@ -827,31 +1017,19 @@ pub fn run_code_index_cycle(
         }
     }
 
-    if !deleted_paths.is_empty() {
-        if let Ok(code_store) = open_code_store(cas_root) {
-            let mut writer_budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
-            for path in &deleted_paths {
-                // Same work-tree-root derivation the writer uses; a mismatch here would look up
-                // a repository that was never written and silently leave the rows behind.
-                let (_repo_root, repo_name) = resolve_repository(path);
-
-                let path_str = path.to_string_lossy();
-                if let Ok(Some(file)) = code_store.get_file_by_path(&repo_name, &path_str) {
-                    match retire_code_file(cas_root, code_store.as_ref(), &file, &mut writer_budget)
-                    {
-                        Ok(_) => result.files_deleted += 1,
-                        Err(error) => result.errors.push(format!(
-                            "{}: failed to retire deleted source file: {error}",
-                            path.display()
-                        )),
-                    }
-                }
-            }
-        }
+    // Deletes use the same ownership/manifest sweep as startup and manual
+    // indexing, with one writer budget per cycle. A delayed delete event
+    // cannot retire a file that the live tree has already recreated.
+    let initial_reconcile = watcher.take_initial_reconcile() || has_deletions;
+    let mut pending_files = watcher.take_pending();
+    if initial_reconcile {
+        // The fresh configured-root walk is the complete snapshot. Pending
+        // events are incremental hints, not another source of scan authority.
+        pending_files = watcher.source_files();
+        pending_files.sort();
+        pending_files.dedup();
     }
-
-    let initial_reconcile = watcher.take_initial_reconcile();
-    let pending_files = watcher.take_pending();
+    pending_files.retain(|file| source_file_in_roots(file, watcher.watch_paths()));
     if initial_reconcile || !pending_files.is_empty() {
         let index_result = if initial_reconcile {
             reconcile_code_tree(&pending_files, watcher.watch_paths(), cas_root, false)?
@@ -861,8 +1039,12 @@ pub fn run_code_index_cycle(
         result.files_indexed = index_result.files_indexed;
         result.symbols_indexed = index_result.symbols_indexed;
         result.files_deleted += index_result.files_deleted;
+        result.files_deferred += index_result.files_deferred;
         result.errors.extend(index_result.errors);
     }
 
+    if result.files_deferred > 0 {
+        watcher.request_reconcile();
+    }
     Ok(result)
 }

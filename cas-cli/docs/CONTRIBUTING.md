@@ -86,6 +86,32 @@ silently reintroduce fixed bugs.
 
 **New migration**: Create file in `cas-cli/src/migration/migrations/` following naming convention `m{NNN}_{table}_{description}.rs`. Add to the `MIGRATIONS` array in `migrations/mod.rs`. Each migration needs: unique sequential ID, up SQL, and a detect query. See `cas-cli/docs/MIGRATIONS.md` for full details. Migration ID ranges: Entries 1-50, Rules 51-70, Skills 71-90, Agents 91-110, Entities/Worktrees 111+, Verification 131+, Loops/Events 151+.
 
+### Code index ownership across worktrees
+
+Code-file rows retain their normalized absolute source paths. Reconciliation
+only retires absent paths owned by the checkout it scanned; sibling and nested
+linked checkouts keep their rows. Retirement and scan receipts derive authority
+from configured scan roots; recursive watcher events cannot add a nested checkout.
+A full reconciliation uses a fresh scan of those roots. An explicitly configured
+nested checkout retains its own reconciliation scope. A configured subdirectory
+can retire its own absent files; it preserves the full-checkout scan receipt
+until a full checkout root is visited. Paths without an identifiable checkout
+remain untouched rather than being treated as another checkout's deletions.
+
+Code scan receipts use `worktree:<canonical checkout root>` in the existing
+`code_index_state.repository` TEXT key. Historical repository-name receipts
+remain stored but do not certify checkout coverage or HEAD. `cas doctor` and
+`cas status` count current eligible, decodable source files from disk. The
+manual index command and daemon select the current linked checkout when its
+Git common directory matches the explicit store's repository.
+
+A busy BM25 writer defers the remaining retirement sweep after one bounded wait;
+source rows remain its retry manifest. `cas index code --json` reports
+`files_deferred`, separately from errors, and the daemon schedules a fresh
+reconciliation without requiring another filesystem event. Doctor autofix keeps
+its warning while retirements are deferred and supplies `cas index code` to retry;
+it reports the symbol index fixed only after deferred work and errors are clear.
+
 ### cas-src close surfaces
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.

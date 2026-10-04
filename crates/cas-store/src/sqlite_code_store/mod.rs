@@ -159,9 +159,9 @@ impl SqliteCodeStore {
     /// `code_symbols.file_path` is NOT byte-identical to what the indexer
     /// passed — most consequentially, an absolute path loses its leading `/`.
     /// Any reader joining on those columns must normalize its probe the same
-    /// way, which is why this is `pub(crate)` rather than private (cas-0562:
+    /// way, which is why this is public rather than private (cas-0562:
     /// the history↔symbol join silently matched nothing until it did).
-    pub(crate) fn normalize_path(path: &str) -> String {
+    pub fn normalize_path(path: &str) -> String {
         let path = path.trim();
         // Strip leading ./
         let path = path.strip_prefix("./").unwrap_or(path);

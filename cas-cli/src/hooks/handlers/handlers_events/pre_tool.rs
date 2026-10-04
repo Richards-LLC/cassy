@@ -2699,7 +2699,11 @@ fn factory_shell_variable_values(
             continue;
         };
         if is_shell_variable_name(name) {
-            values.insert(name.to_string(), vec![value.to_string()]);
+            // Shell assignments expand their RHS using values already bound:
+            // `R=/artifacts; P=$R/task; mkdir -p $P` must not leave `$R`
+            // inside the target. Unknown values still remain unresolved.
+            let expanded = expand_factory_shell_word(value, &values);
+            values.insert(name.to_string(), expanded);
         }
     }
 

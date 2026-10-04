@@ -84,11 +84,12 @@ library; integration into existing policy callers belongs to follow-up tasks.
 
 ```bash
 cas jev files --glob 'cas-cli/src/**/*.rs' --questions @questions.json
+cas jev files --glob 'scripts/*.sh' --rev main --offset 50 --questions @questions.json
 cas jev files --path docs --recursive --max-files 10 --max-bytes 8192 --questions @questions.json --advisory
 ```
 
 The MCP equivalent is `{action:"files", paths:["docs"], recursive:true,
-max_files:10, max_bytes:8192, questions, advisory:true}`; `globs` is an array of
+max_files:10, max_bytes:8192, offset:0, rev:"main", questions, advisory:true}`; `globs` is an array of
 quoted project-relative patterns. Paths/globs may be combined. Globs support
 `**` recursively; directory paths include immediate files unless `recursive`
 is true. Paths resolve relative to the project containing `.cas`, rather than
@@ -108,25 +109,43 @@ Git/Cassy internals are also excluded from walking.
 `max_files` defaults to 50 and accepts 1–50 matching candidates (including
 candidates later skipped); overlapping selectors are deduplicated. Selection
 is deterministic by path. `limit_reached:true` reports more matches than the
-cap or scan deadline exhaustion. Empty matches return an empty list. Explicit
+cap or scan deadline exhaustion. Resume with the returned `next_offset` as
+`offset` (CLI: `--offset`), keeping selectors and revision unchanged. Offsets
+count matching candidates, including those subsequently skipped. A null
+`next_offset` means selection is exhausted. Working-tree pages assume files
+stay unchanged; use `rev` to pin a sweep. If scanning times out before the
+requested offset, narrow the selectors rather than treating an empty page
+as complete. Empty matches return an empty list. Explicit
 ignored, missing, refused and unreadable paths have skip reasons. No ignored
 file is read to classify it. Binaries (NUL-containing/non-UTF-8 prefixes) and
 non-regular files are skipped. Classification inspects only the capped prefix.
 
 `max_bytes` defaults to 24 KiB and accepts 1–128 KiB. Reads stop after cap + 1
-bytes; over-cap text is truncated at a UTF-8 boundary and ends with
-`[Jev: file truncated at byte cap]`. The marker is additional to the byte cap.
+bytes. An over-cap text file returns `status:"incomplete", truncated:true`
+and a reason, with no answers and no Jev call. A truncated prefix cannot prove
+absence; increase `max_bytes` or supply a smaller complete input. This
+abstention applies to every question type, in both strict and advisory modes.
 Questions are validated before reading/evaluation. All file calls and scanning
 share a 45-second deadline, each request also bounded by 15 seconds.
 
-For each accepted file, only code reads its content and sends
+Optional `rev` (CLI: `--rev`) resolves a Git commit once. Paths, directories
+and globs select its tree, including files missing from the checkout; blob
+reads stay capped and never follow symlinks or checkout filters. The response
+returns the resolved `revision`; use that SHA on subsequent pages. Ignore
+rules come from `.gitignore` and `.ignore` at that revision rather than dirty
+checkout rules. Secret path refusals still apply. Missing revision paths are
+reported as `missing at revision`, distinct from unreadable blobs. Without
+`rev`, existing working-tree ignore rules and reads remain in use.
+
+For each accepted complete file, only code reads its content and sends
 `{path, content}` as state to Jev. The agent receives compact JSON:
 
 ```json
 {"files":[{"status":"available","path":"src/example.rs","truncated":false,"model":"jev-1.13.0","answers":{"urgent":{"type":"noul","noul":0.1}},"usage":{"input_tokens":123,"output_tokens":20}},{"status":"skipped","path":".env.local","reason":"secret path"}],"limit_reached":false}
 ```
 
-Available rows preserve typed probabilities/confidence. No content/state is
+Available rows preserve typed probabilities/confidence. Incomplete rows have
+no answers; do not treat them as negative evidence. No content/state is
 returned. Advisory failures are `{status:"unavailable",path,reason}` rows;
 strict failures return an error after logging the attempted files. Every file
 call uses the existing hash-only decision log (`cli:jev.files` or

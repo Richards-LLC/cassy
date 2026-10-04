@@ -241,6 +241,14 @@ fleet. Supervisors keep their own credentials and configuration.
 
 ## Testing
 
+### Task lease release
+
+`task action=release` lets a live registered supervisor release a worker's
+lease and records the supervisor identity in lease history. Other callers
+may release only their own lease; `force=true` does not grant that authority.
+Releasing an InProgress task returns it to Open and clears its assignee.
+AwaitingMerge retains its delivery state, including when no active lease remains.
+
 ### MCP mutation timeout receipts
 
 The MCP response budget is 55 seconds; timeout diagnostics report the measured

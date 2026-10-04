@@ -2826,6 +2826,28 @@ async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_
     assert!(worker_path.join("README").is_file(), "the worktree is kept");
 }
 
+/// GH #1098: a delivered, parked task alone must not block a context reset.
+#[tokio::test]
+async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-1098")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "parked-worker");
+    register_codex_worker_at(&env, "parked-worker", "session-1098", &worker_path);
+    let mut task = Task::new("cas-parked1098".into(), "Delivered task".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("parked-worker".into());
+    env.task_store().add(&task).unwrap();
+    let mut req = factory_req("clear_context");
+    req.target = Some("parked-worker".into());
+    let result = env.service.factory_request(Parameters(req)).await
+        .expect("a clean pushed worker with only parked work can reset");
+    assert!(get_text(&result).contains("recycle"));
+    assert_eq!(env.spawn_queue().peek(10).unwrap()[0].action, cas_store::SpawnAction::Recycle);
+    let after = env.task_store().get(&task.id).unwrap();
+    assert_eq!(after.status, task.status);
+    assert_eq!(after.assignee, task.assignee);
+}
+
 /// cas-a622: unsaved work still refuses a recycle, and the refusal names what
 /// to do instead of suggesting a `force=true` that recycling never honours.
 #[tokio::test]

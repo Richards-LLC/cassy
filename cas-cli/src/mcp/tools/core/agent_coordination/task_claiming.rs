@@ -359,7 +359,33 @@ impl CasCore {
         // Get the registered agent ID (matches how claim works)
         let agent_id = self.get_agent_id()?;
 
-        match agent_store.release_lease(&req.task_id, &agent_id) {
+        // GH #1098: a registered live supervisor can return a worker's
+        // task to the pool without waiting for its exhausted conversation.
+        // Environment roles and force=true do not grant this authority.
+        let is_live_supervisor = agent_store.get(&agent_id).is_ok_and(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
+        });
+        let release_result = if is_live_supervisor {
+            agent_store
+                .release_lease_for_task(
+                    &req.task_id,
+                    &format!("Supervisor release requested by {agent_id}"),
+                )
+                .and_then(|released| {
+                    if released {
+                        Ok(())
+                    } else {
+                        Err(cas_store::StoreError::NotFound(format!(
+                            "No active lease found for task {}",
+                            req.task_id
+                        )))
+                    }
+                })
+        } else {
+            agent_store.release_lease(&req.task_id, &agent_id)
+        };
+
+        match release_result {
             Ok(()) => {
                 let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
@@ -414,7 +440,12 @@ impl CasCore {
                 // still be in a non-open state from a dead session. Flip it
                 // back to Open with an audit note rather than surfacing the
                 // raw "no lease" error to the caller.
-                let err_str = e.to_string();
+                // The store represents ownership refusal as Parse; report
+                // its actual diagnostic without claiming malformed input.
+                let err_str = match &e {
+                    cas_store::StoreError::Parse(message) => message.clone(),
+                    _ => e.to_string(),
+                };
                 let is_not_found = err_str.contains("No active lease found");
 
                 if is_not_found {
@@ -460,7 +491,7 @@ impl CasCore {
 
                 Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!("Failed to release task: {e}")),
+                    message: Cow::from(format!("Failed to release task: {err_str}")),
                     data: None,
                 })
             }

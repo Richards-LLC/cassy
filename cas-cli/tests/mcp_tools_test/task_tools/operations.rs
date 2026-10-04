@@ -4042,6 +4042,63 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
 //     updated status.
 // ============================================================================
 
+// GH #1098: release authorization comes from the registered caller, not
+// CAS_AGENT_ROLE; releasing another worker must keep its lease accounting honest.
+#[tokio::test]
+async fn test_release_worker_lease_as_registered_supervisor_cas_35af() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_as(&mut env, AgentRole::Supervisor);
+    let cas_dir = temp.path().join(".cas");
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let worker = Agent::new_with_role("release-worker".into(), "worker".into(), AgentRole::Worker);
+    agents.register(&worker).unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = Task::new("cas-release1098".into(), "Supervisor release".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    task.assignee = Some(worker.name.clone());
+    tasks.add(&task).unwrap();
+    assert!(agents.try_claim(&task.id, &worker.id, 600, None).unwrap().is_success());
+
+    service.cas_task_release(Parameters(TaskReleaseRequest {
+        task_id: task.id.clone(), force: None,
+    })).await.expect("registered supervisor may release a worker's lease");
+
+    let after = tasks.get(&task.id).unwrap();
+    assert_eq!(after.status, cas::types::TaskStatus::Open);
+    assert_eq!(after.assignee, None);
+    assert!(agents.get_lease(&task.id).unwrap().is_none());
+    assert_eq!(agents.get(&worker.id).unwrap().active_tasks, 0);
+    let history = agents.get_lease_history(&task.id, Some(10)).unwrap();
+    assert_eq!(history[0].event_type, "released");
+    assert!(history[0].reason.as_deref().unwrap().contains("Supervisor"));
+}
+
+#[tokio::test]
+async fn test_release_foreign_lease_refusal_uses_registered_role_cas_35af() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_as(&mut env, AgentRole::Worker);
+    // A forged environment role must not grant supervisor release authority.
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let cas_dir = temp.path().join(".cas");
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let worker = Agent::new_with_role("other-release-worker".into(), "other-worker".into(), AgentRole::Worker);
+    agents.register(&worker).unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = Task::new("cas-foreign1098".into(), "Foreign lease".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    task.assignee = Some(worker.name.clone());
+    tasks.add(&task).unwrap();
+    assert!(agents.try_claim(&task.id, &worker.id, 600, None).unwrap().is_success());
+
+    let error = service.cas_task_release(Parameters(TaskReleaseRequest {
+        task_id: task.id.clone(), force: Some(true),
+    })).await.expect_err("worker may not release another agent's lease");
+    assert!(error.message.contains("not owned"), "{error:?}");
+    assert!(!error.message.contains("parse error"), "ownership refusal is not a parse failure: {error:?}");
+    assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee);
+    assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, worker.id);
+}
+
 #[tokio::test]
 async fn test_release_active_started_task_resets_status_to_open_and_ready() {
     let mut test_env = TestEnvGuard::temp_home();

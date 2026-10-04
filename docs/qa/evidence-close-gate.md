@@ -74,6 +74,19 @@ can configure interaction globs for their TUI modules; an empty list restores
 terminal-qa for all output matches. The ledger's freshness and real-build PASS
 checks still apply, and web/journey bundles and skip-marker gates are unchanged.
 
+A supervisor `qa_waive` bound to the exact delivered SHA satisfies the ledger
+and terminal receipt tier on worker re-close. It does not waive web bundles or
+unexplained test skip/focus markers; a waiver for another tip does not apply.
+
+A fresh ledger may instead contain a deployed check with verdict `DEFERRED`,
+label `deployed-verification`, and evidence cell
+`deferred: deployed-verification owner=<registered supervisor id or unique name>`.
+The close handler validates the owner's registered supervisor role and records
+`POST-DEPLOY OBLIGATION` with the full delivered SHA, ledger path, row and owner.
+The row remains deferred, never PASS. The delivery can park and close after its
+ordinary merge gates without waiting for a deployed PASS. Terminal rendering
+still requires its separate terminal-qa receipt unless explicitly waived.
+
 Where the diff comes from:
 
 - **First close** (not yet merged): `merge-base(parent, factory/<worker>)..factory/<worker>`.

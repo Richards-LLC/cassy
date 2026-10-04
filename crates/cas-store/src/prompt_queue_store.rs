@@ -3638,10 +3638,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      WHERE q.id = ?
                        AND q.target <> 'all_workers'
                        AND q.source <> 'all_workers'
-               AND NOT (lower(q.target) = 'operator' AND (
-                   COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
-                   OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
-               ))
+                       AND NOT (lower(q.target) = 'operator' AND (
+                           COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
+                           OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
+                       ))
                        AND q.source NOT LIKE 'lifecycle:%'
                        AND q.source NOT LIKE 'lifecycle-wake:%'
                        AND q.factory_session = ?

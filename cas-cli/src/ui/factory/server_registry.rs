@@ -46,9 +46,10 @@ const LOG_DIR: &str = "logs";
 /// How long to wait for the launcher shell to publish the server's pid.
 const PID_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Grace between SIGTERM and SIGKILL on [`stop`].
+/// Grace before checking that the launched workload survived startup.
 const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Grace between SIGTERM and SIGKILL on [`stop`].
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Lifecycle state of a registry entry.
@@ -593,7 +594,11 @@ fn start_inner(
     // The launcher publishing $! proves only that a process was forked.
     // Wait briefly before promising that the workload is actually alive.
     std::thread::sleep(STARTUP_GRACE);
-    if liveness(&record) != ServerLiveness::Live {
+    let alive = match &record.docker {
+        Some(docker) => docker.is_running(&record.cwd),
+        None => Ok(liveness(&record) == ServerLiveness::Live),
+    };
+    if !matches!(alive, Ok(true)) {
         let cleanup = stop_with_scope_ops(cas_root, &record, scope_ops).err();
         let mut record = record;
         record.state = ServerState::Dead;
@@ -603,10 +608,14 @@ fn start_inner(
         let log = record.log_path.as_ref().unwrap();
         let detail = log_tail(log).unwrap_or_else(|error| format!("could not read log: {error}"));
         return Err(io::Error::other(format!(
-            "server '{}' failed during startup grace; see {}\n{}{}",
+            "server '{}' failed during startup grace; see {}\n{}{}{}",
             record.name,
             log.display(),
             detail,
+            alive
+                .err()
+                .map(|error| format!("\nworkload liveness could not be confirmed: {error}"))
+                .unwrap_or_default(),
             cleanup
                 .map(|error| format!("\ncleanup could not be confirmed: {error}"))
                 .unwrap_or_default(),

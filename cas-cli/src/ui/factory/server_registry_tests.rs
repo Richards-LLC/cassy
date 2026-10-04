@@ -749,7 +749,9 @@ stop)
   kill "$(cat '{pid}')"
   printf '%s' "$3" > '{stopped}'
   ;;
-inspect) printf 'false\n' ;;
+inspect)
+  if [ -f '{stopped}' ]; then printf 'false\n'; else printf 'true\n'; fi
+  ;;
 esac
 "#, pid=daemon_pid.display(), stopped=stopped.display())).unwrap();
     fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();

@@ -44,7 +44,9 @@ factory action=server_start command="npm run dev" cwd=apps/web port=5173 task_id
 
 Output and errors go to a log file, never to your terminal — the path is in the response.
 A process that exits during the 250 ms startup grace reports failure with the log tail.
-This checks process liveness; it does not prove the server is ready to accept connections.
+For direct Docker runs this checks the tracked container, so a detached client may exit
+while its running container is accepted. Other commands use process liveness.
+This does not prove the server is ready to accept connections.
 
 ### Choosing `shared`
 

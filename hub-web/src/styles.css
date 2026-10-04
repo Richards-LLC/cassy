@@ -4413,3 +4413,41 @@ button.chip:disabled { cursor: default; }
 .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { position: static; grid-column: 3; grid-row: 2; justify-self: end; translate: none; }
 .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]:has(.conversation-marks)::after { content: none; }
 .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] .conversation-marks::before { content: "Enter ↵" / ""; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
+
+/* S6: the phone enters its own fleet from the conversation, then takes one action. */
+#conversation-fleet { display: none; }
+.fleet-action-sheet { color: var(--text-hi); }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  #conversation-fleet { display: flex; align-items: center; justify-content: center; min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font-size: var(--fs-lg); }
+  .fleet-sheet-open > .conversation-context .context-section:not([data-section="progress"]) { display: none; }
+  .fleet-sheet-open > .conversation-context .context-section[data-section="progress"] { display: block; }
+  .conversation-shell.fleet-sheet-open > .conversation-context { padding-bottom: calc(var(--space-16) + var(--space-6)); height: var(--keyboard-viewport-height, 100dvh); box-sizing: border-box; }
+  .status-task { position: relative; }
+  .status-task > .status-line, .status-task > .status-task-title { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+  .status-task > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
+  .fleet-action-sheet { position: fixed; inset: auto 0 calc(100dvh - var(--keyboard-viewport-height, 100dvh)); margin: 0; width: 100%; max-width: none; max-height: calc(var(--keyboard-viewport-height, 100dvh) - var(--space-4)); box-sizing: border-box; overflow-y: auto; padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane) var(--radius-pane) 0 0; background: var(--sheet-bg); box-shadow: var(--lift-strong); }
+  .fleet-action-sheet::backdrop { background: var(--overlay-backdrop); }
+  .fleet-action-sheet--picker { height: var(--keyboard-viewport-height, 100dvh); max-height: var(--keyboard-viewport-height, 100dvh); border-radius: 0; }
+  .fleet-sheet-close { display: flex; align-items: center; justify-content: center; margin: 0 0 var(--space-2) auto; min-width: var(--rail-item-min); min-height: var(--rail-item-min); border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--text-hi); font-size: var(--fs-lg); cursor: pointer; }
+  .fleet-action-sheet .fleet-ops-menu, .fleet-action-sheet .fleet-ops-confirm, .fleet-action-sheet .fleet-ops-preview { width: 100%; min-width: 0; box-sizing: border-box; border: 0; padding: 0; background: var(--color-transparent); }
+  .fleet-action-sheet .fleet-ops-confirm-actions, .fleet-action-sheet .fleet-ops-panel { display: grid; width: 100%; }
+  .fleet-action-sheet .fleet-ops-item, .fleet-action-sheet .fleet-ops-confirm-actions button, .fleet-action-sheet select, .fleet-action-sheet input, .fleet-action-sheet .fleet-ops-add-go { width: 100%; min-height: var(--rail-item-min); box-sizing: border-box; }
+  .fleet-action-sheet .fleet-ops-picker { align-content: start; }
+  .fleet-action-sheet input { font: var(--weight-regular) var(--fs-md)/var(--line-ui) var(--font-ui); padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane); background: var(--bg-panel); color: var(--text-hi); }
+  #fleet-phone-undo { position: fixed; z-index: 30; left: var(--space-3); right: var(--space-3); bottom: calc(100dvh - var(--keyboard-viewport-height, 100dvh) + var(--space-16) + env(safe-area-inset-bottom)); margin: 0; border: var(--line-width) solid var(--line-strong); box-shadow: var(--lift); }
+}
+@media (forced-colors: active) {
+  .fleet-action-sheet, #fleet-phone-undo { border-color: Highlight; }
+  .fleet-sheet-close:focus-visible { outline: 2px solid Highlight; }
+}
+
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .conversation-heading { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
+  #conversation-fleet { grid-column: 3; grid-row: 1; }
+  #conversation-terminal { grid-column: 4; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto auto; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-fleet { grid-column: 4; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-terminal { grid-column: 5; }
+  .fleet-ops-picker { display: grid; gap: var(--space-3); }
+  .fleet-ops-picker [role="menuitem"][hidden], .fleet-ops-no-match[hidden], #fleet-phone-undo[hidden] { display: none; }
+}

@@ -1,4 +1,5 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
+import type { Route } from "@playwright/test";
 import { SCOPES, type FleetWorld } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
@@ -145,3 +146,145 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await page.keyboard.press("Escape");
   });
 });
+
+
+for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+  test.describe(`phone ${viewport.width}×${viewport.height}`, () => {
+  test.use({ viewport });
+  test(`HUB-J17 phone ${viewport.width}×${viewport.height}: operate each machine from its own conversation`, journeyPart, async ({ page, journey }) => {
+    const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"], studio: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet(), [OTTER]: fleet() } });
+    const rail = page.locator("#status-view");
+    const agent = (name: string) => rail.locator(".status-agent", { hasText: name });
+    const task = (id: string) => rail.locator(".status-task", { hasText: id });
+    const actions = () => page.locator("dialog.fleet-action-sheet");
+    const result = page.locator("#fleet-ops-announcer");
+    const openFleet = () => page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+    const target = async (control: ReturnType<typeof page.getByRole>) => {
+      await expect(control).toBeVisible(); const box = await control.boundingBox();
+      expect(box!.width).toBeGreaterThanOrEqual(44); expect(box!.height).toBeGreaterThanOrEqual(44);
+    };
+    await journey.stage("Open the first machine's Tasks & progress sheet", async () => {
+      await journey.open();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
+      await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toBeVisible();
+      await expect(agent("swift-lark-3")).toBeVisible();
+    });
+    await journey.stage("Add a worker on the first machine", async () => {
+      await rail.getByRole("button", { name: "Add worker…" }).click();
+      await expect(actions()).toBeVisible();
+      const add = actions().getByRole("button", { name: "Add", exact: true });
+      await target(add); await expect(add).toBeFocused(); await page.keyboard.press("Enter");
+      await expect(agent("amber-heron-11")).toBeVisible();
+      expect(hub.operations.at(-1)).toMatchObject({ machine: "atlas", session: PELICAN, body: { op: { kind: "spawn_workers", count: 1 } }, status: 200 });
+    });
+    await journey.stage("Pause then use Undo by keyboard above the composer", async () => {
+      const trigger = agent("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" });
+      await target(trigger); await trigger.click(); await target(actions().getByRole("menuitem", { name: "Pause" }));
+      await actions().getByRole("menuitem", { name: "Pause" }).click(); await expect(result).toHaveText("swift-lark-3 paused.");
+      await page.getByRole("button", { name: "Close tasks & progress" }).click();
+      const undo = page.getByRole("button", { name: "Undo", exact: true }); await target(undo);
+      await undo.focus(); await page.keyboard.press("Enter"); await expect(result).toHaveText("swift-lark-3 resumed.");
+      await openFleet();
+    });
+    await journey.stage("Search the full-height Assign and Focus pickers", async () => {
+      await task("cas-2001").getByRole("button", { name: "Actions for cas-2001" }).click();
+      await actions().getByRole("menuitem", { name: "Assign…" }).click();
+      const search = actions().getByRole("searchbox", { name: "Search assign cas-2001 to" });
+      await expect(search).toBeFocused(); await search.fill("absent"); await expect(actions().getByRole("status")).toContainText("No matches");
+      await search.fill("quiet"); await expect(actions().getByRole("menuitem")).toHaveCount(1);
+      await actions().getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click(); await expect(result).toHaveText("cas-2001 assigned to quiet-owl-7.");
+      await rail.getByRole("button", { name: "Focus epic…" }).click();
+      await expect(actions().getByRole("searchbox", { name: "Search focus epic" })).toBeFocused();
+      await page.keyboard.press("Escape"); await expect(rail.getByRole("button", { name: "Focus epic…" })).toBeFocused();
+    });
+    await journey.stage("Switch conversation and confirm Stop on the second machine", async () => {
+      await page.getByRole("button", { name: "Close tasks & progress" }).click();
+      await page.getByRole("button", { name: "‹ Conversations" }).click();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click(); await openFleet();
+      await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
+      await actions().getByRole("menuitem", { name: "Stop…" }).click();
+      await expect(actions().getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(actions().getByRole("button", { name: "Stop", exact: true })).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(actions().getByRole("button", { name: "Close actions", exact: true })).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(actions().getByRole("button", { name: "Stop", exact: true })).toBeFocused();
+      await target(actions().getByRole("button", { name: "Stop", exact: true }));
+      await actions().getByRole("button", { name: "Stop", exact: true }).click(); await expect(result).toHaveText("brisk-wren-9 stopped.");
+      await expect(agent("brisk-wren-9")).toHaveCount(0);
+      expect(hub.operations.at(-1)).toMatchObject({ machine: "studio", session: OTTER, body: { op: { kind: "shutdown_workers", workers: ["brisk-wren-9"] } }, status: 200 });
+    });
+    await journey.stage("A stale Stop explains the second machine's changed generation", async () => {
+      await agent("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
+      await actions().getByRole("menuitem", { name: "Stop…" }).click();
+      // Double-only: change backend generation AFTER the operator read this row.
+      (hub as any).options.fleet[OTTER].agents.find((worker: any) => worker.name === "swift-lark-3").generation = 3;
+      await actions().getByRole("button", { name: "Stop", exact: true }).click();
+      await expect(result).toHaveText("swift-lark-3 already restarted."); await expect(agent("swift-lark-3")).toBeVisible();
+      expect(hub.operations.at(-1)).toMatchObject({ machine: "studio", session: OTTER, status: 409 });
+      await page.keyboard.press("Escape"); await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeFocused();
+    });
+  });
+  });
+}
+
+// M12: retaining async ownership through a real shell replacement must also
+// retain usable navigation. A conversation notice cannot cover Terminal's
+// return button, and a Terminal completion keeps its inline Undo/refusal.
+for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+  test.describe(`phone Terminal return ${viewport.width}×${viewport.height}`, () => {
+    test.use({ viewport });
+    for (const disposition of ["success", "stale"] as const) {
+      test(`HUB-J17 phone Terminal return ${viewport.width}×${viewport.height}: pending and ${disposition} remain usable`, journeyPart, async ({ page, journey }) => {
+        await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+        let request: Route | undefined;
+        await page.route("**/v1/sessions/*/operations", async (route) => { request = route; });
+        const agent = () => page.locator(".status-agent", { hasText: "swift-lark-3" });
+        const terminal = () => page.locator(".conversation-heading").getByRole("button", { name: "Terminal view", exact: true });
+        const returning = () => page.locator("#conversation-return");
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await journey.stage("M12 pending notice permits normal Terminal return without losing ownership", async () => {
+          await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+          await agent().getByRole("button", { name: "Actions for swift-lark-3" }).click();
+          await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Pause" }).click();
+          await expect.poll(() => Boolean(request)).toBe(true);
+          await page.getByRole("button", { name: "Close tasks & progress" }).click();
+          await expect(page.locator("#fleet-phone-undo")).toHaveText("Pausing swift-lark-3…");
+          await terminal().click();
+          await expect(page.locator("#fleet-phone-undo")).toHaveCount(0);
+          await expect(agent().locator(".fleet-ops-progress")).toHaveText("Pausing swift-lark-3…");
+          await expect(returning()).toBeVisible();
+          // The real hit target, not force-clicking through the fixed overlay.
+          expect(await returning().evaluate((button) => {
+            const box = button.getBoundingClientRect();
+            return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+          })).toBe(true);
+          await returning().click();
+          await expect(page.locator("#fleet-phone-undo")).toHaveText("Pausing swift-lark-3…");
+        });
+        await journey.stage("M12 Terminal completion preserves inline feedback and keyboard return", async () => {
+          await terminal().click();
+          const body = request!.request().postDataJSON();
+          await request!.fulfill(disposition === "success"
+            ? { json: { op_id: body.op_id, outcome: { kind: "set_worker_hold" } } }
+            : { status: 409, json: { error: "stale", current: { worker: "swift-lark-3", generation: 3 } } });
+          const text = disposition === "success" ? "swift-lark-3 paused." : "swift-lark-3 already restarted.";
+          await expect(page.locator("#fleet-ops-announcer")).toHaveText(text);
+          await expect(page.locator("#fleet-phone-undo")).toHaveCount(0);
+          await expect(agent().locator(".fleet-ops-progress")).toHaveCount(0);
+          if (disposition === "success") await expect(page.locator("#status-view .fleet-ops-undo")).toContainText(text);
+          else await expect(agent().locator(".fleet-ops-note")).toHaveText(text);
+          await returning().focus();
+          await expect(returning()).toBeFocused();
+          await page.keyboard.press("Enter");
+          await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeVisible();
+          await expect(page.locator("#fleet-phone-undo")).toContainText(text);
+          if (disposition === "success") await expect(page.locator("#fleet-phone-undo").getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+        });
+      });
+    }
+  });
+}

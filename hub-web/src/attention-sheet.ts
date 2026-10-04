@@ -21,9 +21,10 @@ const LABEL_RAIL = "Conversation context";
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]';
 
 /** Give or take the sheet's modal semantics; `modal` false restores the plain rail. */
-export function applySheetSemantics(shell: HTMLElement | null, modal: boolean): void {
+export function applySheetSemantics(shell: HTMLElement | null, modal: boolean, section: "attention" | "progress" = "attention"): void {
   if (!shell) return;
   shell.classList.toggle("attention-sheet-open", modal);
+  shell.classList.toggle("fleet-sheet-open", modal && section === "progress");
   const rail = shell.querySelector<HTMLElement>(":scope > .conversation-context");
   for (const child of shell.children) {
     if (child === rail) continue;
@@ -33,7 +34,7 @@ export function applySheetSemantics(shell: HTMLElement | null, modal: boolean): 
   if (modal) {
     rail.setAttribute("role", "dialog");
     rail.setAttribute("aria-modal", "true");
-    rail.setAttribute("aria-label", LABEL_OPEN);
+    rail.setAttribute("aria-label", section === "progress" ? "Tasks & progress" : LABEL_OPEN);
   } else {
     rail.removeAttribute("role");
     rail.removeAttribute("aria-modal");
@@ -77,7 +78,7 @@ export function sheetFocusables(sheet: HTMLElement, visible: (node: HTMLElement)
  */
 export function layerAboveSheet(sheet: HTMLElement): boolean {
   const document = sheet.ownerDocument;
-  return [...document.querySelectorAll<HTMLElement>("dialog[open], [aria-modal='true']")].some((layer) => layer !== sheet && !sheet.contains(layer) && !layer.contains(sheet));
+  return [...document.querySelectorAll<HTMLElement>("dialog[open], [aria-modal='true']")].some((layer) => layer !== sheet && (layer.tagName === "DIALOG" || (!sheet.contains(layer) && !layer.contains(sheet))));
 }
 
 /**

@@ -13095,6 +13095,18 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              call — fix the task's assignee/epic-branch fields and retry."
         ));
     }
+    if task.deliverables.integration_batch.is_some() {
+        fetch_parent_branch_best_effort(repo_path, parent_branch);
+        if let Some(squash) = super::super::integration_batch::landed_batch_squash(
+            task, repo_path, parent_branch, attribution.receipt,
+        ) {
+            let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
+            return MergeStateGateOutcome::ProceedWithNote(format!(
+                "integration batch {}@{} delivered {} as target-reachable squash {}; exact changed-path final blobs and modes match (supervisor {}).",
+                batch.branch, batch.tip, batch.delivered_head, squash, batch.supervisor_id
+            ));
+        }
+    }
     // cas-e33f (GH #1004): after a handoff the assignee (often the
     // supervisor) has no factory branch; measure the branch that actually
     // holds the task's commits.
@@ -14714,7 +14726,7 @@ pub(crate) fn effective_close_work_target(
 /// Never a bare `"main"` literal: tier 3 is a real resolution (configured
 /// value or git-detected default), not a guess, so this function always
 /// returns a genuine answer rather than silently guessing.
-fn resolve_close_parent_branch(
+pub(crate) fn resolve_close_parent_branch(
     worktree_parent_branch: Option<String>,
     epic_branch: Option<String>,
     epic_work_target_branch: Option<String>,

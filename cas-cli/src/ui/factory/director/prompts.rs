@@ -934,6 +934,12 @@ fn classify_merge_alert_observations(
 /// Fetch and re-read both the local epic ref and `origin/<epic>`, then
 /// classify the factory branch against immutable commit IDs. Unknown Git
 /// state never masquerades as zero.
+fn staged_integration_batch(repo_root: &Path, task_id: &str) -> bool {
+    crate::store::open_task_store(&repo_root.join(".cas"))
+        .and_then(|store| Ok(store.get(task_id)?))
+        .is_ok_and(|task| task.status == TaskStatus::AwaitingMerge && task.deliverables.integration_batch.is_some())
+}
+
 fn fresh_merge_alert_git_evidence(
     repo_root: &Path,
     task_id: &str,
@@ -980,6 +986,9 @@ pub fn check_merge_alert_freshness(
     };
     if task.task_status != TaskStatus::AwaitingMerge {
         return MergeAlertFreshness::NotApplicable;
+    }
+    if staged_integration_batch(repo_root, &task.task_id) {
+        return MergeAlertFreshness::Stale;
     }
     let factory_branch = format!("factory/{worker}");
     let (_, epic_branch, _) = resolve_merge_target_for_task(data, &task.task_id);
@@ -1038,6 +1047,9 @@ pub fn check_merge_alert_freshness_for_task(
         return MergeAlertFreshness::Stale;
     };
     if task.status != TaskStatus::AwaitingMerge {
+        return MergeAlertFreshness::Stale;
+    }
+    if staged_integration_batch(repo_root, task_id) {
         return MergeAlertFreshness::Stale;
     }
     let Some(worker) = task.assignee.clone() else {

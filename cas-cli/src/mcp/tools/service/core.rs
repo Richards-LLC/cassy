@@ -314,6 +314,7 @@ impl CasService {
                 target_branch.as_deref(),
                 req.confirm_warning.unwrap_or(false),
                 req.delivery_mode.as_deref(),
+                req.merged_into.as_deref(),
             )
             .await
     }

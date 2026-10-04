@@ -297,3 +297,20 @@ The cas-c3b8 contract addendum (#32364) exempts `journey` bundles from the
 polish keys. The supervisor ruled that the exemption covers only the release
 journey evaluation. A journey bundle without polish proof cannot close a
 delivery, so the gate keeps requiring polish.
+
+### Integration batches
+
+A registered supervisor can stage a parked delivery with
+`task action=update id=<task> merged_into=<batch-ref>@<exact-tip-sha>`.
+Cassy requires the pinned batch to contain the delivery's recorded anchor and
+content, and records its base, tip and supervisor. `task show` and `epic_status`
+expose the staged receipt; staged tasks stop generating worker-idle merge nags.
+An empty `merged_into` clears staging. Reopening invalidates the receipt.
+
+Ordinary close recognizes a target-reachable squash whose own first-parent
+changed-path set, final blobs and modes exactly match `batch-base..batch-tip`.
+The squash parent may differ from the batch base. Missing or extra paths and
+changed final content fail containment. The original delivery anchor remains
+its QA and executable-hook identity; batch containment supplies merge evidence
+and does not waive review or evidence requirements. `commit_receipt=<squash>`
+can name the integration explicitly; it does not require `supervisor_override`.

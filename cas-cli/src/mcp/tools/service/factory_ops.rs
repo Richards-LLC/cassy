@@ -6480,6 +6480,13 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
+        if !staged.is_empty() {
+            report.push_str("\nStaged integration batches (awaiting target merge):\n");
+            for (task, batch) in staged {
+                report.push_str(&format!("- {}: {}@{} (delivery {})\n", task.id, batch.branch, batch.tip, batch.delivered_head));
+            }
+        }
         // cas-619f: independent QA state per child, including supervisor
         // waivers and their reasons. Omitted entirely when no child has a
         // round, so epics without user-facing work render as before.

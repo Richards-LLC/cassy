@@ -272,6 +272,48 @@ mod tests {
     }
 
     #[test]
+    fn cas_b97f_long_snapshot_line_has_a_bounded_actionable_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.name", "fixture"]);
+        git(repo, &["config", "user.email", "fixture@example.test"]);
+        let path = "opencode_projection.snapshot.json";
+        std::fs::write(repo.join(path), "before\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let changed = format!("worker prompt {}", "x".repeat(3100));
+        std::fs::write(repo.join(path), format!("{changed}\n")).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "long prompt"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        let paths = vec![path.to_string()];
+        let check = |tip: &str, notes: &str| rejection(repo, Some(&base), Some(tip), &paths, notes, "cas-b97f", "mcp__cs__");
+        let error = check(&tip, "").unwrap();
+        let note_json = error.split_once("notes=").unwrap().1.split_once("`, then retry close.").unwrap().0;
+        let note: String = serde_json::from_str(note_json).unwrap();
+        let note = note.replace("<why this change is correct>", "worker contract matches the reviewed launch behavior");
+        let config = crate::config::Config::default();
+        crate::mcp::tools::traffic_limits::validate_note_body("decision", &note, &config, "cas-b97f", false, false, None)
+            .expect("the refusal's suggested approval must fit the actual note gate");
+        assert!(note.chars().count() < 1500);
+        assert!(note.contains("sha256:"), "{note}");
+        assert!(error.chars().count() < 1500, "refusal must remain bounded");
+        assert!(check(&tip, &note).is_none());
+        assert!(check(&tip, &note.replace(path, "other.snap")).is_some());
+        let no_reason = note.split_once(" — worker contract").unwrap().0.to_string() + " — ";
+        assert!(check(&tip, &no_reason).is_some());
+        // Change only the end of a >3000-char line: a prefix-only approval
+        // would incorrectly accept this new delivery.
+        std::fs::write(repo.join(path), format!("{changed}new tail\n")).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "different reviewed state"]);
+        let stale_tip = git(repo, &["rev-parse", "HEAD"]);
+        assert!(check(&stale_tip, &note).is_some(), "stale digest must not approve another line");
+    }
+
+    #[test]
     fn opencode_projection_is_a_snapshot_but_arbitrary_json_is_not() {
         assert!(is_snapshot(
             "crates/cas-mux/src/opencode_projection.snapshot.json"

@@ -45,6 +45,7 @@ mod file_change;
 mod lease;
 mod loop_state;
 mod preview;
+pub mod factory_worker_policy;
 mod prompt;
 pub mod provenance;
 mod public_identifier;

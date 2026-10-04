@@ -90,6 +90,8 @@ impl Config {
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
+            "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),
+            "factory.supervisor_only_env" => Some(factory.worker_policy.supervisor_only_env.join(",")),
             "factory.message_max_chars_escalation" => {
                 Some(factory.message_max_chars_escalation.to_string())
             }

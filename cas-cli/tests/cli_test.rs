@@ -381,9 +381,17 @@ fn cas_0f22_cli_does_not_use_home_socket_rendezvous_as_project_store() {
         .arg("status")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no Cassy store here; run `cas init`"));
-    assert!(!ipc.join("cas.db").exists(), "lookup must not initialize the IPC directory");
-    assert!(!project.join(".cas").exists(), "lookup must not initialize the project");
+        .stderr(predicate::str::contains(
+            "no Cassy store here; run `cas init`",
+        ));
+    assert!(
+        !ipc.join("cas.db").exists(),
+        "lookup must not initialize the IPC directory"
+    );
+    assert!(
+        !project.join(".cas").exists(),
+        "lookup must not initialize the project"
+    );
 }
 
 #[test]

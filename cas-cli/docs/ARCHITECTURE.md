@@ -6,6 +6,11 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 
 **Core data flow**: CLI commands and MCP tool calls both go through the store trait abstractions in `cas-cli/src/store/`, which wraps `cas-store` (SQLite) with notification and sync layers.
 
+Automatic project-store discovery requires `.cas/cas.db` or `.cas/config.toml`
+as a file, or the legacy `.cas/entries/` directory. `~/.cas/` also holds factory
+IPC sockets; a socket-only directory is skipped during ancestor and worktree
+discovery. An explicit `CAS_ROOT` still selects any existing directory.
+
 ### cas-cli (main crate) — `cas-cli/src/`
 
 | Module | Purpose |

@@ -217,7 +217,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // This is the most reliable detection for factory workers because it
     // doesn't depend on git state or .git file parsing.
     if let Some(cas_dir) = find_cas_root_from_cas_worktree(start) {
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
     }
@@ -226,7 +226,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // This takes priority because worktrees should share the main repo's .cas.
     if let Some(main_repo) = find_main_repo_from_worktree(start) {
         let cas_dir = main_repo.join(".cas");
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
     }
@@ -236,7 +236,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // This also keeps a nested `.cas/` from shadowing the project store.
     if let Ok(repo_root) = find_git_toplevel(start) {
         let cas_dir = repo_root.join(".cas");
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
         return Err(CasError::NotInitialized);
@@ -247,7 +247,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
 
     loop {
         let cas_dir = current.join(".cas");
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
 
@@ -257,6 +257,16 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     }
 
     Err(CasError::NotInitialized)
+}
+
+/// A `.cas` directory can be only a factory IPC rendezvous. Automatic
+/// discovery requires a SQLite/config file or the legacy markdown store;
+/// an explicit CAS_ROOT remains authoritative without these markers.
+fn has_project_store_marker(cas_dir: &Path) -> bool {
+    cas_dir.is_dir()
+        && (cas_dir.join("cas.db").is_file()
+            || cas_dir.join("config.toml").is_file()
+            || cas_dir.join("entries").is_dir())
 }
 
 /// Detect if `start` is inside a Cassy factory worktree (.cas/worktrees/<name>/)
@@ -282,7 +292,7 @@ fn find_cas_root_from_cas_worktree(start: &Path) -> Option<PathBuf> {
                 return None;
             }
         }
-        if cas_dir.join("cas.db").exists() || cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Some(cas_dir);
         }
     }
@@ -1012,7 +1022,10 @@ mod tests {
         let _socket = std::os::unix::net::UnixListener::bind(ipc.join("factory.sock")).unwrap();
         #[cfg(not(unix))]
         std::fs::write(ipc.join("factory.sock"), "IPC fixture").unwrap();
-        assert!(matches!(find_cas_root_from(&project), Err(CasError::NotInitialized)));
+        assert!(matches!(
+            find_cas_root_from(&project),
+            Err(CasError::NotInitialized)
+        ));
 
         // A rejected rendezvous must not stop the non-Git ancestor walk.
         let outer = temp.path().join(".cas");
@@ -1040,7 +1053,10 @@ mod tests {
         std::fs::create_dir_all(root.join("cas.db")).unwrap();
         std::fs::create_dir(root.join("config.toml")).unwrap();
         std::fs::write(root.join("entries"), "not a directory").unwrap();
-        assert!(matches!(find_cas_root_from(temp.path()), Err(CasError::NotInitialized)));
+        assert!(matches!(
+            find_cas_root_from(temp.path()),
+            Err(CasError::NotInitialized)
+        ));
     }
 
     #[test]
@@ -1051,7 +1067,10 @@ mod tests {
         let worker = root.join("worktrees/worker/src");
         std::fs::create_dir_all(&worker).unwrap();
         assert!(find_cas_root_from_cas_worktree(&worker).is_none());
-        assert!(matches!(find_cas_root_from(&worker), Err(CasError::NotInitialized)));
+        assert!(matches!(
+            find_cas_root_from(&worker),
+            Err(CasError::NotInitialized)
+        ));
         std::fs::write(root.join("cas.db"), "").unwrap();
         assert_eq!(find_cas_root_from_cas_worktree(&worker), Some(root.clone()));
         assert_eq!(find_cas_root_from(&worker).unwrap(), root);
@@ -1066,17 +1085,42 @@ mod tests {
         std::fs::create_dir(&main).unwrap();
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
-                .arg("-C").arg(&main).args(args).output().unwrap();
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .output()
+                .unwrap();
             assert!(output.status.success(), "fixture git failed: {output:?}");
         };
         git(&["init", "--quiet"]);
-        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-              "commit", "--quiet", "--allow-empty", "-m", "fixture"]);
-        git(&["worktree", "add", "--quiet", "-b", "fixture-worker", worker.to_str().unwrap()]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+        git(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "fixture-worker",
+            worker.to_str().unwrap(),
+        ]);
         let root = main.canonicalize().unwrap().join(".cas");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("factory.sock"), "IPC fixture").unwrap();
-        assert!(matches!(find_cas_root_from(&worker), Err(CasError::NotInitialized)));
+        assert!(matches!(
+            find_cas_root_from(&worker),
+            Err(CasError::NotInitialized)
+        ));
         std::fs::write(root.join("config.toml"), "").unwrap();
         assert_eq!(find_cas_root_from(&worker).unwrap(), root);
     }
@@ -1086,7 +1130,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let explicit = temp.path().join("unmarked");
         std::fs::create_dir(&explicit).unwrap();
-        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", Some(explicit.to_str().unwrap()))]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_ROOT", Some(explicit.to_str().unwrap()))]);
         assert_eq!(find_cas_root_from(temp.path()).unwrap(), explicit);
         assert_eq!(find_cas_root().unwrap(), explicit);
     }

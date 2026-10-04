@@ -3177,10 +3177,9 @@ impl FactoryDaemon {
     /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
     /// this daemon's own transport put in front of `recipient`.
     ///
-    /// Best-effort by design, like every other observability write on the
-    /// delivery path: a receipt that fails to persist costs a redelivery, and a
-    /// delivery failed over a receipt costs the message. The former is
-    /// recoverable and the latter is not, so this never propagates.
+    /// Retain the pre-write channel claim after a successful handoff. This
+    /// helper also repairs historical success paths without weakening another
+    /// channel's receipt. The reservation itself must succeed before sending.
     fn record_transport_receipt(
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
@@ -3190,7 +3189,7 @@ impl FactoryDaemon {
             queue,
             prompt_id,
             recipient,
-            cas_store::SurfacingSource::TransportDelivered,
+            cas_store::SurfacingSource::TransportClaimed,
         );
     }
 
@@ -5418,7 +5417,7 @@ impl FactoryDaemon {
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
                 "{}\n{}\n{}",
-                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
+                crate::mcp::tools::service::agent_search_system::message::first_message_provenance(
                     &queued
                 ),
                 crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
@@ -6032,6 +6031,10 @@ impl FactoryDaemon {
                         fail_notes.push(format!("{name}: pane not ready"));
                         continue;
                     }
+                    if !queue.claim_recipient_transport(queued.id, name)? {
+                        succeeded += 1;
+                        continue;
+                    }
                     let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
                         // cas-ab80: urgent Codex recipients still need the shared
                         // `Message from <sender>:` framing (same contract as
@@ -6068,6 +6071,9 @@ impl FactoryDaemon {
                         )
                         .await
                     };
+                    if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
+                        queue.release_recipient_transport(queued.id, name)?;
+                    }
                     match inject_result {
                         Ok(cas_mux::InjectOutcome::Delivered) => {
                             succeeded += 1;
@@ -6176,6 +6182,10 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
+                if !queue.claim_recipient_transport(queued.id, &queued.target)? {
+                    // A hook/poll may have won after this pass peeked the row.
+                    continue;
+                }
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. An attached
@@ -6390,6 +6400,7 @@ impl FactoryDaemon {
                                     declines,
                                     "cas-dcf2: normal message exhausted consecutive busy wake declines"
                                 );
+                                queue.release_recipient_transport(queued.id, &queued.target)?;
                                 continue;
                             }
                             Ok(_) => {}
@@ -6457,6 +6468,9 @@ impl FactoryDaemon {
                     }
                 }
                 let inject_result = inject_result.map(|report| report.outcome);
+                if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
+                    queue.release_recipient_transport(queued.id, &queued.target)?;
+                }
                 match inject_result {
                     Ok(cas_mux::InjectOutcome::Delivered) => {
                         success = true;
@@ -11214,6 +11228,62 @@ mod tests {
     /// that drops the receipt write from a success arm fails here rather than
     /// in production three releases later.
     #[test]
+    fn cas_27ad_stale_transport_snapshot_loses_to_hook_or_poll() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        for hook_wins in [true, false] {
+            let id = store.enqueue_with_session("worker", "supervisor", "single message", "session").unwrap();
+            let snapshot = store.peek_for_targets(&["supervisor"], Some("session"), 10).unwrap();
+            assert!(snapshot.iter().any(|row| row.id == id));
+            let claimed = if hook_wins {
+                store.surface_unseen_for_recipient("supervisor", Some("session"), 10)
+            } else {
+                store.poll_unseen_for_recipient("supervisor", Some("session"), 10)
+            }.unwrap();
+            assert_eq!(claimed.len(), 1);
+            assert!(!store.claim_recipient_transport(id, "supervisor").unwrap());
+            assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
+            let rendered = crate::hooks::handlers::handlers_middle::factory_inbox::render_surfaced(&claimed);
+            assert!(rendered.contains("s first]"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn cas_27ad_atomic_channel_race_and_failed_transport_release() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        for _ in 0..8 {
+            let id = store.enqueue_with_session("worker", "supervisor", "race", "session").unwrap();
+            let peer = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let transport_start = barrier.clone();
+            let thread = std::thread::spawn(move || {
+                transport_start.wait();
+                peer.claim_recipient_transport(id, "supervisor").unwrap()
+            });
+            barrier.wait();
+            let hook = store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap();
+            assert_eq!(usize::from(thread.join().unwrap()) + hook.len(), 1);
+            assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
+        }
+        let id = store.enqueue_with_session("worker", "supervisor", "retry", "session").unwrap();
+        assert!(store.claim_recipient_transport(id, "supervisor").unwrap());
+        store.release_recipient_transport(id, "supervisor").unwrap();
+        assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
+        store.release_recipient_transport(id, "supervisor").unwrap();
+        assert!(!store.claim_recipient_transport(id, "supervisor").unwrap());
+        let broadcast = store.enqueue_with_session("supervisor", "all_workers", "peers", "session").unwrap();
+        assert!(store.claim_recipient_transport(broadcast, "worker-a").unwrap());
+        assert!(!store.claim_recipient_transport(broadcast, "worker-a").unwrap());
+        assert_eq!(store.poll_unseen_for_recipient("worker-b", Some("session"), 10).unwrap().len(), 1);
+        assert!(!store.claim_recipient_transport(broadcast, "worker-b").unwrap());
+    }
+
+    #[test]
     fn cas_27ad_transport_receipt_excludes_hook_and_poll() {
         use cas_store::PromptQueueStore;
         let temp = tempfile::TempDir::new().unwrap();
@@ -11228,7 +11298,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_delivered_row_stays_pollable_until_the_recipient_claims_it() {
+    fn a_legacy_transport_receipt_stays_pollable_until_the_recipient_claims_it() {
         use cas_store::PromptQueueStore;
         let temp = tempfile::TempDir::new().unwrap();
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
@@ -11245,8 +11315,8 @@ mod tests {
             "precondition: before delivery the row is genuinely unread"
         );
 
-        // Exactly the pair the daemon's success arms now perform.
-        FactoryDaemon::record_transport_receipt(&store, id, "zealous-fox-95");
+        // Legacy handoffs remain recoverable during an upgrade.
+        store.record_recipient_surfaced(id, "zealous-fox-95", cas_store::SurfacingSource::TransportDelivered).unwrap();
         store.mark_transport_delivered(id).unwrap();
 
         assert_eq!(
@@ -11572,16 +11642,16 @@ mod tests {
             queue
                 .count_unseen_for_recipient("worker-1", Some("factory-1"))
                 .unwrap(),
-            2,
-            "transport receipts are provisional for both equivalent rows"
+            0,
+            "both transports own their first delivery claims"
         );
         assert_eq!(
             queue
                 .poll_unseen_for_recipient("worker-1", Some("factory-1"), 20)
                 .unwrap()
                 .len(),
-            2,
-            "inbox_poll must recover both delivered bodies"
+            0,
+            "inbox_poll must not duplicate either delivered body"
         );
         assert!(
             queue

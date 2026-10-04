@@ -7046,4 +7046,27 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         assert!(merge.text.starts_with(&observed.detail()));
         assert!(!merge.text.contains("is idle while task"));
     }
+
+    #[test]
+    fn cas_4b26f_staged_batch_suppresses_merge_nag() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = dir.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut task = cas_types::Task::new("cas-b401".into(), "Batch delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let mut value = serde_json::to_value(task).unwrap();
+        value["deliverables"]["integration_batch"] = serde_json::json!({
+            "branch":"batch/X", "tip":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "delivered_head":"cccccccccccccccccccccccccccccccccccccccc",
+            "supervisor_id":"supervisor", "recorded_at":chrono::Utc::now()
+        });
+        store.add(&serde_json::from_value(value).unwrap()).unwrap();
+        let event = DirectorEvent::WorkerIdle { worker:"worker".into(), active_task:Some(ActiveLeaseSummary {
+            task_id:"cas-b401".into(), task_title:"Batch delivery".into(), task_status:TaskStatus::AwaitingMerge,
+            close_rejected_reason:Some("MERGE REQUIRED".into()), pending_qa:None,
+        }) };
+        assert!(matches!(check_merge_alert_freshness(&event, &make_data(0), dir.path()), MergeAlertFreshness::Stale));
+    }
 }

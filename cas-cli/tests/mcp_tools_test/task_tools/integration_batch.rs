@@ -161,26 +161,3 @@ async fn cas_4b26f_non_supervisor_cannot_stage_batch() {
     assert!(!task.notes.contains("integration batch"));
 }
 
-#[tokio::test]
-async fn cas_4b26f_staged_batch_suppresses_merge_nag() {
-    use cas::ui::factory::director::{
-        DirectorEvent, MergeAlertFreshness, check_merge_alert_freshness,
-    };
-    let mut env = TestEnvGuard::temp_home();
-    let (temp, _, supervisor, head) = fixture(&mut env);
-    stage(supervisor, &head).await.unwrap();
-    let event = DirectorEvent::WorkerIdle {
-        worker: "test-agent".into(),
-        active_task: Some(cas_factory::ActiveLeaseSummary {
-            task_id: TASK.into(),
-            task_title: "Batch delivery".into(),
-            task_status: TaskStatus::AwaitingMerge,
-            close_rejected_reason: Some("MERGE REQUIRED".into()),
-            pending_qa: None,
-        }),
-    };
-    assert!(matches!(
-        check_merge_alert_freshness(&event, &cas_factory::DirectorData::default(), temp.path()),
-        MergeAlertFreshness::Stale
-    ));
-}

@@ -739,6 +739,16 @@ is not parked for merge. A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
 
+A live registered supervisor may repair an incorrect execution methodology with
+`task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`
+to clear it, or supply a valid replacement methodology. Switching to `no-code`
+requires a portable `external_ref`, either stored or supplied in the same update.
+This correction invalidates the old verification cycle and reopens the task with
+its assignee, delivery anchors and immutable merge facts preserved. It supports
+task-only investigation proofs as well as merged code deliveries. Ordinary close
+proofs still apply: declaring `no-code` never hides delivered code. Correct only
+one of methodology, work target, proof targets or risk in each update.
+
 A passed or waived independent QA round remains bound to its reviewed tip after
 a squash merge. Close proves that the integrated receipt carries the same trees
 over the aggregate delivered paths, or the same stable aggregate patch ID.

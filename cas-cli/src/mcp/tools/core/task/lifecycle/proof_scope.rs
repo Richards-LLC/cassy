@@ -26,6 +26,14 @@ pub(crate) enum ProofScopeOperation<'a> {
     },
 }
 
+pub(crate) fn methodology_recovery_command(task_id: &str, methodology: &str) -> String {
+    let proof = if methodology == "no-code" { " external_ref=<portable-reference>" } else { "" };
+    format!(
+        "{}task action=update id={task_id} proof_scope_fix=true execution_note={methodology:?}{proof} reason=\"correct recorded execution methodology\"",
+        crate::mcp::tools::core::guidance::supervisor_prefix(),
+    )
+}
+
 impl ProofScopeOperation<'_> {
     fn locked_fields(self) -> Vec<&'static str> {
         if matches!(self, Self::ParentLink) {
@@ -303,6 +311,14 @@ pub(crate) fn guard_task_proof_scope(
     if locked_fields.is_empty() {
         return Ok(());
     }
+    let methodology_remedy = if let ProofScopeOperation::TaskUpdate { request, .. } = operation
+        && let Some(methodology) = request.execution_note.as_deref()
+        && crate::mcp::tools::types::validate_execution_note(Some(methodology)).is_ok()
+    {
+        format!(" To correct the methodology, ask a live registered supervisor to run `{}`. This invalidates the old proof cycle and reopens the task; ordinary close proofs still apply.", methodology_recovery_command(&task.id, methodology))
+    } else {
+        String::new()
+    };
     match exact_proof_locks_scope(cas_root, task) {
         Ok(false) => Ok(()),
         Ok(true) => {
@@ -325,16 +341,18 @@ pub(crate) fn guard_task_proof_scope(
                 }
             };
             Err(reject(format!(
-                "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only. {}",
+                "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only. {}{}",
                 task.id,
                 locked_fields.join(", "),
                 remediation,
+                methodology_remedy,
             )))
         }
         Err(reason) => Err(reject(format!(
-            "DELIVERY PROOF SCOPE LOCKED: task {} exact proof state is inconsistent ({reason}). Refusing review-relevant update fields [{}] rather than reusing or invalidating ambiguous proof.",
+            "DELIVERY PROOF SCOPE LOCKED: task {} exact proof state is inconsistent ({reason}). Refusing review-relevant update fields [{}] rather than reusing or invalidating ambiguous proof.{}",
             task.id,
-            locked_fields.join(", ")
+            locked_fields.join(", "),
+            methodology_remedy,
         ))),
     }
 }

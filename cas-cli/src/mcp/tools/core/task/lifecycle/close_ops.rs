@@ -89,7 +89,7 @@ fn delivery_audit_text_is_portable(value: &str) -> bool {
     delivery_audit_text_rejection(value).is_none()
 }
 
-fn delivery_audit_text_rejection(value: &str) -> Option<&'static str> {
+pub(crate) fn delivery_audit_text_rejection(value: &str) -> Option<&'static str> {
     if value.chars().any(char::is_control) {
         return Some("contains control characters");
     }
@@ -145,7 +145,8 @@ fn no_code_close_proof<'a>(
     }
     if has_reviewable_code {
         return Err(format!(
-            "⚠️ NO-CODE INTENT VIOLATED\n\nTask {task_id} declares execution_note=no-code, but its task-attributed branch history contains reviewable code changes. Clear or change execution_note and complete the ordinary review/merge gates; no-code cannot be used to bypass code delivery proof."
+            "⚠️ NO-CODE INTENT VIOLATED\n\nTask {task_id} declares execution_note=no-code, but its task-attributed branch history contains reviewable code changes. Ask a live registered supervisor to run `{}` to clear the methodology and invalidate the old proof cycle, then complete the ordinary review/merge gates; no-code cannot be used to bypass code delivery proof.",
+            super::proof_scope::methodology_recovery_command(task_id, ""),
         ));
     }
     Ok(Some(proof_reference))
@@ -196,10 +197,9 @@ fn prepare_no_code_close_metadata(
                 && stored != "no-code"
             {
                 return Err(format!(
-                    "INLINE NO-CODE INTENT REJECTED: Task {} already records execution_note={stored}. task close may set no-code only when execution_note is empty or already no-code; it cannot replace a reviewed methodology. Preserve the stored methodology and satisfy its close gates. If it is wrong after verification, ask a registered supervisor to run `{}task action=reopen id={}`, then update it before a fresh proof cycle.",
+                    "INLINE NO-CODE INTENT REJECTED: Task {} already records execution_note={stored}. task close may set no-code only when execution_note is empty or already no-code; it cannot replace a reviewed methodology. Ask a live registered supervisor to run `{}` to correct it and invalidate the old proof cycle, then retry close with portable proof; delivered code still requires ordinary delivery gates.",
                     task.id,
-                    crate::mcp::tools::core::guidance::supervisor_prefix(),
-                    task.id
+                    super::proof_scope::methodology_recovery_command(&task.id, "no-code"),
                 ));
             }
             validated
@@ -2599,6 +2599,14 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
 #[cfg(test)]
 mod risk_proof_tests {
     use super::*;
+
+    #[test]
+    fn no_code_delivery_rejection_names_methodology_repair_cas_1b74() {
+        let error = no_code_close_proof("cas-delivered", Some("no-code"), Some("artifact:report"), true)
+            .expect_err("code must never close using a no-code declaration");
+        assert!(error.contains("NO-CODE INTENT VIOLATED"), "{error}");
+        assert!(error.contains("proof_scope_fix=true execution_note=\"\""), "{error}");
+    }
 
     fn failed_run_log(head: &str, base: &str, command: &str, failed: &[&str]) -> String {
         let mut log = format!(

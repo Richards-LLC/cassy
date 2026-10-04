@@ -522,7 +522,7 @@ pub struct TaskRequest {
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED, strict widening of proof_targets, or correction of a mistaken risk declaration on a merged or close-ready delivery (including an authenticated worktree_merge observation on the task WorkTarget). Accepts AwaitingMerge and InProgress proof cycles. For a task already marked execution_note=no-code, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
+        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED, strict widening of proof_targets, correction of a mistaken risk declaration on a merged or close-ready delivery, or execution_note methodology correction (empty string clears it). Change one correction kind per call. Methodology corrections also support task-only investigation proofs; switching to no-code requires portable external_ref, supplied inline or already stored. Accepts AwaitingMerge, InProgress and Blocked proof cycles. Preserves immutable merged deliveries. For an already-no-code task, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics. Ordinary close proofs still apply."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,

@@ -2624,6 +2624,42 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn generic_identifier_overlap_does_not_warn_cas_b8ad() {
+        let mut env = TestEnvGuard::temp_home();
+        for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
+            "CAS_AGENT_NAME", "CAS_ROOT", "CAS_CLONE_PATH", "CAS_SESSION_ID"] {
+            env.remove(key);
+        }
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.cas_task_create(Parameters(described_task_request(
+            "Publish batch one release notes",
+            "Do NOT repeat before/after report. Describe payment chargeback rollout with ledger audit.",
+        ))).await.unwrap();
+        core.cas_task_create(Parameters(described_task_request(
+            "Publish batch two release notes",
+            "Do NOT repeat before/after report. Describe search ranking rollout with cursor query.",
+        ))).await.expect("NOT and before/after are generic prose, not shared identifiers");
+    }
+
+    #[tokio::test]
+    async fn generic_only_title_overlap_requires_near_identity_cas_b8ad() {
+        let mut env = TestEnvGuard::temp_home();
+        for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
+            "CAS_AGENT_NAME", "CAS_ROOT", "CAS_CLONE_PATH", "CAS_SESSION_ID"] {
+            env.remove(key);
+        }
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.cas_task_create(Parameters(plain_task_request("Publish release notes report"))).await.unwrap();
+        core.cas_task_create(Parameters(plain_task_request("Publish release notes report before")))
+            .await.expect("generic-only title overlap needs a higher threshold");
+        let warning = core.cas_task_create(Parameters(plain_task_request("Publish release notes report")))
+            .await.expect_err("an exact duplicate title still warns");
+        assert!(warning.message.contains("DUPLICATE TASK WARNING"), "{warning:?}");
+    }
+
+    #[tokio::test]
     async fn duplicate_description_warning_flags_the_gh679_pair() {
         let temp = TempDir::new().expect("temporary project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

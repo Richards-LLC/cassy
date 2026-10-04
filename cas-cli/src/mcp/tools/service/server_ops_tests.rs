@@ -118,6 +118,22 @@ fn a_stopped_entry_keeps_its_own_state_label() {
 }
 
 #[test]
+fn cas_ced2_server_rows_are_single_line_and_bounded() {
+    let mut server = record("web", true);
+    server.name = "界\n".repeat(2000);
+    server.id = "界\r".repeat(2000);
+    server.command = "界\t".repeat(2000);
+    server.cwd = std::path::PathBuf::from("界\n".repeat(2000));
+    server.owner_worker = Some("界\n".repeat(2000));
+    server.owner_task = Some("界\n".repeat(2000));
+    let ports: Vec<_> = (1..=1000).collect();
+    let line = render_server_line(&server, ServerLiveness::Live, &ports);
+    assert_eq!(line.lines().count(), 1, "a server must occupy one line");
+    assert!(line.len() <= 1024, "row emitted {} bytes", line.len());
+    assert!(!line.contains(['\r', '\t']));
+}
+
+#[test]
 fn default_names_come_from_the_command_and_are_filename_safe() {
     assert_eq!(default_server_name("npm run dev"), "npm-run");
     assert_eq!(default_server_name("cargo watch -x run"), "cargo-watch");

@@ -58,6 +58,51 @@ impl TestEnv {
             Err(error) => format!("MCP_ERROR: {error}"),
         }
     }
+
+    async fn factory_list(&self, fields: serde_json::Value) -> String {
+        let mut req = fields;
+        req["action"] = "server_list".into();
+        let req: CoordinationRequest = serde_json::from_value(req).unwrap();
+        match self.service.factory(Parameters(req)).await {
+            Ok(result) => result.content.iter().filter_map(|c| match &c.raw {
+                RawContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }).collect::<Vec<_>>().join("\n"),
+            Err(error) => format!("MCP_ERROR: {error}"),
+        }
+    }
+
+    fn seed_history(&self) {
+        let dir = self.cas_root.join("factory-servers");
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..125 {
+            let record = serde_json::json!({
+                "id": format!("srv-history-{i}"),
+                "name": format!("history-{i}"),
+                "command": "界\n".repeat(2000),
+                "cwd": "/repo/app",
+                "pid": u32::MAX,
+                "owner_task": if i % 2 == 0 { "cas-a" } else { "cas-b" },
+                "owner_worker": if i % 3 == 0 { "alice" } else { "bob" },
+                "owner_agent_id": if i % 3 == 0 { "agent-alice" } else { "agent-bob" },
+                "shared": false,
+                "started_at": "2026-01-01T00:00:00Z",
+                "state": if i == 0 { "running" } else { "stopped" },
+                "ended_at": chrono::Utc::now(),
+            });
+            std::fs::write(dir.join(format!("srv-history-{i}.json")), record.to_string()).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn cas_ced2_server_list_defaults_to_running_without_history() {
+    let env = TestEnv::new();
+    env.seed_history();
+    let listed = env.factory_list(serde_json::json!({})).await;
+    assert!(listed.contains("No servers currently running"), "{listed}");
+    assert!(!listed.contains("history-"), "historical entries leaked into the default listing");
+    assert!(listed.len() < 1024, "default listing emitted {} bytes", listed.len());
 }
 
 fn extract_id(output: &str) -> String {

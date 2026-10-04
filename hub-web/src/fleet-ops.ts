@@ -372,7 +372,9 @@ export class FleetOpsState {
 
   failed(rowKey: string, action: FleetAction, failure: { stale?: boolean; current?: Readonly<Record<string, unknown>>; detail?: string }): void {
     this.pending.delete(rowKey);
-    const text = failure.stale ? staleMessage(action, failure.current) : `Could not ${action.label.replace(/…$/, "").toLowerCase()}: ${failure.detail ?? "the machine refused it"}.`;
+    const detail = failure.detail ?? "the machine refused it";
+    const suffix = /[.!?…]\s*$/.test(detail) ? "" : ".";
+    const text = failure.stale ? staleMessage(action, failure.current) : `Could not ${action.label.replace(/…$/, "").toLowerCase()}: ${detail}${suffix}`;
     this.notes.set(rowKey, { text, tone: failure.stale ? "stale" : "error" });
     this.announcement = text;
   }

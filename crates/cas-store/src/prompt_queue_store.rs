@@ -1130,6 +1130,10 @@ pub enum SurfacingSource {
     /// receipt and claim the row, while a stronger surfacing receipt stays
     /// terminal.
     TransportDelivered,
+    /// The daemon won the atomic per-recipient claim before handing the body
+    /// to its transport. Other channels must skip this row (cas-27ad).
+    /// This is a delivery reservation, not recipient acknowledgement.
+    TransportClaimed,
     /// The daemon observed the recipient consume the delivered body, through
     /// an urgent wake probe or a transcript-backed turn reaction. Unlike a
     /// transport handoff, this is a strong claim and retires the row from the
@@ -1143,6 +1147,7 @@ impl SurfacingSource {
             Self::InboxPoll => "inbox_poll",
             Self::HookSurfaced => "hook_surfaced",
             Self::TransportDelivered => "transport_delivered",
+            Self::TransportClaimed => "transport_claimed",
             Self::ObservedWake => "observed_wake",
         }
     }
@@ -1152,6 +1157,7 @@ impl SurfacingSource {
             "inbox_poll" => Some(Self::InboxPoll),
             "hook_surfaced" => Some(Self::HookSurfaced),
             "transport_delivered" => Some(Self::TransportDelivered),
+            "transport_claimed" => Some(Self::TransportClaimed),
             "observed_wake" => Some(Self::ObservedWake),
             _ => None,
         }
@@ -1882,6 +1888,15 @@ pub trait PromptQueueStore: Send + Sync {
         recipient: &str,
         source: SurfacingSource,
     ) -> Result<()>;
+
+    /// Atomically reserve the first delivery channel for a recipient.
+    /// Hook and poll drains share this receipt table. A stale daemon snapshot
+    /// cannot send after either drain won; broadcasts reserve each peer alone.
+    /// Fail closed on store errors. Only release when no body was handed off.
+    fn claim_recipient_transport(&self, prompt_id: i64, recipient: &str) -> Result<bool>;
+
+    /// Release a failed transport reservation without touching a stronger receipt.
+    fn release_recipient_transport(&self, prompt_id: i64, recipient: &str) -> Result<()>;
 
     /// Record what the daemon's wake nudge did for this row (cas-7a01).
     ///
@@ -4009,6 +4024,41 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     Utc::now().to_rfc3339(),
                     source.as_str()
                 ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn claim_recipient_transport(&self, prompt_id: i64, recipient: &str) -> Result<bool> {
+        if recipient.trim().is_empty() {
+            return Err(StoreError::Other("transport claim requires a recipient".into()));
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let changed = conn.execute(
+                "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
+                 SELECT id, ?, ?, 'transport_claimed' FROM prompt_queue
+                 WHERE id = ? AND (target = ? OR target = 'all_workers')
+                   AND (target = 'all_workers' OR acked_at IS NULL
+                        OR acked_via IS NULL OR acked_via <> 'explicit_ack')
+                   AND (highest_stage IS NULL OR highest_stage NOT IN
+                        ('dropped', 'suppressed', 'abandoned'))
+                 ON CONFLICT(prompt_id, recipient) DO UPDATE SET
+                    seen_at = excluded.seen_at, source = excluded.source
+                 WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
+                params![recipient, Utc::now().to_rfc3339(), prompt_id, recipient],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn release_recipient_transport(&self, prompt_id: i64, recipient: &str) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "DELETE FROM prompt_queue_recipient_seen
+                 WHERE prompt_id = ? AND recipient = ? AND source = 'transport_claimed'",
+                params![prompt_id, recipient],
             )?;
             Ok(())
         })

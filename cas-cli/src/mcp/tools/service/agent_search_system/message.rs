@@ -153,6 +153,14 @@ pub(crate) fn queued_message_provenance_at(
     )
 }
 
+/// A successful shared delivery claim is the first handoff for this recipient.
+/// Queue processing timestamps describe transport work, not earlier model delivery.
+pub(crate) fn first_message_provenance(message: &cas_store::QueuedPrompt) -> String {
+    let mut claimed = message.clone();
+    claimed.processed_at = None;
+    queued_message_provenance(&claimed)
+}
+
 pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> String {
     queued_message_provenance_at(message, chrono::Utc::now())
 }

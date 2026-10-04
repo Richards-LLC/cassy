@@ -364,6 +364,37 @@ fn test_not_initialized_error() {
 }
 
 #[test]
+fn cas_0f22_cli_does_not_use_home_socket_rendezvous_as_project_store() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join(".test-home");
+    let ipc = home.join(".cas");
+    let project = home.join("uninitialized-project");
+    std::fs::create_dir_all(&ipc).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    #[cfg(unix)]
+    let _socket = std::os::unix::net::UnixListener::bind(ipc.join("factory.sock")).unwrap();
+    #[cfg(not(unix))]
+    std::fs::write(ipc.join("factory.sock"), "IPC fixture").unwrap();
+    cas_cmd(temp.path())
+        .env_remove("CAS_CLONE_PATH")
+        .current_dir(&project)
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no Cassy store here; run `cas init`",
+        ));
+    assert!(
+        !ipc.join("cas.db").exists(),
+        "lookup must not initialize the IPC directory"
+    );
+    assert!(
+        !project.join(".cas").exists(),
+        "lookup must not initialize the project"
+    );
+}
+
+#[test]
 fn test_config_list_offline_no_auth_required() {
     let temp = TempDir::new().unwrap();
 

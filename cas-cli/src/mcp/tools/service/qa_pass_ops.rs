@@ -556,11 +556,20 @@ impl CasService {
                 pass.head8()
             )
         };
-        self.enqueue_qa_notice(
-            &pass.implementer_agent_id,
-            &format!("qa-verdict:{}:implementer", pass.id),
-            &reason,
-        );
+        if let Some(owner) = self.inner.open_task_store().ok()
+            .and_then(|store| store.get(&pass.task_id).ok())
+            .and_then(|task| task.assignee)
+        {
+            let target = self.inner.open_agent_store().ok()
+                .and_then(|store| store.get(&owner).ok())
+                .map(|agent| agent.name)
+                .unwrap_or(owner);
+            self.enqueue_qa_notice(
+                &target,
+                &format!("qa-verdict:{}:implementer", pass.id),
+                &reason,
+            );
+        }
         self.enqueue_qa_notice(
             "supervisor",
             &format!("qa-verdict:{}", pass.id),

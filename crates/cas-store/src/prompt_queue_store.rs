@@ -1984,7 +1984,7 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Resolve daemon QA rejection notices from the task's current assignee
     /// before roster-based selection. Returns changed rows for daemon cache eviction.
-    fn refresh_qa_rejection_targets(&self, factory_session: &str) -> Result<Vec<i64>>;
+    fn refresh_qa_rejection_targets(&self, factory_session: &str, prompt_id: Option<i64>) -> Result<Vec<i64>>;
 
     /// Peek at pending prompts for specific targets only.
     ///
@@ -4205,8 +4205,64 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(prompts)
     }
 
-    fn refresh_qa_rejection_targets(&self, _factory_session: &str) -> Result<Vec<i64>> {
-        Ok(Vec::new())
+    fn refresh_qa_rejection_targets(&self, factory_session: &str, prompt_id: Option<i64>) -> Result<Vec<i64>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
+            // Join the trusted daemon notice to its durable QA pass, never
+            // infer a task from caller-authored prose or a captured implementer.
+            let routes = {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT q.id, q.target,
+                            CASE WHEN t.status IN ('closed', 'cancelled') THEN NULL
+                                 ELSE COALESCE((SELECT a.name FROM agents a WHERE a.id = t.assignee),
+                                               NULLIF(t.assignee, '')) END AS owner
+                     FROM prompt_queue q
+                     JOIN qa_passes qa ON q.source = 'qa-verdict:' || qa.id || ':implementer'
+                     JOIN tasks t ON t.id = qa.task_id
+                     WHERE q.factory_session = ?1 AND q.origin_kind = 'daemon'
+                       AND (?2 IS NULL OR q.id = ?2)
+                       AND q.processed_at IS NULL AND q.acked_at IS NULL
+                       AND NOT EXISTS (
+                           SELECT 1 FROM prompt_queue_recipient_seen seen
+                           WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                             AND seen.source <> 'transport_delivered'
+                       )",
+                )?;
+                stmt.query_map(params![factory_session, prompt_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+                })?.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let mut changed = Vec::new();
+            for (id, old_target, owner) in routes {
+                match owner {
+                    Some(owner) if owner != old_target => {
+                        tx.execute(
+                            "UPDATE prompt_queue SET target = ?2, wake_gate_declines = 0,
+                                 wake_attempt = NULL, wake_attempt_at = NULL, wake_attempt_detail = NULL,
+                                 next_attempt_at = NULL, delivery_attempts = 0, first_attempt_at = NULL,
+                                 last_pending_reason = NULL, last_pending_detail = NULL
+                             WHERE id = ?1",
+                            params![id, owner],
+                        )?;
+                        changed.push(id);
+                    }
+                    None => {
+                        Self::atomic_stage_stamp_in_tx(&tx, id, DeliveryStage::Suppressed,
+                            AtomicStampOpts {
+                                reason: Some(PendingReason::SupersededStale),
+                                detail: Some("QA rejection withdrawn: task has no current assignee or is terminal"),
+                                set_processed: true, broadcast_attempted: None,
+                                broadcast_succeeded: None, broadcast_failed: None,
+                            })?;
+                        changed.push(id);
+                    }
+                    _ => {}
+                }
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
     }
 
     fn peek_for_targets(

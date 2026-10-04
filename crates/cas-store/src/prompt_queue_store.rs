@@ -3568,12 +3568,19 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let priority_cutoff = cutoff("priority", priority_threshold_secs)?;
         let normal_cutoff = cutoff("normal", normal_threshold_secs)?;
         let stale_cutoff = cutoff("stale TTL", PROMPT_QUEUE_STALE_TTL_SECS)?;
+        // Commander informational turns and pane mirrors need no reply. Keep
+        // untyped legacy rows and explicit asks/blockers monitored; transport
+        // delivery alone is still not a recipient read or acknowledgment.
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue q
              WHERE q.target <> 'all_workers'
                AND q.source <> 'all_workers'
+               AND NOT (lower(q.target) = 'operator' AND (
+                   COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
+                   OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
+               ))
                AND q.source NOT LIKE 'lifecycle:%'
                AND q.source NOT LIKE 'lifecycle-wake:%'
                AND q.factory_session = ?
@@ -3631,6 +3638,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      WHERE q.id = ?
                        AND q.target <> 'all_workers'
                        AND q.source <> 'all_workers'
+               AND NOT (lower(q.target) = 'operator' AND (
+                   COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
+                   OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
+               ))
                        AND q.source NOT LIKE 'lifecycle:%'
                        AND q.source NOT LIKE 'lifecycle-wake:%'
                        AND q.factory_session = ?
@@ -9653,10 +9664,10 @@ mod tests {
                 "commander-mirror:session:agent:turn",
                 now,
                 now,
-                r#"{"message":"pane answer","kind":"answer"}"#,
+                r#"{"message":"pane answer","kind":"ask"}"#,
                 "pane mirror",
                 "phone",
-                "answer",
+                "ask",
             )
             .unwrap()
             .unwrap();
@@ -9734,6 +9745,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
     }
 
     #[test]

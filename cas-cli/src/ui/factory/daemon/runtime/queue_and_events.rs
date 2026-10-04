@@ -206,6 +206,13 @@ fn delivery_stalled_notice(
         .num_seconds()
         .max(0);
     let summary = queued.summary.as_deref().unwrap_or("(no summary)");
+    // Commander is a paired-device recipient, not a factory harness. Keep
+    // transport/read state untouched: an unanswered ask can still stall.
+    let recipient_harness = if queued.target.eq_ignore_ascii_case("operator") {
+        "commander"
+    } else {
+        recipient_harness.backend().name()
+    };
     let delivery_state = report.map_or_else(
         || "delivery state unavailable".to_string(),
         |report| {
@@ -219,7 +226,7 @@ fn delivery_stalled_notice(
         "<system-notice>Delivery stalled: notification_id={}; recipient='{}'; recipient_harness={}; age_secs={}; summary='{}'; delivery_state={}. The recipient has not acknowledged or read this message. Switch to another channel if this is time-critical.</system-notice>",
         queued.id,
         queued.target,
-        recipient_harness.backend().name(),
+        recipient_harness,
         age_secs,
         summary,
         delivery_state,

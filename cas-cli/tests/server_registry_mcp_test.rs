@@ -28,7 +28,7 @@ impl TestEnv {
         std::fs::create_dir_all(&workdir).unwrap();
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing("server-registry-test".to_string());
-        core.open_agent_store()
+        cas::store::open_agent_store(&cas_root)
             .unwrap()
             .register(&cas::types::Agent::new(
                 "server-registry-test".to_string(),
@@ -322,7 +322,10 @@ async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
     bob.factory_session = Some("session-a".into());
     let service = |agent: &Agent| {
         let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
-        core.open_agent_store().unwrap().register(agent).unwrap();
+        cas::store::open_agent_store(&env.cas_root)
+            .unwrap()
+            .register(agent)
+            .unwrap();
         core.set_agent_id_for_testing(agent.id.clone());
         CasService::new(core, None)
     };

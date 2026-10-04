@@ -430,10 +430,10 @@ fn invalid_worker_resource_policy_refuses_launch_before_execution_gh_1047() {
     });
     let worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
     assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
-    let overrides: toml::Value = worker.args.iter()
+    let override_arg = worker.args.iter()
         .find(|arg| arg.starts_with("mcp_servers={"))
-        .expect("dotted name must use a parent table override")
-        .parse().unwrap();
+        .expect("dotted name must use a parent table override");
+    let overrides: toml::Value = toml::from_str(override_arg).unwrap();
     assert_eq!(overrides["mcp_servers"]["server.with.dots"]["enabled"].as_bool(), Some(false));
     assert!(overrides["mcp_servers"].get("server").is_none());
 }

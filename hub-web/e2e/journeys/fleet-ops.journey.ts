@@ -23,6 +23,58 @@ const fleet = (): FleetWorld => ({
   spawnNames: ["amber-heron-11", "copper-fox-2"],
 });
 
+for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as const) {
+  test.describe(`fleet failure copy ${width} ${colorScheme} cas_a348`, () => {
+    test.use({ viewport: { width, height: 844 }, colorScheme });
+    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348`, journeyPart, async ({ page, journey }) => {
+      await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+      const row = page.locator("#status-view .status-agent", { hasText: "swift-lark-3" });
+      const panel = () => width === 390 ? page.locator("dialog.fleet-action-sheet") : row;
+      const result = page.locator("#fleet-ops-announcer");
+      await journey.stage("Open the fleet", async () => {
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        await expect(row).toBeVisible();
+      });
+      await journey.stage("A server failure names the worker and offers a next step", async () => {
+        await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, contentType: "text/html", body: "Internal Server Error" }));
+        await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
+        await panel().getByRole("menuitem", { name: "Stop…" }).click();
+        await panel().getByRole("button", { name: "Stop", exact: true }).click();
+        const text = "Could not stop swift-lark-3: the machine returned an error. Try again.";
+        await expect(result).toHaveText(text);
+        await expect(row.locator(".fleet-ops-note")).toHaveText(text);
+        expect(await row.evaluate((element) => {
+          const trigger = element.querySelector(".fleet-ops-trigger")!.getBoundingClientRect();
+          const range = document.createRange(); range.selectNodeContents(element.querySelector(".fleet-ops-note")!);
+          return Array.from(range.getClientRects()).every((rect) => rect.bottom <= trigger.top || rect.top >= trigger.bottom || rect.right <= trigger.left);
+        }), "the action button does not cover error text").toBe(true);
+        if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
+        await expect(row.locator(".status-chip")).toHaveText("active");
+      });
+      await journey.stage("A connection failure offers connection recovery without diagnostics", async () => {
+        await page.unroute("**/v1/sessions/*/operations");
+        await page.route("**/v1/sessions/*/operations", (route) => route.abort("failed"));
+        await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
+        await panel().getByRole("menuitem", { name: "Pause" }).click();
+        await expect(result).toHaveText("Could not pause swift-lark-3: the machine could not be reached. Check its connection and try again.");
+        await expect(row.locator(".fleet-ops-note")).not.toContainText(/POST|\/v1\/|Failed to fetch|500/);
+        await expect(row.locator(".status-chip")).toHaveText("active");
+      });
+      await journey.stage("A successful retry clears failure feedback and offers Undo", async () => {
+        await page.unroute("**/v1/sessions/*/operations");
+        await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
+        await panel().getByRole("menuitem", { name: "Pause" }).click();
+        await expect(result).toHaveText("swift-lark-3 paused.");
+        await expect(row.locator(".fleet-ops-note")).toHaveCount(0);
+        await expect(row.locator(".status-chip")).toHaveText("held");
+        await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+      });
+    });
+  });
+}
+
 for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`phone fleet feedback ${colorScheme} cas_c2e7`, () => {
     test.use({ viewport: { width: 390, height: 844 }, colorScheme });

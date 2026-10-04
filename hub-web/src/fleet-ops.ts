@@ -409,12 +409,13 @@ export class FleetOpsState {
     this.undo = inverse ? { action: inverse, label: action.done, expiresAt: now + UNDO_WINDOW_MS } : undefined;
   }
 
-  failed(rowKey: string, action: FleetAction, failure: { stale?: boolean; current?: Readonly<Record<string, unknown>>; detail?: string }): void {
+  failed(rowKey: string, action: FleetAction, failure: { stale?: boolean; current?: Readonly<Record<string, unknown>>; detail?: string; subject?: string }): void {
     this.pending.delete(rowKey);
     this.requests.delete(rowKey);
     const detail = failure.detail ?? "the machine refused it";
     const suffix = /[.!?…]\s*$/.test(detail) ? "" : ".";
-    const text = failure.stale ? staleMessage(action, failure.current) : `Could not ${action.label.replace(/…$/, "").toLowerCase()}: ${detail}${suffix}`;
+    const subject = failure.subject ? ` ${failure.subject}` : "";
+    const text = failure.stale ? staleMessage(action, failure.current) : `Could not ${action.label.replace(/…$/, "").toLowerCase()}${subject}: ${detail}${suffix}`;
     this.notes.set(rowKey, { text, tone: failure.stale ? "stale" : "error" });
     this.announcement = text;
   }

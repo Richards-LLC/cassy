@@ -1706,9 +1706,10 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
-    /// Atomically enqueue the one durable sender bounce if the original row is
-    /// still unread; returns its notification ID when it was (or already is)
-    /// created. A read or ack that wins the race cancels the bounce.
+    /// Atomically enqueue one durable notice per recipient stall episode if
+    /// the original is still unread. Only a new notice returns an ID; further
+    /// originals are marked notified without a notice until the recipient reads/acks.
+    /// A read or ack that wins the race cancels the original's bounce.
     fn enqueue_delivery_stalled_bounce(
         &self,
         prompt_id: i64,
@@ -3653,7 +3654,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
             let original = tx
                 .query_row(
-                    "SELECT source, factory_session FROM prompt_queue q
+                    "SELECT source, factory_session, target FROM prompt_queue q
                      WHERE q.id = ?
                        AND q.target <> 'all_workers'
                        AND q.source <> 'all_workers'
@@ -3680,16 +3681,44 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target
                        )",
                     params![prompt_id, factory_session, stale_cutoff],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
                 )
                 .optional()?;
-            let Some((sender, factory_session)) = original else {
+            let Some((sender, factory_session, recipient)) = original else {
                 return Ok(None);
             };
 
             let now = Utc::now().to_rfc3339();
-            let dedupe_key = format!("{DELIVERY_STALLED_BOUNCE_DEDUPE_PREFIX}{prompt_id}");
-            tx.execute(
+            // A durable channel episode ends only when the recipient actually
+            // reads/acks, not when the sender reads this watchdog alert. A PTY
+            // handoff or an in-flight transport claim is not a recipient read.
+            let last_read: Option<String> = tx.query_row(
+                "SELECT MAX(at) FROM (
+                    SELECT seen.seen_at AS at FROM prompt_queue_recipient_seen seen
+                    JOIN prompt_queue q ON q.id = seen.prompt_id
+                    WHERE q.factory_session = ?1 AND q.target = ?2 AND seen.recipient = ?2
+                      AND COALESCE(seen.source, 'inbox_poll') NOT IN ('transport_delivered', 'transport_claimed')
+                    UNION ALL
+                    SELECT acked_at AS at FROM prompt_queue
+                    WHERE factory_session = ?1 AND target = ?2 AND acked_at IS NOT NULL
+                      AND COALESCE(acked_via, 'explicit_ack') <> 'inferred_from_reply'
+                 )",
+                params![factory_session, recipient], |row| row.get(0),
+            )?;
+            let episode = serde_json::to_string(&(&factory_session, &recipient, &last_read))
+                .map_err(|error| StoreError::Parse(error.to_string()))?;
+            let dedupe_key = format!("{DELIVERY_STALLED_BOUNCE_DEDUPE_PREFIX}recipient:{episode}");
+            let (unread, since): (i64, Option<String>) = tx.query_row(
+                "SELECT COUNT(*), MIN(created_at) FROM prompt_queue q
+                 WHERE factory_session = ?1 AND target = ?2 AND acked_at IS NULL
+                   AND COALESCE(highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+                   AND COALESCE(dedupe_key, '') NOT LIKE 'delivery-stalled:%'
+                   AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                       WHERE seen.prompt_id = q.id AND seen.recipient = q.target)",
+                params![factory_session, recipient], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let notice = format!("{notice}\nChannel degraded at first detection: {unread} unread message(s) for {recipient} since {}. Further delivery-stalled notices are paused until the recipient reads or acknowledges a message.", since.as_deref().unwrap_or("unknown"));
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key)
                  VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, ?, 0, ?)",
@@ -3713,7 +3742,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![now, prompt_id],
             )?;
             tx.commit()?;
-            Ok(Some(bounce_id))
+            Ok((inserted > 0).then_some(bounce_id))
         })
     }
 
@@ -9834,15 +9863,11 @@ mod tests {
                 "informational row {id} must remain safe even after scan races"
             );
         }
-        for id in action_ids {
-            assert!(
-                store
-                    .enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled")
-                    .unwrap()
-                    .is_some(),
-                "delivered is not read: unanswered action {id} still stalls"
-            );
-        }
+        let notices = action_ids.into_iter().filter_map(|id| {
+            store.enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled").unwrap()
+        }).collect::<Vec<_>>();
+        assert_eq!(notices.len(), 2, "unanswered actions coalesce into operator and worker episodes");
+        assert!(store.delivery_stalled_candidates("session", 600, 1800, 50).unwrap().is_empty());
     }
 
     #[test]

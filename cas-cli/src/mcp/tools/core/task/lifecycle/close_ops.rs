@@ -7234,7 +7234,7 @@ impl CasCore {
         // implementer/independent QA still judge the original reviewed anchor.
         if let Some(batch) = task.deliverables.integration_batch.as_ref()
             && let Some(receipt) = req.commit_receipt.as_deref()
-            && receipt != batch.delivered_head
+            && resolve_task_commit_receipt_sha(&close_project_root, receipt).ok().as_deref() != Some(batch.delivered_head.as_str())
         {
             fetch_parent_branch_best_effort(&close_project_root, &resolved_parent_branch);
             let supplied = resolve_task_commit_receipt_sha(&close_project_root, receipt).ok();
@@ -17623,16 +17623,16 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             continue;
         }
 
-        let mut merge_evidence_note = super::super::integration_batch::landed_batch_squash(
+        let mut merge_evidence_note = has_delivery.then(|| super::super::integration_batch::landed_batch_squash(
             t, repo_path, parent_branch, None,
-        ).map(|squash| format!(
+        )).flatten().map(|squash| format!(
             "decision: child {} delivery is contained in target-reachable integration batch squash {}; original reviewed anchor retained.", t.id, squash
         ));
         if merge_evidence_note.is_some() { unmerged_count = 0; refs_unresolved = false; }
         let mut content_evolution_note = None;
         let mut dropped_paths = Vec::new();
         let mut content_check_error = t.deliverables.integration_batch.as_ref().filter(|batch|
-            merge_evidence_note.is_none() && !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch)
+            has_delivery && merge_evidence_note.is_none() && !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch)
         ).map(|batch| format!("integration batch {}@{} is staged but its complete delta is not proven on {}", batch.branch, batch.tip, parent_branch));
         let mut content_directions = Vec::new();
         // A stranded live lane is the common close-gate case. Measure each

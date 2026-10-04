@@ -127,7 +127,7 @@ fn squash(repo: &Path, drop_path: Option<&str>) {
 #[tokio::test]
 async fn cas_4b26f_matching_batch_squash_auto_closes() {
     let mut env = TestEnvGuard::temp_home();
-    for explicit_receipt in [false, true] {
+    for receipt_kind in ["auto", "squash", "anchor"] {
         let (temp, worker, supervisor, head) = fixture(&mut env);
         stage(supervisor.clone(), &head).await.unwrap();
         let service = CasService::new(supervisor, None);
@@ -171,7 +171,12 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
         );
         squash(temp.path(), None);
         let squash_tip = git(temp.path(), &["rev-parse", "main"]);
-        let text = close(worker, explicit_receipt.then_some(squash_tip.as_str())).await;
+        let receipt = match receipt_kind {
+            "squash" => Some(squash_tip.as_str()),
+            "anchor" => Some(&head[..10]),
+            _ => None,
+        };
+        let text = close(worker, receipt).await;
         let task = open_task_store(&temp.path().join(".cas"))
             .unwrap()
             .get(TASK)

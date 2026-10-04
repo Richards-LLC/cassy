@@ -2466,10 +2466,19 @@ mod tests {
     fn worker_machine_bootstrap_respects_denials_and_supervisor_retains_credentials_gh_1047() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let credentials = env.home().join("credentials.env");
-        std::fs::write(&credentials, "export WORKER_DENIED_FIXTURE_TOKEN='denied-fixture'\nexport WORKER_ALLOWED_FIXTURE_TOKEN='allowed-fixture'\n").unwrap();
+        std::fs::write(
+            &credentials,
+            "export WORKER_DENIED_FIXTURE_TOKEN='denied-fixture'\n\
+             export WORKER_ALLOWED_FIXTURE_TOKEN='allowed-fixture'\n\
+             export WORKER_EMPTY_FIXTURE_TOKEN='   '\n\
+             export WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN='file-fixture'\n",
+        )
+        .unwrap();
         env.set("CAS_CREDENTIALS_FILE", &credentials);
         env.remove("WORKER_DENIED_FIXTURE_TOKEN");
         env.remove("WORKER_ALLOWED_FIXTURE_TOKEN");
+        env.remove("WORKER_EMPTY_FIXTURE_TOKEN");
+        env.set("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN", "");
         assert_eq!(
             load_machine_credentials_with_installer(
                 &["WORKER_DENIED_FIXTURE_TOKEN".into()],
@@ -2479,6 +2488,17 @@ mod tests {
         );
         assert!(std::env::var_os("WORKER_DENIED_FIXTURE_TOKEN").is_none());
         assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "allowed-fixture");
+        assert!(std::env::var_os("WORKER_EMPTY_FIXTURE_TOKEN").is_none());
+        assert_eq!(std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(), "");
+        assert_eq!(
+            load_machine_credentials_with_installer(
+                &["WORKER_DENIED_FIXTURE_TOKEN".into()],
+                |name, value| env.set(name, value),
+            )
+            .unwrap(),
+            0,
+            "repeated worker bootstrap must not restore a denied credential",
+        );
         env.set("WORKER_ALLOWED_FIXTURE_TOKEN", "existing-fixture");
         assert_eq!(
             load_machine_credentials_with_installer(&[], |name, value| env.set(name, value))
@@ -2487,6 +2507,8 @@ mod tests {
         );
         assert_eq!(std::env::var("WORKER_DENIED_FIXTURE_TOKEN").unwrap(), "denied-fixture");
         assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "existing-fixture");
+        assert!(std::env::var_os("WORKER_EMPTY_FIXTURE_TOKEN").is_none());
+        assert_eq!(std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(), "");
     }
 
     struct FakeEnv(HashMap<String, String>);

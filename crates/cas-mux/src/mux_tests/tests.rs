@@ -14,8 +14,8 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
 }
 
 /// GH #1047: configured supervisor-only resources win over project proxy
-/// credential grants. Claude isolates local scopes; restricted-env Codex
-/// refuses because retained native env cannot be completely evaluated.
+/// credential grants. Claude isolates local scopes; Codex disables named native
+/// servers and remains spawnable with environment restrictions.
 #[test]
 fn factory_supervisor_only_mcp_and_env_isolate_claude_and_codex_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
@@ -76,11 +76,7 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
         }
         assert!(env_value(supervisor, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
         assert_eq!(std::fs::read(&source).unwrap(), before, "supervisor config is untouched");
-        if cli == SupervisorCli::Codex {
-            assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").unwrap().contains("supervisor_only_env"));
-            assert!(crate::pty::Pty::spawn("restricted-codex", worker.clone()).is_err());
-            continue;
-        }
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
         let materialized: serde_json::Value = serde_json::from_slice(
             &std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap()
         ).unwrap();
@@ -95,6 +91,12 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
                 assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
                 let flag = worker.args.iter().position(|arg| arg == "--mcp-config").unwrap();
                 assert_eq!(worker.args[flag + 1], cas_root.join("worker-mcp/worker-1.json").display().to_string());
+            }
+            SupervisorCli::Codex => {
+                for name in ["vercel", "neon"] {
+                    assert!(worker.args.iter().any(|arg|
+                        arg == &format!("mcp_servers.{name}.enabled=false")));
+                }
             }
             _ => unreachable!(),
         }
@@ -187,10 +189,10 @@ fn restricted_grok_adapter_refuses_native_discovery_without_substitution_gh_1047
     }
 }
 
-/// Codex cannot expose a complete auth-free effective env inventory. Refuse
-/// env restrictions before native discovery, preserving server-only support.
+/// Read native TOML without discovery and disable only the affected servers.
+/// Unknown plugin contributions must not prevent the worker from spawning.
 #[test]
-fn codex_env_policy_refuses_before_native_discovery_preserving_safe_launch_gh_1047() {
+fn codex_env_policy_disables_literal_env_servers_preserving_safe_launch_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
     let project = tempfile::tempdir().unwrap();
     let cas_root = project.path().join(".cas");
@@ -200,7 +202,7 @@ fn codex_env_policy_refuses_before_native_discovery_preserving_safe_launch_gh_10
     let native_config = "[mcp_servers.context7]\ncommand = 'never-executed-fixture'\n[mcp_servers.context7.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'literal-fixture'\n[plugins.unknown_fixture]\nenabled = true\n";
     std::fs::write(native_root.join("config.toml"), native_config).unwrap();
     env.set("DENIED_LITERAL_FIXTURE_TOKEN", "parent-fixture");
-    for (policy, refused, server_only) in [
+    for (policy, env_restricted, server_only) in [
         ("[factory]\n", false, false),
         ("[factory]\nsupervisor_only_env = []\n", false, false),
         ("[factory]\nsupervisor_only_mcp = ['vercel']\n", false, true),
@@ -224,22 +226,12 @@ fn codex_env_policy_refuses_before_native_discovery_preserving_safe_launch_gh_10
         assert_eq!(supervisor.effective_command(), "codex");
         assert!(env_value(supervisor, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
         assert!(!supervisor.env_remove.iter().any(|key| key == "DENIED_LITERAL_FIXTURE_TOKEN"));
-        assert_eq!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_some(), refused);
-        if refused {
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.context7.enabled=false"), env_restricted);
+        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_only || policy.contains("vercel"));
+        if env_restricted {
             assert!(worker.env_remove.iter().any(|key| key == "DENIED_LITERAL_FIXTURE_TOKEN"));
             assert!(env_value(worker, "DENIED_LITERAL_FIXTURE_TOKEN").is_none());
-            // Pty::spawn checks the admission error before any executable or
-            // account/config discovery. No native Codex process is started.
-            let error = match crate::pty::Pty::spawn("refused-native-codex", worker.clone()) {
-                Err(error) => error.to_string(),
-                Ok(_) => panic!("restricted Codex must refuse before execution"),
-            };
-            assert!(error.contains("supervisor_only_env"));
-            assert!(error.contains("auth-free"));
-            assert!(!error.contains("literal-fixture"));
-            assert!(!error.contains("parent-fixture"));
-        } else {
-            assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_only);
         }
         assert_eq!(std::fs::read_to_string(native_root.join("config.toml")).unwrap(), native_config);
         assert!(std::env::var_os("DENIED_LITERAL_FIXTURE_TOKEN").is_some());
@@ -247,8 +239,7 @@ fn codex_env_policy_refuses_before_native_discovery_preserving_safe_launch_gh_10
 }
 
 /// The real PTY command builder must remove inherited AND explicitly granted
-/// credentials for supported admission; restricted Codex refuses rather than
-/// silently launching with an unevaluated native environment.
+/// credentials for both supported harnesses without launching a live harness.
 #[tokio::test]
 async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
@@ -272,11 +263,7 @@ async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
             worker_cli: cli, include_director: false, ..Default::default()
         });
         let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
-        if cli == SupervisorCli::Codex {
-            assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").unwrap().contains("auth-free"));
-            assert!(crate::pty::Pty::spawn("refused-codex-env-probe", worker).is_err());
-            continue;
-        }
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
         let worker_mcp = cas_root.join("worker-mcp/worker-1.json");
         let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(worker_mcp).unwrap()).unwrap();
         assert!(mcp["mcpServers"].get("vercel").is_none() && mcp["mcpServers"].get("neon").is_none());
@@ -305,7 +292,7 @@ async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     }
 }
 
-/// A refused env policy must not disable otherwise supported Codex admission.
+/// Environment restrictions must preserve supported Codex admission.
 /// Execute only a local shell probe through the admitted config's PTY boundary;
 /// actual native Codex discovery remains a separate supervisor demo.
 #[tokio::test]

@@ -2438,6 +2438,7 @@ impl Pty {
         for key in &config.env_remove {
             cmd.env_remove(key);
         }
+        cmd.env_remove(WORKER_CREDENTIAL_WARNING_ENV);
 
         // Strip CLAUDECODE to prevent nested-session detection in spawned Claude CLI
         cmd.env_remove("CLAUDECODE");

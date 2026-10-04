@@ -24,6 +24,7 @@ async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas
     let credentials = env.home().join("credentials.env");
     env.set("CAS_CREDENTIALS_FILE", &credentials);
     env.set("NEON_API_KEY", "not-granted-fixture");
+    env.set("CAS_FACTORY_WORKER_CREDENTIAL_WARNING", "stale-fixture");
     env.remove("CAS_WORKER_GITHUB_READ_TOKEN");
     for from_file in [false, true] {
         if from_file {

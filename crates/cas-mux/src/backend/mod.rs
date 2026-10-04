@@ -243,8 +243,8 @@ fn grant_worker_github_read_token(config: &mut PtyConfig, project_grants: &BTree
 ///
 /// User-level proxy definitions and shell/profile values remain useful for
 /// the supervisor, but they are machine-global state rather than a grant to a
-/// worker in this project. Only the project `.cas/proxy.toml` is an auditable
-/// worker grant source.
+/// worker in this project. The project `.cas/proxy.toml` and explicit factory
+/// credential allowlist are the auditable worker grant sources.
 fn project_proxy_credential_names(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> BTreeSet<String> {
     let mut names: BTreeSet<String> = policy.worker_credential_env.iter()
         .filter(|name| grantable_worker_credential(name) && !policy.denies_env(name))

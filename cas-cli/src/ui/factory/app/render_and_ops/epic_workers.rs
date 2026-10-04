@@ -5871,6 +5871,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recycle_retirement_preserves_reassigned_snapshot_cas_35af() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        seed_wise_raven_tasks(&cas_dir);
+        let agent = retired_worker(&cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        // The task was held when recycling began, then reassigned before
+        // retirement/death cleanup observed that old snapshot.
+        let snapshot = vec!["cas-e0be".to_string()];
+        let mut reassigned = tasks.get("cas-e0be").unwrap();
+        reassigned.assignee = Some("replacement-worker".into());
+        tasks.update(&reassigned).unwrap();
+        assert_eq!(settle_retired_worker_bindings(
+            &cas_dir, agents.as_ref(), &agent, &snapshot, WorkerRetirement::Recycle,
+        ), 0);
+        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+            &cas_dir, agents.as_ref(), &agent, &snapshot, "late exit after recycle",
+        );
+        let after = tasks.get("cas-e0be").unwrap();
+        assert_eq!(after.assignee, reassigned.assignee);
+        assert_eq!(after.status, reassigned.status);
+    }
+
     /// The contrast that keeps the shutdown contract honest: a real shutdown
     /// still frees the worker's Open/InProgress/Blocked bindings.
     #[test]

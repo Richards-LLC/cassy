@@ -4068,7 +4068,7 @@ async fn test_release_worker_lease_as_registered_supervisor_cas_35af() {
     assert_eq!(after.assignee, None);
     assert!(agents.get_lease(&task.id).unwrap().is_none());
     assert_eq!(agents.get(&worker.id).unwrap().active_tasks, 0);
-    let history = agents.get_lease_history(&task.id, 10).unwrap();
+    let history = agents.get_lease_history(&task.id, Some(10)).unwrap();
     assert_eq!(history[0].event_type, "released");
     assert!(history[0].reason.as_deref().unwrap().contains("Supervisor"));
 }

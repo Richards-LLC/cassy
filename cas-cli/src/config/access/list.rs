@@ -18,6 +18,7 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
+            ("jev.gate.shadow".into(), self.get("jev.gate.shadow").unwrap()),
             ("jev.model".into(), self.get("jev.model").unwrap()),
             ("jev.key_file".into(), self.get("jev.key_file").unwrap()),
             ("jev.enabled".into(), self.get("jev.enabled").unwrap()),

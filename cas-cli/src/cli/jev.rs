@@ -17,6 +17,8 @@ pub enum JevCommands {
     Batch(JevBatchArgs),
     /// Ask about project files without printing their contents.
     Files(JevFilesArgs),
+    /// Summarize observed shadow decisions as JSON (no command or file content).
+    GateReport,
 }
 #[derive(Debug, Clone, Args)]
 pub struct JevAskArgs {
@@ -64,8 +66,16 @@ pub struct JevFilesArgs {
     pub advisory: bool,
 }
 pub fn execute(command: &JevCommands, cas_root: &Path) -> anyhow::Result<()> {
+    if matches!(command, JevCommands::GateReport) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::jev::gate::report(cas_root)?)?
+        );
+        return Ok(());
+    }
     let client = JevClient::from_project(cas_root)?;
     let (value, out) = match command {
+        JevCommands::GateReport => unreachable!("report handled before credentials"),
         JevCommands::Ask(args) => {
             let state = Value::String(read_argument(&args.state, true)?);
             let questions: Value = serde_json::from_str(&read_argument(&args.questions, false)?)
@@ -250,5 +260,13 @@ mod tests {
             panic!("files command missing")
         };
         assert_eq!((args.max_files, args.max_bytes), (50, 24576));
+    }
+    #[test]
+    fn jev_cli_parses_local_gate_report() {
+        let cli = crate::cli::Cli::try_parse_from(["cas", "jev", "gate-report"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(crate::cli::Commands::Jev(JevCommands::GateReport))
+        ));
     }
 }

@@ -4,6 +4,14 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+const CREDENTIAL_OVERRIDES: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+];
+
 fn cas_cmd(home: &std::path::Path) -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
     let path = std::env::join_paths(std::iter::once(home.join("bin")).chain(
@@ -40,9 +48,15 @@ fi
 if [ "$1" = "auth" ] && [ "$2" = "login" ]; then
   printf 'LOGIN_CONFIG=%s\n' "$CLAUDE_CONFIG_DIR"
   printf 'LOGIN_SECURE_STORAGE=%s\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
+  for key in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR; do
+    eval "present=\${$key+set}"
+    printf 'LOGIN_%s=%s\n' "$key" "$present"
+  done
   printf 'LOGIN_ARGS=%s\n' "$*"
   exit 0
 fi
+printf 'BARE_CONFIG=%s\n' "$CLAUDE_CONFIG_DIR"
+printf 'BARE_SECURE_STORAGE=%s\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
 exit 0
 "#,
     );
@@ -60,12 +74,18 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Usage: cas claude <profile>"))
-        .stdout(predicate::str::contains("main"))
-        .stdout(predicate::str::contains("alt"))
-        .stdout(predicate::str::contains("logged in"))
-        .stdout(predicate::str::contains("(active)"))
-        .stdout(predicate::str::contains("work"))
-        .stdout(predicate::str::contains("not logged in"));
+        .stdout(predicate::str::contains(format!(
+            "  alt — {} (logged in) (active)\n",
+            alt.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "  main — {} (not logged in)\n",
+            home.path().join(".claude").display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "  work — {} (not logged in)\n",
+            home.path().join(".claude-work").display()
+        )));
 }
 
 /// The headline behavior: `cas claude alt` selects the alt account and then
@@ -164,32 +184,137 @@ fn help_documents_profile_and_factory_passthrough() {
 fn login_subcommand_binds_auth_flow_to_named_profile() {
     let home = home_with_profiles();
 
-    cas_cmd(home.path())
+    let mut cmd = cas_cmd(home.path());
+    for key in CREDENTIAL_OVERRIDES {
+        cmd.env(key, "fixture-override");
+    }
+    let assertion = cmd
         .args(["claude", "login", "alt", "--email", "alt@example.com"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("LOGIN_CONFIG=").and(predicate::str::contains(".claude-alt")),
-        )
-        .stdout(
-            predicate::str::contains("LOGIN_SECURE_STORAGE=")
-                .and(predicate::str::contains(".claude-alt")),
-        )
+        .stdout(predicate::str::contains(format!(
+            "LOGIN_CONFIG={}\n",
+            home.path().join(".claude-alt").display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "LOGIN_SECURE_STORAGE={}\n",
+            home.path().join(".claude-alt").display()
+        )))
         .stdout(predicate::str::contains(
             "LOGIN_ARGS=auth login --email alt@example.com",
         ));
+    for key in CREDENTIAL_OVERRIDES {
+        assert!(
+            String::from_utf8_lossy(&assertion.get_output().stdout)
+                .lines()
+                .any(|line| line == format!("LOGIN_{key}=")),
+            "{key} must be unset in the login child"
+        );
+    }
 }
 
 #[test]
 fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
     let home = home_with_profiles();
 
-    cas_cmd(home.path())
+    let mut cmd = cas_cmd(home.path());
+    cmd.env("CLAUDE_CONFIG_DIR", home.path().join(".claude-alt"))
+        .env(
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            home.path().join(".claude-alt"),
+        );
+    for key in CREDENTIAL_OVERRIDES {
+        cmd.env(key, "fixture-override");
+    }
+    let assertion = cmd
         .args(["claude", "login", "main"])
         .assert()
         .success()
         .stdout(predicate::str::contains("LOGIN_CONFIG=\n"))
         .stdout(predicate::str::contains("LOGIN_SECURE_STORAGE=\n"));
+    for key in CREDENTIAL_OVERRIDES {
+        assert!(
+            String::from_utf8_lossy(&assertion.get_output().stdout)
+                .lines()
+                .any(|line| line == format!("LOGIN_{key}=")),
+            "{key} must be unset for main too"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bare_picker_on_a_real_tty_forwards_the_selected_profile_cas_fa64() {
+    use cas_pty::{Pty, PtyConfig, PtyEvent};
+    let home = home_with_profiles();
+    let path = std::env::join_paths(std::iter::once(home.path().join("bin")).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let mut pty = Pty::spawn(
+        "claude-picker-probe",
+        PtyConfig {
+            command: cas::test_paths::cas_binary().to_string_lossy().into_owned(),
+            args: vec!["claude".into(), "--bare".into()],
+            cwd: Some(home.path().to_path_buf()),
+            env: vec![
+                ("HOME".into(), home.path().to_string_lossy().into_owned()),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    home.path().join(".xdg").to_string_lossy().into_owned(),
+                ),
+                ("PATH".into(), path.to_string_lossy().into_owned()),
+                ("TERM".into(), "xterm-256color".into()),
+                ("CAS_SKIP_FACTORY_TOOLING".into(), "1".into()),
+            ],
+            env_remove: vec![
+                "CAS_ROOT".into(),
+                "CLAUDE_CONFIG_DIR".into(),
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+            ],
+            ..PtyConfig::default()
+        },
+    )
+    .expect("spawn Cassy with terminal stdin/stdout");
+    let mut output = Vec::new();
+    let mut selected = false;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            match pty.recv().await {
+                Some(PtyEvent::Output(bytes)) => {
+                    output.extend(bytes);
+                    if !selected
+                        && String::from_utf8_lossy(&output).contains("Choose Claude account")
+                    {
+                        // main starts selected; the next sorted account is alt.
+                        pty.write(b"\x1b[B\r").await.unwrap();
+                        selected = true;
+                    }
+                }
+                Some(PtyEvent::Exited(code)) => return code,
+                Some(PtyEvent::Error(error)) => panic!("picker PTY: {error}"),
+                None => panic!("picker exited without status"),
+            }
+        }
+    })
+    .await;
+    pty.kill_tree_force();
+    let output = String::from_utf8_lossy(&output).replace('\r', "");
+    assert_eq!(
+        result.expect("picker did not finish after selection"),
+        Some(0),
+        "{output}"
+    );
+    assert!(selected, "bare launch never prompted: {output}");
+    for label in ["BARE_CONFIG", "BARE_SECURE_STORAGE"] {
+        assert!(
+            output.contains(&format!(
+                "{label}={}\n",
+                home.path().join(".claude-alt").display()
+            )),
+            "wrong selected account for {label}: {output}"
+        );
+    }
 }
 
 /// `cas claude --workers 0` errored with "unexpected argument" until cas-6dad:

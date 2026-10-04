@@ -669,6 +669,132 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn auth_probe_failures_return_unknown_cas_fa64() {
+        let missing = Command::new("/missing/cas-fa64/claude");
+        assert_eq!(
+            probe_login_state_command(missing, Duration::from_secs(1)),
+            LoginState::Unknown
+        );
+        let mut invalid = Command::new("sh");
+        invalid
+            .args(["-c", "printf 'not-json'"])
+            .stdout(Stdio::piped());
+        assert_eq!(
+            probe_login_state_command(invalid, Duration::from_secs(1)),
+            LoginState::Unknown
+        );
+    }
+
+    #[test]
+    fn set_profile_env_subprocess_isolates_both_selectors_and_overrides_cas_fa64() {
+        const KEYS: [&str; 5] = [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+        ];
+        if let Ok(profile) = std::env::var("FA64_PROFILE_PROBE") {
+            let mut env = crate::test_support::TestEnvGuard::new();
+            for key in KEYS {
+                env.set(key, "fixture-override");
+            }
+            env.set("CLAUDE_CONFIG_DIR", "/tmp/ambient-config");
+            env.set("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/tmp/ambient-secure");
+            let dir = Path::new("/tmp/.claude-alt");
+            set_profile_env(&profile, dir);
+            for key in ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"] {
+                assert_eq!(
+                    std::env::var_os(key),
+                    (profile != "main").then(|| dir.as_os_str().to_os_string()),
+                    "{key}"
+                );
+            }
+            for key in KEYS {
+                assert!(std::env::var_os(key).is_none(), "{key} was not scrubbed");
+            }
+            return;
+        }
+        for profile in ["main", "alt"] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::claude::tests::set_profile_env_subprocess_isolates_both_selectors_and_overrides_cas_fa64", "--nocapture"])
+                .env("FA64_PROFILE_PROBE", profile)
+                .output().unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "subprocess did not run its exact test"
+            );
+            assert!(
+                output.status.success(),
+                "{profile}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_worker_sources_scrub_all_inherited_overrides_in_pty_child_cas_fa64() {
+        use cas_pty::{Pty, PtyConfig, PtyEvent};
+        let keys = [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+        ];
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for key in keys {
+            env.set(key, "fixture-override");
+        }
+        for source in ["explicit", "supervisor"] {
+            let mut script = keys
+                .iter()
+                .map(|key| format!("printf '{key}=%s\\n' \"${{{key}+set}}\""))
+                .collect::<Vec<_>>()
+                .join("; ");
+            script.push_str("; printf 'CLAUDE_CONFIG_DIR=%s\\n' \"$CLAUDE_CONFIG_DIR\"; printf 'CLAUDE_SECURESTORAGE_CONFIG_DIR=%s\\n' \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\"");
+            let mut config = PtyConfig {
+                command: "sh".into(),
+                args: vec!["-c".into(), script],
+                ..PtyConfig::default()
+            };
+            config.apply_claude_config_dir(Some("/tmp/.claude-alt"), Some(source));
+            let mut pty = Pty::spawn(format!("claude-{source}-probe"), config).unwrap();
+            let mut bytes = Vec::new();
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pty.recv().await {
+                        Some(PtyEvent::Output(output)) => bytes.extend(output),
+                        Some(PtyEvent::Exited(code)) => return code,
+                        other => panic!("worker probe: {other:?}"),
+                    }
+                }
+            })
+            .await;
+            pty.kill_tree_force();
+            assert_eq!(result.unwrap(), Some(0));
+            let output = String::from_utf8_lossy(&bytes).replace('\r', "");
+            for key in keys {
+                assert!(
+                    output.lines().any(|line| line == format!("{key}=")),
+                    "{source}: {key} was not scrubbed: {output}"
+                );
+            }
+            for key in ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"] {
+                assert!(
+                    output
+                        .lines()
+                        .any(|line| line == format!("{key}=/tmp/.claude-alt")),
+                    "{source}: selected {key} missing: {output}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn auth_probe_timeout_returns_unknown_for_a_hung_provider() {
         let mut command = Command::new("sh");
         command.args(["-c", "exec sleep 5"]);

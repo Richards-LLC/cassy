@@ -14,7 +14,8 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
 }
 
 /// GH #1047: configured supervisor-only resources win over project proxy
-/// credential grants, and local-scope Claude entries cannot widen a worker.
+/// credential grants. Claude isolates local scopes; restricted-env Codex
+/// refuses because retained native env cannot be completely evaluated.
 #[test]
 fn factory_supervisor_only_mcp_and_env_isolate_claude_and_codex_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
@@ -73,6 +74,13 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
             assert!(!supervisor.env_remove.iter().any(|name| name == key));
             assert!(std::env::var_os(key).is_some(), "parent retains its credentials");
         }
+        assert!(env_value(supervisor, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(std::fs::read(&source).unwrap(), before, "supervisor config is untouched");
+        if cli == SupervisorCli::Codex {
+            assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").unwrap().contains("supervisor_only_env"));
+            assert!(crate::pty::Pty::spawn("restricted-codex", worker.clone()).is_err());
+            continue;
+        }
         let materialized: serde_json::Value = serde_json::from_slice(
             &std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap()
         ).unwrap();
@@ -87,11 +95,6 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
                 assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
                 let flag = worker.args.iter().position(|arg| arg == "--mcp-config").unwrap();
                 assert_eq!(worker.args[flag + 1], cas_root.join("worker-mcp/worker-1.json").display().to_string());
-            }
-            SupervisorCli::Codex => {
-                for name in ["vercel", "neon"] {
-                    assert!(worker.args.iter().any(|arg| arg == &format!("mcp_servers.{name}.enabled=false")));
-                }
             }
             _ => unreachable!(),
         }
@@ -244,7 +247,8 @@ fn codex_env_policy_refuses_before_native_discovery_preserving_safe_launch_gh_10
 }
 
 /// The real PTY command builder must remove inherited AND explicitly granted
-/// credentials; a configuration-only assertion cannot prove that boundary.
+/// credentials for supported admission; restricted Codex refuses rather than
+/// silently launching with an unevaluated native environment.
 #[tokio::test]
 async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
@@ -268,6 +272,11 @@ async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
             worker_cli: cli, include_director: false, ..Default::default()
         });
         let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        if cli == SupervisorCli::Codex {
+            assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").unwrap().contains("auth-free"));
+            assert!(crate::pty::Pty::spawn("refused-codex-env-probe", worker).is_err());
+            continue;
+        }
         let worker_mcp = cas_root.join("worker-mcp/worker-1.json");
         let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(worker_mcp).unwrap()).unwrap();
         assert!(mcp["mcpServers"].get("vercel").is_none() && mcp["mcpServers"].get("neon").is_none());

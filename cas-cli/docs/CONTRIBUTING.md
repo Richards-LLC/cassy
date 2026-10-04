@@ -114,12 +114,27 @@ direct servers must be declared in the project file. Cassy remains available
 even if it was registered only in local scope. Every worker uses the same private
 store path, including shared-cwd workers. Codex disables the named native MCP servers, and
 its Cassy proxy filters those upstreams before startup and reload.
-Codex overrides require server names containing letters, digits, hyphens or
+Codex server-only overrides require server names containing letters, digits, hyphens or
 underscores; ambiguous names refuse launch rather than bypass isolation.
 Worker snapshots cannot overwrite the supervisor's shared proxy catalog/health.
 Listed environment names are removed from inherited and explicitly granted
 values, including machine credential bootstrap and retained proxy stdio
 servers' explicit environment maps, before credential resolution and reload.
+Codex workers refuse **before native discovery** when `supervisor_only_env` is
+nonempty. Parent environment removal cannot prevent retained native MCP servers
+from restoring literal environment entries. Codex 0.160.0 offers no complete
+auth-free effective environment inventory: `mcp list` performs auth discovery,
+while `config/read` omits expanded plugin/runtime MCP contributions. Empty or
+sanitized TOML env overrides preserve omitted keys through recursive merging.
+The error names `[factory] supervisor_only_env` and explains this admission
+limit without exposing values. Route restricted tasks to the supervisor; use
+an empty environment policy only when unrestricted native access is intended.
+Unrestricted Codex workers and Codex server-only restrictions remain supported;
+the supervisor retains its environment and configuration. The original
+restricted-environment Codex successful-launch contract is replaced by early
+refusal and safe unrestricted launch. Future support requires a complete,
+bounded auth-free evaluator of the exact launch layers, plugins and retained
+stdio env keys, with unknown/conflicting sources refused before discovery.
 Grok and other native harnesses without supported per-launch MCP/environment
 isolation refuse a worker launch when either list is nonempty. They retain
 ordinary native discovery with empty lists; the supervisor remains unrestricted.

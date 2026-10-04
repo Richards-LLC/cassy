@@ -142,6 +142,16 @@ pub(super) fn finish_worker_config(
     for name in &policy.supervisor_only_env {
         if !config.env_remove.contains(name) { config.env_remove.push(name.clone()); }
     }
+    if config.effective_command() == "codex" && !policy.supervisor_only_env.is_empty() {
+        // Parent env stripping cannot remove literal env entries on retained
+        // native MCP servers. Codex's available inventory interfaces perform
+        // auth discovery or omit effective plugin/layer contributions. Admit
+        // this policy only when a supported complete auth-free evaluator can
+        // prove the exact launch context safe, before native discovery.
+        config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(),
+            "Codex worker cannot enforce [factory] supervisor_only_env: complete auth-free native MCP environment admission is unavailable; route restricted tasks to the supervisor, or use an unrestricted environment policy only when intended".into()));
+        return;
+    }
     if !policy.is_empty() {
         // Grok discovers original project/user MCP configuration and has no
         // supported per-launch isolation override. Other unsupported native

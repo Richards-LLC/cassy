@@ -419,6 +419,50 @@ pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Opt
     }
 }
 
+#[cfg(unix)]
+fn discard_shared_fingerprints(target: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !target.exists() {
+        return Ok(());
+    }
+    // Old seeders shared mutable freshness records. Their contents may already
+    // describe another lane's rebuild, so copying them now would preserve a
+    // poisoned cache. Drop only affected fingerprint directories; Cargo will
+    // rebuild those units and keep unrelated private metadata/artifacts.
+    // Profiles live under target/<profile> or target/<triple>/<profile>.
+    let mut roots = Vec::new();
+    for entry in walkdir::WalkDir::new(target)
+        .max_depth(3)
+        .follow_links(false)
+    {
+        let entry = entry?;
+        if entry.file_type().is_dir() && entry.file_name() == ".fingerprint" {
+            roots.push(entry.into_path());
+        }
+    }
+    for root in roots {
+        for unit in std::fs::read_dir(root)? {
+            let unit = unit?;
+            if !unit.file_type()?.is_dir() {
+                continue;
+            }
+            let mut shared = false;
+            for record in std::fs::read_dir(unit.path())? {
+                let record = record?;
+                if record.file_type()?.is_file() && record.metadata()?.nlink() > 1 {
+                    shared = true;
+                    break;
+                }
+            }
+            if shared {
+                std::fs::remove_dir_all(unit.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
     execute_at(
         cas_root,
@@ -496,6 +540,8 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
         tracing::warn!(%error, "worker target re-seed skipped; Cargo will rebuild privately");
     }
+    #[cfg(unix)]
+    discard_shared_fingerprints(&repo.join("target"))?;
     let count_file = slots.join(format!("count-{lane_key}"));
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.
@@ -1027,6 +1073,60 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
             std::fs::read_to_string(repo.join("target/called")).unwrap(),
             "called\ncalled\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_discards_legacy_shared_fingerprints_cas_a7cf() {
+        use std::os::unix::fs::MetadataExt;
+
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let snapshot = dir.path().join("snapshot");
+        std::fs::create_dir(&snapshot).unwrap();
+        let source = snapshot.join("invoked.timestamp");
+        std::fs::write(&source, b"another lane's freshness").unwrap();
+        for profile in ["debug", "aarch64-apple-darwin/debug"] {
+            let shared = repo
+                .join("target")
+                .join(profile)
+                .join(".fingerprint/cas-types-abc");
+            std::fs::create_dir_all(&shared).unwrap();
+            std::fs::hard_link(&source, shared.join("invoked.timestamp")).unwrap();
+            // Even records Cargo already replaced privately are suspect when
+            // this unit still has a shared invocation timestamp.
+            std::fs::write(shared.join("lib-cas_types"), b"possibly poisoned").unwrap();
+        }
+        let private = repo.join("target/debug/.fingerprint/warm-abc/lib-warm");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, b"private freshness").unwrap();
+        let artifact = repo.join("target/debug/deps/libwarm.rmeta");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::hard_link(&source, &artifact).unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            r#"
+[ ! -e target/debug/.fingerprint/cas-types-abc ] || exit 3
+[ ! -e target/aarch64-apple-darwin/debug/.fingerprint/cas-types-abc ] || exit 4
+[ -f target/debug/.fingerprint/warm-abc/lib-warm ] || exit 5
+[ -f target/debug/deps/libwarm.rmeta ] || exit 6
+"#,
+        );
+        let args = vec!["-p".into(), "cas".into(), "--lib".into()];
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        assert_eq!(std::fs::read(&private).unwrap(), b"private freshness");
+        assert_eq!(std::fs::read(&source).unwrap(), b"another lane's freshness");
+        assert_eq!(
+            std::fs::metadata(&artifact).unwrap().ino(),
+            std::fs::metadata(&source).unwrap().ino()
+        );
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
     }
 
     #[cfg(unix)]

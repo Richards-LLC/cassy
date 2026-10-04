@@ -11215,6 +11215,7 @@ mod tests {
     /// in production three releases later.
     #[test]
     fn cas_27ad_transport_receipt_excludes_hook_and_poll() {
+        use cas_store::PromptQueueStore;
         let temp = tempfile::TempDir::new().unwrap();
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();

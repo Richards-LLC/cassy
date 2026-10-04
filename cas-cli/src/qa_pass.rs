@@ -1589,6 +1589,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cas_bb7e_qa_task_brief_uses_the_reviewers_harness_prefix() {
+        let text = qa_task_description(
+            &task(),
+            &pass("aaaa1111", cas_types::QaPassState::Pending),
+            &["demo_statement".to_string()],
+            Path::new("/artifacts/cas-ui1/independent-qa/round-1"),
+            "epic/x",
+        );
+        assert!(text.contains(crate::builtins::TOOL_NAMING_LINE), "{text}");
+        assert!(text.contains("verification action=qa_record task_id=cas-ui1"), "{text}");
+        assert!(!text.contains("mcp__cas__verification action=qa_record"), "{text}");
+    }
+
     /// cas-a6a3 (GH #1007): a round claiming `visual_qa_status: pass` needs
     /// the strict run's own report, from after the round opened, of a local
     /// build. A claim with no run, or a run against production, is refused.

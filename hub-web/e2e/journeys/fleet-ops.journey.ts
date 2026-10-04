@@ -82,7 +82,10 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await page.unroute("**/v1/sessions/*/operations");
         await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, contentType: "text/html", body: "Internal Server Error" }));
         const task = page.locator("#status-view .status-task", { hasText: "cas-2001" });
-        await task.getByRole("button", { name: "Assign cas-2001" }).click();
+        if (width === 390) {
+          await task.getByRole("button", { name: "Actions for cas-2001" }).click();
+          await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Assign…" }).click();
+        } else await task.getByRole("button", { name: "Assign cas-2001" }).click();
         const menu = width === 390 ? page.locator("dialog.fleet-action-sheet") : task;
         await menu.getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click();
         const text = "Could not assign cas-2001 to quiet-owl-7: the machine returned an error. Try again.";

@@ -7,8 +7,15 @@ fn is_snapshot(path: &str) -> bool {
     path.ends_with(".snap") || path.rsplit('/').next() == Some("opencode_projection.snapshot.json")
 }
 
-/// Each note names a file, an actual added/deleted line, and a reason:
-/// snapshot-approved: path — +changed line — reason
+/// Hash the signed UTF-8 diff line, preserving whitespace and excluding its
+/// newline. Path binding and a non-empty rationale remain part of the note.
+fn changed_line_digest(changed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(changed.as_bytes()))
+}
+
+/// Each note names a file, an actual changed line (literal or digest), and a reason:
+/// snapshot-approved: path — +changed line / sha256:<digest> — reason
 pub(super) fn rejection(
     repo: &Path,
     base: Option<&str>,
@@ -106,6 +113,9 @@ pub(super) fn rejection(
             };
             lines.iter().any(|changed| {
                 body.strip_prefix(&format!("{path} — {changed} — "))
+                    .or_else(|| {
+                        body.strip_prefix(&format!("{path} — {} — ", changed_line_digest(changed)))
+                    })
                     .is_some_and(|reason| !reason.trim().is_empty())
             })
         });
@@ -117,8 +127,15 @@ pub(super) fn rejection(
                 .or(lines.first())
                 .copied()
                 .unwrap_or("<binary snapshot change>");
+            // Keep short-line guidance familiar; long prompts must fit a task
+            // note without weakening the exact changed-line identity.
+            let identity = if changed.chars().count() <= 256 {
+                changed.to_string()
+            } else {
+                changed_line_digest(changed)
+            };
             let approval =
-                format!("snapshot-approved: {path} — {changed} — <why this change is correct>");
+                format!("snapshot-approved: {path} — {identity} — <why this change is correct>");
             missing.push(format!(
                 "{path}: no approval for a changed line. Record `{prefix}task action=notes id={task_id} note_type=decision notes={approval:?}`, then retry close."
             ));
@@ -289,14 +306,35 @@ mod tests {
         git(repo, &["commit", "-qm", "long prompt"]);
         let tip = git(repo, &["rev-parse", "HEAD"]);
         let paths = vec![path.to_string()];
-        let check = |tip: &str, notes: &str| rejection(repo, Some(&base), Some(tip), &paths, notes, "cas-b97f", "mcp__cs__");
+        let check = |tip: &str, notes: &str| {
+            rejection(
+                repo,
+                Some(&base),
+                Some(tip),
+                &paths,
+                notes,
+                "cas-b97f",
+                "mcp__cs__",
+            )
+        };
         let error = check(&tip, "").unwrap();
-        let note_json = error.split_once("notes=").unwrap().1.split_once("`, then retry close.").unwrap().0;
+        let note_json = error
+            .split_once("notes=")
+            .unwrap()
+            .1
+            .split_once("`, then retry close.")
+            .unwrap()
+            .0;
         let note: String = serde_json::from_str(note_json).unwrap();
-        let note = note.replace("<why this change is correct>", "worker contract matches the reviewed launch behavior");
+        let note = note.replace(
+            "<why this change is correct>",
+            "worker contract matches the reviewed launch behavior",
+        );
         let config = crate::config::Config::default();
-        crate::mcp::tools::traffic_limits::validate_note_body("decision", &note, &config, "cas-b97f", false, false, None)
-            .expect("the refusal's suggested approval must fit the actual note gate");
+        crate::mcp::tools::traffic_limits::validate_note_body(
+            "decision", &note, &config, "cas-b97f", false, false, None,
+        )
+        .expect("the refusal's suggested approval must fit the actual note gate");
         assert!(note.chars().count() < 1500);
         assert!(note.contains("sha256:"), "{note}");
         assert!(error.chars().count() < 1500, "refusal must remain bounded");
@@ -310,7 +348,10 @@ mod tests {
         git(repo, &["add", "."]);
         git(repo, &["commit", "-qm", "different reviewed state"]);
         let stale_tip = git(repo, &["rev-parse", "HEAD"]);
-        assert!(check(&stale_tip, &note).is_some(), "stale digest must not approve another line");
+        assert!(
+            check(&stale_tip, &note).is_some(),
+            "stale digest must not approve another line"
+        );
     }
 
     #[test]

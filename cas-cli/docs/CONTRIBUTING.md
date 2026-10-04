@@ -852,6 +852,13 @@ fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
 Closing a task that changes a committed `*.snap` or
 `opencode_projection.snapshot.json` requires a task decision note:
 `snapshot-approved: <relative file> — <actual +added or -removed line> — <why>`.
+The equivalent digest form is
+`snapshot-approved: <relative file> — sha256:<64 lowercase hex digits> — <why>`.
+SHA256 covers the complete UTF-8 diff line, including its leading `+`/`-` and
+whitespace, excluding the newline. The refusal prints this bounded form when
+the changed line exceeds 256 characters, so long prompts fit the default
+1500-character note limit. Copy the suggested token and explain the reviewed
+change; existing short-line literal approvals remain valid.
 The close gate checks the task-attributed Git diff, even after merge, and names
 the exact `task action=notes` command when approval is missing. Approval for a
 different file or a line absent from that diff does not satisfy the gate.

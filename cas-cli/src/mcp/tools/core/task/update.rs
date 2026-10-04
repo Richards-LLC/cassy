@@ -6,6 +6,45 @@ use crate::cloud::{CloudConfig, TeamRegistration};
 /// (cas-cc74). Aligned with claim/close assignee liveness (~5 min).
 const EPIC_OWNER_TARGET_STALE_SECS: i64 = 300;
 
+// Branch-only retargeting preserves a declared repository, but legacy
+// targetless tasks default to the project exactly as public creation does.
+fn branch_update_work_target(
+    cas_root: &std::path::Path,
+    existing: Option<&cas_types::WorkTarget>,
+    branch: &str,
+) -> Result<cas_types::WorkTarget, String> {
+    if let Some(existing) = existing {
+        let mut target = existing.clone();
+        // Resolve the corrected branch, so a deleted old epic cannot prevent
+        // repairing the target in its otherwise valid repository.
+        target.target_branch = branch.trim().to_string();
+        let context = super::repo_context::resolve_repo_context(cas_root, &target)?;
+        target.target_branch = context.target_branch;
+        Ok(target)
+    } else {
+        super::repo_context::declare_work_target(cas_root, None, Some(branch))?
+            .ok_or_else(|| "WORK TARGET REJECTED: project resolved to no work target".into())
+    }
+}
+
+fn last_recorded_close_blocker(cas_root: &std::path::Path, task_id: &str) -> Option<String> {
+    let events = crate::store::open_event_store(cas_root).ok()?
+        .list_by_type(cas_types::EventType::WorkerVerificationBlocked, 512).ok()?;
+    for event in events {
+        let metadata = event.metadata.as_ref()?;
+        if metadata.get("task_id").and_then(|v| v.as_str()) != Some(task_id)
+            || metadata.get("close_rejected").and_then(|v| v.as_bool()) != Some(true)
+        {
+            continue;
+        }
+        let reason = metadata.get("reason").and_then(|v| v.as_str()).unwrap_or("close gate");
+        let message = metadata.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        return Some(format!("Last recorded close blocker: {}: {}",
+            truncate_str(reason, 128), truncate_str(message, 1024)));
+    }
+    None
+}
+
 fn requested_update_fields(
     request: &TaskUpdateRequest,
     target_repo_supplied: bool,
@@ -697,43 +736,26 @@ impl CasCore {
                     })?,
                 )
             } else {
-                let existing = task.deliverables.work_target.as_ref().ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding"
-                            .to_string(),
-                    ),
-                    data: None,
-                })?;
-                let context = super::repo_context::resolve_repo_context(&self.cas_root, existing)
-                    .map_err(|message| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
-                    data: None,
-                })?;
-                let branch = super::repo_context::validate_target_branch(
-                    &context.repo_root,
+                Some(branch_update_work_target(
+                    &self.cas_root,
+                    task.deliverables.work_target.as_ref(),
                     target_branch.expect("checked above"),
-                )
-                .map_err(|message| McpError {
+                ).map_err(|message| McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
-                    data: None,
-                })?;
-                Some(cas_types::WorkTarget {
-                    repo_selector: existing.repo_selector.clone(),
-                    target_branch: branch,
-                })
+                    message: Cow::from(message), data: None,
+                })?)
             };
             if !proof_targets_fix && !risk_fix && !methodology_fix
                 && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated."
-                            .to_string(),
-                    ),
+                    message: Cow::from(format!(
+                        "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated. {} Retry task action=close id={} to refresh the actual gate; changing the target again will not repair it.",
+                        last_recorded_close_blocker(&self.cas_root, &task.id)
+                            .unwrap_or_else(|| "No close rejection is recorded for this task.".into()),
+                        task.id,
+                    )),
                     data: None,
                 });
             }
@@ -1046,22 +1068,13 @@ impl CasCore {
         // cas-c85e: an explicit target in this same call outranks the
         // WorkTarget an epic move would otherwise inherit.
         let work_target_supplied = target_repo.is_some() || target_branch.is_some();
-        let existing_repo_context = if target_repo.is_none() && target_branch.is_some() {
-            match task.deliverables.work_target.as_ref() {
-                Some(target) => Some(
-                    super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
-                        |message| McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(message),
-                            data: None,
-                        },
-                    )?,
-                ),
-                None => None,
-            }
-        } else {
-            None
-        };
+        let branch_only_target = if target_repo.is_none() {
+            target_branch.map(|branch| branch_update_work_target(
+                &self.cas_root, task.deliverables.work_target.as_ref(), branch,
+            )).transpose().map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None,
+            })?
+        } else { None };
         let prior_assignee = task.assignee.clone();
 
         let mut changes = Vec::new();
@@ -1219,29 +1232,8 @@ impl CasCore {
                     message: Cow::from(message),
                     data: None,
                 })?;
-            } else if let Some(branch) = target_branch {
-                let context = existing_repo_context.as_ref().ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding",
-                    ),
-                    data: None,
-                })?;
-                let branch =
-                    super::repo_context::validate_target_branch(&context.repo_root, branch)
-                        .map_err(|message| McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(message),
-                            data: None,
-                        })?;
-                let target = task.deliverables.work_target.as_mut().ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding",
-                    ),
-                    data: None,
-                })?;
-                target.target_branch = branch;
+            } else {
+                task.deliverables.work_target = branch_only_target;
             }
             changes.push("work_target");
         }

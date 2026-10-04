@@ -630,8 +630,14 @@ async fn branch_only_target_update_defaults_legacy_task_to_project_cas_4ae1() {
     let cas_root = init_cas_dir(&repo.root).unwrap();
     let store = open_task_store(&cas_root).unwrap();
     let service = registered_target_supervisor(&cas_root);
-    for repair in [false, true] {
-        let mut task = Task::new(format!("cas-legacy1107-{repair}"), "Legacy target".into());
+    for (repair, bound) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut task = Task::new(format!("cas-legacy1107-{repair}-{bound}"), "Legacy target".into());
+        if bound {
+            task.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "remote:github.com/org/updated-target".into(),
+                target_branch: "epic/deleted-lane".into(),
+            });
+        }
         if repair { task.status = TaskStatus::InProgress; }
         store.add(&task).unwrap();
         let result = service.task(Parameters(task_request(serde_json::json!({

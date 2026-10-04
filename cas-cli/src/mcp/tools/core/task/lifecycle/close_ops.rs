@@ -8585,6 +8585,10 @@ impl CasCore {
             ) {
                 Ok(evidence) => Some(evidence),
                 Err(message) => {
+                    // Retargeting an unchanged scope cannot repair this gate.
+                    // Preserve its real diagnostic for the next administrative
+                    // retry using the existing close-rejection activity stream.
+                    self.record_close_rejection_activity(&task.id, "PRE-CLOSE HOOK FAILED", &message);
                     return Ok(Self::tool_error(format!(
                         "⚠️ PRE-CLOSE HOOK FAILED\n\n{message}"
                     )));

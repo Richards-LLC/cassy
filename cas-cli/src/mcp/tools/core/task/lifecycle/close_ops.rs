@@ -17584,7 +17584,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             }
             checked_ref_reads.push(read);
         }
-        let refs_unresolved = !checked_ref_reads.is_empty() && !any_ref_resolved;
+        let mut refs_unresolved = !checked_ref_reads.is_empty() && !any_ref_resolved;
 
         // Summary mode intentionally stops after the cheap ancestry
         // measurement. Delivery-content reconciliation is the dominant
@@ -17616,7 +17616,12 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             continue;
         }
 
-        let mut merge_evidence_note = None;
+        let mut merge_evidence_note = super::super::integration_batch::landed_batch_squash(
+            t, repo_path, parent_branch, None,
+        ).map(|squash| format!(
+            "decision: child {} delivery is contained in target-reachable integration batch squash {}; original reviewed anchor retained.", t.id, squash
+        ));
+        if merge_evidence_note.is_some() { unmerged_count = 0; refs_unresolved = false; }
         let mut content_evolution_note = None;
         let mut dropped_paths = Vec::new();
         let mut content_check_error = None;

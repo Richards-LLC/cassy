@@ -8,6 +8,7 @@ use super::lifecycle::close_ops::{
     effective_close_work_target, resolve_close_gate_repo_root, resolve_close_parent_branch,
     resolve_task_commit_receipt_sha,
 };
+use crate::git_evidence::measurement::CommandExt as _;
 use crate::mcp::CasCore;
 use cas_types::{IntegrationBatchEvidence, Task, TaskStatus};
 
@@ -15,7 +16,7 @@ fn git(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let out = Command::new("git")
         .args(args)
         .current_dir(repo)
-        .output()
+        .measurement_output()
         .ok()?;
     out.status.success().then_some(out.stdout)
 }

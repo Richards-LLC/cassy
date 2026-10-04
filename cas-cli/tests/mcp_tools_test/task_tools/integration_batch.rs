@@ -48,6 +48,11 @@ fn fixture(env: &mut TestEnvGuard) -> (tempfile::TempDir, CasCore, CasCore, Stri
     git(repo, &["checkout", "-q", "-b", "factory/test-agent"]);
     commit(repo, "src/one.rs", "pub fn one() {}\n");
     let head = commit(repo, "src/two.rs", "pub fn two() {}\n");
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    let mut epic = Task::new("cas-be01".into(), "Integration batch epic".into());
+    epic.task_type = cas::types::TaskType::Epic;
+    epic.branch = Some("main".into());
+    tasks.add(&epic).unwrap();
     let mut task = Task::new(TASK.into(), "Batch delivery".into());
     task.assignee = Some("test-agent".into());
     task.status = TaskStatus::AwaitingMerge;
@@ -56,6 +61,13 @@ fn fixture(env: &mut TestEnvGuard) -> (tempfile::TempDir, CasCore, CasCore, Stri
     open_task_store(&repo.join(".cas"))
         .unwrap()
         .add(&task)
+        .unwrap();
+    tasks
+        .add_dependency(&cas::types::Dependency::new(
+            TASK.into(),
+            "cas-be01".into(),
+            cas::types::DependencyType::ParentChild,
+        ))
         .unwrap();
     git(repo, &["branch", "batch/X", &head]);
     let id = format!("batch-supervisor-{}", std::process::id());
@@ -112,7 +124,38 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
     let mut env = TestEnvGuard::temp_home();
     for explicit_receipt in [false, true] {
         let (temp, worker, supervisor, head) = fixture(&mut env);
-        stage(supervisor, &head).await.unwrap();
+        stage(supervisor.clone(), &head).await.unwrap();
+        let service = CasService::new(supervisor, None);
+        let shown = extract_text(
+            service
+                .task(Parameters(
+                    serde_json::from_value(serde_json::json!({"action":"show", "id":TASK}))
+                        .unwrap(),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            shown.contains("Staged in integration batch: batch/X@") && shown.contains(&head),
+            "{shown}"
+        );
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let report = extract_text(
+            service
+                .factory(Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({"action":"epic_status", "id":"cas-be01"}),
+                    )
+                    .unwrap(),
+                ))
+                .await
+                .unwrap(),
+        );
+        env.remove("CAS_AGENT_ROLE");
+        assert!(
+            report.contains("Staged integration batch receipts:") && report.contains(&head),
+            "{report}"
+        );
         let staged = open_task_store(&temp.path().join(".cas"))
             .unwrap()
             .get(TASK)
@@ -129,6 +172,20 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
             .get(TASK)
             .unwrap();
         assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let report = extract_text(
+            service
+                .factory(Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({"action":"epic_status", "id":"cas-be01"}),
+                    )
+                    .unwrap(),
+                ))
+                .await
+                .unwrap(),
+        );
+        env.remove("CAS_AGENT_ROLE");
+        assert!(report.contains("integration batch squash"), "{report}");
         assert_eq!(
             task.deliverables.factory_branch_anchor.as_deref(),
             Some(head.as_str())

@@ -4851,6 +4851,9 @@ function placeFleetUndo(): void {
   if (region) (progressSheetOpen() ? document.querySelector(".conversation-context") ?? document.body : document.body).append(region);
   const undo = document.getElementById("fleet-phone-undo");
   if (!undo) return;
+  // This notice belongs above the conversation composer. A retained request
+  // must not leave its phone overlay over the Terminal's return control.
+  if (!phoneLayout() || hubPresentation !== "conversation") { undo.remove(); return; }
   undo.hidden = attentionSheetOpen;
   const rail = progressSheetOpen() ? document.querySelector(".conversation-context") : null;
   (rail ?? document.body).append(undo);
@@ -4958,8 +4961,9 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (ops) {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();
-    const undo = undoBar(document, ops) ?? (phoneLayout() ? phoneFleetNotice(document, ops) : undefined);
-    if (undo && phoneLayout()) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
+    const phoneConversation = phoneLayout() && hubPresentation === "conversation";
+    const undo = undoBar(document, ops) ?? (phoneConversation ? phoneFleetNotice(document, ops) : undefined);
+    if (undo && phoneConversation) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
     else if (undo) container.append(undo);
     container.append(headerControls(document, ops, fleetHeaderPanel));
   }

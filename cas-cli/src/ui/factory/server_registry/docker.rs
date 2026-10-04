@@ -89,11 +89,11 @@ impl DockerRun {
         }
     }
 
-    pub(super) fn stop(&self, cwd: &Path) -> io::Result<()> {
+    fn container_id(&self) -> io::Result<String> {
         // A just-started client may still be contacting the daemon. Refuse to
         // claim success until its CID exists; retries use the same durable file.
         let deadline = std::time::Instant::now() + PID_PUBLISH_TIMEOUT;
-        let id = loop {
+        loop {
             match fs::read_to_string(&self.cid_file) {
                 Ok(id) => {
                     let id = id.trim().to_string();
@@ -102,7 +102,7 @@ impl DockerRun {
                         continue;
                     }
                     if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        break id;
+                        return Ok(id);
                     }
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -122,13 +122,34 @@ impl DockerRun {
                     ));
                 }
             }
-        };
+        }
+    }
+
+    /// Detached runs outlive their client; inspect only this run's captured ID.
+    pub(super) fn is_running(&self, cwd: &Path) -> io::Result<bool> {
+        let id = self.container_id()?;
+        let inspected = self.command(cwd, &["inspect", "--format={{.State.Running}}", &id])?;
+        if inspected.status.success() {
+            match String::from_utf8_lossy(&inspected.stdout).trim() {
+                "true" => return Ok(true),
+                "false" => return Ok(false),
+                _ => {}
+            }
+        } else if container_removed(&inspected) {
+            return Ok(false);
+        }
+        Err(io::Error::other(format!(
+            "Docker container {id} liveness could not be confirmed (inspect {}): {}",
+            inspected.status,
+            String::from_utf8_lossy(&inspected.stderr).trim()
+        )))
+    }
+
+    pub(super) fn stop(&self, cwd: &Path) -> io::Result<()> {
+        let id = self.container_id()?;
         let stopped = self.command(cwd, &["stop", "--time=2", &id])?;
         let inspected = self.command(cwd, &["inspect", "--format={{.State.Running}}", &id])?;
-        let stderr = String::from_utf8_lossy(&inspected.stderr).to_ascii_lowercase();
-        let removed = !inspected.status.success()
-            && (stderr.contains("no such object:") || stderr.contains("no such container:"));
-        if removed
+        if container_removed(&inspected)
             || (inspected.status.success()
                 && String::from_utf8_lossy(&inspected.stdout).trim() == "false")
         {
@@ -141,6 +162,12 @@ impl DockerRun {
             String::from_utf8_lossy(&inspected.stderr).trim()
         )))
     }
+}
+
+fn container_removed(inspected: &std::process::Output) -> bool {
+    let stderr = String::from_utf8_lossy(&inspected.stderr).to_ascii_lowercase();
+    !inspected.status.success()
+        && (stderr.contains("no such object:") || stderr.contains("no such container:"))
 }
 
 #[cfg(test)]

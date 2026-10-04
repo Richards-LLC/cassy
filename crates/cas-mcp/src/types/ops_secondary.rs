@@ -357,7 +357,9 @@ pub struct SystemRequest {
 pub struct VerificationRequest {
     /// Typed shadow-review operation, encoded as bounded JSON. These records
     /// never contribute verification verdicts to task or merge gates.
-    #[schemars(description = "shadow: JSON operation (start, context, report, cross_check, show, apply); see cas-shadow-review. Requires separate registered Spec/Standards children; apply requires supervisor opt-in.")]
+    #[schemars(
+        description = "shadow: JSON operation (start, context, report, cross_check, show, apply); see cas-shadow-review. Requires separate registered Spec/Standards children; apply requires supervisor opt-in."
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
 
@@ -611,6 +613,11 @@ pub struct FactoryRequest {
     )]
     #[serde(default)]
     pub id: Option<String>,
+
+    /// Explicit label for server_start; id remains a compatibility alias.
+    #[schemars(description = "server_start: explicit server name; takes precedence over id")]
+    #[serde(default)]
+    pub name: Option<String>,
 
     /// Number of workers to spawn/shutdown
     #[schemars(
@@ -1019,7 +1026,9 @@ pub struct CoordinationRequest {
 
     // ========== Agent Fields ==========
     /// Human-readable agent name (for register)
-    #[schemars(description = "Human-readable name for the agent")]
+    #[schemars(
+        description = "register: agent name; server_start: explicit server name (id is an alias)"
+    )]
     #[serde(default)]
     pub name: Option<String>,
 
@@ -1040,7 +1049,9 @@ pub struct CoordinationRequest {
 
     /// Loop prompt (for loop_start). spawn_workers rejects a non-empty value;
     /// worker briefs must be sent with coordination message after registration.
-    #[schemars(description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration.")]
+    #[schemars(
+        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration."
+    )]
     #[serde(default)]
     pub prompt: Option<String>,
 
@@ -1121,7 +1132,9 @@ pub struct CoordinationRequest {
     pub worker_names: Option<String>,
 
     /// Target branch/ref for sync actions
-    #[schemars(description = "Target branch/ref for sync actions (e.g., 'epic/my-epic'); for db_branch_create, the non-production Neon parent (a recorded label such as dev or staging, a branch id, or a name)")]
+    #[schemars(
+        description = "Target branch/ref for sync actions (e.g., 'epic/my-epic'); for db_branch_create, the non-production Neon parent (a recorded label such as dev or staging, a branch id, or a name)"
+    )]
     #[serde(default)]
     pub branch: Option<String>,
 
@@ -1350,6 +1363,7 @@ impl CoordinationRequest {
         super::FactoryRequest {
             action: self.action.clone(),
             id: self.id.clone(),
+            name: self.name.clone(),
             count: self.count,
             accept: self.accept,
             limit: self.limit,

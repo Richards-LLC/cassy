@@ -311,6 +311,36 @@ async fn shared_servers_announce_that_they_outlive_teardown() {
         .await;
 }
 
+#[tokio::test]
+async fn cas_7694_start_uses_explicit_name() {
+    let env = TestEnv::new();
+    let started = env.call(serde_json::json!({"action":"server_start", "name":"explicit server", "command":"sleep 300", "cwd":env.workdir})).await;
+    if started.contains("Started server") {
+        let id = extract_id(&started);
+        env.call(serde_json::json!({"action":"server_stop", "id":id}))
+            .await;
+    }
+    assert!(
+        started.contains("Started server 'explicit server'"),
+        "{started}"
+    );
+}
+
+#[tokio::test]
+async fn cas_7694_immediate_exit_reports_failure_and_log_tail() {
+    let env = TestEnv::new();
+    let result = env.call(serde_json::json!({"action":"server_start", "command":"printf 'startup error\\n' >&2; exit 7", "cwd":env.workdir})).await;
+    assert!(
+        result.contains("MCP_ERROR") && result.contains("startup error"),
+        "must report failure with diagnostic: {result}"
+    );
+    let listed = env.call(serde_json::json!({"action":"server_list"})).await;
+    assert!(
+        !listed.contains("Running servers (1)"),
+        "failed launch must not stay running: {listed}"
+    );
+}
+
 /// Registered identity controls both factory and legacy coordination routes.
 #[tokio::test]
 async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {

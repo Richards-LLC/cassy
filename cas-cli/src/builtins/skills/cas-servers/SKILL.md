@@ -39,11 +39,14 @@ factory action=server_start command="npm run dev" cwd=apps/web port=5173 task_id
 | `cwd` | Where to run it. Defaults to the current directory. |
 | `port` | The port you expect it to bind. Advisory — `server_list` reports what it *actually* bound. |
 | `task_id` | The task this server belongs to. Always set it: it is how a supervisor knows who to ask. |
-| `id` | A short name (`dev-web`). Defaults to something derived from the command. |
+| `name` | Explicit server label, used verbatim. `id` is a compatibility alias; `name` takes precedence. Defaults to the command without environment prefixes. |
 | `shared` | `true` when the server must outlive your task. Default `false`. |
 
 Output and errors go to a log file, never to your terminal — the path is in the response.
-A server that dies on startup leaves its reason in that log.
+A process that exits during the 250 ms startup grace reports failure with the log tail.
+For direct Docker runs this checks the tracked container, so a detached client may exit
+while its running container is accepted. Other commands use process liveness.
+This does not prove the server is ready to accept connections.
 
 ### Choosing `shared`
 

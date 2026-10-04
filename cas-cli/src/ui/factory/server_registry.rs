@@ -46,6 +46,9 @@ const LOG_DIR: &str = "logs";
 /// How long to wait for the launcher shell to publish the server's pid.
 const PID_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Grace before checking that the launched workload survived startup.
+const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Grace between SIGTERM and SIGKILL on [`stop`].
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
@@ -588,7 +591,57 @@ fn start_inner(
         ended_detail: None,
     };
     write_record(cas_root, &record)?;
+    // The launcher publishing $! proves only that a process was forked.
+    // Wait briefly before promising that the workload is actually alive.
+    std::thread::sleep(STARTUP_GRACE);
+    let alive = match &record.docker {
+        Some(docker) => docker.is_running(&record.cwd),
+        None => Ok(liveness(&record) == ServerLiveness::Live),
+    };
+    if !matches!(alive, Ok(true)) {
+        let cleanup = stop_with_scope_ops(cas_root, &record, scope_ops).err();
+        let mut record = record;
+        record.state = ServerState::Dead;
+        record.ended_at = Some(Utc::now());
+        record.ended_detail = Some("failed during startup grace".to_string());
+        write_record(cas_root, &record)?;
+        let log = record.log_path.as_ref().unwrap();
+        let detail = log_tail(log).unwrap_or_else(|error| format!("could not read log: {error}"));
+        return Err(io::Error::other(format!(
+            "server '{}' failed during startup grace; see {}\n{}{}{}",
+            record.name,
+            log.display(),
+            detail,
+            alive
+                .err()
+                .map(|error| format!("\nworkload liveness could not be confirmed: {error}"))
+                .unwrap_or_default(),
+            cleanup
+                .map(|error| format!("\ncleanup could not be confirmed: {error}"))
+                .unwrap_or_default(),
+        )));
+    }
     Ok(record)
+}
+
+/// Bound diagnostics even if a failed server flooded its log.
+fn log_tail(path: &Path) -> io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(4096)))?;
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(text
+        .lines()
+        .rev()
+        .take(10)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// Removes the pid handshake file when `start` returns, by any path.

@@ -24,6 +24,7 @@ name = "cas"
 path = "src/main.rs"
 
 [dependencies]
+shell-words = "1.1.1"
 quick-xml = "0.37.5"
 # Core types (workspace crate)
 cas-types = { path = "../crates/cas-types" }

@@ -475,6 +475,7 @@ fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
         action: action.to_string(),
         id: None,
+        name: None,
         count: None,
         accept: None,
         limit: None,

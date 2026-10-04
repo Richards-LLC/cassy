@@ -132,6 +132,21 @@ fn default_names_come_from_the_command_and_are_filename_safe() {
 }
 
 #[test]
+fn cas_7694_names_ignore_environment_prefixes() {
+    for command in [
+        "PORT=4000 npm run dev",
+        "env -i PORT=4000 npm run dev",
+        "PORT=4000 LABEL='hello world' npm run dev",
+    ] {
+        assert_eq!(
+            default_server_name(command),
+            default_server_name("npm run dev"),
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn cas_9723_server_ownership_rejects_identity_and_session_reuse() {
     use crate::types::{Agent, AgentRole};
     let mut server = record("owned", true);

@@ -2105,7 +2105,7 @@ pub fn doctor_row(
         return DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
-                "{}; {CREDENTIALS_HINT} (hub: {endpoint})",
+                "hub {endpoint}: {}; {CREDENTIALS_HINT}",
                 missing.join(", ")
             ),
         };

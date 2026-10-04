@@ -305,6 +305,49 @@ async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     }
 }
 
+/// A refused env policy must not disable otherwise supported Codex admission.
+/// Execute only a local shell probe through the admitted config's PTY boundary;
+/// actual native Codex discovery remains a separate supervisor demo.
+#[tokio::test]
+async fn codex_unrestricted_and_server_only_admission_preserves_spawn_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    for (policy, server_only) in [
+        ("[factory]\n", false),
+        ("[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = []\n", true),
+    ] {
+        std::fs::write(cas_root.join("config.toml"), policy).unwrap();
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().to_path_buf(), cas_root: Some(cas_root.clone()),
+            workers: 1, worker_cli: SupervisorCli::Codex,
+            include_director: false, ..Default::default()
+        });
+        let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert_eq!(worker.effective_command(), "codex");
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_only);
+        worker.env.push(("CAS_GH1047_SAFE_LAUNCH_FIXTURE".into(), "allowed-fixture".into()));
+        worker.command = "/bin/sh".into();
+        worker.args = vec!["-c".into(), "test \"$CAS_GH1047_SAFE_LAUNCH_FIXTURE\" = allowed-fixture && printf 'safe-codex-admission\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("safe-codex-local-probe", worker).unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("PTY ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded local safe-admission probe");
+        assert!(String::from_utf8_lossy(&output).contains("safe-codex-admission"));
+    }
+}
+
 #[test]
 fn invalid_worker_resource_policy_refuses_launch_before_execution_gh_1047() {
     let _env = TestEnvGuard::temp_home();

@@ -2412,6 +2412,18 @@ impl FactoryDaemon {
                             );
                             continue;
                         }
+                        // Task mutations and director snapshots share one durable
+                        // assignment row; a late tick cannot duplicate the wake.
+                        if let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text) {
+                            if let Ok(task) = crate::store::open_task_store(self.app.cas_dir())
+                                .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
+                            {
+                                match crate::task_assignment::enqueue(self.app.cas_dir(), &task) {
+                                    Ok(_) => continue,
+                                    Err(error) => tracing::warn!(%error, "assignment enqueue failed; retaining director fallback"),
+                                }
+                            }
+                        }
                         // cas-ae6d (GH #100): a loss-intolerant prompt (today:
                         // the assignment wake-up) bound for a PTY pane that is
                         // not ready for injection goes to the durable

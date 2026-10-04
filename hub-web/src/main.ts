@@ -4873,8 +4873,11 @@ function placeFleetUndo(): void {
   if (!phoneLayout() || hubPresentation !== "conversation") { undo.remove(); return; }
   undo.hidden = attentionSheetOpen;
   const rail = progressSheetOpen() ? document.querySelector(".conversation-context") : null;
-  if (rail) rail.append(undo);
-  else document.getElementById("conversation-composer-slot")?.prepend(undo);
+  const parent = rail ?? document.getElementById("conversation-composer-slot");
+  // Re-inserting even into the same parent drops a descendant's keyboard focus.
+  if (parent && undo.parentElement !== parent) {
+    if (rail) parent.append(undo); else parent.prepend(undo);
+  }
 }
 function dismissFleetPanel(redraw = true): void {
   const row = fleetOps.confirm?.rowKey ?? fleetOps.menuFor ?? fleetOps.assignFor ?? fleetOps.preview?.rowKey;

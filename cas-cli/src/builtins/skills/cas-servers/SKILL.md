@@ -14,7 +14,7 @@ knows which task it belongs to, and nothing can stop it except hunting through `
 
 Start it through Cassy instead:
 
-```
+```text
 factory action=server_start command="npm run dev" port=5173 task_id=<your task>
 ```
 
@@ -29,7 +29,7 @@ worker's containment scope on purpose.
 
 ### Start
 
-```
+```text
 factory action=server_start command="npm run dev" cwd=apps/web port=5173 task_id=cas-1234
 ```
 
@@ -58,7 +58,7 @@ A server that dies on startup leaves its reason in that log.
 
 ### List
 
-```
+```text
 factory action=server_list
 factory action=server_list task_id=cas-1234
 ```
@@ -70,7 +70,7 @@ answer. A pid that has gone away is reported dead; Cassy never restarts anything
 
 ### Stop
 
-```
+```text
 factory action=server_stop id=dev-web
 ```
 

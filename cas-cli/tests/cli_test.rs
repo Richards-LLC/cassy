@@ -809,12 +809,11 @@ fn cas_8121_cli_names_project_hub_in_integrate_and_doctor() {
     std::fs::write(&proxy, original).unwrap();
     let integrate = cas_cmd(temp.path()).current_dir(&temp).env_remove("CAS_CLONE_PATH")
         .env_remove("CAS_8121_STAGING_TOKEN")
-        .args(["integrate", "violet", "--dry-run", "--skip-verify", "--no-harness", "--json"])
+        .args(["integrate", "violet", "--dry-run", "--skip-verify", "--no-harness"])
         .output().unwrap();
     assert!(integrate.status.success(), "{}", String::from_utf8_lossy(&integrate.stderr));
-    let report: serde_json::Value = serde_json::from_slice(&integrate.stdout).unwrap();
-    assert!(report["summary"].as_array().unwrap().iter().any(|line|
-        line.as_str() == Some("hub: https://staging.example.test/mcp/slack")), "{report}");
+    let report = String::from_utf8(integrate.stdout).unwrap();
+    assert!(report.lines().any(|line| line.trim() == "hub: https://staging.example.test/mcp/slack"), "{report}");
     assert_eq!(std::fs::read_to_string(&proxy).unwrap(), original);
     let doctor = cas_cmd(temp.path()).current_dir(&temp).env_remove("CAS_CLONE_PATH")
         .env_remove("CAS_8121_STAGING_TOKEN").args(["doctor", "--json"]).output().unwrap();

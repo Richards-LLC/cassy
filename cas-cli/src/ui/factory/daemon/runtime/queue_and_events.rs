@@ -9146,6 +9146,30 @@ mod tests {
     }
 
     #[test]
+    fn operator_stall_notice_never_claims_a_worker_harness_cas_8422() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        for (target, expected) in [("operator", "commander"), ("worker", "codex")] {
+            let id = store
+                .enqueue("supervisor", target, "unanswered ask")
+                .unwrap();
+            store.mark_transport_delivered(id).unwrap();
+            let row = store.queued_prompt(id).unwrap().unwrap();
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            let text =
+                super::delivery_stalled_notice(&row, cas_mux::SupervisorCli::Codex, Some(&report));
+            assert!(
+                text.contains(&format!("recipient_harness={expected};")),
+                "{text}"
+            );
+            assert!(text.contains("stage=delivered"), "{text}");
+            assert!(text.contains("has not acknowledged or read"), "{text}");
+        }
+    }
+
+    #[test]
     fn casb123_delivery_stalled_threshold_clamps_before_i64_store_boundary() {
         assert_eq!(
             super::delivery_stalled_threshold_i64(10_u64.pow(12)),
@@ -11299,6 +11323,10 @@ mod tests {
             scopes: vec!["message:send".to_string()],
             operator_verified: true,
         };
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut sender = cas_types::Agent::new_with_role("ask-sender".into(), "patient-pelican-9".into(), cas_types::AgentRole::Supervisor);
+        sender.factory_session = Some("factory-1".into());
+        agents.register(&sender).unwrap();
         // The supervisor's ask, stored exactly as message.rs stores a
         // target='operator' Commander turn.
         let ask_payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
@@ -11330,6 +11358,7 @@ mod tests {
         let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
         assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
 
+        assert_eq!(queue.delivery_stalled_candidates("factory-1", 0, 0, 10).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![ask_id]);
         let reply_id = super::super::delivery::enqueue_commander_message(
             &cas_dir,
             "factory-1",
@@ -11354,6 +11383,9 @@ mod tests {
         let after = queue.message_delivery_report(ask_id).unwrap().unwrap();
         assert_eq!(after.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
         assert!(after.confirmed_at.is_some(), "the ask is confirmed by the operator's answer");
+        assert!(queue.delivery_stalled_candidates("factory-1", 0, 0, 10).unwrap().is_empty());
+        assert!(queue.enqueue_delivery_stalled_bounce(ask_id, "factory-1", "stalled", "stalled").unwrap().is_none());
+
 
         // A reference that is not a supervisor→operator turn is refused, and
         // nothing is queued for it.

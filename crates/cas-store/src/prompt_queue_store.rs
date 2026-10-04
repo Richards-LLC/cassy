@@ -9628,6 +9628,115 @@ mod tests {
     }
 
     #[test]
+    fn operator_stalls_only_action_required_turns_cas_8422() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        let mut action_ids = Vec::new();
+        let mut informational_ids = Vec::new();
+        for kind in ["status", "receipt", "answer", "ask", "blocker"] {
+            let id = store
+                .enqueue_with_session("supervisor", "operator", kind, "session")
+                .unwrap();
+            store.stamp_operator_reply(id, kind, &[]).unwrap();
+            store.mark_transport_delivered(id).unwrap();
+            backdate(&store, id, 31 * 60);
+            if matches!(kind, "ask" | "blocker") {
+                action_ids.push(id);
+            } else {
+                informational_ids.push(id);
+            }
+        }
+        let now = Utc::now();
+        let mirror = store
+            .mirror_supervisor_turn(
+                "session",
+                "commander-mirror:session:agent:turn",
+                now,
+                now,
+                r#"{"message":"pane answer","kind":"answer"}"#,
+                "pane mirror",
+                "phone",
+                "answer",
+            )
+            .unwrap()
+            .unwrap();
+        backdate(&store, mirror, 31 * 60);
+        informational_ids.push(mirror);
+        // Legacy untyped operator rows and all direct worker messages retain monitoring.
+        for target in ["operator", "worker"] {
+            let id = store
+                .enqueue_with_session("supervisor", target, "action required", "session")
+                .unwrap();
+            store.mark_transport_delivered(id).unwrap();
+            backdate(&store, id, 31 * 60);
+            action_ids.push(id);
+        }
+        let candidates = store
+            .delivery_stalled_candidates("session", 600, 1800, 50)
+            .unwrap();
+        assert_eq!(
+            candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
+            action_ids
+        );
+        for id in informational_ids {
+            assert!(
+                store
+                    .enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled")
+                    .unwrap()
+                    .is_none(),
+                "informational row {id} must remain safe even after scan races"
+            );
+        }
+        for id in action_ids {
+            assert!(
+                store
+                    .enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled")
+                    .unwrap()
+                    .is_some(),
+                "delivered is not read: unanswered action {id} still stalls"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_recipient_read_cancels_stall_without_forging_ack_cas_8422() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        let id = store
+            .enqueue_with_session("supervisor", "operator", "question", "session")
+            .unwrap();
+        store.stamp_operator_reply(id, "ask", &[]).unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        backdate(&store, id, 31 * 60);
+        assert_eq!(
+            store
+                .delivery_stalled_candidates("session", 600, 1800, 10)
+                .unwrap()[0]
+                .id,
+            id
+        );
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("operator", Some("session"), 10)
+                .unwrap()[0]
+                .id,
+            id
+        );
+        assert!(
+            store
+                .delivery_stalled_candidates("session", 600, 1800, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .enqueue_delivery_stalled_bounce(id, "session", "stalled", "stalled")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn delivery_stalled_bounce_uses_priority_threshold_once_and_cancels_on_read() {
         let (_temp, store) = create_test_store();
         register_bounce_sender(&store, "supervisor", "session");

@@ -524,7 +524,7 @@ async fn jev_files_mock_http_globs_secrets_ignores_binary_and_hash_only() {
 }
 
 #[tokio::test]
-async fn jev_files_caps_truncate_utf8_and_bound_selection() {
+async fn jev_files_caps_abstain_at_utf8_boundary_and_bound_selection() {
     let server = MockServer::start().await;
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("a.txt"), "abésecret-after-cap").unwrap();
@@ -784,6 +784,11 @@ async fn truncated_files_abstain_instead_of_confident_negatives_cas_c5e8() {
         format!("{}\ndate -d tomorrow", "x".repeat(DEFAULT_FILE_BYTES)),
     )
     .unwrap();
+    fs::write(
+        dir.path().join("large.bin"),
+        vec![0; DEFAULT_FILE_BYTES + 1],
+    )
+    .unwrap();
     let negative = json!({"model":"jev-1.13.0", "answers":{"urgent":{"type":"noul","noul":0.12}}, "usage":{"input_tokens":1,"output_tokens":1}});
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(negative))
@@ -794,7 +799,7 @@ async fn truncated_files_abstain_instead_of_confident_negatives_cas_c5e8() {
         client.files(
             dir.path(),
             &FilesOptions {
-                paths: vec!["large.sh".into()],
+                paths: vec!["large.sh".into(), "large.bin".into()],
                 ..Default::default()
             },
             &questions(),
@@ -810,6 +815,12 @@ async fn truncated_files_abstain_instead_of_confident_negatives_cas_c5e8() {
         encoded["files"][0]["status"], "incomplete",
         "a truncated prefix cannot prove absence: {encoded}"
     );
+    assert_eq!(encoded["files"].as_array().unwrap().len(), 2);
+    for row in encoded["files"].as_array().unwrap() {
+        assert_eq!(row["status"], "incomplete");
+        assert_eq!(row["truncated"], true);
+        assert!(row.get("answers").is_none());
+    }
     assert!(encoded["files"][0].get("answers").is_none());
     assert!(server.received_requests().await.unwrap().is_empty());
 }

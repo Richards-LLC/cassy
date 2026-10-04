@@ -121,7 +121,7 @@ file is read to classify it. Binaries (NUL-containing/non-UTF-8 prefixes) and
 non-regular files are skipped. Classification inspects only the capped prefix.
 
 `max_bytes` defaults to 24 KiB and accepts 1–128 KiB. Reads stop after cap + 1
-bytes. An over-cap text file returns `status:"incomplete", truncated:true`
+bytes. An over-cap file returns `status:"incomplete", truncated:true`
 and a reason, with no answers and no Jev call. A truncated prefix cannot prove
 absence; increase `max_bytes` or supply a smaller complete input. This
 abstention applies to every question type, in both strict and advisory modes.

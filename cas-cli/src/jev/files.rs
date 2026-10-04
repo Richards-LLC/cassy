@@ -371,15 +371,15 @@ impl JevClient {
             };
             let truncated = bytes.len() > options.max_bytes;
             bytes.truncate(options.max_bytes);
-            if bytes.contains(&0) {
-                output.files.push(skipped(path, "binary file"));
-                continue;
-            }
             if truncated {
                 output.files.push(FileRow::Incomplete {
                     path, truncated: true,
                     reason: "File exceeds max_bytes; no answers returned because a truncated prefix cannot prove absence. Increase max_bytes or narrow the input.".into(),
                 });
+                continue;
+            }
+            if bytes.contains(&0) {
+                output.files.push(skipped(path, "binary file"));
                 continue;
             }
             let content = match std::str::from_utf8(&bytes) {

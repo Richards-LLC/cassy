@@ -4858,6 +4858,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
       toggleAssign: (rowKey) => { const opening = fleetOps.assignFor !== rowKey; fleetOps.closeMenus(); fleetOps.assignFor = opening ? rowKey : undefined; rerender(opening ? phoneLayout() ? `${rowKey}:search` : `${rowKey}:first-item` : `${rowKey}:assign`); },
       toggleHeader: (panel) => { fleetOps.closeMenus(); fleetHeaderPanel = fleetHeaderPanel === panel ? undefined : panel; rerender(fleetHeaderPanel === "focus" ? phoneLayout() ? "header:search" : "header:first-item" : fleetHeaderPanel === "add" ? "header:add-go" : `header:${panel}`); },
       undo: () => { const run = fleetOps.takeUndo(Date.now()); if (run) void runFleetAction(run.request.op.kind === "assign_task" ? `task:${String(run.request.op.task_id)}` : run.request.op.kind === "focus_epic" ? "header" : `agent:${String(run.request.op.worker)}`, run); },
+      dismissNotice: () => rerender(progressSheetOpen() ? "header:add" : "phone-notice-dismiss"),
     },
   };
 }
@@ -4867,12 +4868,13 @@ function placeFleetUndo(): void {
   if (region) (progressSheetOpen() ? document.querySelector(".conversation-context") ?? document.body : document.body).append(region);
   const undo = document.getElementById("fleet-phone-undo");
   if (!undo) return;
-  // This notice belongs above the conversation composer. A retained request
-  // must not leave its phone overlay over the Terminal's return control.
+  // Reserve its actual height above the composer, or after the sheet's tasks.
+  // Retained requests still use inline feedback in Terminal view.
   if (!phoneLayout() || hubPresentation !== "conversation") { undo.remove(); return; }
   undo.hidden = attentionSheetOpen;
   const rail = progressSheetOpen() ? document.querySelector(".conversation-context") : null;
-  (rail ?? document.body).append(undo);
+  if (rail) rail.append(undo);
+  else document.getElementById("conversation-composer-slot")?.prepend(undo);
 }
 function dismissFleetPanel(redraw = true): void {
   const row = fleetOps.confirm?.rowKey ?? fleetOps.menuFor ?? fleetOps.assignFor ?? fleetOps.preview?.rowKey;
@@ -4904,7 +4906,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     event.preventDefault(); event.stopPropagation(); dismissFleetPanel();
   };
   const undoFocused = document.activeElement instanceof HTMLElement && document.activeElement.dataset.fleetFocus === "undo";
-  const hadFocus = document.activeElement instanceof HTMLElement && container.contains(document.activeElement) ? document.activeElement.dataset.fleetFocus : undefined;
+  const hadFocus = document.activeElement instanceof HTMLElement && (container.contains(document.activeElement) || document.activeElement.closest("#fleet-phone-undo")) ? document.activeElement.dataset.fleetFocus : undefined;
   // The rows' triggers in their drawn order, so focus on a row that leaves
   // (a confirmed Stop) can move to its neighbour (cas-a474 QA N1).
   const priorTriggers = [...container.querySelectorAll<HTMLElement>('[data-fleet-focus$=":trigger"]')].map((node) => node.dataset.fleetFocus ?? "");
@@ -4978,7 +4980,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();
     const phoneConversation = phoneLayout() && hubPresentation === "conversation";
-    const undo = undoBar(document, ops) ?? (phoneConversation ? phoneFleetNotice(document, ops) : undefined);
+    const undo = fleetOps.currentUndo(ops.now) ? undoBar(document, { ...ops, phone: phoneConversation }) : phoneConversation ? phoneFleetNotice(document, ops) : undefined;
     if (undo && phoneConversation) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
     else if (undo) container.append(undo);
     container.append(headerControls(document, ops, fleetHeaderPanel));

@@ -325,6 +325,11 @@ export class FleetOpsState {
   private selectionKey: string | undefined;
   private selectionVersion = 0;
   private readonly requests = new Map<string, symbol>();
+  private readonly dismissedPhoneNotices = new WeakSet<FleetAction | RowNote | UndoOffer>();
+
+  /** Dismiss only this presentation; requests, row notes and Undo remain intact. */
+  dismissPhoneNotice(notice: FleetAction | RowNote | UndoOffer): void { this.dismissedPhoneNotices.add(notice); }
+  phoneNoticeDismissed(notice: FleetAction | RowNote | UndoOffer): boolean { return this.dismissedPhoneNotices.has(notice); }
 
   get selectionEpoch(): number { return this.selectionVersion; }
 

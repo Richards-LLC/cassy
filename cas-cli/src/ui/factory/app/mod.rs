@@ -531,6 +531,19 @@ fn hardlink_seed_tree_inner(
             let metadata = entry.metadata()?;
             if entry
                 .path()
+                .strip_prefix(source_root)?
+                .components()
+                .any(|part| part.as_os_str() == ".fingerprint")
+            {
+                // Cargo rewrites freshness records in place. Sharing their
+                // inode lets one lane bless another lane's old rmeta as fresh.
+                // Keep the original mtime: making dep-info newer during a
+                // seed would also hide source changes from Cargo's mtime check.
+                std::fs::copy(entry.path(), &destination_entry)?;
+                std::fs::File::open(&destination_entry)?
+                    .set_times(std::fs::FileTimes::new().set_modified(metadata.modified()?))?;
+            } else if entry
+                .path()
                 .extension()
                 .is_some_and(|extension| extension == "d")
             {
@@ -6700,6 +6713,85 @@ mod spawn_isolation_tests {
             warning.contains("scripts/refresh-worker-build-cache.sh"),
             "{warning}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_seed_keeps_fingerprints_private_cas_a7cf() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let snapshot = tmp.path().join("snapshot");
+        let fingerprint = "debug/.fingerprint/cas-types-abc";
+        let records = [
+            "lib-cas_types",
+            "lib-cas_types.json",
+            "dep-lib-cas_types",
+            "invoked.timestamp",
+        ];
+        std::fs::create_dir_all(snapshot.join(fingerprint)).unwrap();
+        std::fs::create_dir_all(snapshot.join("debug/deps")).unwrap();
+        for record in records {
+            let path = snapshot.join(fingerprint).join(record);
+            std::fs::write(&path, b"old freshness").unwrap();
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100)),
+                )
+                .unwrap();
+        }
+        let artifact = "debug/deps/libcas_types-abc.rmeta";
+        std::fs::write(snapshot.join(artifact), b"old metadata").unwrap();
+        let worker_a = tmp.path().join("worker-a");
+        let worker_b = tmp.path().join("worker-b");
+        for worker in [&worker_a, &worker_b] {
+            hardlink_seed_tree(&snapshot, worker, worker, &mut TargetSeedStats::default()).unwrap();
+            for record in records {
+                assert_eq!(
+                    std::fs::metadata(worker.join(fingerprint).join(record))
+                        .unwrap()
+                        .modified()
+                        .unwrap(),
+                    std::fs::metadata(snapshot.join(fingerprint).join(record))
+                        .unwrap()
+                        .modified()
+                        .unwrap(),
+                    "seeding must preserve {record}'s source-freshness cutoff"
+                );
+            }
+        }
+
+        // Cargo rewrites these freshness records in place when one lane rebuilds.
+        // Its sibling still has the old rmeta and must retain the old freshness.
+        for record in records {
+            std::fs::write(worker_a.join(fingerprint).join(record), b"new freshness").unwrap();
+            for untouched in [&snapshot, &worker_b] {
+                assert_eq!(
+                    std::fs::read(untouched.join(fingerprint).join(record)).unwrap(),
+                    b"old freshness",
+                    "another lane refreshed {record} while its rmeta stayed old"
+                );
+            }
+            assert_eq!(
+                std::fs::metadata(worker_a.join(fingerprint).join(record))
+                    .unwrap()
+                    .nlink(),
+                1
+            );
+        }
+        for worker in [&worker_a, &worker_b] {
+            assert_eq!(
+                std::fs::read(worker.join(artifact)).unwrap(),
+                b"old metadata"
+            );
+            assert_eq!(
+                std::fs::metadata(worker.join(artifact)).unwrap().ino(),
+                std::fs::metadata(snapshot.join(artifact)).unwrap().ino(),
+                "reusable artifacts should still be hardlinked"
+            );
+        }
     }
 
     #[cfg(unix)]

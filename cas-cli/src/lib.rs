@@ -79,6 +79,7 @@ pub(crate) mod ops;
 pub mod qa_evidence;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
+pub(crate) mod task_assignment;
 pub mod qa_pass;
 pub(crate) mod review_body;
 pub mod retrieval_eval;

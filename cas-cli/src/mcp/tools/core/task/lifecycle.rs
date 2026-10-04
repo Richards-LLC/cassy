@@ -1182,6 +1182,11 @@ impl CasCore {
             })?;
 
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
+        let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
+            Ok(_) => String::new(),
+            Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
+        };
+
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
         // cas-3e41 (GH #993): every task create, not only an epic, pushes the
@@ -1248,12 +1253,13 @@ impl CasCore {
                                 "Warning: Failed to resolve a fresh epic base '{trunk}': {error}"
                             );
                             return Ok(Self::success(format!(
-                                "Created task: {} - {} (P{}){}{}",
+                                "Created task: {} - {} (P{}){}{}{}",
                                 id,
                                 task.title,
                                 task.priority.0,
                                 related_context,
                                 no_code_external_ref_guidance(&task),
+                                assignment_warning,
                             )));
                         }
                     };
@@ -1370,12 +1376,13 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}",
+            "Created task: {} - {} (P{}){}{}{}",
             id,
             task.title,
             task.priority.0,
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
+            assignment_warning,
         )))
     }
 
@@ -3008,6 +3015,63 @@ mod related_recall_response_tests {
             .find(|task| task.title == "Invalid target task")
             .expect("task persisted despite invalid target");
         assert!(invalid_target_task.deliverables.work_target.is_none());
+    }
+
+    #[tokio::test]
+    async fn gh1123_create_with_live_assignee_queues_dispatch() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "assigned-worker".into(), cas_types::AgentRole::Worker);
+        worker.factory_session = Some("assignment-session".into());
+        worker.metadata.insert("cli".into(), "codex".into());
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        let mut request = plain_task_request("Assigned creation dispatch");
+        request.assignee = Some(worker.name.clone());
+        core.cas_task_create(Parameters(request)).await.unwrap();
+        let task = core.open_task_store().unwrap().list(None).unwrap().pop().unwrap();
+        let queue = crate::store::open_prompt_queue_store(&core.cas_root).unwrap();
+        let rows = queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap();
+        assert_eq!(rows.len(), 1, "assigned creation must persist one dispatch without a director tick");
+        assert_eq!(rows[0].target, worker.name);
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(rows[0].prompt.contains(&format!("action=start id={}", task.id)));
+        assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
+        // A later director tick shares the producer; it cannot duplicate this dispatch.
+        crate::task_assignment::enqueue(&core.cas_root, &task).unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 1);
+        let mut dependent = plain_task_request("Dependent dashboard calibration");
+        dependent.assignee = Some(worker.name.clone());
+        dependent.blocked_by = Some(task.id.clone());
+        // Ordinary blocks permit parallel preparation in the current ready policy.
+        core.cas_task_create(Parameters(dependent)).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        let mut config = crate::config::Config::load(&core.cas_root).unwrap();
+        let mut orchestration = config.orchestration();
+        orchestration.auto_prompt.on_task_assigned = false;
+        config.orchestration = Some(orchestration.clone());
+        config.save(&core.cas_root).unwrap();
+        let mut disabled = plain_task_request("Disabled dispatch nutrition study");
+        disabled.assignee = Some(worker.id.clone());
+        core.cas_task_create(Parameters(disabled)).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        orchestration.auto_prompt.on_task_assigned = true;
+        config.orchestration = Some(orchestration);
+        config.save(&core.cas_root).unwrap();
+        let mut next = cas_types::Agent::new_with_role("next-worker-id".into(), "next-worker".into(), cas_types::AgentRole::Worker);
+        next.factory_session = worker.factory_session.clone();
+        core.open_agent_store().unwrap().register(&next).unwrap();
+        let update = serde_json::from_value(serde_json::json!({"id": task.id, "assignee": next.name})).unwrap();
+        core.cas_task_update(Parameters(update)).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&next.name], Some("assignment-session"), 10).unwrap().len(), 1,
+            "reassignment must use the same durable producer");
+        worker.mark_shutdown();
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        let mut retired = plain_task_request("Retired billing workflow");
+        retired.assignee = Some(worker.id.clone());
+        core.cas_task_create(Parameters(retired)).await.unwrap();
+        core.cas_task_create(Parameters(plain_task_request("Unassigned storage cleanup"))).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+
     }
 
     #[tokio::test]

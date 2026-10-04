@@ -2054,6 +2054,12 @@ impl CasCore {
             data: None,
         })?;
 
+        if task.assignee.is_some() && task.assignee != prior_assignee {
+            if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
+                warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
+            }
+        }
+
         // cas-ea9c (GH #1005): an assignment attaches the GitHub issues the
         // task cites, so a worker without GitHub credentials reads them from
         // disk. Only a credentialed caller (supervisor or operator) fetches;

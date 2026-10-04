@@ -142,16 +142,6 @@ pub(super) fn finish_worker_config(
     for name in &policy.supervisor_only_env {
         if !config.env_remove.contains(name) { config.env_remove.push(name.clone()); }
     }
-    if config.effective_command() == "codex" && !policy.supervisor_only_env.is_empty() {
-        // Parent env stripping cannot remove literal env entries on retained
-        // native MCP servers. Codex's available inventory interfaces perform
-        // auth discovery or omit effective plugin/layer contributions. Admit
-        // this policy only when a supported complete auth-free evaluator can
-        // prove the exact launch context safe, before native discovery.
-        config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(),
-            "Codex worker cannot enforce [factory] supervisor_only_env: complete auth-free native MCP environment admission is unavailable; route restricted tasks to the supervisor, or use an unrestricted environment policy only when intended".into()));
-        return;
-    }
     if !policy.is_empty() {
         // Grok discovers original project/user MCP configuration and has no
         // supported per-launch isolation override. Other unsupported native
@@ -172,14 +162,17 @@ pub(super) fn finish_worker_config(
                     if cli == "claude" {
                         config.args.extend(["--strict-mcp-config".into(), "--mcp-config".into(), path.display().to_string()]);
                     } else if cli == "codex" {
-                        for name in &policy.supervisor_only_mcp {
+                        let mut disabled = crate::worker_resources::codex_native_env_denials(config, root, &policy);
+                        disabled.extend(policy.supervisor_only_mcp.iter().cloned());
+                        for name in &disabled {
                             // Codex splits override paths on dots; quoted TOML
                             // keys become literal quote characters, not keys.
-                            // Refuse ambiguous names rather than silently
-                            // configuring a different server.
+                            // Address dotted names through the parent inline
+                            // table so the override path cannot split the key.
                             if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
-                                config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Codex worker isolation requires supervisor-only MCP names containing only letters, digits, hyphens or underscores".into()));
-                                break;
+                                let key = toml::Value::String(name.clone());
+                                config.args.extend(["-c".into(), format!("mcp_servers={{ {key} = {{ enabled = false }} }}")]);
+                                continue;
                             }
                             config.args.extend(["-c".into(), format!("mcp_servers.{name}.enabled=false")]);
                         }

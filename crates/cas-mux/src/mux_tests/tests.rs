@@ -202,12 +202,12 @@ fn codex_env_policy_disables_literal_env_servers_preserving_safe_launch_gh_1047(
     let native_config = "[mcp_servers.context7]\ncommand = 'never-executed-fixture'\n[mcp_servers.context7.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'literal-fixture'\n[plugins.unknown_fixture]\nenabled = true\n";
     std::fs::write(native_root.join("config.toml"), native_config).unwrap();
     env.set("DENIED_LITERAL_FIXTURE_TOKEN", "parent-fixture");
-    for (policy, env_restricted, server_only) in [
+    for (policy, env_restricted, server_restricted) in [
         ("[factory]\n", false, false),
         ("[factory]\nsupervisor_only_env = []\n", false, false),
         ("[factory]\nsupervisor_only_mcp = ['vercel']\n", false, true),
         ("[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true, false),
-        ("[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true, false),
+        ("[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true, true),
     ] {
         std::fs::write(cas_root.join("config.toml"), policy).unwrap();
         let config = MuxConfig {
@@ -228,7 +228,7 @@ fn codex_env_policy_disables_literal_env_servers_preserving_safe_launch_gh_1047(
         assert!(!supervisor.env_remove.iter().any(|key| key == "DENIED_LITERAL_FIXTURE_TOKEN"));
         assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
         assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.context7.enabled=false"), env_restricted);
-        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_only || policy.contains("vercel"));
+        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_restricted);
         if env_restricted {
             assert!(worker.env_remove.iter().any(|key| key == "DENIED_LITERAL_FIXTURE_TOKEN"));
             assert!(env_value(worker, "DENIED_LITERAL_FIXTURE_TOKEN").is_none());
@@ -240,6 +240,72 @@ fn codex_env_policy_disables_literal_env_servers_preserving_safe_launch_gh_1047(
 
 /// The real PTY command builder must remove inherited AND explicitly granted
 /// credentials for both supported harnesses without launching a live harness.
+#[test]
+fn codex_env_denials_read_selected_home_and_nested_project_layers_gh_1047() {
+    let mut env = TestEnvGuard::temp_home();
+    env.remove("CODEX_HOME");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    let nested = project.path().join("nested");
+    let account = project.path().join("account");
+    for path in [&cas_root, &project.path().join(".codex"), &nested.join(".codex"),
+        &env.home().join(".codex"), &account] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(cas_root.join("config.toml"),
+        "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n").unwrap();
+    for (path, source) in [
+        (env.home().join(".codex/config.toml"),
+            "[mcp_servers.default_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'default-fixture'\n"),
+        (account.join("config.toml"),
+            "[mcp_servers.account_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'account-fixture'\n"),
+        (project.path().join(".codex/config.toml"),
+            "[mcp_servers.project_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'parent-fixture'\n"),
+        (nested.join(".codex/config.toml"),
+            "[mcp_servers.project_env.env]\nALLOWED_FIXTURE_TOKEN = 'child-fixture'\n\
+             [mcp_servers.safe.env]\nALLOWED_FIXTURE_TOKEN = 'safe-fixture'\n\
+             [plugins.unknown_fixture]\nenabled = true\n"),
+    ] {
+        std::fs::write(path, source).unwrap();
+    }
+    for alternate in [false, true] {
+        let mut worker = crate::pty::PtyConfig {
+            command: "codex".into(),
+            cwd: Some(nested.clone()),
+            ..Default::default()
+        };
+        if alternate {
+            worker.env.push(("CODEX_HOME".into(), account.display().to_string()));
+        }
+        crate::backend::finish_worker_config(
+            &mut worker, SupervisorCli::Codex, None, None, Some(&cas_root),
+        );
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        for (server, disabled) in [
+            ("project_env", true), ("safe", false),
+            ("default_env", !alternate), ("account_env", alternate),
+        ] {
+            assert_eq!(worker.args.iter().any(|arg|
+                arg == &format!("mcp_servers.{server}.enabled=false")), disabled);
+        }
+    }
+    // Unreadable/invalid/unknown contributions warn rather than refusing the
+    // whole worker. No parser error or credential value reaches launch errors.
+    std::fs::write(account.join("config.toml"), "invalid = [ 'secret-fixture'").unwrap();
+    let mut worker = crate::pty::PtyConfig {
+        command: "codex".into(), cwd: Some(nested),
+        env: vec![("CODEX_HOME".into(), account.display().to_string())],
+        ..Default::default()
+    };
+    crate::backend::finish_worker_config(
+        &mut worker, SupervisorCli::Codex, None, None, Some(&cas_root),
+    );
+    assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+    assert!(worker.args.iter().any(|arg| arg == "mcp_servers.project_env.enabled=false"));
+    assert!(worker.args.iter().all(|arg| !arg.contains("secret-fixture")));
+}
+
+/// The actual PTY boundary removes denied process env for both native adapters.
 #[tokio::test]
 async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
@@ -363,7 +429,13 @@ fn invalid_worker_resource_policy_refuses_launch_before_execution_gh_1047() {
         worker_cli: SupervisorCli::Codex, include_director: false, ..Default::default()
     });
     let worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
-    assert!(crate::pty::Pty::spawn("ambiguous-codex-server", worker).is_err());
+    assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+    let overrides: toml::Value = worker.args.iter()
+        .find(|arg| arg.starts_with("mcp_servers={"))
+        .expect("dotted name must use a parent table override")
+        .parse().unwrap();
+    assert_eq!(overrides["mcp_servers"]["server.with.dots"]["enabled"].as_bool(), Some(false));
+    assert!(overrides["mcp_servers"].get("server").is_none());
 }
 
 fn shell_quote(value: &str) -> String {

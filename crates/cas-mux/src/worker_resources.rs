@@ -1,9 +1,98 @@
 //! Factory worker MCP configuration and explicit resource denials.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use cas_types::factory_worker_policy::FactoryWorkerPolicy;
+
+/// Read native Codex configuration without starting MCP discovery. A literal
+/// denied key disables that server, even if another layer changes its value:
+/// Codex merges environment tables rather than replacing them wholesale.
+pub(crate) fn codex_native_env_denials(
+    config: &cas_pty::PtyConfig,
+    cas_root: &Path,
+    policy: &FactoryWorkerPolicy,
+) -> BTreeSet<String> {
+    let mut denied = BTreeSet::new();
+    if policy.supervisor_only_env.is_empty() {
+        return denied;
+    }
+    let effective_env = |key: &str| {
+        config
+            .env
+            .iter()
+            .rev()
+            .find_map(|(name, value)| (name == key).then(|| PathBuf::from(value)))
+            .or_else(|| {
+                (!config.env_remove.iter().any(|name| name == key))
+                    .then(|| std::env::var_os(key).map(PathBuf::from))
+                    .flatten()
+            })
+            .filter(|path| !path.as_os_str().is_empty())
+    };
+    let mut paths = BTreeSet::new();
+    if let Some(home) = effective_env("CODEX_HOME")
+        .or_else(|| effective_env("HOME").map(|home| home.join(".codex")))
+    {
+        paths.insert(home.join("config.toml"));
+    }
+    // Include both the source project and the actual launch cwd. Nested
+    // project layers can retain environment entries from their ancestors.
+    for base in cas_root.parent().into_iter().chain(config.cwd.as_deref()) {
+        for directory in base.ancestors() {
+            paths.insert(directory.join(".codex/config.toml"));
+        }
+    }
+    let mut unevaluated = BTreeSet::new();
+    for path in paths {
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                unevaluated.insert(format!("{} (unreadable config)", path.display()));
+                continue;
+            }
+        };
+        let document = match toml::from_str::<toml::Value>(&contents) {
+            Ok(document) => document,
+            Err(_) => {
+                unevaluated.insert(format!("{} (invalid TOML)", path.display()));
+                continue;
+            }
+        };
+        if let Some(plugins) = document.get("plugins").and_then(toml::Value::as_table) {
+            for (name, plugin) in plugins {
+                if plugin.get("enabled").and_then(toml::Value::as_bool) != Some(false) {
+                    unevaluated.insert(format!("plugins.{name}"));
+                }
+            }
+        }
+        for field in ["profiles", "config_layers", "imports"] {
+            if document.get(field).is_some() {
+                unevaluated.insert(format!("{} ({field})", path.display()));
+            }
+        }
+        if let Some(servers) = document.get("mcp_servers").and_then(toml::Value::as_table) {
+            for (name, server) in servers {
+                if let Some(env) = server.get("env") {
+                    if let Some(env) = env.as_table() {
+                        if env.keys().any(|key| policy.denies_env(key)) {
+                            denied.insert(name.clone());
+                        }
+                    } else {
+                        unevaluated.insert(format!("mcp_servers.{name}.env"));
+                    }
+                }
+            }
+        }
+    }
+    if !unevaluated.is_empty() {
+        tracing::warn!(contributions = ?unevaluated,
+            "Codex worker MCP isolation covers parsed TOML only; review unevaluated contributions before granting credentials");
+    }
+    denied
+}
 
 /// Read the same flattened factory policy used by the CLI configuration.
 /// Invalid configuration is a launch error, never an empty denial policy.

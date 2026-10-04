@@ -1018,12 +1018,15 @@ pub fn qa_task_description(
          journeys/<ID>/ folder per journey. Run visual-qa.mjs --strict against your own local \
          serve of {head}, never the production URL: qa_record refuses a claimed visual-QA pass \
          without that local run.\n\n\
-         Record the verdict with: mcp__cas__verification action=qa_record task_id={task} \
+         {tool_naming}\n\n\
+         Replace {{prefix}} with your harness's prefix above. Load verification.\n\
+         Record the verdict with: {{prefix}}verification action=qa_record task_id={task} \
          status=approved|rejected summary=\"...\" issues='[...]' ledger_path={ledger}/LEDGER.md \
          — a rejection sends {task} back to its implementer with your ledger. Recording closes \
          this QA task and cannot be revised. If you change your mind after recording, do not \
          record again: message the supervisor (blocker=true) asking for request_changes on \
          {task}, and name the finding.",
+        tool_naming = crate::builtins::TOOL_NAMING_LINE,
         bar = QA_REJECTION_BAR,
         task = delivery.id,
         round = pass.round,
@@ -1587,6 +1590,20 @@ mod tests {
         ] {
             assert!(text.contains(pinned), "missing {pinned:?} in:\n{text}");
         }
+    }
+
+    #[test]
+    fn cas_bb7e_qa_task_brief_uses_the_reviewers_harness_prefix() {
+        let text = qa_task_description(
+            &task(),
+            &pass("aaaa1111", cas_types::QaPassState::Pending),
+            &["demo_statement".to_string()],
+            Path::new("/artifacts/cas-ui1/independent-qa/round-1"),
+            "epic/x",
+        );
+        assert!(text.contains(crate::builtins::TOOL_NAMING_LINE), "{text}");
+        assert!(text.contains("{prefix}verification action=qa_record task_id=cas-ui1"), "{text}");
+        assert!(!text.contains("mcp__cas__verification action=qa_record"), "{text}");
     }
 
     /// cas-a6a3 (GH #1007): a round claiming `visual_qa_status: pass` needs

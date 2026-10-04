@@ -17,6 +17,107 @@ fn set_test_agent_role(cas_dir: &std::path::Path, role: AgentRole) {
     store.update(&agent).unwrap();
 }
 
+async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged: bool) {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    let store = open_task_store(&root).unwrap();
+    let mut task = cas::types::Task::new("cas-methodology".into(), "Correct methodology".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("worker".into());
+    task.execution_note = Some(stored.into());
+    store.add(&task).unwrap();
+    let mut delivery_id = None;
+    if merged {
+        let receipt = cas_store::build_worker_completion_receipt(
+            &WorkerCompletionReceiptInput {
+                task_id: task.id.clone(), worker_agent_id: "worker".into(),
+                repo_selector: "remote:github.com/example/methodology".into(),
+                source_branch: "factory/worker".into(), commit_sha: "a".repeat(40),
+                merge_base_sha: "b".repeat(40), target_branch: "main".into(),
+                target_sha: "c".repeat(40), proof_reference: "reviewed delivery".into(),
+                scope_summary: "comment-only CSS delivery".into(), artifact_path: None,
+            }, "worker", chrono::Utc::now(),
+        );
+        let delivery = cas_store::create_worker_delivery(
+            &root, &receipt, WorkerDeliveryState::AwaitingMerge, "worker",
+        ).unwrap();
+        cas_store::transition_worker_delivery(
+            &root, &delivery.id, &[WorkerDeliveryState::AwaitingMerge],
+            WorkerDeliveryState::Merged, "supervisor", Some("supervisor"),
+            None, Some(&"d".repeat(40)), None,
+        ).unwrap();
+        delivery_id = Some(delivery.id);
+    }
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &root, &task.id, "worker", "supervisor",
+        &cas::types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    let service = CasService::new(core, None);
+    let send = |value: serde_json::Value| {
+        let service = service.clone();
+        async move {
+            let request = serde_json::from_value(value).unwrap();
+            match service.task(Parameters(request)).await {
+                Ok(result) => extract_text(result), Err(error) => error.message.to_string(),
+            }
+        }
+    };
+    let ordinary = send(serde_json::json!({
+        "action":"update", "id":task.id, "execution_note":replacement,
+    })).await;
+    assert!(ordinary.contains("DELIVERY PROOF SCOPE LOCKED"), "{ordinary}");
+    assert!(ordinary.contains("proof_scope_fix=true"), "{ordinary}");
+    let mut repair = serde_json::json!({
+        "action":"update", "id":task.id, "execution_note":replacement,
+        "proof_scope_fix":true, "reason":"Reviewed incorrect execution methodology",
+    });
+    if replacement == "no-code" {
+        repair["external_ref"] = serde_json::json!("artifact:methodology-investigation");
+    }
+    let denied = send(repair.clone()).await;
+    assert!(denied.contains("only a live registered supervisor"), "{denied}");
+    assert_eq!(store.get(&task.id).unwrap().execution_note, task.execution_note);
+    set_test_agent_role(&root, AgentRole::Supervisor);
+    let mut bundled = repair.clone();
+    bundled["title"] = serde_json::json!("unreviewed scope");
+    assert!(send(bundled).await.contains("unrelated field"));
+    assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().unwrap().state,
+        cas::types::VerificationDispatchState::Pending);
+    let fixed = send(repair).await;
+    assert!(fixed.contains("Corrected proof scope"), "{fixed}");
+    let corrected = store.get(&task.id).unwrap();
+    assert_eq!(corrected.status, TaskStatus::Open);
+    assert_eq!(corrected.execution_note.as_deref(), Some(replacement));
+    assert_eq!(corrected.assignee, task.assignee);
+    assert!(corrected.notes.contains("Execution methodology corrected"), "{}", corrected.notes);
+    assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().unwrap().state,
+        cas::types::VerificationDispatchState::Invalidated);
+    if let Some(id) = delivery_id {
+        let (_, delivery) = cas_store::get_latest_worker_delivery(&root, &task.id).unwrap().unwrap();
+        assert_eq!(delivery.id, id);
+        assert_eq!(delivery.state, WorkerDeliveryState::Merged);
+    } else {
+        assert_eq!(corrected.external_ref.as_deref(), Some("artifact:methodology-investigation"));
+        let closed = send(serde_json::json!({
+            "action":"close", "id":task.id, "reason":"Investigation completed",
+            "supervisor_override":true,
+        })).await;
+        assert!(closed.contains("Closed task"), "{closed}");
+    }
+}
+
+#[tokio::test]
+async fn no_code_to_code_merged_methodology_repair_cas_1b74() {
+    execution_note_repair_cas_1b74("no-code", "test-first", true).await;
+}
+
+#[tokio::test]
+async fn test_first_to_no_code_methodology_repair_cas_1b74() {
+    execution_note_repair_cas_1b74("test-first", "no-code", false).await;
+}
+
 async fn unified_task(service: &CasService, request: serde_json::Value) -> String {
     let request: cas_mcp::TaskRequest = serde_json::from_value(request).unwrap();
     extract_text(service.task(Parameters(request)).await.unwrap())

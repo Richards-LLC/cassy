@@ -223,6 +223,13 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
     }
 }
 
+/// Integration and review are separate facts. Avoid dispatching a pre-merge
+/// review of content already delivered, including rewritten squash tips;
+/// the close gate still requires a recorded verdict or supervisor waiver.
+fn delivery_tip_on_target(repo: &Path, head: &str, target: &str) -> bool {
+    is_ancestor(repo, head, target) || reviewed_tip_carried_by(repo, head, target, target)
+}
+
 /// cas-624f: rejected (failed) rounds on record for a delivery.
 pub(crate) fn failed_qa_rounds(cas_root: &Path, task_id: &str) -> u32 {
     cas_store::list_qa_passes(cas_root, task_id)
@@ -436,9 +443,13 @@ impl CasCore {
         // The close gate has already selected this task's delivery tip. A
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
+        let target = freshest_target_ref(repo, parent_branch);
+        if delivery_tip_on_target(repo, delivery_ref, &target) {
+            return None;
+        }
         let changed = match changed_paths_for_delivery(
             repo,
-            &freshest_target_ref(repo, parent_branch),
+            &target,
             delivery_ref,
         ) {
             Ok(paths) => Some(paths),
@@ -991,6 +1002,7 @@ impl CasCore {
         if !qa.independent_pass {
             return QaCloseGate::Clear;
         }
+        let classification_target = freshest_target_ref(repo, target_branch);
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
         let branch = task
             .deliverables
@@ -1008,7 +1020,7 @@ impl CasCore {
             // The live branch tip is the delivery only while it is itself
             // merged: months later it carries unrelated work.
             super::close_ops::resolve_branch_sha(repo, &branch)
-                .filter(|tip| is_ancestor(repo, tip, target_branch))
+                .filter(|tip| is_ancestor(repo, tip, &classification_target))
         });
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
@@ -1026,7 +1038,7 @@ impl CasCore {
         // it ever parked through the gate.
         let changed = head
             .as_deref()
-            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, target_branch));
+            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, &classification_target));
         // cas-2387: a no-code task owes no review only while it delivered no
         // user-facing code. Then any round an earlier close opened for it is
         // withdrawn, so it cannot hold the close.
@@ -1117,6 +1129,15 @@ impl CasCore {
                 "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on trunk \
                  {trunk} with no passed or waived QA round. Cassy does not dispatch a review of code \
                  that is already on trunk, so no QA pass was opened. {remedy}.",
+                task.id,
+                &head[..head.len().min(8)],
+            ));
+        }
+        if delivery_tip_on_target(repo, &head, &classification_target) {
+            return QaCloseGate::Refuse(format!(
+                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already \
+                 integrated into {classification_target} with no passed or waived QA round. \
+                 No pre-merge QA round was opened for the integrated content. {remedy}.",
                 task.id,
                 &head[..head.len().min(8)],
             ));

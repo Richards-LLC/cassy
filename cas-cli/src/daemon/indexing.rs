@@ -954,13 +954,15 @@ pub fn reconcile_code_tree(
             .len()
             .saturating_sub(current_indexed)
             .saturating_add(retirement_errors);
-        // Skips belong to the repository whose tree they were found in, so a
-        // multi-repo scan does not report one repo's undecodable files against
-        // another's coverage.
+        // Attribute skips by canonical checkout ownership, not lexical prefix:
+        // alias spellings still belong here and nested checkouts do not. Count
+        // each physical skipped path once while preserving its original detail.
+        let mut seen_skipped = HashSet::new();
         let repo_skipped: Vec<String> = result
             .skipped
             .iter()
-            .filter(|(path, _)| path.starts_with(&repo_root))
+            .filter(|(path, _)| source_file_in_roots(path, std::slice::from_ref(&repo_root)))
+            .filter(|(path, _)| seen_skipped.insert(canonical_source_path(path)))
             .map(|(path, reason)| format!("{}: {reason}", path.display()))
             .collect();
         let deferred_files = result.files_deferred - deferred_before_retirement;

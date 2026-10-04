@@ -609,3 +609,82 @@ async fn anchored_no_code_task_can_add_parked_proof_and_close_without_code_hook(
     assert!(!close_text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"));
     assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed);
 }
+
+fn registered_target_supervisor(cas_root: &Path) -> CasService {
+    let agents = cas::store::open_agent_store(cas_root).unwrap();
+    let supervisor = cas::types::Agent::new_with_role(
+        "retarget-supervisor".into(), "retarget-supervisor".into(), cas::types::AgentRole::Supervisor,
+    );
+    agents.register(&supervisor).unwrap();
+    let core = CasCore::with_daemon(cas_root.to_path_buf(), None, None);
+    core.set_agent_id_for_testing(supervisor.id);
+    CasService::new(core, None)
+}
+
+#[tokio::test]
+async fn branch_only_target_update_defaults_legacy_task_to_project_cas_4ae1() {
+    let _env = TestEnvGuard::temp_home();
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    let repo = GitRepo::new();
+    run_git(&repo.root, &["branch", "staging"]);
+    let cas_root = init_cas_dir(&repo.root).unwrap();
+    let store = open_task_store(&cas_root).unwrap();
+    let service = registered_target_supervisor(&cas_root);
+    for repair in [false, true] {
+        let mut task = Task::new(format!("cas-legacy1107-{repair}"), "Legacy target".into());
+        if repair { task.status = TaskStatus::InProgress; }
+        store.add(&task).unwrap();
+        let result = service.task(Parameters(task_request(serde_json::json!({
+            "action": "update", "id": task.id, "target_branch": "staging",
+            "proof_scope_fix": repair, "reason": "Retarget the stale lane",
+        })))).await.expect("branch-only update defaults to project repository");
+        assert!(!result.is_error.unwrap_or(false), "{}", result_text(&result));
+        let target = store.get(&task.id).unwrap().deliverables.work_target.unwrap();
+        assert_eq!(target.repo_selector, "remote:github.com/org/updated-target");
+        assert_eq!(target.target_branch, "staging");
+    }
+}
+
+#[tokio::test]
+async fn unchanged_proof_scope_fix_names_last_real_close_gate_cas_4ae1() {
+    use cas::store::EventStore;
+    let _env = TestEnvGuard::temp_home();
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    let repo = GitRepo::new();
+    let cas_root = init_cas_dir(&repo.root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n[verification]\nenabled = false\n").unwrap();
+    let store = open_task_store(&cas_root).unwrap();
+    let service = registered_target_supervisor(&cas_root);
+    let mut task = Task::new("cas-unchanged1107".into(), "Actual blocker".into());
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Light;
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/updated-target".into(), target_branch: "main".into(),
+    });
+    store.add(&task).unwrap();
+    // Real close fails at its declared pre-close context gate because there
+    // is no task-owned receipt. Repeating the same target cannot repair it.
+    let failed = service.task(Parameters(task_request(serde_json::json!({
+        "action": "close", "id": task.id, "reason": "Attempt delivery",
+    })))).await.unwrap();
+    let failed = result_text(&failed);
+    assert!(failed.contains("PRE-CLOSE HOOK"), "{failed}");
+    let events = cas::store::open_event_store(&cas_root).unwrap();
+    events.record(&cas::types::Event::new(
+        cas::types::EventType::WorkerVerificationBlocked,
+        cas::types::EventEntityType::Agent, "unrelated-agent", "other rejection",
+    ).with_metadata(serde_json::json!({
+        "task_id": "other-task", "close_rejected": true,
+        "reason": "UNRELATED-BLOCKER-MUST-NOT-LEAK", "message": "other rejection",
+    }))).unwrap();
+    let error = service.task(Parameters(task_request(serde_json::json!({
+        "action": "update", "id": task.id, "proof_scope_fix": true,
+        "target_branch": "main", "reason": "Retry unchanged target",
+    })))).await.expect_err("same target must not invalidate an unrelated gate");
+    let message = error.message.to_string();
+    assert!(message.contains("unchanged"), "{message}");
+    assert!(message.contains("PRE-CLOSE HOOK"), "last actual close gate must be named: {message}");
+    assert!(!message.contains("UNRELATED-BLOCKER"), "{message}");
+    assert_eq!(store.get(&task.id).unwrap().status, task.status);
+    assert_eq!(store.get(&task.id).unwrap().deliverables.work_target, task.deliverables.work_target);
+}

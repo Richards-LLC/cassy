@@ -280,11 +280,46 @@ it("keeps an Undo refusal readable after the phone progress sheet closes", () =>
   const state = new FleetOpsState(); const action = holdAction(lark, false);
   state.started("agent:swift-lark-3", action);
   const pending = phoneFleetNotice(document, context(CONTROL, state))!;
-  expect(pending.textContent).toBe(action.progress);
+  expect(pending.querySelector("span")?.textContent).toBe(action.progress);
   expect(pending.dataset.fleetFocus).toBe("agent:swift-lark-3:progress");
   state.failed("agent:swift-lark-3", action, { stale: true, current: { worker: lark.name, generation: 3 } });
   const refused = phoneFleetNotice(document, context(CONTROL, state))!;
   expect(refused.textContent).toContain("already restarted");
   expect(refused.dataset.fleetFocus).toBe("agent:swift-lark-3:note");
   expect(undoBar(document, context(CONTROL, state))).toBeUndefined();
+});
+
+describe("phone feedback dismissal (cas-c2e7)", () => {
+  it("dismisses the same failure across redraws, retains its row and allows a later failure", () => {
+    const state = new FleetOpsState(); const action = stopAction(lark);
+    state.failed("agent:swift-lark-3", action, { stale: true, current: { generation: 3 } });
+    const note = state.notes.get("agent:swift-lark-3"); const announcement = state.announcement;
+    const dismissNotice = vi.fn();
+    const ctx = { ...context(CONTROL, state, { dismissNotice }), phone: true };
+    const bar = phoneFleetNotice(document, ctx)!;
+    const dismiss = bar.querySelector<HTMLButtonElement>('[aria-label="Dismiss fleet notice"]')!;
+    expect(dismiss.tabIndex).toBe(0); dismiss.click();
+    expect(dismissNotice).toHaveBeenCalledOnce();
+    expect(phoneFleetNotice(document, ctx)).toBeUndefined();
+    expect(state.notes.get("agent:swift-lark-3")).toBe(note);
+    expect(state.announcement).toBe(announcement);
+    state.failed("agent:swift-lark-3", action, { stale: true, current: { generation: 3 } });
+    expect(phoneFleetNotice(document, ctx)).toBeDefined();
+  });
+  it("dismisses pending feedback without losing its owner, then shows completion and keeps desktop Undo", () => {
+    const state = new FleetOpsState(); state.select("atlas/session"); const action = holdAction(lark);
+    const owner = state.started("agent:swift-lark-3", action);
+    const ctx = { ...context(CONTROL, state), phone: true };
+    phoneFleetNotice(document, ctx)!.querySelector<HTMLButtonElement>("button")!.click();
+    expect(state.owns(owner)).toBe(true);
+    expect(state.pending.get("agent:swift-lark-3")).toBe(action);
+    expect(phoneFleetNotice(document, ctx)).toBeUndefined();
+    state.succeeded("agent:swift-lark-3", action, 0);
+    const result = undoBar(document, ctx)!;
+    result.querySelector<HTMLButtonElement>('[aria-label="Dismiss fleet notice"]')!.click();
+    expect(undoBar(document, ctx)).toBeUndefined();
+    expect(state.currentUndo(0)).toBeDefined();
+    expect(undoBar(document, { ...ctx, phone: false })!.querySelector("button")!.textContent).toBe("Undo");
+    expect(state.takeUndo(0)?.request.op).toMatchObject({ hold: false });
+  });
 });

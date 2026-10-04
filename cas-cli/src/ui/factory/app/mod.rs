@@ -6704,6 +6704,51 @@ mod spawn_isolation_tests {
 
     #[cfg(unix)]
     #[test]
+    fn target_seed_keeps_fingerprints_private_cas_a7cf() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let snapshot = tmp.path().join("snapshot");
+        let fingerprint = "debug/.fingerprint/cas-types-abc";
+        let records = ["lib-cas_types", "lib-cas_types.json", "dep-lib-cas_types", "invoked.timestamp"];
+        std::fs::create_dir_all(snapshot.join(fingerprint)).unwrap();
+        std::fs::create_dir_all(snapshot.join("debug/deps")).unwrap();
+        for record in records {
+            std::fs::write(snapshot.join(fingerprint).join(record), b"old freshness").unwrap();
+        }
+        let artifact = "debug/deps/libcas_types-abc.rmeta";
+        std::fs::write(snapshot.join(artifact), b"old metadata").unwrap();
+        let worker_a = tmp.path().join("worker-a");
+        let worker_b = tmp.path().join("worker-b");
+        for worker in [&worker_a, &worker_b] {
+            hardlink_seed_tree(&snapshot, worker, worker, &mut TargetSeedStats::default()).unwrap();
+        }
+
+        // Cargo rewrites these freshness records in place when one lane rebuilds.
+        // Its sibling still has the old rmeta and must retain the old freshness.
+        for record in records {
+            std::fs::write(worker_a.join(fingerprint).join(record), b"new freshness").unwrap();
+            for untouched in [&snapshot, &worker_b] {
+                assert_eq!(
+                    std::fs::read(untouched.join(fingerprint).join(record)).unwrap(),
+                    b"old freshness",
+                    "another lane refreshed {record} while its rmeta stayed old"
+                );
+            }
+            assert_eq!(std::fs::metadata(worker_a.join(fingerprint).join(record)).unwrap().nlink(), 1);
+        }
+        for worker in [&worker_a, &worker_b] {
+            assert_eq!(std::fs::read(worker.join(artifact)).unwrap(), b"old metadata");
+            assert_eq!(
+                std::fs::metadata(worker.join(artifact)).unwrap().ino(),
+                std::fs::metadata(snapshot.join(artifact)).unwrap().ino(),
+                "reusable artifacts should still be hardlinked"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn target_seed_skips_cargo_lock_so_workers_hold_private_locks() {
         use std::fs::OpenOptions;
         use std::os::fd::AsRawFd;

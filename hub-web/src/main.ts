@@ -1,3 +1,4 @@
+import { presentFleetSheet } from "./fleet-sheet";
 import { cloudBrand, projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
@@ -189,7 +190,7 @@ function syncConversationContext(): void {
     return;
   }
   const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
-  syncContextRail(document, { history, progress: contextProgress, attention: contextAttention });
+  syncContextRail(document, { history, progress: contextProgress || progressSheetOpen(), attention: contextAttention });
 }
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
 /** Pane output lights the working line now and schedules the check that puts it out. */
@@ -4563,6 +4564,9 @@ function renderAttention(): void {
  * Escape or once nothing is left, and focus returns to the badge or thread.
  */
 let attentionSheetOpen = false;
+let progressSheetSession: string | undefined;
+const progressSheetOpen = () => progressSheetSession !== undefined;
+const contextSheetOpen = () => attentionSheetOpen || progressSheetOpen();
 function syncConversationAttention(count: number): void {
   const badge = document.querySelector<HTMLButtonElement>("#conversation-attention");
   if (badge) {
@@ -4581,6 +4585,7 @@ function syncConversationAttention(count: number): void {
     if (count < 1 && hubPresentation === "conversation" && selectedSession) closeAttentionSheet();
     else { attentionSheetOpen = false; badge?.setAttribute("aria-expanded", "false"); }
   }
+  if (progressSheetOpen() && (!phoneLayout() || !selectedSession || progressSheetSession !== sessionKey(selectedMachineId ?? "", selectedSession) || hubPresentation !== "conversation")) progressSheetSession = undefined;
   applyAttentionSheet();
 }
 /** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
@@ -4588,8 +4593,19 @@ let sheetFocus: HTMLElement | undefined;
 /** The same control's redraw-proof key (cas-a5c6 QA F03). */
 let sheetFocusKey: string | undefined;
 function applyAttentionSheet(): void {
-  applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), attentionSheetOpen);
-  if (!attentionSheetOpen) { sheetFocus = undefined; sheetFocusKey = undefined; return; }
+  applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), contextSheetOpen(), progressSheetOpen() ? "progress" : "attention");
+  const fleetEntry = document.querySelector<HTMLButtonElement>("#conversation-fleet");
+  fleetEntry?.setAttribute("aria-expanded", String(progressSheetOpen()));
+  const close = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
+  close?.setAttribute("aria-label", progressSheetOpen() ? "Close tasks & progress" : "Close attention");
+  const rail = document.querySelector<HTMLElement>(".conversation-context");
+  if (progressSheetOpen() && rail) {
+    rail.dataset.open = "true"; rail.removeAttribute("aria-hidden");
+    const progress = rail.querySelector<HTMLElement>('[data-section="progress"]');
+    if (progress) progress.hidden = false;
+  }
+  placeFleetUndo();
+  if (!contextSheetOpen()) { sheetFocus = undefined; sheetFocusKey = undefined; return; }
   // A redraw (a catalog poll, a new turn) rebuilds the shell and moves the
   // rail's panel, which drops focus to the page. Put it back where it was.
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
@@ -4604,9 +4620,9 @@ function applyAttentionSheet(): void {
 // cas-a5c6: while the sheet is modal, Escape closes it from anywhere and Tab
 // stays inside it; focus that lands behind it is brought back.
 document.addEventListener("keydown", (event) => {
-  if (!attentionSheetOpen) return;
+  if (!contextSheetOpen()) return;
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
-  if (sheet && sheetKeydown(event, sheet, document.activeElement, closeAttentionSheet)) {
+  if (sheet && sheetKeydown(event, sheet, document.activeElement, closeContextSheet)) {
     event.preventDefault();
     // Escape is the sheet's alone while it is open.
     if (event.key === "Escape") event.stopPropagation();
@@ -4648,11 +4664,11 @@ function restorePairedMachinesOpener(dialog: HTMLDialogElement): void {
 // A layer that was over the sheet (the palette) has closed: focus goes back
 // into the sheet, to the control it left, rather than to the page.
 document.addEventListener("close", () => {
-  if (!attentionSheetOpen) return;
-  window.setTimeout(() => { if (attentionSheetOpen) applyAttentionSheet(); }, 0);
+  if (!contextSheetOpen()) return;
+  window.setTimeout(() => { if (contextSheetOpen()) applyAttentionSheet(); }, 0);
 }, true);
 document.addEventListener("focusin", (event) => {
-  if (!attentionSheetOpen) return;
+  if (!contextSheetOpen()) return;
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
   if (!sheet || !(event.target instanceof HTMLElement)) return;
   if (sheet.contains(event.target)) { sheetFocus = event.target; sheetFocusKey = focusKey(sheet, event.target); }
@@ -4661,11 +4677,28 @@ document.addEventListener("focusin", (event) => {
   else sheetFocusables(sheet)[0]?.focus();
 });
 function openAttentionSheet(): void {
+  progressSheetSession = undefined;
   attentionSheetOpen = true;
   applyAttentionSheet();
   document.querySelector<HTMLButtonElement>("#conversation-attention")?.setAttribute("aria-expanded", "true");
   document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close")?.focus();
 }
+function openProgressSheet(): void {
+  if (!selectedMachineId || !selectedSession) return;
+  attentionSheetOpen = false;
+  progressSheetSession = sessionKey(selectedMachineId, selectedSession);
+  applyAttentionSheet();
+  document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close")?.focus();
+}
+function closeContextSheet(): void {
+  if (!progressSheetOpen()) { closeAttentionSheet(); return; }
+  dismissFleetPanel(false);
+  progressSheetSession = undefined;
+  syncConversationContext();
+  applyAttentionSheet();
+  document.querySelector<HTMLButtonElement>("#conversation-fleet")?.focus();
+}
+
 function closeAttentionSheet(): void {
   if (!attentionSheetOpen) return;
   attentionSheetOpen = false;
@@ -4765,12 +4798,14 @@ async function runFleetAction(rowKey: string, action: FleetAction): Promise<void
   renderStatus(statuses.get(sessionKey(machineId, session)));
   try {
     const answer = await connection.operation(session, { op_id: newOperationId(), op: { ...action.request.op }, expected: { ...action.request.expected } });
+    if (selectedMachineId !== machineId || selectedSession !== session) return;
     fleetOps.succeeded(rowKey, action, Date.now(), answer?.outcome);
     if (action.request.op.kind === "request_merge") fleetAsked.set(String(action.request.op.task_id), Date.now());
     fleetFocusNext = action.inverse ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
     window.clearTimeout(fleetUndoTimer);
     if (fleetOps.undo) fleetUndoTimer = window.setTimeout(() => { if (selectedMachineId && selectedSession) renderStatus(statuses.get(sessionKey(selectedMachineId, selectedSession))); }, UNDO_WINDOW_MS + 50);
   } catch (error) {
+    if (selectedMachineId !== machineId || selectedSession !== session) return;
     const refused = error instanceof HubRequestError ? error : undefined;
     const current = refused?.body?.current;
     fleetOps.failed(rowKey, action, {
@@ -4796,6 +4831,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
   const currentEpic = typeof status.focused_epic === "string" ? status.focused_epic : (((status.epics as any[]) ?? []).find((epic) => epic?.focused)?.id ?? null);
   return {
     state: fleetOps,
+    phone: phoneLayout(),
     scopes: machine.scopes,
     origin: location.origin,
     now: Date.now(),
@@ -4817,12 +4853,28 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
       cancelConfirm: () => { const rowKey = fleetOps.confirm?.rowKey; fleetOps.cancelConfirm(); rerender(rowKey ? `${rowKey}:trigger` : undefined); },
       openPreview: (rowKey, task) => { fleetOps.openPreview(rowKey, task); rerender(`${rowKey}:preview-cancel`); },
       sendMerge: (rowKey, task) => { fleetOps.closeMenus(); void runFleetAction(rowKey, fleetMergeAction(task)); },
-      closePanels: () => { const rowKey = fleetOps.preview?.rowKey ?? fleetOps.assignFor; fleetOps.closeMenus(); fleetHeaderPanel = undefined; rerender(rowKey ? `${rowKey}:ask` : undefined); },
-      toggleAssign: (rowKey) => { const opening = fleetOps.assignFor !== rowKey; fleetOps.closeMenus(); fleetOps.assignFor = opening ? rowKey : undefined; rerender(opening ? `${rowKey}:first-item` : `${rowKey}:assign`); },
-      toggleHeader: (panel) => { fleetOps.closeMenus(); fleetHeaderPanel = fleetHeaderPanel === panel ? undefined : panel; rerender(fleetHeaderPanel === "focus" ? "header:first-item" : fleetHeaderPanel === "add" ? "header:add-go" : `header:${panel}`); },
+      closePanels: () => { if (phoneLayout()) { dismissFleetPanel(); return; } const rowKey = fleetOps.preview?.rowKey ?? fleetOps.assignFor; fleetOps.closeMenus(); fleetHeaderPanel = undefined; rerender(rowKey ? `${rowKey}:ask` : undefined); },
+      toggleAssign: (rowKey) => { const opening = fleetOps.assignFor !== rowKey; fleetOps.closeMenus(); fleetOps.assignFor = opening ? rowKey : undefined; rerender(opening ? phoneLayout() ? `${rowKey}:search` : `${rowKey}:first-item` : `${rowKey}:assign`); },
+      toggleHeader: (panel) => { fleetOps.closeMenus(); fleetHeaderPanel = fleetHeaderPanel === panel ? undefined : panel; rerender(fleetHeaderPanel === "focus" ? phoneLayout() ? "header:search" : "header:first-item" : fleetHeaderPanel === "add" ? "header:add-go" : `header:${panel}`); },
       undo: () => { const run = fleetOps.takeUndo(Date.now()); if (run) void runFleetAction(run.request.op.kind === "assign_task" ? `task:${String(run.request.op.task_id)}` : run.request.op.kind === "focus_epic" ? "header" : `agent:${String(run.request.op.worker)}`, run); },
     },
   };
+}
+
+function placeFleetUndo(): void {
+  const region = document.getElementById("fleet-ops-announcer");
+  if (region) (progressSheetOpen() ? document.querySelector(".conversation-context") ?? document.body : document.body).append(region);
+  const undo = document.getElementById("fleet-phone-undo");
+  if (!undo) return;
+  undo.hidden = attentionSheetOpen;
+  const rail = progressSheetOpen() ? document.querySelector(".conversation-context") : null;
+  (rail ?? document.body).append(undo);
+}
+function dismissFleetPanel(redraw = true): void {
+  const row = fleetOps.confirm?.rowKey ?? fleetOps.menuFor ?? fleetOps.assignFor ?? fleetOps.preview?.rowKey;
+  const opener = row ? phoneLayout() || row.startsWith("agent:") ? `${row}:trigger` : `${row}:${fleetOps.assignFor ? "assign" : "ask"}` : fleetHeaderPanel ? `header:${fleetHeaderPanel}` : undefined;
+  fleetOps.closeMenus(); fleetOps.cancelConfirm(); fleetHeaderPanel = undefined;
+  if (redraw) { fleetFocusNext = opener; renderStatus(selectedMachineId && selectedSession ? statuses.get(sessionKey(selectedMachineId, selectedSession)) : undefined); }
 }
 
 function fleetMergeAction(task: FleetTask): FleetAction {
@@ -4838,7 +4890,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
-  const signature = JSON.stringify([selectedMachineId, selectedSession, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A different conversation starts with every menu closed and no stale notes.
@@ -4846,19 +4898,14 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (container.dataset.fleetSession !== fleetSession) {
     container.dataset.fleetSession = fleetSession;
     fleetOps.closeMenus(); fleetOps.cancelConfirm(); fleetOps.notes.clear(); fleetOps.undo = undefined; fleetHeaderPanel = undefined;
+    fleetOps.pending.clear();
+    document.getElementById("fleet-phone-undo")?.remove();
   }
-  // Escape closes the open menu, confirmation or panel and returns focus to its opener.
   container.onkeydown = (event) => {
-    if (event.key !== "Escape") return;
-    const rowKey = fleetOps.confirm?.rowKey ?? fleetOps.menuFor ?? fleetOps.assignFor ?? fleetOps.preview?.rowKey ?? (fleetHeaderPanel ? "header" : undefined);
-    if (!rowKey) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const opener = fleetOps.assignFor ? `${rowKey}:assign` : fleetOps.preview ? `${rowKey}:ask` : rowKey === "header" ? `header:${fleetHeaderPanel}` : `${rowKey}:trigger`;
-    fleetOps.closeMenus(); fleetOps.cancelConfirm(); fleetHeaderPanel = undefined;
-    fleetFocusNext = opener;
-    renderStatus(status);
+    if (event.key !== "Escape" || !container.querySelector(".fleet-ops-menu, .fleet-ops-confirm, .fleet-ops-preview, .fleet-ops-panel")) return;
+    event.preventDefault(); event.stopPropagation(); dismissFleetPanel();
   };
+  const undoFocused = document.activeElement instanceof HTMLElement && document.activeElement.dataset.fleetFocus === "undo";
   const hadFocus = document.activeElement instanceof HTMLElement && container.contains(document.activeElement) ? document.activeElement.dataset.fleetFocus : undefined;
   // The rows' triggers in their drawn order, so focus on a row that leaves
   // (a confirmed Stop) can move to its neighbour (cas-a474 QA N1).
@@ -4868,13 +4915,17 @@ function renderStatus(status?: Record<string, unknown>): void {
   container.replaceChildren();
   contextProgress = false;
   const restoreFocus = (): void => {
-    const want = fleetFocusNext ?? hadFocus;
+    const want = fleetFocusNext ?? (undoFocused ? "undo" : hadFocus);
     fleetFocusNext = undefined;
     if (!want) return;
     const target = want.endsWith(":first-item")
       ? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
-      : container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`);
+      : (want === "undo" ? document : container).querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`);
     if (target) { target.focus({ preventScroll: false }); return; }
+    if (want === "undo") {
+      const fallback = progressSheetOpen() || !phoneLayout() ? container.querySelector<HTMLElement>('[data-fleet-focus="header:add"]') : document.querySelector<HTMLElement>("#conversation-fleet");
+      fallback?.focus(); return;
+    }
     // Its row is gone: the next row's ⋯, else the list itself.
     const at = priorTriggers.indexOf(`${want.slice(0, want.lastIndexOf(":"))}:trigger`);
     if (at < 0) return;
@@ -4926,8 +4977,10 @@ function renderStatus(status?: Record<string, unknown>): void {
   const ops = fleetOpsContext(status);
   if (ops) {
     fleetAnnouncer();
+    document.getElementById("fleet-phone-undo")?.remove();
     const undo = undoBar(document, ops);
-    if (undo) container.append(undo);
+    if (undo && phoneLayout()) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
+    else if (undo) container.append(undo);
     container.append(headerControls(document, ops, fleetHeaderPanel));
   }
   if (agents.length > 0) container.append(sectionLabel("Agents", agents.length));
@@ -4966,6 +5019,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     empty.textContent = "No agents or tasks reported for this session yet.";
     container.append(empty);
   }
+  if (phoneLayout()) presentFleetSheet(container, dismissFleetPanel);
   restoreFocus();
 }
 
@@ -5065,7 +5119,9 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const attentionBadge = document.querySelector<HTMLButtonElement>("#conversation-attention");
   if (attentionBadge) attentionBadge.onclick = openAttentionSheet;
   const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
-  if (sheetClose) sheetClose.onclick = closeAttentionSheet;
+  if (sheetClose) sheetClose.onclick = closeContextSheet;
+  const fleetEntry = document.querySelector<HTMLButtonElement>("#conversation-fleet");
+  if (fleetEntry) fleetEntry.onclick = openProgressSheet;
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
   if (conversationBack) conversationBack.onclick = () => {
     attentionSheetOpen = false;

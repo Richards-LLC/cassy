@@ -27,6 +27,7 @@ import { fleetControlGate, type FleetControlGate } from "./fleet-permissions";
 import type { Scope } from "./types";
 
 export interface FleetOpsViewContext {
+  readonly phone?: boolean;
   readonly state: FleetOpsState;
   readonly scopes: readonly Scope[];
   readonly origin: string;
@@ -166,6 +167,7 @@ function menu(document: Document, context: FleetOpsViewContext, rowKey: string, 
     if (reason) list.append(reason);
   }
   list.onkeydown = (event) => {
+    if ((event.target as HTMLElement).tagName === "INPUT") return;
     const entries = [...list.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
     const at = entries.indexOf(document.activeElement as HTMLButtonElement);
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -177,6 +179,40 @@ function menu(document: Document, context: FleetOpsViewContext, rowKey: string, 
   return list;
 }
 
+/** Form state belongs to the controller; filtering never refetches or sends an operation. */
+function picker(document: Document, context: FleetOpsViewContext, rowKey: string, actions: readonly FleetAction[], label: string): HTMLElement {
+  const list = menu(document, context, rowKey, actions, label);
+  if (!context.phone) return list;
+  const panel = document.createElement("div");
+  panel.className = "fleet-ops-picker";
+  panel.setAttribute("aria-label", label);
+  const search = document.createElement("input");
+  search.type = "search";
+  search.setAttribute("aria-label", `Search ${label.toLowerCase()}`);
+  search.placeholder = "Search…";
+  search.dataset.fleetFocus = `${rowKey}:search`;
+  search.value = context.state.pickerQuery;
+  const empty = document.createElement("p");
+  empty.className = "fleet-ops-no-match";
+  empty.setAttribute("role", "status");
+  const filter = () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    context.state.pickerQuery = search.value;
+    const entries = [...list.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    for (const entry of entries) entry.hidden = !entry.textContent?.toLocaleLowerCase().includes(query);
+    empty.hidden = entries.some((entry) => !entry.hidden);
+    empty.textContent = actions.length ? `No matches for “${search.value.trim()}”.` : "Nothing to choose yet.";
+  };
+  search.oninput = filter;
+  search.onkeydown = (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "Enter") return;
+    event.preventDefault();
+    list.querySelector<HTMLButtonElement>('[role="menuitem"]:not([hidden])')?.focus();
+  };
+  panel.append(search, list, empty); filter();
+  return panel;
+}
+
 /** Trailing controls for one agent row. */
 export function agentControls(document: Document, context: FleetOpsViewContext, agent: FleetAgent): HTMLElement {
   const rowKey = agentRowKey(agent);
@@ -184,7 +220,7 @@ export function agentControls(document: Document, context: FleetOpsViewContext, 
   wrap.className = "fleet-ops";
   const open = context.state.menuFor === rowKey;
   const trigger = button(document, "⋯", "fleet-ops-trigger", `${rowKey}:trigger`, () => context.on.toggleMenu(rowKey));
-  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-haspopup", context.phone ? "dialog" : "menu");
   trigger.setAttribute("aria-expanded", String(open));
   trigger.setAttribute("aria-label", `Actions for ${agent.name}`);
   wrap.append(trigger);
@@ -200,6 +236,26 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
   const rowKey = taskRowKey(task);
   const wrap = document.createElement("div");
   wrap.className = "fleet-ops";
+  if (context.phone && (awaitingMerge(task) || readyTask(task))) {
+    const open = context.state.menuFor === rowKey;
+    const trigger = button(document, "⋯", "fleet-ops-trigger", `${rowKey}:trigger`, () => context.on.toggleMenu(rowKey));
+    trigger.setAttribute("aria-label", `Actions for ${task.id}`);
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute("aria-expanded", String(open));
+    wrap.append(trigger);
+    if (open) {
+      const list = document.createElement("div"); list.className = "fleet-ops-menu";
+      list.setAttribute("role", "menu"); list.setAttribute("aria-label", `Actions for ${task.id}`);
+      const parked = awaitingMerge(task);
+      const item = button(document, parked ? "Ask supervisor to merge" : "Assign…", "fleet-ops-item", `${rowKey}:item:task`, () => parked ? context.on.openPreview(rowKey, task) : context.on.toggleAssign(rowKey));
+      item.setAttribute("role", "menuitem");
+      const gate = fleetControlGate(context.scopes, parked ? "ask-merge" : "assign-task", context.origin);
+      const reasonId = `fleet-reason-${safeId(rowKey)}-task`;
+      gateDisabled(item, gate, reasonId); list.append(item);
+      const reason = reasonLine(document, gate, reasonId); if (reason) list.append(reason);
+      wrap.append(list);
+    }
+  }
   if (awaitingMerge(task)) {
     const gate = fleetControlGate(context.scopes, "ask-merge", context.origin);
     const asked = context.asked.get(task.id);
@@ -212,7 +268,7 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
     const ask = button(document, asked !== undefined ? "Ask again" : "Ask supervisor to merge", "fleet-ops-ask", `${rowKey}:ask`, () => context.on.openPreview(rowKey, task));
     const reasonId = `fleet-reason-${safeId(rowKey)}-ask`;
     gateDisabled(ask, gate, reasonId);
-    wrap.append(ask);
+    if (!context.phone) wrap.append(ask);
     const reason = reasonLine(document, gate, reasonId);
     if (reason) wrap.append(reason);
     if (context.state.preview?.rowKey === rowKey) {
@@ -240,13 +296,13 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
     assign.setAttribute("aria-label", `Assign ${task.id}`);
     const reasonId = `fleet-reason-${safeId(rowKey)}-assign`;
     gateDisabled(assign, gate, reasonId);
-    wrap.append(assign);
+    if (!context.phone) wrap.append(assign);
     const reason = reasonLine(document, gate, reasonId);
     if (reason) wrap.append(reason);
     if (open && gate.allowed) {
       const idle = idleWorkers(context.agents);
       const actions = idle.map((agent) => assignAction(task, agent.name));
-      if (actions.length) wrap.append(menu(document, context, rowKey, actions, `Assign ${task.id} to`));
+      if (actions.length || context.phone) wrap.append(picker(document, context, rowKey, actions, `Assign ${task.id} to`));
       else {
         const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No idle worker. Add worker… starts one on this task.";
         wrap.append(none);
@@ -293,7 +349,7 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   }
   if (panel === "focus" && focusGate.allowed) {
     const actions = context.epics.filter((epic) => epic !== context.currentEpic).map((epic) => focusEpicAction(epic, context.currentEpic));
-    if (actions.length) wrap.append(menu(document, context, "header", actions, "Focus epic"));
+    if (actions.length || context.phone) wrap.append(picker(document, context, "header", actions, "Focus epic"));
     else { const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No other epic to focus."; wrap.append(none); }
   }
   const note = noteLine(document, context, "header");

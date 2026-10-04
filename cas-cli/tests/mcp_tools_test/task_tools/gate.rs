@@ -83,7 +83,7 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
     let mut bundled = repair.clone();
     bundled["title"] = serde_json::json!("unreviewed scope");
     assert!(send(bundled).await.contains("unrelated field"));
-    assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().unwrap().state,
+    assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
         cas::types::VerificationDispatchState::Pending);
     let fixed = send(repair).await;
     assert!(fixed.contains("Corrected proof scope"), "{fixed}");
@@ -92,7 +92,7 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
     assert_eq!(corrected.execution_note.as_deref(), Some(replacement));
     assert_eq!(corrected.assignee, task.assignee);
     assert!(corrected.notes.contains("Execution methodology corrected"), "{}", corrected.notes);
-    assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().unwrap().state,
+    assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
         cas::types::VerificationDispatchState::Invalidated);
     if let Some(id) = delivery_id {
         let (_, delivery) = cas_store::get_latest_worker_delivery(&root, &task.id).unwrap().unwrap();

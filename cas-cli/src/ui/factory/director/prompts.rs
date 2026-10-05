@@ -2899,7 +2899,22 @@ mod tests {
     /// harness, rather than retaining a literal from a previous CLI flavor.
     #[test]
     fn cas_9d40_injected_templates_only_render_the_live_tool_prefix() {
-        let data = make_data(0);
+        // GH #1124: only the lease-expired Open path renders a completion
+        // template. Terminal tasks leave close notices to the lifecycle relay.
+        let closed_data = make_data(0);
+        let mut data = make_data(0);
+        data.ready_tasks.push(TaskSummary {
+            id: "cas-prefix".to_string(),
+            title: "Prefix guard".to_string(),
+            status: TaskStatus::Open,
+            priority: Priority::MEDIUM,
+            assignee: Some("swift-fox".to_string()),
+            task_type: TaskType::Task,
+            epic: None,
+            branch: None,
+            updated_at: None,
+            epic_verification_owner: None,
+        });
         let events = [
             DirectorEvent::TaskAssigned {
                 task_id: "cas-prefix".to_string(),
@@ -2918,6 +2933,21 @@ mod tests {
             SupervisorCli::Grok,
         ] {
             let prefix = cli.backend().capabilities().tool_prefix;
+            assert!(
+                generate_prompt(
+                    &events[1],
+                    &closed_data,
+                    &closed_data,
+                    "supervisor",
+                    &default_config(),
+                    cli,
+                    cli,
+                    &HashSet::new(),
+                    None,
+                )
+                .is_none(),
+                "{cli:?}: terminal completion must not emit an actorless template"
+            );
             for event in &events {
                 let prompt = generate_prompt(
                     event,

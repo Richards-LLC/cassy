@@ -149,6 +149,7 @@ PY_NESTED_VERSION
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
 .cas/
+target/
 __pycache__/
 EOF
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$repo/.context/zig/zig"

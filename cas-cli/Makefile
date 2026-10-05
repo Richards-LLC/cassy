@@ -216,6 +216,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py
 	cd .. && python3 scripts/test-assembly-memory.py
+	cd .. && python3 scripts/test-release-scratch.py
 	cd .. && python3 scripts/test-review-pr-body.py
 	cd .. && python3 scripts/test-builtin-contract-phrases.py
 	cd .. && bash scripts/test-hitl-loop-template.sh

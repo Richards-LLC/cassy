@@ -83,6 +83,46 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
   await second.close();
 });
 
+test("HUB-J12 a held message another tab delivers clears this tab's waiting line (cas-387e)", journeyPart, async ({ page, context, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  const second = await context.newPage();
+  await second.clock.install({ time: journeyNow() });
+  const other = new HubDouble(second, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  await other.install();
+  const status = page.locator("#message-status");
+  await journey.stage("This tab holds a message while the machine is away", async () => {
+    await journey.open(); await choose(page);
+    await second.goto(page.url()); await choose(second);
+    await Promise.all([hub.down("atlas", { sockets: "close" }), other.down("atlas", { sockets: "close" })]);
+    await expect(page.locator("#conversation-connection")).not.toHaveText(" · Live");
+    await send(page, "Held in the first tab");
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
+    await expect(status).toContainText("will go out by itself");
+  });
+  await journey.stage("The other tab reconnects first and delivers it; this tab stops promising", async () => {
+    await other.up("atlas");
+    await choose(second);
+    await expect.poll(() => other.sends.map((row) => row.text), { timeout: 20_000 }).toEqual(["Held in the first tab"]);
+    other.deliverLatest(PELICAN);
+    await expect(second.getByRole("log").getByText("Delivered")).toBeVisible();
+    await expect(second.locator("#message-status")).toBeHidden();
+    // Nothing is held for this conversation any more, so the first tab no
+    // longer says the message will go out by itself, even while still offline.
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    await expect(status).toBeHidden();
+  });
+  await journey.stage("This tab comes back: no waiting line, sent once", async () => {
+    await hub.up("atlas");
+    await choose(page);
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+    // Never a second copy of it here; the composer stays clear.
+    expect(await page.getByRole("log").getByText("Held in the first tab").count()).toBeLessThanOrEqual(1);
+    await expect(status).toBeHidden();
+    expect([...hub.sends, ...other.sends].map((row) => row.text)).toEqual(["Held in the first tab"]);
+  });
+  await second.close();
+});
+
 test("HUB-J12 cancellation persists and cannot drain after reload", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
   await journey.stage("Cancel an explicitly waiting message", async () => {

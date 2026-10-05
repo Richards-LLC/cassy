@@ -616,6 +616,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // cas-a6f0 (journey F35): a refused pairing will not come back by
       // itself, so nothing may keep saying it is sending.
       if (state.phase === "failed" && state.authFailure) settleSendsForPairingLoss(machine);
+      // cas-387e: the composer's waiting line follows the connection, and
+      // clears once nothing is held.
+      if (messageStatus?.held && messageStatus.session?.startsWith(`${machine.id}:`) && selectedMachineId === machine.id && selectedSession) settleHeldComposerStatus(machine.id, selectedSession);
       // One outage is one problem. A stable fingerprint per machine and kind
       // collapses every retry into a single card with a repeat count instead of
       // burying the feed under a card for each attempt.
@@ -760,6 +763,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (frameFence && (!accepted || accepted.deviceId !== machine.deviceId || accepted.baseUrl !== machine.baseUrl || accepted.credentialId !== frameFence.credentialId || credentialFence(accepted).generation !== frameFence.generation)) return;
       conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
+      settleHeldComposerStatus(machine.id, session);
       updateConversationViews(); renderConversationList();
     },
     onOperatorMessage: (session, message) => {
@@ -2941,6 +2945,7 @@ sendJournal.onChange = () => {
           clearTimeout(held.expiry); queue.splice(queue.indexOf(held), 1);
         }
         if (!queue.length) heldSends.delete(key);
+        settleHeldComposerStatus(machine.id, scope.session);
         for (const held of history.synchronizePending(snapshot.sends)) {
           const remaining = HELD_SEND_MS - (Date.now() - (held.heldAt ?? held.at));
           if (remaining <= 0) expireHeldSend(machine, key, held.id);
@@ -3068,6 +3073,23 @@ function heldSendStatus(machineId: string, session: string): string {
   return `${lostConnectionBanner(label, false)} ${after}`;
 }
 
+/**
+ * cas-387e: the "will go out by itself" line belongs to messages still held
+ * for this conversation. Once none is held (flushed, Delivered, refused, or
+ * sent by another tab and seen through the journal), it clears; while some
+ * are, it follows the connection's wording. `live` clears it outright: the
+ * session is up and nothing waits on the connection.
+ */
+function settleHeldComposerStatus(machineId: string, session: string, live = false): void {
+  const key = sessionKey(machineId, session);
+  if (!messageStatus?.held || messageStatus.session !== key) return;
+  if (live || !heldSends.get(key)?.length) {
+    clearComposerStatus();
+    return;
+  }
+  if (selectedMachineId === machineId && selectedSession === session && heldSendStatus(machineId, session) !== messageStatus.text) showHeldSendStatus(machineId, session);
+}
+
 function showHeldSendStatus(machineId: string, session: string): void {
   showComposerStatus(heldSendStatus(machineId, session), "info", true);
   if (messageStatus) messageStatus.held = true;
@@ -3165,6 +3187,7 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     scheduleReceiptCheck(key);
   } finally {
     flushingHeldSends.delete(key);
+    settleHeldComposerStatus(machine.id, session);
     updateConversationViews(); renderConversationList();
   }
 }
@@ -3207,7 +3230,11 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     rememberDraft(key, undefined);
     messageDraft = composer?.value ?? "";
     messageDraftSelection = messageDraft.length;
-    showHeldSendStatus(machine.id, session);
+    // cas-387e: only a send that actually waits says it will go out by
+    // itself; on a live session it goes now, and the bubble's own Sending…
+    // and Delivered say so.
+    if (sessionIsUp(machine.id, session)) settleHeldComposerStatus(machine.id, session, true);
+    else showHeldSendStatus(machine.id, session);
     composer?.focus();
   }
   if (sessionIsUp(machine.id, session)) await flushHeldSends(machine, session);

@@ -1759,7 +1759,7 @@ dialog form > *,
 .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* cas-766c: the machine name says where a conversation runs, so it holds its
    place and the generated codename yields: the machine's OS word goes first
-   (.os-dropped); then the codename shrinks (its shrink weight dwarfs the
+   (fitMachineLine marks it .sr-only, so it is still heard); then the codename shrinks (its shrink weight dwarfs the
    machine's) down to 8ch while a long machine name keeps 16ch
    (.machine-long); then the codename steps aside (.codename-squeezed) and
    the machine ellipsises alone. The title keeps the whole line
@@ -1771,7 +1771,6 @@ dialog form > *,
 .conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
 /* cas-8526: what steps aside is hidden from sight only (the .sr-only
    technique), never display:none, so the line is heard whole at any width. */
-.conversation-identity .host-where.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-connection { flex: none; white-space: pre; }
@@ -2122,7 +2121,6 @@ button.chip:disabled { cursor: default; }
 .thread .empty .proj2.machine-long > .proj2-machine { min-width: 16ch; }
 .thread .empty .proj2-sep { flex: none; white-space: pre; }
 .thread .empty .proj2-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
-.thread .empty .proj2.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .thread .empty .proj2.codename-squeezed > .proj2-machine { min-width: 0; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
@@ -2289,9 +2287,6 @@ button.chip:disabled { cursor: default; }
   /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
   #conversation-interrupt { padding: 0 var(--space-2); }
   #conversation-interrupt .action-icon { display: none; }
-  /* The header actions take room from the identity, so on a phone the host line
-     names the machine without its OS word; the line's title keeps it whole. */
-  .conversation-identity .host-os { display: none; }
 
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */

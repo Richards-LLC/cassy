@@ -590,8 +590,9 @@ describe("hostMarkup (journey F14)", () => {
     expect(css).toContain(".conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }");
     expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }");
     // The OS word goes whenever the line is short of room, not only on a phone.
-    // cas-8526: hidden from sight only, so the OS word is still heard.
-    expect(css).toContain(".conversation-identity .host-where.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
+    // cas-8526: hidden from sight only, so the OS word is still heard; since
+    // cas-0546 fitMachineLine marks it .sr-only (the house accessibility helper).
+    expect(css).toMatch(/\n\.sr-only \{/);
     expect(css).not.toContain("  .conversation-identity .host-os { display: none; }");
   });
 });
@@ -605,13 +606,13 @@ describe("fitMachineLine (cas-766c)", () => {
     const machine = where.querySelector<HTMLElement>(".host-machine")!;
     codename.style.fontSize = "10px";
     Object.defineProperty(codename, "scrollWidth", { configurable: true, get: () => sizes.codename });
-    Object.defineProperty(machine, "scrollWidth", { configurable: true, get: () => (where.classList.contains("os-dropped") ? sizes.machineNoOs ?? sizes.machine : sizes.machine) });
+    Object.defineProperty(machine, "scrollWidth", { configurable: true, get: () => (where.querySelector(".host-os")!.classList.contains("sr-only") ? sizes.machineNoOs ?? sizes.machine : sizes.machine) });
     const separator = where.querySelector<HTMLElement>(".host-sep")!;
     separator.getBoundingClientRect = () => ({ width: sizes.separator ?? 18 } as DOMRect);
     document.body.append(where);
     return where;
   };
-  const state = (where: HTMLElement) => ["os-dropped", "machine-long", "codename-squeezed"].filter((name) => where.classList.contains(name));
+  const state = (where: HTMLElement) => ["os-dropped", "machine-long", "codename-squeezed"].filter((name) => name === "os-dropped" ? where.querySelector(".host-os")!.classList.contains("sr-only") : where.classList.contains(name));
 
   it("leaves a line that fits whole alone", () => {
     const where = line({ machine: 80, codename: 100 });

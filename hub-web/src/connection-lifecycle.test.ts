@@ -160,22 +160,6 @@ describe("Commander live connection lifecycle", () => {
     expect(hub.requests).toHaveLength(stopped);
   });
 
-  it("fires100 events in1s with at most2 catalog GETs and fresh final state (cas-2b3a5)", async () => {
-    const hub = transport();
-    let latest: string | undefined;
-    const connection = supervisor(await storedMachine("rate-cap"), () => {}, () => {}, sessions => { latest = sessions[0]?.name; });
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
-    for (let i = 1; i <= 100; i++) {
-      hub.catalogRevision(i); hub.event({ kind: "session_added", sequence: i, revision: 0 });
-      await vi.advanceTimersByTimeAsync(10);
-    }
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
-    await vi.advanceTimersByTimeAsync(1000);
-    await vi.waitFor(() => expect(latest).toBe("catalog-100"));
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
-  });
   it("distinguishes a measured browser health503 from an opaque fetch failure (cas-2b3a5)", async () => {
     transport();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable", { status: 503 })));

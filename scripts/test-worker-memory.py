@@ -215,7 +215,10 @@ class AdmissionTests(unittest.TestCase):
         self.assertIn('waiting for host memory (proof running), 2 s', output.getvalue())
 
     def test_direct_runner_limits_are_authoritative(self):
-        self.assertEqual(worker.constrained(['npx','playwright','test','--workers','20']), ['npx','playwright','test','--workers=1'])
+        self.assertEqual(worker.constrained(['npx','playwright','test','--workers','20']), ['npx','playwright','test','--workers=4'])
+        self.assertEqual(worker.constrained(['npx','playwright','test','--workers=4','--workers=3']), ['npx','playwright','test','--workers=3'])
+        self.assertEqual(worker.constrained(['npx','playwright','test']), ['npx','playwright','test','--workers=1'])
+        self.assertEqual(worker.constrained(['npx','playwright','test','--workers=50%']), ['npx','playwright','test','--workers=1'])
         self.assertEqual(worker.constrained(['node','/pkg/vitest/vitest.mjs','run','--maxWorkers=50']), ['node','/pkg/vitest/vitest.mjs','run','--maxWorkers=2'])
 
     def test_signal_teardown_releases_worker_lease_and_reaps_owned_child(self):

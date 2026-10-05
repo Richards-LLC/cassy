@@ -12112,6 +12112,52 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
         })
 }
 
+/// cas-baf7: the delivery's own non-artifact paths (its source), measured
+/// against the anchor's first parent, or its second for a merge anchor.
+/// `None` when Git cannot say.
+pub(super) fn delivery_source_paths(
+    repo_path: &std::path::Path,
+    anchor: &str,
+) -> Option<Vec<String>> {
+    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
+        format!("{anchor}^2")
+    } else {
+        format!("{anchor}^1")
+    };
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "--no-renames", &base, anchor, "--"])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty() && !regenerable_build_artifact(repo_path, path))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// cas-24d8: a regenerable artifact need not be walked line by line when the
+/// delivery carries source. If it is dropped, cas-baf7's rule
+/// ([`regenerated_artifact_drop_note`]) accepts it exactly when every other
+/// dropped path is an artifact too. Walking a minified bundle through
+/// hundreds of rebuilt epic commits was most of a 35s+ child close (cas-cee5
+/// replay). Callers record the path as dropped and let that rule decide.
+pub(super) fn artifact_left_to_regeneration_rule(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    path: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) -> bool {
+    regenerable_build_artifact(repo_path, path)
+        && *carries_source.get_or_init(|| {
+            delivery_source_paths(repo_path, anchor).is_some_and(|source| !source.is_empty())
+        })
+}
+
 /// cas-baf7: when the only "dropped" paths are regenerable build artifacts,
 /// the integration rebuilt them from the merged source of several deliveries
 /// (the standard fix for bundle merge conflicts), so minified output can never
@@ -12130,23 +12176,7 @@ fn regenerated_artifact_drop_note(
     {
         return None;
     }
-    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
-        format!("{anchor}^2")
-    } else {
-        format!("{anchor}^1")
-    };
-    let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", "--no-renames", &base, anchor, "--"])
-        .current_dir(repo_path)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    let delivered = String::from_utf8_lossy(&output.stdout);
-    let source: Vec<&str> = delivered
-        .lines()
-        .map(str::trim)
-        .filter(|path| !path.is_empty() && !regenerable_build_artifact(repo_path, path))
-        .collect();
+    let source = delivery_source_paths(repo_path, anchor)?;
     if source.is_empty() {
         return None;
     }
@@ -12657,6 +12687,13 @@ fn anchored_delivery_content_gate_unbounded(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
+            // before the byte-identity proof walks those bundles again.
+            if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                )));
+            }
             let (identical, paths) = match target_identical_delivered_paths(
                 task,
                 repo_path,

@@ -940,6 +940,7 @@ pub(super) fn merge_tip_content_presence(
             }
         }
     }
+    let carries_source = std::cell::OnceCell::new();
     for commit in &commits {
         match super::delivery_content_presence_in_parent(repo, commit, target) {
             DeliveryContentPresence::Present { paths } => append_unique(&mut present_paths, paths),
@@ -949,6 +950,15 @@ pub(super) fn merge_tip_content_presence(
             }
             DeliveryContentPresence::Dropped { paths } => {
                 for path in paths {
+                    if super::artifact_left_to_regeneration_rule(
+                        repo,
+                        merge_tip,
+                        &path,
+                        &carries_source,
+                    ) {
+                        append_unique(&mut dropped_paths, vec![path]);
+                        continue;
+                    }
                     // A resolution may replace only the owned lines in its
                     // novel hunks, on a path whose final effect was proven.
                     // It never enters the later-commit list for other paths.
@@ -1117,7 +1127,12 @@ pub(super) fn ordinary_anchor_content_presence(
         let mut dropped = Vec::new();
         let mut proven_paths = Vec::new();
         let mut commits = Vec::new();
+        let carries_source = std::cell::OnceCell::new();
         for path in paths {
+            if super::artifact_left_to_regeneration_rule(repo, &anchor, path, &carries_source) {
+                dropped.push(path.clone());
+                continue;
+            }
             let authorized: Vec<_> = resolutions
                 .iter()
                 .filter(|(_, resolved)| resolved == path)

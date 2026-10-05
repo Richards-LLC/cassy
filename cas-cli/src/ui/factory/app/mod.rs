@@ -1,5 +1,7 @@
 //! Factory application state and orchestration
 
+pub(crate) mod provisioning;
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -121,6 +123,7 @@ pub struct PendingWorkerState {
 }
 
 /// Worktree preparation data (can be sent to background thread)
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct WorktreePrep {
     pub worktree_path: PathBuf,
     pub branch_name: String,
@@ -138,6 +141,7 @@ pub struct WorktreePrep {
 }
 
 /// Data needed to spawn a worker (phase 1 output, can be sent to background thread)
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct WorkerSpawnPrep {
     pub worker_name: String,
     pub worktree_info: Option<WorktreePrep>,
@@ -155,6 +159,7 @@ pub struct WorkerSpawnPrep {
 }
 
 /// Result of background worktree preparation (phase 2 output)
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct WorkerSpawnResult {
     pub worker_name: String,
     pub cwd: PathBuf,
@@ -173,7 +178,7 @@ pub struct WorkerSpawnResult {
     pub(crate) target_seed_warning: Option<String>,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TargetSeedStats {
     pub(crate) snapshot: String,
     pub(crate) source_commit: String,
@@ -181,6 +186,21 @@ pub(crate) struct TargetSeedStats {
     pub(crate) skipped_crates: Vec<String>,
     pub(crate) files: u64,
     pub(crate) bytes: u64,
+}
+
+/// In-memory input to the off-loop provisioner. No Git or store access is
+/// required to capture this snapshot.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct WorkerSpawnContext {
+    pub(crate) worker_name: String,
+    isolate: bool,
+    task_id: Option<String>,
+    project_path: PathBuf,
+    cas_dir: PathBuf,
+    worktree_repo_root: Option<PathBuf>,
+    worktree_root: Option<PathBuf>,
+    epic_branch: Option<String>,
+    current_epic_id: Option<String>,
 }
 
 const TARGET_SEED_METADATA_FILE: &str = ".cas-build-cache-metadata";

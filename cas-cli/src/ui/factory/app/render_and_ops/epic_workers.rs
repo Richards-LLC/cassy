@@ -2,8 +2,8 @@ use crate::store::{open_agent_store, open_task_store};
 use crate::ui::factory::app::imports::*;
 use crate::worktree::RemoveOutcome;
 
-fn validate_live_spawn_repo_context(
-    manager: &WorktreeManager,
+fn validate_live_spawn_repo_root(
+    repo_root: &std::path::Path,
     project_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     use crate::worktree::GitOperations;
@@ -14,11 +14,11 @@ fn validate_live_spawn_repo_context(
              the factory started, restart the factory daemon before spawning isolated workers."
         )
     })?;
-    if live_root != manager.repo_root() {
+    if live_root != repo_root {
         anyhow::bail!(
             "Repository context changed after the factory daemon started (cached root: {}, \
              live root: {}). Restart the factory daemon so worker isolation uses the new repository.",
-            manager.repo_root().display(),
+            repo_root.display(),
             live_root.display(),
         );
     }
@@ -1793,6 +1793,217 @@ fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
     }
 }
 
+
+impl WorkerSpawnContext {
+    pub(crate) fn resolve(mut self) -> anyhow::Result<WorkerSpawnPrep> {
+        let data = DirectorData::load_fast(&self.cas_dir)?;
+        let focus = crate::ui::factory::app::preferred_epic_focus_from_session_metadata();
+        let state = crate::ui::factory::app::resolve_epic_state_for_focus(&data, &focus);
+        self.current_epic_id = state.epic_id().map(str::to_string);
+        self.epic_branch = crate::ui::factory::app::epic_branch_for_state(&data, &state);
+        let worker_name = self.worker_name.clone();
+        let task_id = self.task_id.as_deref();
+        let isolate = self.isolate;
+        let (worktree_info, base_warnings, base_provenance) = if isolate {
+            if let Some(session_repo_root) = &self.worktree_repo_root {
+                // Re-resolve the repository on every request. A daemon started
+                // before `git init` may have latched an ancestor repository;
+                // continuing with that stale root would create worker branches
+                // in the wrong project. The verified-spawn lifecycle surfaces
+                // this per-request failure to the supervisor.
+                validate_live_spawn_repo_root(session_repo_root, &self.project_path)?;
+                // Verify repo has commits before trying to create worktrees
+                if !crate::worktree::GitOperations::new(session_repo_root.clone()).has_commits().unwrap_or(false) {
+                    crate::telemetry::track(
+                        "factory_worker_spawn_result",
+                        vec![("success", "false"), ("reason", "repo_has_no_commits")],
+                    );
+                    anyhow::bail!(
+                        "Repository has no commits. Please make an initial commit before spawning workers."
+                    );
+                }
+
+                let session_repo_root = session_repo_root.clone();
+                let task_base = task_id
+                    .map(|tid| task_epic_base(&self.cas_dir, &session_repo_root, tid))
+                    .unwrap_or(TaskBase::Unresolved);
+                if let Some(epic) = task_base.epic()
+                    && epic.work_target.is_none()
+                    && (epic.branch.is_empty() || !epic.branch_exists)
+                {
+                    anyhow::bail!(
+                        "spawn refused: task {} belongs to epic {} but the epic has no recorded WorkTarget or resolvable branch; refusing to recompute a title-derived base",
+                        epic.task_id,
+                        epic.epic_id,
+                    );
+                }
+                let repo_root = resolve_spawn_worktree_repo(
+                    &self.cas_dir,
+                    &session_repo_root,
+                    task_base.work_target(),
+                )?;
+                let cross_repo = repo_root != session_repo_root;
+                let spawn_git = crate::worktree::GitOperations::new(repo_root.clone());
+                let worktree_path = if cross_repo {
+                    repo_root.join(".cas/worktrees").join(&worker_name)
+                } else {
+                    self.worktree_root.as_ref().expect("worktree root snapshot").join(&worker_name)
+                };
+                let branch_name = format!("factory/{worker_name}");
+                // Dynamic spawns must match startup spawns: never the
+                // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
+                // is the pre-assigned task's epic branch first, pinned epic
+                // focus second, trunk last.
+                let configured_trunk = Config::configured_epic_base_branch(&repo_root)
+                    .unwrap_or_else(|| spawn_git.detect_default_branch());
+                // An epic's declared delivery target is authoritative for both
+                // a no-epic child fallback and stale-base comparison. Falling
+                // back to factory configuration keeps legacy/taskless spawns.
+                let trunk = task_base
+                    .target_branch()
+                    .unwrap_or(&configured_trunk)
+                    .to_string();
+                let task_epic = task_base.epic().cloned();
+                let (parent_branch, base_source) =
+                    resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
+                let mut notices: Vec<String> = Vec::new();
+                if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+                {
+                    notices.push(notice);
+                }
+                let base_epic_id = match &base_source {
+                    SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
+                    SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
+                    SpawnBaseSource::WorkTarget { .. }
+                    | SpawnBaseSource::TaskWithoutEpic { .. }
+                    | SpawnBaseSource::Trunk => None,
+                };
+                // cas-b6f5 (GH #434): a task-level WorkTarget may point at
+                // an outer epic branch, so the winning SpawnBaseSource has no
+                // task-epic id even though the resolved base itself records a
+                // parent. Look up that base as an epic after retaining the
+                // direct child-epic path used by cas-83f6.
+                let recorded_base_parent = base_epic_id
+                    .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
+                    .filter(|(epic_branch, _)| epic_branch == &parent_branch)
+                    .or_else(|| {
+                        recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
+                    });
+                if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
+                    let refresh = fast_forward_epic_base_from_parent(
+                        &repo_root,
+                        &epic_branch,
+                        &recorded_parent,
+                    )
+                    .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
+                    if let Some(notice) = refresh {
+                        notices.push(notice);
+                    }
+                }
+                // cas-d897 (GH #146): the winning branch name still has to be
+                // resolved to the fresher of its local and origin refs — a
+                // stale local ref silently backdates every worker cut from it.
+                let (base_ref, freshness_notice, checkout_ref) =
+                    checkout_ref_for_spawn_base(&repo_root, &parent_branch, &base_source);
+                if let Some(notice) = freshness_notice {
+                    notices.push(notice);
+                }
+                // `parent_branch` remains the local merge-back target, but a
+                // refreshed spawn is actually cut from `base_ref`. Warnings
+                // must assess that effective checkout ref or they contradict
+                // the successful origin-based refresh they just announced.
+                let effective_base = base_ref.as_deref().unwrap_or(&parent_branch);
+                let mut provenance = spawn_base_provenance_notice(
+                    &parent_branch,
+                    &base_source,
+                    self.epic_branch.as_deref(),
+                );
+                let checkout_sha = short_sha(&repo_root, effective_base);
+                provenance.push_str(&format!(
+                    " CHECKOUT BASE: '{checkout_ref}' @ {checkout_sha}."
+                ));
+                if base_diverges_from_focus(
+                    &parent_branch,
+                    &base_source,
+                    self.epic_branch.as_deref(),
+                ) {
+                    notices.push(provenance.clone());
+                }
+                // The base must contain the epic it is meant to serve — the
+                // task's epic when that decided the base, otherwise the focus.
+                let epic_to_contain = match &base_source {
+                    SpawnBaseSource::TaskEpic { .. } => {
+                        task_epic.as_ref().map(|t| t.branch.clone())
+                    }
+                    SpawnBaseSource::WorkTarget { .. } => None,
+                    _ => self.epic_branch.clone(),
+                };
+                if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
+                    worker_base_mismatch_notice(&repo_root, effective_base, epic_branch)
+                }) {
+                    notices.push(notice);
+                }
+                // cas-7587: a task whose epic branch does not exist locally
+                // still lands on the focus base — say so instead of letting it
+                // look like the task's epic was honoured.
+                if !matches!(base_source, SpawnBaseSource::WorkTarget { .. })
+                    && let Some(unresolved) = task_epic.as_ref().filter(|t| !t.branch_exists)
+                {
+                    notices.push(format!(
+                        "SPAWN BASE FALLBACK: task {} belongs to epic {} whose branch '{}' does \
+                         not exist in this repository; the worker was cut from '{parent_branch}' \
+                         instead. Create the epic branch (or fix the epic's branch field) before \
+                         relying on this worker's base.",
+                        unresolved.task_id, unresolved.epic_id, unresolved.branch
+                    ));
+                }
+                if let Some(notice) =
+                    stale_legacy_slug_notice(task_epic.as_ref(), &parent_branch, &base_source)
+                {
+                    notices.push(notice);
+                }
+                // cas-ecf7 (GH #118): the base ref is resolved live, but the
+                // branch it names can be far behind trunk. Surface that at
+                // spawn time instead of leaving it to whoever happens to read
+                // `behind:` in worker_status.
+                if let Some(notice) =
+                    stale_spawn_base_notice(&repo_root, effective_base, &trunk)
+                {
+                    notices.push(notice);
+                }
+                (
+                    Some(WorktreePrep {
+                        worktree_path,
+                        branch_name,
+                        parent_branch,
+                        base_ref,
+                        repo_root,
+                        cas_dir: self.cas_dir.clone(),
+                    }),
+                    notices,
+                    Some(provenance),
+                )
+            } else {
+                anyhow::bail!(
+                    "Worker isolation requested but worktrees are not enabled. \
+                     Start the factory with --worktrees to enable isolation."
+                );
+            }
+        } else {
+            (None, Vec::new(), None)
+        };
+
+
+        Ok(WorkerSpawnPrep {
+            worker_name,
+            worktree_info,
+            warnings: base_warnings,
+            base_provenance,
+        })
+    }
+}
+
 impl FactoryApp {
     /// Get the current epic state
     pub fn epic_state(&self) -> &EpicState {
@@ -1957,269 +2168,53 @@ impl FactoryApp {
     /// task_id=...`). cas-7587 (GH #122): when present, the worktree base is
     /// resolved from *that task's* epic branch, not from the session's pinned
     /// epic focus — the two can name different epics, and the task is right.
+    /// Capture only in-memory spawn state. All store, config and Git work is
+    /// resolved by the cancellable provisioner, never on the daemon loop.
+    pub(crate) fn snapshot_worker_spawn(
+        &self,
+        name: Option<&str>,
+        isolate: bool,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<WorkerSpawnContext> {
+        let worker_name = match name {
+            Some(name) => name.to_string(),
+            None => {
+                let existing: std::collections::HashSet<&str> =
+                    self.worker_names.iter().map(String::as_str).collect();
+                let mut candidate = generate_unique(1)[0].clone();
+                while existing.contains(candidate.as_str()) {
+                    candidate = generate_unique(1)[0].clone();
+                }
+                candidate
+            }
+        };
+        if self.worker_names.contains(&worker_name) {
+            anyhow::bail!("Worker '{worker_name}' already exists");
+        }
+        Ok(WorkerSpawnContext {
+            worker_name,
+            isolate,
+            task_id: task_id.map(str::to_string),
+            project_path: self.project_path().to_path_buf(),
+            cas_dir: self.cas_dir.clone(),
+            worktree_repo_root: self.worktree_manager.as_ref().map(|m| m.repo_root().to_path_buf()),
+            worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
+            epic_branch: self.epic_branch.clone(),
+            current_epic_id: self.current_epic_id.clone(),
+        })
+    }
+
     pub fn prepare_worker_spawn(
         &mut self,
         name: Option<&str>,
         isolate: bool,
         task_id: Option<&str>,
     ) -> anyhow::Result<WorkerSpawnPrep> {
-        // focus_epic is persisted outside cas.db, so reconcile the task
-        // snapshot and session metadata synchronously at spawn time.
-        if let Err(error) = self.refresh_data() {
-            tracing::warn!(
-                error = %error,
-                "failed to refresh factory data before worker spawn; using cached task data"
-            );
-        }
-        self.apply_session_metadata_focus();
-
-        let spawn_type = if name.is_some() { "named" } else { "anonymous" };
-        crate::telemetry::track(
-            "factory_worker_spawn_requested",
-            vec![
-                ("spawn_type", spawn_type),
-                ("worktrees_enabled", bool_prop(self.worktrees_enabled())),
-                ("isolate", bool_prop(isolate)),
-            ],
-        );
-
-        // Generate a unique name if not provided
-        let worker_name = match name {
-            Some(n) => n.to_string(),
-            None => {
-                let existing: std::collections::HashSet<&str> =
-                    self.worker_names.iter().map(|s| s.as_str()).collect();
-                let mut candidate = generate_unique(1)[0].clone();
-                let mut attempts = 0;
-                while existing.contains(candidate.as_str()) && attempts < 100 {
-                    candidate = generate_unique(1)[0].clone();
-                    attempts += 1;
-                }
-                candidate
-            }
-        };
-
-        if self.worker_names.contains(&worker_name) {
-            crate::telemetry::track(
-                "factory_worker_spawn_result",
-                vec![("success", "false"), ("reason", "worker_exists")],
-            );
-            anyhow::bail!("Worker '{worker_name}' already exists");
-        }
-
-        let (worktree_info, base_warnings, base_provenance) = if isolate {
-            if let Some(manager) = &self.worktree_manager {
-                // Re-resolve the repository on every request. A daemon started
-                // before `git init` may have latched an ancestor repository;
-                // continuing with that stale root would create worker branches
-                // in the wrong project. The verified-spawn lifecycle surfaces
-                // this per-request failure to the supervisor.
-                validate_live_spawn_repo_context(manager, self.project_path())?;
-                // Verify repo has commits before trying to create worktrees
-                if !manager.git().has_commits().unwrap_or(false) {
-                    crate::telemetry::track(
-                        "factory_worker_spawn_result",
-                        vec![("success", "false"), ("reason", "repo_has_no_commits")],
-                    );
-                    anyhow::bail!(
-                        "Repository has no commits. Please make an initial commit before spawning workers."
-                    );
-                }
-
-                let session_repo_root = manager.repo_root().to_path_buf();
-                let task_base = task_id
-                    .map(|tid| task_epic_base(&self.cas_dir, &session_repo_root, tid))
-                    .unwrap_or(TaskBase::Unresolved);
-                if let Some(epic) = task_base.epic()
-                    && epic.work_target.is_none()
-                    && (epic.branch.is_empty() || !epic.branch_exists)
-                {
-                    anyhow::bail!(
-                        "spawn refused: task {} belongs to epic {} but the epic has no recorded WorkTarget or resolvable branch; refusing to recompute a title-derived base",
-                        epic.task_id,
-                        epic.epic_id,
-                    );
-                }
-                let repo_root = resolve_spawn_worktree_repo(
-                    &self.cas_dir,
-                    &session_repo_root,
-                    task_base.work_target(),
-                )?;
-                let cross_repo = repo_root != session_repo_root;
-                let spawn_git = crate::worktree::GitOperations::new(repo_root.clone());
-                let worktree_path = if cross_repo {
-                    repo_root.join(".cas/worktrees").join(&worker_name)
-                } else {
-                    manager.worktree_path_for_worker(&worker_name)
-                };
-                let branch_name = manager.branch_name_for_worker(&worker_name);
-                // Dynamic spawns must match startup spawns: never the
-                // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
-                // is the pre-assigned task's epic branch first, pinned epic
-                // focus second, trunk last.
-                let configured_trunk = Config::configured_epic_base_branch(&repo_root)
-                    .unwrap_or_else(|| spawn_git.detect_default_branch());
-                // An epic's declared delivery target is authoritative for both
-                // a no-epic child fallback and stale-base comparison. Falling
-                // back to factory configuration keeps legacy/taskless spawns.
-                let trunk = task_base
-                    .target_branch()
-                    .unwrap_or(&configured_trunk)
-                    .to_string();
-                let task_epic = task_base.epic().cloned();
-                let (parent_branch, base_source) =
-                    resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
-                let mut notices: Vec<String> = Vec::new();
-                if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?
-                {
-                    notices.push(notice);
-                }
-                let base_epic_id = match &base_source {
-                    SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
-                    SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
-                    SpawnBaseSource::WorkTarget { .. }
-                    | SpawnBaseSource::TaskWithoutEpic { .. }
-                    | SpawnBaseSource::Trunk => None,
-                };
-                // cas-b6f5 (GH #434): a task-level WorkTarget may point at
-                // an outer epic branch, so the winning SpawnBaseSource has no
-                // task-epic id even though the resolved base itself records a
-                // parent. Look up that base as an epic after retaining the
-                // direct child-epic path used by cas-83f6.
-                let recorded_base_parent = base_epic_id
-                    .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
-                    .filter(|(epic_branch, _)| epic_branch == &parent_branch)
-                    .or_else(|| {
-                        recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
-                    });
-                if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
-                    let refresh = fast_forward_epic_base_from_parent(
-                        &repo_root,
-                        &epic_branch,
-                        &recorded_parent,
-                    )
-                    .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
-                    if let Some(notice) = refresh {
-                        notices.push(notice);
-                    }
-                }
-                // cas-d897 (GH #146): the winning branch name still has to be
-                // resolved to the fresher of its local and origin refs — a
-                // stale local ref silently backdates every worker cut from it.
-                let (base_ref, freshness_notice, checkout_ref) =
-                    checkout_ref_for_spawn_base(&repo_root, &parent_branch, &base_source);
-                if let Some(notice) = freshness_notice {
-                    notices.push(notice);
-                }
-                // `parent_branch` remains the local merge-back target, but a
-                // refreshed spawn is actually cut from `base_ref`. Warnings
-                // must assess that effective checkout ref or they contradict
-                // the successful origin-based refresh they just announced.
-                let effective_base = base_ref.as_deref().unwrap_or(&parent_branch);
-                let mut provenance = spawn_base_provenance_notice(
-                    &parent_branch,
-                    &base_source,
-                    self.epic_branch.as_deref(),
-                );
-                let checkout_sha = short_sha(&repo_root, effective_base);
-                provenance.push_str(&format!(
-                    " CHECKOUT BASE: '{checkout_ref}' @ {checkout_sha}."
-                ));
-                if base_diverges_from_focus(
-                    &parent_branch,
-                    &base_source,
-                    self.epic_branch.as_deref(),
-                ) {
-                    notices.push(provenance.clone());
-                }
-                // The base must contain the epic it is meant to serve — the
-                // task's epic when that decided the base, otherwise the focus.
-                let epic_to_contain = match &base_source {
-                    SpawnBaseSource::TaskEpic { .. } => {
-                        task_epic.as_ref().map(|t| t.branch.clone())
-                    }
-                    SpawnBaseSource::WorkTarget { .. } => None,
-                    _ => self.epic_branch.clone(),
-                };
-                if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
-                    worker_base_mismatch_notice(&repo_root, effective_base, epic_branch)
-                }) {
-                    notices.push(notice);
-                }
-                // cas-7587: a task whose epic branch does not exist locally
-                // still lands on the focus base — say so instead of letting it
-                // look like the task's epic was honoured.
-                if !matches!(base_source, SpawnBaseSource::WorkTarget { .. })
-                    && let Some(unresolved) = task_epic.as_ref().filter(|t| !t.branch_exists)
-                {
-                    notices.push(format!(
-                        "SPAWN BASE FALLBACK: task {} belongs to epic {} whose branch '{}' does \
-                         not exist in this repository; the worker was cut from '{parent_branch}' \
-                         instead. Create the epic branch (or fix the epic's branch field) before \
-                         relying on this worker's base.",
-                        unresolved.task_id, unresolved.epic_id, unresolved.branch
-                    ));
-                }
-                if let Some(notice) =
-                    stale_legacy_slug_notice(task_epic.as_ref(), &parent_branch, &base_source)
-                {
-                    notices.push(notice);
-                }
-                // cas-ecf7 (GH #118): the base ref is resolved live, but the
-                // branch it names can be far behind trunk. Surface that at
-                // spawn time instead of leaving it to whoever happens to read
-                // `behind:` in worker_status.
-                if let Some(notice) =
-                    stale_spawn_base_notice(&repo_root, effective_base, &trunk)
-                {
-                    notices.push(notice);
-                }
-                (
-                    Some(WorktreePrep {
-                        worktree_path,
-                        branch_name,
-                        parent_branch,
-                        base_ref,
-                        repo_root,
-                        cas_dir: self.cas_dir.clone(),
-                    }),
-                    notices,
-                    Some(provenance),
-                )
-            } else {
-                anyhow::bail!(
-                    "Worker isolation requested but worktrees are not enabled. \
-                     Start the factory with --worktrees to enable isolation."
-                );
-            }
-        } else {
-            (None, Vec::new(), None)
-        };
-
-        if let Some(provenance) = &base_provenance {
-            tracing::info!("{provenance}");
-        }
-
-        for notice in &base_warnings {
-            tracing::warn!("{notice}");
+        let prep = self.snapshot_worker_spawn(name, isolate, task_id)?.resolve()?;
+        for notice in &prep.warnings {
             self.set_error(notice.clone());
         }
-
-        crate::telemetry::track(
-            "factory_worker_spawn_prepared",
-            vec![
-                ("spawn_type", spawn_type),
-                ("worktrees_enabled", bool_prop(worktree_info.is_some())),
-            ],
-        );
-
-        Ok(WorkerSpawnPrep {
-            worker_name,
-            worktree_info,
-            warnings: base_warnings,
-            base_provenance,
-        })
+        Ok(prep)
     }
 
     /// Phase 3: Finish spawn on main thread (fast - adds pane to mux, updates tracking).

@@ -204,7 +204,7 @@ pub struct FactoryDaemon {
         Option<i64>,
         Option<cas_mux::WorkerSpec>,
         Option<String>,
-        JoinHandle<anyhow::Result<WorkerSpawnResult>>,
+        JoinHandle<anyhow::Result<crate::ui::factory::app::provisioning::ProvisionedWorker>>,
     )>,
     /// Workers whose CLI was launched but whose Cassy registration is not confirmed yet.
     spawn_verifications: HashMap<String, SpawnVerification>,
@@ -356,6 +356,7 @@ pub struct FactoryDaemon {
     /// background worktree build so a hung git process cannot wedge the spawn
     /// queue for the rest of the session (GH #59).
     spawn_started_at: Option<Instant>,
+    spawn_cancellation: Option<std::sync::Arc<crate::ui::factory::app::provisioning::ProvisioningCancellation>>,
     /// cas-2702: last scan for queue rows this daemon never drained (GH #58).
     last_spawn_queue_stall_scan: Option<Instant>,
     /// Last bounded probe for durable external reminder conditions.

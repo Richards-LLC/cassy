@@ -55,6 +55,7 @@
 //! - Detach with Ctrl+D keeps daemon running
 
 mod app;
+pub use app::provisioning::run_internal_provisioner;
 mod boot;
 mod buffer_backend;
 mod client;

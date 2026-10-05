@@ -21,6 +21,7 @@ mod connector;
 mod death;
 mod discovery;
 mod events;
+mod connection_recovery;
 mod identity;
 pub mod launch_env;
 pub mod projects;

@@ -1,6 +1,6 @@
 import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
-import { CommanderJournal, type CredentialFence, type DeliveryScope } from "./commander-journal";
+import { CommanderJournal, deliveryScope, DELIVERY_DB, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import type { PendingSend } from "./conversation-store";
 
 const scope: DeliveryScope = { hub: "hub-a", baseUrl: "https://hub.example", device: "phone", session: "session-a" };
@@ -139,5 +139,50 @@ describe("atomic Commander journal", () => {
     await a.reconcile(scope, rows, [], fence);
     await b.importLegacy(scope, [item], fence);
     expect((await a.read(scope)).sends).toEqual([]);
+  });
+});
+
+async function seedRows(factory: IDBFactory, rows: { sends?: unknown[]; replies?: unknown[] }) {
+  const db = await new Promise<IDBDatabase>((resolve) => { const open = factory.open(DELIVERY_DB, 1); open.onsuccess = () => resolve(open.result); });
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(["sends", "replies"], "readwrite");
+    for (const name of ["sends", "replies"] as const) for (const row of rows[name] ?? []) tx.objectStore(name).put(row);
+    tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+  }); db.close();
+}
+
+describe("journal privacy and immutable replay", () => {
+  it("drops malformed stored rows without exposing or dispatching their payload", async () => {
+    const { a, db } = journals(); await a.read(scope);
+    await seedRows(db, { sends: [{ key: "corrupt", send: send("corrupt"), revision: 1, updatedAt: 1_000 }], replies: [{ key: "bad-reply", scope, reply: { ...reply, message: 1 }, persistedAt: 1_000 }] });
+    expect(await a.read(scope)).toEqual({ sends: [], replies: [] });
+    expect(await a.scopes({ id: scope.hub, baseUrl: scope.baseUrl, deviceId: scope.device } as never)).toEqual([]);
+  });
+  it("deletes private payloads past retention when a quiet journal is reopened", async () => {
+    let now = 1_000; const { a, make } = journals(() => now);
+    await a.reconcile(scope, [], [send("old")], fence); await a.persistReply(scope, reply, fence);
+    now += 91 * 24 * 60 * 60 * 1_000;
+    expect(await make().read(scope)).toEqual({ sends: [], replies: [] });
+  });
+  it("live/history defaults dedupe but changed attachments cannot authorize an ACK", async () => {
+    const { a } = journals(); expect(await a.persistReply(scope, reply, fence)).toBe(true);
+    expect(await a.persistReply(scope, { ...reply, kind: "answer", attachments: [] }, fence)).toBe(true);
+    expect(await a.persistReply(scope, { ...reply, attachments: [{ artifact_id: "art-other", name: "changed", mime: "text/plain", size_bytes: 1, sha256: "a".repeat(64) }] }, fence)).toBe(false);
+    expect((await a.read(scope)).replies).toHaveLength(1);
+  });
+  it("the newly committed reply remains durable at the cap even when all timestamps tie", async () => {
+    const { a } = journals();
+    for (let id = 1; id <= 401; id++) expect(await a.persistReply(scope, { ...reply, notification_id: id }, fence)).toBe(true);
+    const rows = (await a.read(scope)).replies;
+    expect(rows).toHaveLength(400); expect(rows.some(row => row.reply.notification_id === 401)).toBe(true);
+  });
+  it("future account enrollment fails closed until the enrolled journal contract exists", async () => {
+    const { a } = journals();
+    const machine = { id: scope.hub, baseUrl: scope.baseUrl, deviceId: scope.device, accountEnrollment: { state: "enrolled", account_id: "next-account" } };
+    const future = deliveryScope(machine as never, scope.session);
+    expect(await a.reconcile(future, [], [send("future")], fence)).toBe("not-saved");
+    expect(await a.persistReply(future, reply, fence)).toBe(false);
+    expect(await a.dispatch(future, "future", fence, () => { throw Error("must not send"); })).toBe("stale");
+    expect(await a.read(future)).toEqual({ sends: [], replies: [] });
   });
 });

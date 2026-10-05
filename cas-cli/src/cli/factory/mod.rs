@@ -251,13 +251,13 @@ pub struct FactoryArgs {
     #[arg(long, default_value = "claude")]
     pub supervisor_cli: String,
 
-    /// Worker CLI to use (claude, codex, or grok). Without this flag,
-    /// `[llm.worker] harness` and then the stock worker default decide.
-    ///
-    /// cas-2567: an `Option`, not a `"claude"` default, so an explicit
-    /// `--worker-cli claude` can be told apart from no flag at all. The old
-    /// string default made `--worker-cli claude` indistinguishable from
-    /// omission, and the stock codex worker floor silently replaced it.
+    // cas-2567: an `Option`, not a `"claude"` default, so an explicit
+    // `--worker-cli claude` can be told apart from no flag at all. The old
+    // string default made it indistinguishable from omission, and the stock
+    // codex worker floor silently replaced it. (A `//` comment: clap renders
+    // `///` doc comments as help text.)
+    /// Worker CLI to use (claude, codex, or grok). Default: [llm.worker]
+    /// harness, else the stock worker default.
     #[arg(long, value_name = "CLI")]
     pub worker_cli: Option<String>,
 

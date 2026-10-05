@@ -674,7 +674,7 @@ export class HubDouble {
       return route.fulfill({ status: 401, json: { reason: "unknown_credential", retryable: false } });
     }
     if (active && this.expiredInstallationSecrets.has(active.credential) && path !== "/v1/auth/refresh") {
-      return route.fulfill({ status: 401, json: { reason: "credential_expired", retryable: false } });
+      return route.fulfill({ status: 401, json: { reason: "expired", retryable: false } });
     }
     if (path === "/v1/auth/refresh" && active) {
       this.installationRefreshes++;

@@ -5,3 +5,8 @@ Claude Code: load the Cassy tool schemas once per session with ToolSearch(query=
 <!-- CAS:END -->
 
 After writing markdown to a file, summarise it in chat instead of echoing it, and avoid nested fenced blocks. This avoids the Claude Code Ink `<Box>`-in-`<Text>` crash.
+
+Browser build/check policy is in AGENTS.md: affected journeys at four workers for
+workers and independent QA; full Playwright only for supervisor epic assembly
+and the merge queue. Use `scripts/journey-eval.sh <task-artifact-dir>`; preserve
+failures when rerunning one failing spec at one worker.

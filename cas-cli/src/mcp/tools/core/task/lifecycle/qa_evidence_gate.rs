@@ -212,6 +212,18 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     commit_receipt: Option<&str>,
     attributed_paths: Option<&[String]>,
 ) -> Result<Vec<String>, String> {
+    qa_evidence_close_gate_for_delivery(cas_root, task, repo, target_branch, commit_receipt, attributed_paths, None)
+}
+
+pub(crate) fn qa_evidence_close_gate_for_delivery(
+    cas_root: &Path,
+    task: &Task,
+    repo: &Path,
+    target_branch: &str,
+    commit_receipt: Option<&str>,
+    attributed_paths: Option<&[String]>,
+    attributed_base: Option<&str>,
+) -> Result<Vec<String>, String> {
     let Ok(config) = crate::config::Config::load(cas_root) else {
         return Ok(Vec::new());
     };
@@ -241,7 +253,16 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         .as_deref()
         .map(|paths| catalog_journeys_for(repo, paths))
         .unwrap_or_default();
-    let reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
+    let mut reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
+    if let Some(changed) = changed.as_deref().filter(|p| crate::qa_evidence::journeys::affects_hub(p)) {
+        let base = attributed_base.or_else(|| range.as_ref().map(|(base, _)| base.as_str()))
+            .ok_or("QA EVIDENCE REJECTED: cannot establish the task-attributed journey selection base")?;
+        let base = super::close_ops::resolve_branch_sha(repo, &format!("{base}^{{commit}}"))
+            .ok_or("QA EVIDENCE REJECTED: journey selection base is unreadable")?;
+        let selected = crate::qa_evidence::journeys::select_journeys(repo, &base, &head, Some(changed))
+            .map_err(|e| format!("QA EVIDENCE REJECTED: {e}; affected paths [{}]; run scripts/journey-eval.sh for the repaired selection", changed.join(", ")))?;
+        reasons.push(crate::qa_evidence::journeys::selection_reason(&base, &selected));
+    }
     let terminal_render = changed.as_deref().is_some_and(|paths| requires_terminal_qa(paths, &qa));
     let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
         (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)

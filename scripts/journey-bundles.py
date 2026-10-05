@@ -106,6 +106,7 @@ def main(argv: list[str]) -> int:
             "task_id": artifacts.name,
             "producer": "journey",
             "journey_id": data["id"],
+            "journey_receipt": "../../journey-receipt.json",
             "verdict": data["status"],
             "label": data.get("label"),
             "head_sha": commit,

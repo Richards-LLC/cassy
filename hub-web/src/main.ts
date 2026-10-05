@@ -3169,7 +3169,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     const snapshot = await sendJournal.read(scope);
     history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
     const previous = history.events.find(event => event.kind === "send" && event.value.id === retryOf);
-    if (previous?.kind !== "send" || !history.isFailedSend(previous.value)) {
+    if (previous?.kind !== "send" || !history.canRetrySend(previous.value)) {
       updateConversationViews(); renderConversationList();
       return;
     }
@@ -3195,7 +3195,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
   if (retryOf) {
     // A live receipt can arrive while the Retry transaction commits.
     const previous = history.events.find(event => event.kind === "send" && event.value.id === retryOf);
-    if (previous?.kind !== "send" || !history.isFailedSend(previous.value)) {
+    if (previous?.kind !== "send" || !history.canRetrySend(previous.value)) {
       updateConversationViews(); renderConversationList();
       return;
     }

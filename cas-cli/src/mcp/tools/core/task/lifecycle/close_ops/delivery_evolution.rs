@@ -48,6 +48,10 @@ fn hunks(repo: &Path, left: &str, right: &str, path: &str) -> Result<Vec<Hunk>, 
             path,
         ],
     )?;
+    parse_hunks(&patch)
+}
+
+fn parse_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
     if patch.contains("Binary files ") || patch.contains("GIT binary patch") {
         return Err("binary delivery evolution cannot be attributed to line ranges".into());
     }
@@ -80,7 +84,15 @@ fn hunks(repo: &Path, left: &str, right: &str, path: &str) -> Result<Vec<Hunk>, 
 // complete changed block together; never join across executable context or
 // apply this normalization at a merge.
 fn ordinary_hunks(repo: &Path, left: &str, right: &str, path: &str) -> Result<Vec<Hunk>, String> {
-    let raw = hunks(repo, left, right, path)?;
+    normalize_ordinary(repo, left, path, hunks(repo, left, right, path)?)
+}
+
+fn normalize_ordinary(
+    repo: &Path,
+    left: &str,
+    path: &str,
+    raw: Vec<Hunk>,
+) -> Result<Vec<Hunk>, String> {
     if !raw.windows(2).any(|pair| {
         pair[0].old_count > 0
             && pair[0].new_count > 0
@@ -962,6 +974,95 @@ fn path_blobs(
     )
 }
 
+/// cas-24d8: every changing edge's patch on `path` from one `diff-tree
+/// --stdin`. A line `<commit> <prior>` diffs `prior` to `commit`. Only edges
+/// whose blobs differ are fed, so each yields exactly one chunk, headed by
+/// the commit id; chunks are matched to edges in order and the headers are
+/// checked. Under host load the per-edge `git diff` spawns were the close's
+/// remaining cost (about 2k per close on the v35 epic). Any mismatch returns
+/// `None`, and the walk diffs edge by edge as before.
+fn edge_patches(
+    repo: &Path,
+    edges: &[(&str, &str)],
+    path: &str,
+) -> Option<std::collections::HashMap<(String, String), String>> {
+    use std::io::{Seek, Write};
+    if edges.is_empty() {
+        return Some(std::collections::HashMap::new());
+    }
+    super::epic_measurement::check().ok()?;
+    let mut input = tempfile::tempfile().ok()?;
+    for (prior, commit) in edges {
+        writeln!(input, "{commit} {prior}").ok()?;
+    }
+    input.rewind().ok()?;
+    let output = Command::new("git")
+        .args([
+            "diff-tree",
+            "--stdin",
+            "-p",
+            "--unified=0",
+            "--no-renames",
+            "--",
+            path,
+        ])
+        .current_dir(repo)
+        .measurement_output_with_stdin(std::process::Stdio::from(input))
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8(output.stdout).ok()?;
+    let is_header =
+        |line: &str| line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let mut chunks: Vec<(String, String)> = Vec::new();
+    for line in listing.lines() {
+        if is_header(line) {
+            chunks.push((line.to_string(), String::new()));
+        } else if let Some((_, patch)) = chunks.last_mut() {
+            patch.push_str(line);
+            patch.push('\n');
+        } else {
+            return None;
+        }
+    }
+    if chunks.len() != edges.len() {
+        return None;
+    }
+    let mut patches = std::collections::HashMap::new();
+    for ((prior, commit), (header, patch)) in edges.iter().zip(chunks) {
+        if !header.eq_ignore_ascii_case(commit) {
+            return None;
+        }
+        patches.insert((prior.to_string(), commit.to_string()), patch);
+    }
+    Some(patches)
+}
+
+/// cas-24d8: the full message of each commit in one `show -s`, keyed by id.
+fn commit_messages(
+    repo: &Path,
+    commits: &[&str],
+) -> Option<std::collections::HashMap<String, String>> {
+    if commits.is_empty() {
+        return Some(std::collections::HashMap::new());
+    }
+    let mut args = vec!["show", "-s", "--format=%x1e%H%x1f%B"];
+    args.extend(commits.iter().copied());
+    let listing = text(repo, &args).ok()?;
+    let messages: std::collections::HashMap<_, _> = listing
+        .split('\u{1e}')
+        .filter_map(|record| {
+            let (id, message) = record.split_once('\u{1f}')?;
+            Some((id.trim().to_string(), message.to_string()))
+        })
+        .collect();
+    commits
+        .iter()
+        .all(|commit| messages.contains_key(*commit))
+        .then_some(messages)
+}
+
 fn line_content_presence_uncached(
     repo: &Path,
     parent: &str,
@@ -1114,13 +1215,31 @@ fn line_content_presence_uncached(
             matches!((blobs.get(prior), blobs.get(commit)), (Some(left), Some(right)) if left == right)
         })
     };
+    let mut changing_edges = Vec::new();
+    let mut changing_commits = Vec::new();
+    for record in history.lines() {
+        let fields: Vec<_> = record.split_whitespace().collect();
+        for prior in fields.iter().skip(1) {
+            if !unchanged(prior, fields[0]) {
+                changing_edges.push((*prior, fields[0]));
+                if !changing_commits.contains(&fields[0]) {
+                    changing_commits.push(fields[0]);
+                }
+            }
+        }
+    }
+    let patches = edge_patches(repo, &changing_edges, path);
+    let messages = commit_messages(repo, &changing_commits);
     for record in history.lines() {
         let fields: Vec<_> = record.split_whitespace().collect();
         let commit = fields[0];
         let ordinary = fields.len() == 2;
         // A revert label only matters for an edge that changes the path.
         let reverted = !fields.iter().skip(1).all(|prior| unchanged(prior, commit))
-            && is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
+            && match messages.as_ref().and_then(|messages| messages.get(commit)) {
+                Some(message) => is_revert_message(message),
+                None => is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?),
+            };
         let mut union_changes = None;
         let mut union_base = None;
         let mut union_checked = false;
@@ -1156,10 +1275,14 @@ fn line_content_presence_uncached(
                 }
                 continue;
             }
-            let changes = if ordinary {
-                ordinary_hunks(repo, prior, commit, path)?
-            } else {
-                hunks(repo, prior, commit, path)?
+            let batched = patches
+                .as_ref()
+                .and_then(|patches| patches.get(&(prior.to_string(), commit.to_string())));
+            let changes = match (batched, ordinary) {
+                (Some(patch), true) => normalize_ordinary(repo, prior, path, parse_hunks(patch)?)?,
+                (Some(patch), false) => parse_hunks(patch)?,
+                (None, true) => ordinary_hunks(repo, prior, commit, path)?,
+                (None, false) => hunks(repo, prior, commit, path)?,
             };
             // Most merge edges leave owned content unchanged. Only measure
             // both parents' base edits when a changed live hunk could need

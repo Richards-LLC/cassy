@@ -191,6 +191,10 @@ async fn connection_evidence(
         }
     }
     response.headers_mut().insert("x-cas-request-id", HeaderValue::from_str(&request_id).expect("UUID header"));
+    let expose = response.headers().get("access-control-expose-headers")
+        .and_then(|value| value.to_str().ok()).map(|value| format!("{value}, X-Cas-Request-Id"))
+        .unwrap_or_else(|| "X-Cas-Request-Id".to_owned());
+    response.headers_mut().insert("access-control-expose-headers", HeaderValue::from_str(&expose).expect("fixed header extension"));
     response
 }
 
@@ -3203,14 +3207,28 @@ async fn proxy_machine_socket<R: SessionReadModel>(
             },
             event = async {
                 if events_subscribed {
-                    machine_events.recv().await.ok()
+                    machine_events.recv().await
                 } else {
                     futures_util::future::pending().await
                 }
             } => {
-                if let Some(event) = event {
-                    let envelope = serde_json::json!({"channel":"events","event":event});
-                    if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                match event {
+                    Ok(event) => {
+                        let envelope = serde_json::json!({"channel":"events","event":event});
+                        if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let request_id = auth.as_ref().map(|(_, context)| context.request_id.clone())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        if let Some((store, _)) = auth.as_ref() {
+                            let _ = store.audit_connection("events", false, 200, &request_id, Some("viewer_lagged"), skipped);
+                        }
+                        let envelope = serde_json::json!({"channel":"events","event":{
+                            "kind":"viewer_lagged", "skipped":skipped, "request_id":request_id,
+                        }});
+                        if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => { events_subscribed = false; }
                 }
             },
             revoked = async {

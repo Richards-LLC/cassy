@@ -87,7 +87,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const together = await page.waitForFunction(() => {
       const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText ?? "";
       const seen = {
-        banner: text(".terminal-disconnected-banner"),
+        banner: text(".terminal-disconnected-banner .banner-text"),
         header: text("#conversation-connection"),
         row: text('#conversation-list [data-thread-key="atlas:patient-pelican-9"]'),
         footer: text("#hub-footer-badges"),
@@ -249,7 +249,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
       const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText.trim() ?? "";
       const mode = document.querySelector<HTMLElement>(".mode-badge");
       return {
-        banner: text(".terminal-disconnected-banner"),
+        banner: text(".terminal-disconnected-banner .banner-text"),
         rail: text("#attention-panel .attention-empty p"),
         machine: [...document.querySelectorAll<HTMLElement>("#machine-rail-list .machine-icon")].map((button) => button.getAttribute("aria-label") ?? "").find((label) => label.startsWith("Atlas")) ?? "",
         mode: mode && !mode.hidden && mode.getClientRects().length > 0 ? mode.innerText : "",

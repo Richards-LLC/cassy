@@ -1350,6 +1350,10 @@ main {
 
 /* == Unit 4: Session disconnection outcome == */
 .terminal-disconnected-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
   position: absolute;
   z-index: 4;
   top: var(--space-2);
@@ -1364,6 +1368,8 @@ main {
   font-size: var(--fs-meta);
   border-left: var(--rule-verdict) solid var(--state-warn);
 }
+.terminal-disconnected-banner .banner-text { flex: 1 1 12rem; }
+.terminal-disconnected-banner .banner-diagnose { flex: none; min-height: 44px; }
 
 /* cas-d15c: the pairing-lost banner carries Re-pair beside its sentence,
    since a phone hides the rail that otherwise offers it. */
@@ -2191,7 +2197,11 @@ main > #conversation-return { order: 1; }
 /* == Unit 5: connection evidence ledger == */
 .connection-log {
   width: min(var(--dialog-width), calc(100vw - var(--space-6)));
+  max-height: calc(100dvh - var(--space-6));
+  overflow: auto;
 }
+.connection-log-summary { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.connection-log-export { justify-self: start; min-height: 44px; }
 
 .connection-log section {
   display: grid;
@@ -2237,6 +2247,7 @@ main > #conversation-return { order: 1; }
   font-size: var(--fs-meta);
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* == Unit 5: pairing dialog == */

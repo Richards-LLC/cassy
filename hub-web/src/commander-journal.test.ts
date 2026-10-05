@@ -116,6 +116,45 @@ describe("atomic Commander journal", () => {
     expect(outcomes.filter((outcome) => outcome === "written")).toHaveLength(1);
     expect((await a.read(scope)).sends[0].state).toBe("sending");
   });
+  it("a stale held caption from the claiming tab cannot reopen a completed wire claim (cas-9dc6 recovery)", async () => {
+    const { a, b } = journals();
+    const history = new ConversationHistory();
+    const item = send("shared");
+    await a.reconcile(scope, [], [item], fence);
+    history.restorePending((await a.read(scope)).sends, 1_000);
+    // main.ts captures a held History snapshot before dispatch; a broadcast
+    // can refresh the persisted/observed journal revision before it commits.
+    const staleCaption = history.pendingSends();
+    let writes = 0;
+    await a.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    const claimed = await a.read(scope);
+    await a.reconcile(scope, claimed.sends, staleCaption, fence);
+    await b.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    expect(writes).toBe(1);
+    expect((await b.read(scope)).sends[0].state).toBe("sending");
+  });
+  it("a later explicit Retry fences an older dispatch even in the same tab (cas-9dc6 recovery)", async () => {
+    const { db } = journals();
+    let reads = 0, writes = 0;
+    let entered!: () => void, resume!: () => void;
+    const atFinalCheck = new Promise<void>(resolve => { entered = resolve; });
+    const wait = new Promise<void>(resolve => { resume = resolve; });
+    const a = new CommanderJournal(db, async () => {
+      if (++reads === 2) { entered(); await wait; }
+      return fence;
+    }, () => 1_000, false);
+    const item = send("shared");
+    await a.reconcile(scope, [], [item], fence);
+    const oldDispatch = a.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    await atFinalCheck;
+    const claimed = await a.read(scope);
+    await a.reconcile(scope, claimed.sends, claimed.sends.map(row => ({ ...row, state: "unconfirmed" })), fence);
+    expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
+    expect(await a.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");
+    resume();
+    await oldDispatch;
+    expect(writes).toBe(1);
+  });
   it("a tab crash after dispatch leaves the same client_ref unconfirmed and never automatically replays", async () => {
     const { a, make } = journals();
     await a.reconcile(scope, [], [send("a")], fence);

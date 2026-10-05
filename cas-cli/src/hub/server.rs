@@ -216,16 +216,20 @@ async fn connection_evidence(
         }
     }
     response.headers_mut().insert("x-cas-request-id", HeaderValue::from_str(&request_id).expect("UUID header"));
-    let prior_expose = response.headers().get("access-control-expose-headers")
-        .and_then(|value| value.to_str().ok()).unwrap_or_default();
-    let expose = if prior_expose.split(',').any(|name| name.trim().eq_ignore_ascii_case("X-Cas-Request-Id")) {
-        prior_expose.to_owned()
-    } else if prior_expose.is_empty() {
-        "X-Cas-Request-Id".to_owned()
-    } else {
-        format!("{prior_expose}, X-Cas-Request-Id")
-    };
-    response.headers_mut().insert("access-control-expose-headers", HeaderValue::from_str(&expose).expect("fixed header extension"));
+    // Request IDs are observable to this origin only after the route grants
+    // CORS. Unbound pairing attempts must receive no CORS disclosure headers.
+    if response.headers().contains_key("access-control-allow-origin") {
+        let prior_expose = response.headers().get("access-control-expose-headers")
+            .and_then(|value| value.to_str().ok()).unwrap_or_default();
+        let expose = if prior_expose.split(',').any(|name| name.trim().eq_ignore_ascii_case("X-Cas-Request-Id")) {
+            prior_expose.to_owned()
+        } else if prior_expose.is_empty() {
+            "X-Cas-Request-Id".to_owned()
+        } else {
+            format!("{prior_expose}, X-Cas-Request-Id")
+        };
+        response.headers_mut().insert("access-control-expose-headers", HeaderValue::from_str(&expose).expect("fixed header extension"));
+    }
     response
 }
 

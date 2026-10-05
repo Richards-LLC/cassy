@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -314,43 +315,137 @@ class ReceiptTests(unittest.TestCase):
                 self.save()
                 self.assertIsNone(proof.matching(self.root, self.expected))
 
-    def run_producer(self, fail_script=False):
+    def run_producer(self, failure=None, serial=False, deny_test=False):
         self.path.unlink()
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         rows = []
+        tests = []
+        script_done = threading.Event()
+        native_done = threading.Event()
+        producers = threading.Barrier(3)
 
         def run(root, row, env, logs):
             rows.append(row)
             self.assertFalse(proof.IDENTITY & env.keys())
-            if row == "ci-script-tests" and fail_script:
-                raise ValueError("test_seeded_ci_script_failure")
+            if not serial:
+                producers.wait(timeout=5)  # all three legs must overlap
+            if row == "ci-script-tests":
+                if failure == row:
+                    raise ValueError("test_seeded_ci_script_failure")
+                script_done.set()
+            else:
+                if failure == row:
+                    raise ValueError("test_seeded_compile_failure")
+                sync_dir = env.get("CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR")
+                if sync_dir:
+                    sync = Path(sync_dir)
+                    (sync / ("compiled-" + row)).touch()
+                    deadline = time.monotonic() + 5
+                    while not (sync / ("release-" + row)).exists():
+                        if (sync / "abort").exists():
+                            raise ValueError("test_seeded_admission_aborted")
+                        if time.monotonic() > deadline:
+                            raise ValueError("test_admission_stranded")
+                        time.sleep(0.01)
+                self.assertTrue(script_done.is_set(), "tests preceded script PASS")
+                if row == "archive-mode":
+                    self.assertTrue(native_done.is_set(), "consumers overlapped")
+                else:
+                    native_done.set()
+                tests.append(row)
             if row == "archive-mode":
                 (logs / "archive-size-bytes").write_text("123")
             return {"status": "PASS", "row": row, "tree": self.tree, "passed": 10}
 
+        memory = {"total_bytes": 64 * proof.GIB, "available_bytes": (26 if serial else 60) * proof.GIB,
+                  "source": "fixture"}
+        snapshots = [memory, memory, dict(memory, available_bytes=17 * proof.GIB)] if deny_test else None
         with mock.patch.object(proof, "clone_scratch", return_value=Path(scratch.name) / "base"), \
                 mock.patch.object(proof, "inputs", return_value=(self.expected, proof.test_environment(self.root))), \
+                mock.patch.object(proof, "memory_snapshot", return_value=memory, side_effect=snapshots), \
+                mock.patch.object(proof, "cpu_count", return_value=32), \
                 mock.patch.object(proof, "run_row", side_effect=run):
-            if fail_script:
-                with self.assertRaisesRegex(ValueError, "test_seeded_ci_script_failure"):
+            if failure or deny_test:
+                pattern = "cannot fit above memory reserve" if deny_test else "test_seeded_.*failure"
+                with self.assertRaisesRegex(ValueError, pattern):
                     proof.prove(self.root)
-                self.assertEqual(rows, ["ci-script-tests"])
+                self.assertEqual(tests, [])
+                self.assertCountEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
                 self.assertIsNone(proof.matching(self.root, self.expected))
                 self.assertEqual(json.loads(self.path.read_text())["status"], "RUNNING")
             else:
                 record, _ = proof.prove(self.root)
-                self.assertEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+                self.assertCountEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+                self.assertEqual(tests, ["nextest", "archive-mode"])
                 self.assertEqual(record["script_tests"]["status"], "PASS")
+                self.assertEqual(record["execution"]["mode"], "serial" if serial else "concurrent")
                 self.assertIsNotNone(proof.matching(self.root, self.expected))
                 proof.prove(self.root)
-                self.assertEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+                self.assertEqual(len(rows), 3)
 
     def test_script_failure_blocks_rust_suites_and_pass_publication(self):
-        self.run_producer(fail_script=True)
+        self.run_producer(failure="ci-script-tests")
 
     def test_script_pass_precedes_both_contexts_and_receipt_reuse(self):
         self.run_producer()
+
+    def test_compile_failure_aborts_waiters_without_pass(self):
+        for row in ("nextest", "archive-mode"):
+            with self.subTest(row=row):
+                self.run_producer(failure=row)
+
+    def test_memory_constrained_proof_falls_back_to_serial_and_reuses(self):
+        self.run_producer(serial=True)
+
+    def test_memory_drop_after_compile_aborts_both_consumers(self):
+        self.run_producer(deny_test=True)
+
+    def test_memory_and_cpu_caps_on_soundwave_and_prowl(self):
+        for total, available, cores, expected_jobs in ((62, 50, 32, 16), (48, 40, 18, 9), (62, 35, 32, 3)):
+            with self.subTest(cores=cores), \
+                    mock.patch.object(proof, "memory_snapshot", return_value={
+                        "total_bytes": total * proof.GIB, "available_bytes": available * proof.GIB,
+                        "source": "fixture"}), mock.patch.object(proof, "cpu_count", return_value=cores):
+                plan = proof.execution_plan({})
+                self.assertEqual(plan["compile_jobs"], expected_jobs)
+                estimated = 2 * (expected_jobs * proof.COMPILE_JOB_BYTES + proof.PRODUCER_BYTES) + proof.SCRIPT_BYTES
+                self.assertLessEqual(estimated, plan["budget_bytes"])
+                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS": "99"})["compile_jobs"], expected_jobs)
+                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS": "1"})["compile_jobs"], 1)
+                reserved = proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB": "48"})
+                self.assertEqual(reserved["mode"], "serial")
+
+    def test_reserve_floor_and_phase_refusal(self):
+        with mock.patch.object(proof, "memory_snapshot", return_value={
+                "total_bytes": 16 * proof.GIB, "available_bytes": 9 * proof.GIB, "source": "fixture"}):
+            self.assertEqual(proof.execution_plan({})["reserve_bytes"], 8 * proof.GIB)
+            execution = {"phases": []}
+            with self.assertRaisesRegex(ValueError, "cannot fit above memory reserve"):
+                proof.admit_phase({}, execution, "nextest-compile", True)
+            self.assertFalse(execution["phases"][0]["admitted"])
+
+    def test_invalid_memory_and_job_knobs_fail_closed(self):
+        for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS", "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB"):
+            for value in ("", "0", "-1", "auto", "1.5"):
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                    proof.execution_plan({key: value})
+        with mock.patch.object(proof, "memory_snapshot", side_effect=OSError("unavailable")):
+            with self.assertRaisesRegex(ValueError, "cannot safely admit"):
+                proof.execution_plan({})
+
+    def test_linux_memory_probe_uses_available_not_free(self):
+        with mock.patch.object(proof.platform, "system", return_value="Linux"), \
+                mock.patch.object(Path, "read_text", return_value="MemTotal: 64000 kB\nMemFree: 1 kB\nMemAvailable: 40000 kB\n"):
+            self.assertEqual(proof.memory_snapshot()["available_bytes"], 40000 * 1024)
+
+    def test_macos_memory_probe_uses_actual_page_size_without_double_counting(self):
+        vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+              "Pages free: 100.\nPages inactive: 200.\nPages speculative: 50.\n"
+              "Pages purgeable: 80.\nPages occupied by compressor: 900.\n")
+        with mock.patch.object(proof.platform, "system", return_value="Darwin"), \
+                mock.patch.object(proof.subprocess, "check_output", side_effect=[str(48 * proof.GIB).encode(), vm]):
+            self.assertEqual(proof.memory_snapshot()["available_bytes"], 350 * 16384)
 
     def test_incomplete_corrupt_and_running_receipts_miss(self):
         baseline = copy.deepcopy(self.record)

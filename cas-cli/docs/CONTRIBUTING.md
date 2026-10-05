@@ -451,7 +451,7 @@ file (default `<git-common-dir>/cas/scoped-proof/<head>.receipt`) and close
 verifies its digest. Non-Rust suites are unaffected. An older runtime that denies the check exception requires parking
 with the unverified crates and test filters named for assembly.
 
-The assembly command first runs the gate's `ci-script-tests` row:
+The assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
 dry-run/ignore-error modes removed. A failing script suite retains its output
 and stops assembly before either Rust suite. The full release gate runs this
@@ -469,10 +469,33 @@ the report stage with GNU date and path commands unavailable. Provisioning
 and persistent Actions cache maintenance remain Linux-only and explicitly
 require GNU tools and Linux kernel interfaces.
 
-The assembly command then runs native full-workspace nextest in the factory
-worktree, then the gate's archive-mode row in a plain clone outside every
-`.cas` ancestor. The archive consumer uses the queue's remapped environment
-and excludes component-output snapshots, already covered by the native run.
+When memory permits, the script tier overlaps the native nextest precompile
+and archive producer compile. Both producer phases finish and the script tier
+passes before native full-workspace tests run, followed by the archive consumer.
+The two test consumers remain sequential: nextest groups apply within one
+process, and host ports and hub processes may be shared between suites. Native
+and clone builds use separate Cargo targets; each row has separate logs and
+gate scratch directories. The plain clone and archive remap remain outside
+disposable roots and every `.cas` ancestor. Archive extraction stays on disk
+with `--extract-to`; only disposable test temp directories and fixture HOMEs
+use the native temp filesystem. Missing-wrapper, empty Cargo home, reduced
+PATH and the component-output snapshot exclusion remain archive requirements.
+
+Assembly reads Linux `MemAvailable`, or macOS `hw.memsize` and `vm_stat`
+free/inactive/speculative pages, before admitting producers and each consumer.
+`CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS` sets a per-producer job ceiling; the
+default shares available cores equally, and memory may lower it further.
+`CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB` overrides the reserve; its default is
+the larger of 25% of physical RAM and 8 GiB. Both knobs accept positive integers.
+The producer budget uses 8 GiB for the large cas compile/link unit, rounded up
+from soundwave's measured 7,293,348 KiB maximum RSS (serial proof `7e4c6f50`,
+head `abd6817b5`), plus an assumed 256 MiB per dependency job and 2 GiB for
+scripts. Supervisor memory/PSI samples must validate the estimates on each host.
+Insufficient concurrent capacity selects sequential legs with a fresh memory
+admission before each phase; a phase that cannot preserve the reserve fails
+without starting. Missing memory probes fail admission. Consumers have a fresh
+thread ceiling using an assumed 4 GiB base plus 256 MiB per test thread, and
+never overlap a producer. These are admission estimates, not OS memory limits.
 
 The gate prints a reuse hit for both suite rows or a `MISS assembly key=…`
 reason. Environment misses from new receipts also name the first changed
@@ -522,7 +545,8 @@ The script tier must pass, and both Rust contexts must report nonzero passed
 tests, before an atomic PASS is written
 under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
 records the tested Git tree, script-tier status/tree/log, each Rust context's
-tree and pass count, toolchain,
+tree and pass count, per-leg and compile-phase intervals and CPU timings,
+memory scheduling decisions and serial fallback reasons, toolchain,
 environment and archive size. Full Cassy integration sweeps and the train's
 assembly stage use this same command; retries cite the existing receipt.
 

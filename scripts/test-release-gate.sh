@@ -65,7 +65,9 @@ from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
-    "scratch = Path(os.environ['CAS_RELEASE_GATE_HOME_DIR']).resolve()"))
+    "scratch = Path(os.environ['CAS_RELEASE_GATE_HOME_DIR']).resolve()").replace(
+    "snapshot = memory_snapshot()",
+    "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
     # Real defects in the new rows are covered by test-fast-release-rows.py.
@@ -102,7 +104,16 @@ jobs:
 EOF
     cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
     cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
+    cp -R "$script_dir/release-train.d" "$repo/scripts/"
     cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
+    # The nested integration fixtures have their own release version. Keep it
+    # distinct from this gate's 9.99.7 so source-literal checks stay meaningful.
+    python3 - "$repo/scripts/test-release-integration.py" <<'PY_NESTED_VERSION'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace('9.99.7', '9.98.7'))
+PY_NESTED_VERSION
     cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
@@ -177,6 +188,7 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${GATE_FIXTURE_CARGO_LOG:?}"
+if [[ "$*" == *'--no-run'* ]]; then printf 'fixture compile stderr\n' >&2; fi
 # cas-c0411: every gate child must see the raised `cas init` watchdog budget,
 # because the child that hit the 300s default was a test's `cas init`, several
 # processes below the gate.
@@ -186,6 +198,8 @@ printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
   >>"${GATE_FIXTURE_ZIG_LOG:-/dev/null}"
 printf 'INSTA_WORKSPACE_ROOT=%s :: %s\n' "${INSTA_WORKSPACE_ROOT:-unset}" "$*" >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
 printf 'RUSTC_WRAPPER=%s CARGO_HOME=%s :: %s\n' "${RUSTC_WRAPPER:-unset}" "${CARGO_HOME:-unset}" "$*" \
+  >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
+printf 'TMPDIR=%s NEXTEST_TEST_THREADS=%s :: %s\n' "${TMPDIR:-unset}" "${NEXTEST_TEST_THREADS:-unset}" "$*" \
   >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
 printf 'CAS_FACTORY_SESSION=%s CAS_AGENT_ROLE=%s CAS_AGENT_NAME=%s CAS_SUPERVISOR_NAME=%s CAS_AGENT_ID=%s :: %s\n' \
   "${CAS_FACTORY_SESSION:-unset}" "${CAS_AGENT_ROLE:-unset}" "${CAS_AGENT_NAME:-unset}" \
@@ -945,6 +959,28 @@ else
     bad "archive-mode did not reproduce the shard environment: $(cat "$archive_env_log") (output: $output)"
 fi
 
+if python3 - "$archive_env_log" "$CAS_RELEASE_GATE_HOME_DIR" <<'PY_TEMP_PLACEMENT'
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text()
+match = re.search(r'^TMPDIR=(\S+) .* :: nextest run --archive-file .* --extract-to (\S+) --workspace-remap (\S+)', text, re.M)
+assert match, 'missing explicit test TMPDIR or disk extraction'
+temp, extract, remap = map(Path, match.groups())
+assert temp.name == 'archive-test-tmp'
+assert temp.parent.name.startswith('cas-release-gate.')
+assert extract.parent == remap.parent
+assert extract.parent.parent == Path(sys.argv[2]).parent
+assert extract.parent not in temp.parents
+assert not temp.exists(), 'test temp was not cleaned'
+assert not extract.exists(), 'extraction was not cleaned'
+PY_TEMP_PLACEMENT
+then
+    ok 'archive test temp is separate from durable extraction/remap and both are cleaned'
+else
+    bad 'archive TMPDIR and extraction placement regressed'
+fi
+
 # cas-6df6. A release gate launched inside a factory supervisor must not let
 # its shell identity become the registered session for integration fixtures.
 # Both the ordinary nextest row and both archive-mode cargo invocations must
@@ -1318,7 +1354,7 @@ CAS_RELEASE_RECEIPTS_RUN_DIR="$tmp/train-artifacts/receipt-output" \
 if grep -q 'stopped after stage assemble' "$tmp/train-proof.log" \
     && grep -q 'stopped after stage gate' "$tmp/train-proof.log"; then
     train_run="$tmp/train-artifacts/v9.99.8-train-proof"
-    if [[ "$(grep -c '^nextest run --workspace' "$tmp/cargo.log")" == 1 ]] \
+    if [[ "$(grep -c '^nextest run --workspace.*--no-fail-fast' "$tmp/cargo.log")" == 1 ]] \
         && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 2 ]] \
         && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]] \
         && grep -q 'stage prep: done' "$tmp/train-proof.log" \
@@ -1353,14 +1389,41 @@ proof_sha="$(git -C "$repo" rev-parse HEAD)"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/proof-gate-logs"
 : >"$tmp/cargo.log"
 run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof.log" 2>&1 || { cat "$tmp/proof.log"; exit 1; }
-if [[ "$(grep -c '^nextest run ' "$tmp/cargo.log")" == 2 ]] \
+if [[ "$(grep -c '^nextest run .*--no-fail-fast' "$tmp/cargo.log")" == 2 ]] \
     && grep -qF 'contexts=worktree,clone' "$tmp/proof.log"; then
     ok 'assembly proves native nextest and archive-mode in a plain clone exactly twice'
 else
     bad "assembly suite count: $(cat "$tmp/cargo.log")"
 fi
+if python3 - "$tmp/proof.log" <<'PY_PHASE_RECEIPT'
+import json
+from pathlib import Path
+import re
+import sys
+path = re.search(r'PASS assembly receipt=(\S+)', Path(sys.argv[1]).read_text())[1]
+record = json.loads(Path(path).read_text())
+assert record['inputs']['format'] == 2
+assert record['execution']['mode'] == 'concurrent'
+assert set(record['contexts']) == {'worktree', 'clone'}
+for row in (record['script_tests'], *record['contexts'].values()):
+    assert row['timing']['row'] == row['row']
+    assert float(row['timing']['wall_s']) >= 0
+    assert row['timing']['average_cores_busy'] >= 0
+    assert row['timing']['started_utc'] <= row['timing']['ended_utc']
+for row in record['contexts'].values():
+    assert row['compile_timing']['row'] == row['row']
+    assert float(row['compile_timing']['user_s']) >= 0
+    assert float(row['compile_timing']['system_s']) >= 0
+    assert row['compile_timing']['average_cores_busy'] >= 0
+assert [item['phase'] for item in record['execution']['phases']] == ['nextest-tests', 'archive-mode-tests']
+PY_PHASE_RECEIPT
+then
+    ok 'assembly receipt keeps all legs and captures per-leg/compile intervals plus memory admission'
+else
+    bad 'assembly phase timing or memory receipt regressed'
+fi
 run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof-retry.log" 2>&1
-if [[ "$(grep -c '^nextest run ' "$tmp/cargo.log")" == 2 ]] \
+if [[ "$(grep -c '^nextest run .*--no-fail-fast' "$tmp/cargo.log")" == 2 ]] \
     && grep -qF "source_sha=$proof_sha" "$tmp/proof-retry.log"; then
     ok 'assemble prove reuses the supervisor receipt and runs no additional suite'
 else
@@ -1473,6 +1536,63 @@ else
     bad 'diagnostic consumed an assembly proof'
 fi
 unset CAS_RELEASE_GATE_LOG_DIR
+
+# Admission barriers exercise the real shell seam with fake Cargo. A compiled
+# producer must wait for script PASS/test serialization, then abort promptly
+# when another leg fails, keeping compile stderr out of numeric timing fields.
+repo="$(new_fixture assembly-admission)"
+for row in nextest archive-mode; do
+    sync="$tmp/sync-$row"
+    logs="$tmp/sync-$row-logs"
+    mkdir -p "$sync"
+    printf '%s' "$$" >"$sync/owner"
+    : >"$tmp/cargo.log"
+    CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR="$sync" CAS_RELEASE_GATE_LOG_DIR="$logs" \
+        run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only "$row" \
+        >"$tmp/sync-$row.log" 2>&1 &
+    gate_pid=$!
+    for ((attempt=0; attempt<200; attempt++)); do
+        [[ ! -e "$sync/compiled-$row" ]] || break
+        kill -0 "$gate_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    if [[ -e "$sync/compiled-$row" ]] && ! grep -q -- '--no-fail-fast' "$tmp/cargo.log"; then
+        ok "$row compiles while its test consumer waits for admission"
+    else
+        bad "$row failed to stop at test admission: $(cat "$tmp/sync-$row.log")"
+    fi
+    if [[ "$row" == nextest ]]; then
+        printf '2' >"$sync/release-$row"
+        if wait "$gate_pid" && grep -qF "PASS $row" "$tmp/sync-$row.log"; then
+            ok 'native consumer starts only after its admitted test slot is released'
+        else
+            bad "native test slot did not release: $(cat "$tmp/sync-$row.log")"
+        fi
+    else
+        touch "$sync/abort"
+        if wait "$gate_pid"; then
+            bad 'aborted archive consumer published PASS'
+        elif grep -qF 'assembly test admission aborted' "$logs/archive-mode.log" \
+            && ! grep -q -- '--no-fail-fast' "$tmp/cargo.log"; then
+            ok 'archive consumer aborts without running tests or publishing PASS'
+        else
+            bad "archive admission abort failed: $(cat "$tmp/sync-$row.log")"
+        fi
+    fi
+done
+
+# The fixture has 64 GiB total, 60 available. A 48 GiB reserve admits one
+# producer, not two: this is real serial dispatch through both shell rows.
+repo="$(new_fixture assembly-serial-memory)"
+CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB=48 run_gate "$repo" '' \
+    python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/serial-proof.log" 2>&1
+if grep -qF '"mode": "serial"' "$tmp/serial-proof.log" \
+    && grep -qF 'insufficient available memory' "$tmp/serial-proof.log" \
+    && grep -qF 'PASS assembly receipt=' "$tmp/serial-proof.log"; then
+    ok 'memory reserve selects the serial path and retains all proof legs'
+else
+    bad "serial memory fallback failed: $(cat "$tmp/serial-proof.log")"
+fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

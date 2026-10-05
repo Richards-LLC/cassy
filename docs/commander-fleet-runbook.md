@@ -165,7 +165,7 @@ fragment is removed before networking. In browser developer tools, verify:
 2. the session list succeeds only after DPoP authentication;
 3. WebSocket ticket issuance succeeds and the attach request upgrades at `wss://MACHINE-B.TAILNET.ts.net/v1/sessions/SESSION/attach?...`;
 4. reconnecting consumes a new ticket and replaying the prior ticket fails; and
-5. terminal output arrives from machine B while machine A remains the controller origin.
+5. the conversation's supervisor messages (and its Raw output) arrive from machine B while machine A remains the controller origin.
 
 Repeat the command on every target. Discovery suggestions from Cassy Cloud never pair, trust, proxy, or add a machine automatically.
 

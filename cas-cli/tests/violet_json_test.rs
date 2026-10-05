@@ -15,7 +15,6 @@ fn violet_command(root: &Path) -> Command {
         if key.to_string_lossy().starts_with("CAS_")
             || key.to_string_lossy().starts_with("VIOLET_")
             || key.to_string_lossy().starts_with("SLACK_")
-            || key.to_string_lossy().starts_with("MECHA_")
         {
             command.env_remove(key);
         }

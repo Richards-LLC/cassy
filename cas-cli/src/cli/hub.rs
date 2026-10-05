@@ -2027,6 +2027,7 @@ async fn shutdown_signal() {
 }
 
 fn status(cli: &Cli) -> Result<()> {
+    let probe_window_started_at = chrono::Utc::now();
     let paths = HubRuntimePaths::default_for_user()?;
     let record = match paths.read_process_record() {
         Ok(record) => record,
@@ -2043,6 +2044,7 @@ fn status(cli: &Cli) -> Result<()> {
             };
             let transport = hub_transport_report(&paths, None);
             if cli.json {
+                let runtime_receipt = runtime_receipt(&paths, None, None, &transport, probe_window_started_at);
                 println!(
                     "{}",
                     serde_json::json!({
@@ -2060,6 +2062,7 @@ fn status(cli: &Cli) -> Result<()> {
                         "tailscale_serve": transport,
                         "service_warning": service_warning,
                         "service_status": service_status(service_warning),
+                        "runtime_receipt": runtime_receipt,
                     })
                 );
             } else if let Some(holder) = &holder {
@@ -2102,6 +2105,7 @@ fn status(cli: &Cli) -> Result<()> {
     // used to be visible only as a log that fell silent.
     let audit = crate::hub::audit_writer_report(paths.root(), chrono::Utc::now());
     if cli.json {
+        let runtime_receipt = runtime_receipt(&paths, Some(&record), Some(state), &transport, probe_window_started_at);
         println!(
             "{}",
             serde_json::json!({
@@ -2113,6 +2117,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "service_warning": service_warning,
                 "service_status": service_status(service_warning),
                 "audit": audit,
+                "runtime_receipt": runtime_receipt,
             })
         );
     } else {
@@ -2139,6 +2144,37 @@ fn status(cli: &Cli) -> Result<()> {
     );
     anyhow::ensure!(!audit.is_failure(), "hub audit writer is failing: {}", audit.message);
     Ok(())
+}
+
+fn runtime_receipt(
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+    state: Option<HubDisplayState>,
+    transport: &HubTransportReport,
+    probe_window_started_at: chrono::DateTime<chrono::Utc>,
+) -> crate::hub::observation::RuntimeReceipt {
+    use crate::hub::observation::{Observation, ObservationState, collect_runtime_receipt, requested_publication};
+    let hub = match state {
+        Some(HubDisplayState::Running) => Observation::new(ObservationState::Healthy, "loopback_health_and_lock_ready", "current_status_probe"),
+        Some(HubDisplayState::Exited) => Observation::new(ObservationState::Failed, "hub_process_exited", "current_status_probe"),
+        Some(HubDisplayState::Unresponsive { .. }) => Observation::new(ObservationState::Failed, "hub_health_unresponsive", "current_status_probe"),
+        Some(HubDisplayState::Starting { wedged: true, .. }) => Observation::new(ObservationState::Failed, "hub_startup_wedged", "current_status_probe"),
+        Some(HubDisplayState::Starting { .. }) => Observation::new(ObservationState::Unknown, "hub_starting", "current_status_probe"),
+        Some(HubDisplayState::Stopping { .. }) => Observation::new(ObservationState::Unknown, "hub_stopping", "current_status_probe"),
+        None => Observation::new(ObservationState::Unknown, "runtime_record_unavailable", "current_status_probe"),
+    };
+    let publication = if transport.is_failure() {
+        Observation::new(ObservationState::Failed, "owned_serve_route_not_verified", "current_status_probe")
+    } else if record.is_some_and(|record| record.transport_warning.is_some()) {
+        Observation::new(ObservationState::Failed, "serve_publication_unavailable", "current_status_probe")
+    } else if requested_publication(paths) == Some(false) && record.is_none_or(|r| r.tailscale_serve_target.is_none()) {
+        Observation::new(ObservationState::Disabled, "host_publication_opt_out", "host_config_and_current_status_probe")
+    } else if state == Some(HubDisplayState::Running) && record.is_some_and(|r| tailscale_enabled(r) && r.tailscale_serve_target.is_some() && r.public_url.is_some()) {
+        Observation::new(ObservationState::Healthy, "owned_serve_route_matches_live_hub", "current_status_probe")
+    } else {
+        Observation::new(ObservationState::Unknown, "no_owned_publication_observed", "current_status_probe")
+    };
+    collect_runtime_receipt(paths, record, hub, publication, probe_window_started_at)
 }
 
 /// The status screen's audit line (cas-0140): OK with the last row's age, or

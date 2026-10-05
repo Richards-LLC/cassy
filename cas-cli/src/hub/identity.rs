@@ -57,6 +57,15 @@ impl MachineIdentityStore {
                 .with_context(|| format!("create hub machine identity at {}", path.display())),
         }
     }
+
+    /// Diagnostic reads must not enroll a machine or create its state directory.
+    pub(crate) fn load(&self) -> Result<MachineIdentity> {
+        let path = self.state_dir.join("machine-id");
+        ensure_private_file(&path)?;
+        let id = fs::read_to_string(&path)?.trim().to_owned();
+        anyhow::ensure!(!id.is_empty(), "hub machine identity is empty");
+        Ok(MachineIdentity { id })
+    }
 }
 
 fn ensure_private_file(path: &Path) -> Result<()> {

@@ -65,6 +65,33 @@ describe("atomic Commander journal", () => {
     expect((await a.read(scope)).sends[0].id).toBe(item.id);
     expect(await b.retry(scope, item.id, fence, { ...item, text: "different content" })).toBe("not-saved");
   });
+  it("a peer's unconfirmed caption cannot undo the writer's explicit Retry (cas-9dc6 F01)", async () => {
+    const { a, b } = journals();
+    const item = send("shared"), peerHistory = new ConversationHistory();
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    peerHistory.restorePending((await b.read(scope)).sends, 1_000);
+    expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
+    // The broadcast refreshes this tab's observed revision, but its existing
+    // unconfirmed bubble is still present when caption persistence runs.
+    const snapshot = await b.read(scope);
+    peerHistory.synchronizePending(snapshot.sends, 1_000, snapshot.receipts);
+    await b.reconcile(scope, snapshot.sends, peerHistory.pendingSends(), fence);
+    let writes = 0;
+    expect(await a.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");
+    expect(writes).toBe(1);
+    expect((await b.read(scope)).sends[0].id).toBe(item.id);
+  });
+  it("a retry stays dispatchable by a peer if the writer closes before dispatch (cas-9dc6 F01)", async () => {
+    const { a, b } = journals();
+    const item = send("shared");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
+    let writes = 0;
+    expect(await b.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");
+    expect(writes).toBe(1);
+  });
   it("receipt persistence honours credential fences and revocation (cas-9dc6)", async () => {
     const { a } = journals();
     const item = send("shared"), receipt = { client_ref: item.id, notification_id: 99, target: item.target, stamped: true };

@@ -144,7 +144,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("preview: conversationHistories.get(key)?.preview(),");
     // Retry of a refused send (cas-b1ee): same leased path, the refused send's own in_reply_to.
     expect(source).toContain("retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },");
-    expect(source).toContain("if (retryOf) history.discardRefused(retryOf);");
+    expect(source).toMatch(/if \(retryOf\) \{[\s\S]*?history\.discardRefused\(retryOf\);/);
     expect(source).toContain("supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)");
     expect(source).toContain("holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);");
     expect(source).toContain("composerSlot.prepend(conversation.pinned);");

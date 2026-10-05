@@ -44,6 +44,38 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
   await peer.close();
 });
 
+test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its original reference (cas-9dc6 F01)", journeyPart, async ({ page, context, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  const peer = await context.newPage();
+  await peer.clock.install({ time: journeyNow() });
+  const other = new HubDouble(peer, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  await other.install();
+  await journey.stage("Both live tabs see a send whose receipt has not arrived", async () => {
+    await journey.open(); await choose(page);
+    await peer.goto(page.url()); await choose(peer);
+    await send(page, "Retry this same instruction");
+    await expect.poll(() => hub.sends.length + other.sends.length).toBe(1);
+    for (const tab of [page, peer]) {
+      await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toBeVisible({ timeout: 20_000 });
+    }
+  });
+  await journey.stage("Explicit Retry crosses the wire without waiting for a reconnect", async () => {
+    await page.getByRole("button", { name: "Retry sending", exact: true }).click();
+    await expect.poll(() => hub.sends.length + other.sends.length).toBe(2);
+    expect(new Set([...hub.sends, ...other.sends].map(send => send.client_ref)).size).toBe(1);
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+  });
+  await journey.stage("A late receipt settles both tabs and removes Retry", async () => {
+    (hub.sends.length ? hub : other).deliverLatest(PELICAN);
+    for (const tab of [page, peer]) {
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
+    }
+    expect(hub.sends.length + other.sends.length).toBe(2);
+  });
+  await peer.close();
+});
+
 async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") {
   const qa = process.env.DELIVERY_QA;
   if (!qa) return;

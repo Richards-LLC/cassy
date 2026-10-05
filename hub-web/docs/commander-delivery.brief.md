@@ -12,6 +12,8 @@ Waiting commands persist before leaving the composer, share atomic client-refere
 
 Confirmed sends share a small, payload-free receipt across tabs. A committed receipt settles the same client reference to Delivered in every open thread and removes Retry. Explicit Retry retains the original client reference, so the daemon's bounded deduplication can return its first receipt. The journal refuses to re-claim a confirmed reference, even for a stale Retry callback or snapshot. A missing receipt remains uncertain; observing a socket write alone never claims delivery.
 
+A peer's existing Not confirmed caption cannot overwrite a committed explicit Retry. Only dispatch advances a held send to a wire claim; held retries stay available to another tab if the writer closes before dispatch.
+
 ## Critique
 
 | Dimension | Score | Evidence |

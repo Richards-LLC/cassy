@@ -213,6 +213,11 @@ export class CommanderJournal {
               if (!prior.has(id) && row) continue;
               const send = next.get(id);
               if (send && row?.owner && row.owner !== this.owner) continue;
+              // A peer can read an explicit Retry's new revision while its
+              // existing bubble still says unconfirmed. Caption persistence
+              // cannot turn a definitely unsent item back into an uncertain
+              // write: only dispatch may advance held to sending.
+              if (row?.send?.state === "held" && (send?.state === "sending" || send?.state === "unconfirmed")) continue;
               if (send?.state === "held" && row?.send?.state !== "held" && row?.owner !== this.owner && row !== undefined) continue;
               const revision = (row?.revision ?? 0) + 1;
               const updated = { key, scope, ...(send ? { send } : {}), revision, updatedAt: this.now(), ...(row?.flight ? { flight: row.flight, owner: row.owner } : {}) } satisfies JournalSend;

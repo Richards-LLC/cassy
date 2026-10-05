@@ -3,6 +3,9 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/release-portable.sh
+source "$script_dir/release-portable.sh"
+release_portable_define_sha256sum
 installer="$script_dir/cas-install.sh"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT

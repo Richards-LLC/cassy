@@ -161,6 +161,80 @@ fn test_create_worker_worktree() {
 
 #[cfg(unix)]
 #[test]
+fn worker_tracked_mcp_stays_git_clean_after_provisioning_gh_1047() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_temp, repo) = create_test_repo();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        assert!(output.status.success(), "fixture git command failed: {}", String::from_utf8_lossy(&output.stderr));
+        output
+    };
+    let original = serde_json::json!({"mcpServers": {
+        "vercel": {"command": "vercel-fixture"},
+        "neon": {"command": "neon-fixture"},
+        "context7": {"command": "allowed-fixture"}
+    }}).to_string();
+    std::fs::write(repo.join(".mcp.json"), &original).unwrap();
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(&["add", ".mcp.json", ".gitignore"]);
+    git(&["commit", "-m", "Track supervisor MCP configuration"]);
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\n").unwrap();
+    let worker = cas_root.join("worktrees/worker-1");
+    git(&["worktree", "add", "-b", "worker-fixture", worker.to_str().unwrap()]);
+    provision_worker_project_config(&repo, &worker, "worker-1");
+    let status = Command::new("git").args(["status", "--porcelain"])
+        .current_dir(&worker).output().unwrap();
+    assert!(status.status.success());
+    assert!(status.stdout.is_empty(), "worker provisioning dirtied tracked configuration: {}", String::from_utf8_lossy(&status.stdout));
+    assert_eq!(std::fs::read_to_string(worker.join(".mcp.json")).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(repo.join(".mcp.json")).unwrap(), original);
+    let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap()).unwrap();
+    assert!(mcp["mcpServers"].get("vercel").is_none());
+    assert!(mcp["mcpServers"].get("neon").is_none());
+    assert!(mcp["mcpServers"].get("context7").is_some());
+    assert!(mcp["mcpServers"].get("cas").is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_project_mcp_is_private_and_filtered_without_mutating_supervisor_gh_1047() {
+    use std::os::unix::fs::PermissionsExt;
+    let (temp, repo) = create_test_repo();
+    std::fs::create_dir_all(repo.join(".cas")).unwrap();
+    std::fs::write(repo.join(".cas/config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\nsupervisor_only_env = [\"VERCEL_TOKEN\"]\n").unwrap();
+    let source = repo.join(".mcp.json");
+    let original = serde_json::json!({"mcpServers": {
+        "vercel": {"command": "vercel-fixture"},
+        "neon": {"command": "neon-fixture"},
+        "context7": {"command": "allowed-fixture", "env": {"VERCEL_TOKEN": "operator-fixture", "ALLOWED": "fixture"}}
+    }}).to_string();
+    std::fs::write(&source, &original).unwrap();
+    let worker = temp.path().join("worker");
+    std::fs::create_dir_all(&worker).unwrap();
+    std::os::unix::fs::symlink(&source, worker.join(".mcp.json")).unwrap();
+    provision_worker_project_config(&repo, &worker, "worker-1");
+    assert!(std::fs::symlink_metadata(worker.join(".mcp.json")).unwrap().file_type().is_symlink(), "existing project links must remain untouched");
+    let path = repo.join(".cas/worker-mcp/worker-1.json");
+    let metadata = std::fs::symlink_metadata(&path).unwrap();
+    assert!(!metadata.file_type().is_symlink());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(config["mcpServers"].get("vercel").is_none());
+    assert!(config["mcpServers"].get("neon").is_none());
+    assert_eq!(config["mcpServers"]["context7"]["env"]["ALLOWED"], "fixture");
+    assert!(config["mcpServers"]["context7"]["env"].get("VERCEL_TOKEN").is_none());
+    assert!(config["mcpServers"].get("cas").is_some());
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+    let supervisor = temp.path().join("supervisor");
+    std::fs::create_dir_all(&supervisor).unwrap();
+    symlink_project_config(&repo, &supervisor);
+    assert_eq!(std::fs::read_to_string(supervisor.join(".mcp.json")).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
 fn worker_project_support_symlinks_carry_codex_hooks_and_zig_toolchain() {
     let (temp, repo_path) = create_test_repo();
     let source_codex = repo_path.join(".codex");
@@ -2141,4 +2215,175 @@ fn lane_fast_rows_refuse_before_target_moves() {
         assert!(worktree.path.exists());
         assert!(!manager.git.merge_in_progress());
     }
+}
+
+// cas-6029: a supervisor may run an older main checkout while the target epic
+// carries a newer admission policy. The target commit owns that policy.
+#[test]
+fn lane_fast_rows_uses_committed_target_runner_and_preserves_root_wip_cas_6029() {
+    for target_passes in [true, false] {
+        let (_temp, repo_path) = create_test_repo();
+        std::fs::create_dir_all(repo_path.join("scripts")).unwrap();
+        let old_runner = if target_passes {
+            "import sys\nprint('OLD ROOT RUNNER')\nsys.exit(1)\n"
+        } else {
+            "print('OLD ROOT FALSE PASS')\n"
+        };
+        commit_file(
+            &repo_path,
+            "scripts/check-lane-fast-rows.py",
+            old_runner,
+            "old root runner",
+        );
+        let trunk = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        let trunk = String::from_utf8_lossy(&trunk.stdout).trim().to_string();
+        let config = WorktreeConfig {
+            auto_merge: true,
+            ..Default::default()
+        };
+        let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+        let epic = manager
+            .create_epic_branch("Target Runner cas 6029")
+            .unwrap();
+        manager.git.checkout(&epic).unwrap();
+        let target_runner = if target_passes {
+            "from pathlib import Path\nassert Path(__file__).with_name('check-lane-compile.py').read_text() == 'approved compiler\\n'\nprint('TARGET RUNNER PASS')\n"
+        } else {
+            "import sys\nprint('FAIL test-env: target row')\nsys.exit(1)\n"
+        };
+        commit_file(
+            &repo_path,
+            "scripts/check-lane-fast-rows.py",
+            target_runner,
+            "target runner policy",
+        );
+        commit_file(
+            &repo_path,
+            "scripts/check-lane-compile.py",
+            "approved compiler\n",
+            "target compile verifier",
+        );
+        manager.git.checkout(&trunk).unwrap();
+        let mut worktree = manager
+            .create_for_worker_from("target-runner-worker", &epic)
+            .unwrap();
+        commit_file(
+            &worktree.path,
+            "worker.txt",
+            "worker change",
+            "worker change",
+        );
+        std::fs::write(repo_path.join("operator-wip.txt"), "preserve me").unwrap();
+        let target_before = manager.git.resolve_commit(&epic).unwrap();
+        let source_before = manager.git.resolve_commit(&worktree.branch).unwrap();
+        let root_head_before = manager.git.resolve_commit("HEAD").unwrap();
+        let result = manager.merge_and_cleanup(&mut worktree, false, false);
+        if target_passes {
+            assert!(result.is_ok(), "{result:?}");
+            assert_ne!(manager.git.resolve_commit(&epic).unwrap(), target_before);
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("FAIL test-env: target row"), "{error}");
+            assert!(error.contains("target policy"), "{error}");
+            assert!(error.contains("authenticated worktree_merge"), "{error}");
+            assert_eq!(manager.git.resolve_commit(&epic).unwrap(), target_before);
+        }
+        assert_eq!(
+            manager.git.resolve_commit(&worktree.branch).unwrap(),
+            source_before
+        );
+        assert_eq!(
+            manager.git.resolve_commit("HEAD").unwrap(),
+            root_head_before
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo_path.join("operator-wip.txt")).unwrap(),
+            "preserve me"
+        );
+        assert!(worktree.path.exists());
+        assert!(!manager.git.merge_in_progress());
+    }
+}
+
+#[test]
+fn lane_fast_rows_refuse_if_target_moves_during_policy_check_cas_6029() {
+    let (_temp, repo_path) = create_test_repo();
+    std::fs::create_dir_all(repo_path.join("scripts")).unwrap();
+    let trunk = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let trunk = String::from_utf8_lossy(&trunk.stdout).trim().to_string();
+    let config = WorktreeConfig {
+        auto_merge: true,
+        ..Default::default()
+    };
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+    let epic = manager
+        .create_epic_branch("Moving Target cas 6029")
+        .unwrap();
+    manager.git.checkout(&epic).unwrap();
+    commit_file(
+        &repo_path,
+        "scripts/check-lane-fast-rows.py",
+        "import subprocess, sys\nrepo, target, source = sys.argv[1:4]\nsource_sha = subprocess.check_output(['git', '-C', repo, 'rev-parse', source], text=True).strip()\nsubprocess.run(['git', '-C', repo, 'update-ref', 'refs/heads/' + target, source_sha], check=True)\nprint('runner moved target')\n",
+        "target moves during admission",
+    );
+    manager.git.checkout(&trunk).unwrap();
+    let mut worktree = manager
+        .create_for_worker_from("moving-target-worker", &epic)
+        .unwrap();
+    commit_file(
+        &worktree.path,
+        "worker.txt",
+        "worker change",
+        "worker change",
+    );
+    let source_before = manager.git.resolve_commit(&worktree.branch).unwrap();
+    let root_head_before = manager.git.resolve_commit("HEAD").unwrap();
+    let error = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("moved during lane fast rows"), "{error}");
+    assert_eq!(manager.git.resolve_commit(&epic).unwrap(), source_before);
+    assert_eq!(
+        manager.git.resolve_commit(&worktree.branch).unwrap(),
+        source_before
+    );
+    assert_eq!(
+        manager.git.resolve_commit("HEAD").unwrap(),
+        root_head_before
+    );
+    assert!(worktree.path.exists());
+    assert!(!manager.git.merge_in_progress());
+}
+
+#[test]
+fn lane_fast_rows_refuse_if_source_moves_during_policy_check_cas_6029() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig {
+        auto_merge: true,
+        ..Default::default()
+    };
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+    let epic = manager.create_epic_branch("Moving Source cas 6029").unwrap();
+    let worktree = manager
+        .create_for_worker_from("moving-source-worker", &epic)
+        .unwrap();
+    let target_before = manager.git.resolve_commit(&epic).unwrap();
+    let source_before = manager.git.resolve_commit(&worktree.branch).unwrap();
+    commit_file(&worktree.path, "worker.txt", "new source tip", "worker moved");
+    let error = manager
+        .require_lane_refs(&worktree, &target_before, &source_before)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("source or target moved during lane fast rows"), "{error}");
+    assert_eq!(manager.git.resolve_commit(&epic).unwrap(), target_before);
+    assert_ne!(manager.git.resolve_commit(&worktree.branch).unwrap(), source_before);
 }

@@ -1738,6 +1738,7 @@ impl FactoryDaemon {
             last_prompt_poison_sweep: Some(Instant::now()),
             resumed_epic_ids: std::collections::HashSet::new(),
             spawn_started_at: None,
+            spawn_cancellation: None,
             last_spawn_queue_stall_scan: None,
             last_external_wake_scan: None,
             reported_stalled_spawn_requests: std::collections::HashSet::new(),
@@ -2412,6 +2413,18 @@ impl FactoryDaemon {
                             );
                             continue;
                         }
+                        // Task mutations and director snapshots share one durable
+                        // assignment row; a late tick cannot duplicate the wake.
+                        if let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text) {
+                            if let Ok(task) = crate::store::open_task_store(self.app.cas_dir())
+                                .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
+                            {
+                                match crate::task_assignment::enqueue(self.app.cas_dir(), &task) {
+                                    Ok(_) => continue,
+                                    Err(error) => tracing::warn!(%error, "assignment enqueue failed; retaining director fallback"),
+                                }
+                            }
+                        }
                         // cas-ae6d (GH #100): a loss-intolerant prompt (today:
                         // the assignment wake-up) bound for a PTY pane that is
                         // not ready for injection goes to the durable
@@ -2839,6 +2852,9 @@ impl FactoryDaemon {
 
     /// Cleanup on shutdown
     async fn cleanup(&mut self) -> anyhow::Result<()> {
+        // Stop the isolated provisioner before any asynchronous shutdown waits.
+        // This group never contains the supervisor or live worker harnesses.
+        self.cancel_provisioning();
         self.merge_sweep.shutdown().await;
 
         // Clean up notification socket

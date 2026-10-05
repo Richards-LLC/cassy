@@ -144,7 +144,12 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
          land, a registered supervisor may close with `{supervisor_prefix}task \
          action=close id={task_id} negative_result=true \
          negative_result_artifact_path=<absolute-path-under-artifacts_root/<project-key>/{task_id}> \
-         negative_result_reference=<closed-PR-URL-or-branch> reason=\"...\"`. If the \
+         negative_result_reference=<closed-PR-URL-or-branch> reason=\"...\"`. For successful \
+         docs/artifacts-only reports intentionally not integrated, a registered supervisor \
+         may use `{supervisor_prefix}task action=close id={task_id} evidence_only=true \
+         evidence_only_artifact_path=<absolute-path-under-artifacts_root/<project-key>/{task_id}> \
+         evidence_only_reference=<PR-URL-or-branch> reason=\"...\"`; CAS measures and logs \
+         the immutable delivery paths. If the \
          supervisor declines the delivery for rework, it runs `{supervisor_prefix}task \
          action=request_changes id={task_id} reason=\"...\"`; only after that verdict \
          may the assigned worker start a fresh cycle."

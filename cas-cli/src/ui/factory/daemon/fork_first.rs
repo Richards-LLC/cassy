@@ -111,6 +111,10 @@ pub fn fork_first_daemon(
         std::fs::create_dir_all(parent)?;
     }
 
+    // cas-65cce: close idle pooled SQLite connections before fork(). A child
+    // that inherits an open connection shares its file descriptors and locks
+    // with the parent, which SQLite does not support across fork.
+    cas_store::shared_db::close_idle_connections();
     // Fork!
     match unsafe { fork() } {
         Ok(NixForkResult::Parent { child }) => {
@@ -601,6 +605,7 @@ impl DaemonInitPhase {
             last_prompt_poison_sweep: Some(Instant::now()),
         resumed_epic_ids: std::collections::HashSet::new(),
         spawn_started_at: None,
+            spawn_cancellation: None,
         last_spawn_queue_stall_scan: None,
         last_external_wake_scan: None,
         reported_stalled_spawn_requests: std::collections::HashSet::new(),

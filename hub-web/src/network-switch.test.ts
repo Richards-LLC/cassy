@@ -435,8 +435,6 @@ describe("a late attach failure after a retry succeeded (cas-8fe2)", () => {
     machineSocketReady: boolean;
     machineSubscriptions: Set<string>;
     attachRetryTimers: Map<string, number>;
-    hubIsReachable(): Promise<boolean>;
-    authenticatedRequestSucceeds(): Promise<boolean>;
     handleAttachFailure(session: string, error: unknown): Promise<void>;
   };
   const SESSION = "patient-pelican-9";
@@ -447,18 +445,13 @@ describe("a late attach failure after a retry succeeded (cas-8fe2)", () => {
     const { sup, internals } = supervisor({ onAttachState, onSocketError: vi.fn() });
     const machine = internals as unknown as Late;
     machine.desired = true;
-    let reachable!: (value: boolean) => void;
-    machine.hubIsReachable = () => new Promise((resolve) => { reachable = resolve; });
-    machine.authenticatedRequestSucceeds = async () => true;
-    const failing = machine.handleAttachFailure(SESSION, new TransientAuthError("stale_proof"));
-    // While its probes are in flight, the retry opens the socket and subscribes.
+    // Another attach finished before this caller handles its shared failure.
     if (retrySubscribed) {
       machine.machineSocket = fakeSocket();
       machine.machineSocketReady = true;
       machine.machineSubscriptions.add(SESSION);
     }
-    reachable(true);
-    await failing;
+    await machine.handleAttachFailure(SESSION, new TransientAuthError("stale_proof"));
     const failed = onAttachState.mock.calls.some(([session, state]) => session === SESSION && state.phase === "failed");
     const retrying = machine.attachRetryTimers.has(SESSION);
     sup.stop();

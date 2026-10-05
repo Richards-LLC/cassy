@@ -14,7 +14,7 @@ knows which task it belongs to, and nothing can stop it except hunting through `
 
 Start it through Cassy instead:
 
-```
+```text
 factory action=server_start command="npm run dev" port=5173 task_id=<your task>
 ```
 
@@ -29,7 +29,7 @@ worker's containment scope on purpose.
 
 ### Start
 
-```
+```text
 factory action=server_start command="npm run dev" cwd=apps/web port=5173 task_id=cas-1234
 ```
 
@@ -39,11 +39,14 @@ factory action=server_start command="npm run dev" cwd=apps/web port=5173 task_id
 | `cwd` | Where to run it. Defaults to the current directory. |
 | `port` | The port you expect it to bind. Advisory — `server_list` reports what it *actually* bound. |
 | `task_id` | The task this server belongs to. Always set it: it is how a supervisor knows who to ask. |
-| `id` | A short name (`dev-web`). Defaults to something derived from the command. |
+| `name` | Explicit server label, used verbatim. `id` is a compatibility alias; `name` takes precedence. Defaults to the command without environment prefixes. |
 | `shared` | `true` when the server must outlive your task. Default `false`. |
 
 Output and errors go to a log file, never to your terminal — the path is in the response.
-A server that dies on startup leaves its reason in that log.
+A process that exits during the 250 ms startup grace reports failure with the log tail.
+For direct Docker runs this checks the tracked container, so a detached client may exit
+while its running container is accepted. Other commands use process liveness.
+This does not prove the server is ready to accept connections.
 
 ### Choosing `shared`
 
@@ -58,7 +61,7 @@ A server that dies on startup leaves its reason in that log.
 
 ### List
 
-```
+```text
 factory action=server_list
 factory action=server_list task_id=cas-1234
 ```
@@ -70,12 +73,20 @@ answer. A pid that has gone away is reported dead; Cassy never restarts anything
 
 ### Stop
 
-```
+```text
 factory action=server_stop id=dev-web
 ```
 
 Takes the name or the id from `server_list`. Stops the whole server, not just its wrapper
 script — `npm run dev` is a launcher whose real server is a child process.
+Workers may stop servers they started; the supervisor may stop any registered server.
+Ownership is bound to the registered worker identity and factory session.
+
+For a direct `docker run ...` command, Cassy injects `--cidfile` and stops the
+captured container ID through Docker before stopping the client. This also works
+with `--rm` or `--detach`, because containers belong to the daemon. Omit your own
+`--cidfile`. Shell wrappers and Docker global options are not detected; use a
+direct `docker run` command for managed container teardown.
 
 Cassy refuses to signal a pid it cannot prove is still the process it started (pid reuse
 happens on long-lived machines). If you see that refusal, the server is already gone; the

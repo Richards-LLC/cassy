@@ -703,3 +703,46 @@ fn store_at_root(cas_root: &std::path::Path) -> SqlitePromptQueueStore {
     store.init().unwrap();
     store
 }
+
+#[test]
+fn cas_27ad_subagent_post_tool_does_not_consume_parent_mail() {
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    store.enqueue_with_session("worker", "supervisor", "parent-only mail", SESSION).unwrap();
+    for child_identity in [true, false] {
+        let mut hook = input("supervisor");
+        hook.hook_event_name = "PostToolUse".into();
+        hook.tool_name = Some("Bash".into());
+        if child_identity {
+            hook.agent_id = Some("child-123".into());
+        } else {
+            hook.transcript_path = Some("/tmp/session/subagents/agent-child.jsonl".into());
+        }
+        let surfaced = super::super::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(
+            Some(temp.path()), &hook, None);
+        assert!(surfaced.is_none(), "a child consumed the parent's mail: {surfaced:?}");
+        let output = crate::hooks::handle_post_tool_use(&hook, Some(temp.path())).unwrap();
+        let rendered = serde_json::to_string(&output).unwrap();
+        assert!(!rendered.contains("parent-only mail"), "{rendered}");
+    }
+    assert_eq!(store.count_unseen_for_recipient("supervisor", Some(SESSION)).unwrap(), 1);
+    assert!(super::super::handlers_middle::factory_inbox::surface_factory_inbox(
+        Some(temp.path()), &input("supervisor")).unwrap().contains("parent-only mail"));
+}
+
+#[test]
+fn cas_27ad_first_hook_claim_ignores_queue_processing_timestamp() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let id = store.enqueue_with_session("supervisor", WORKER, "legacy handoff", SESSION).unwrap();
+    store.mark_transport_delivered(id).unwrap();
+    let output = handle_user_prompt_submit(&input("worker"), Some(temp.path())).unwrap();
+    let rendered = context_of(&output);
+    assert!(rendered.contains("s first]"), "{rendered}");
+    assert!(!rendered.contains("replay]"), "{rendered}");
+    assert!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().is_empty());
+}

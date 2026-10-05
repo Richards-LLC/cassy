@@ -1,5 +1,8 @@
 import { cloudBrand, escapeHtml } from './cloud-brand';
 import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
+import type { FleetControlGate } from './fleet-permissions';
+import { commandTokensMarkup } from './launch-session';
+import { FACTORY_MANAGE_CAPABILITY, FACTORY_OPERATE_CAPABILITY } from './pairing-scopes';
 export { CANT_REACH_RETRYING } from './connection-state';
 
 export interface PairedMachineRow {
@@ -13,6 +16,42 @@ export interface PairedMachineRow {
   connectionState?: MachineConnectionLabelState;
   lastSeen: string;
   runtime?: string;
+  /**
+   * Fleet permissions on this pairing (cas-d382): managing workers and tasks
+   * (factory:operate) and stopping and restarting them (factory:manage).
+   */
+  fleet?: { readonly operate: FleetControlGate; readonly manage: FleetControlGate };
+}
+
+export interface PairedMachineActions {
+  /** The one-time "Allow managing workers" grant for this machine. */
+  readonly allowManagingWorkers?: (id: string) => Promise<void>;
+  /** Copy a pairing command. */
+  readonly copy?: (text: string) => Promise<void> | void;
+}
+
+/** One permission line: what it allows, its state in words, and the way to get it when missing. */
+function fleetPermissionMarkup(id: string, kind: 'operate' | 'manage', name: string, gate: FleetControlGate, label: string): string {
+  const key = `${kind}-${id.replace(/[^a-z0-9_-]/gi, '_')}`;
+  const state = gate.allowed ? 'Allowed' : gate.state;
+  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}">${escapeHtml(state)}</span></p>`;
+  if (gate.allowed) return `<div class="fleet-permission" data-permission="${kind}" data-allowed="true">${head}</div>`;
+  const reason = `<p class="field-hint fleet-permission-reason" id="fleet-reason-${key}">${escapeHtml(gate.reason)}</p>`;
+  // The control the permission unlocks reads as unavailable, and says why,
+  // but it is never the only cue: the state and the way to get it are words.
+  const control = kind === 'manage'
+    ? `<button type="button" class="fleet-permission-control" aria-disabled="true" aria-describedby="fleet-state-${key} fleet-reason-${key}">Stop and restart</button>`
+    : '';
+  const grant = gate.grantable
+    ? `<div class="fleet-permission-grant"><button type="button" class="fleet-permission-allow" data-fleet-allow="${escapeHtml(id)}" aria-describedby="fleet-reason-${key}">Allow managing workers</button></div>`
+    : `<p class="field-hint fleet-permission-invite" id="fleet-invite-${key}">Run this on ${escapeHtml(label)} and open the link it prints in this browser:</p><div class="pair-code-actions fleet-permission-command"><code>${commandTokensMarkup(gate.command)}</code><button type="button" class="fleet-permission-copy" data-command="${escapeHtml(gate.command)}" aria-describedby="fleet-invite-${key}">Copy command</button></div>`;
+  return `<div class="fleet-permission" data-permission="${kind}" data-allowed="false">${head}${reason}${control}${grant}</div>`;
+}
+
+/** The Fleet permissions block of one paired machine. */
+export function fleetPermissionsMarkup(row: Pick<PairedMachineRow, 'id' | 'label' | 'fleet'>): string {
+  if (!row.fleet) return '';
+  return `<h4 class="fleet-permissions-title">Fleet permissions</h4>${fleetPermissionMarkup(row.id, 'operate', FACTORY_OPERATE_CAPABILITY, row.fleet.operate, row.label)}${fleetPermissionMarkup(row.id, 'manage', FACTORY_MANAGE_CAPABILITY, row.fleet.manage, row.label)}`;
 }
 
 /**
@@ -34,9 +73,11 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // are unsteady, as the header and the row say, not reconnecting.
   const unsteady = retryable.length > 0 && labels.every(label => label === UNSTEADY || label === NEEDS_PAIRING);
   // cas-0739 (journey F10): with some machines connected and some not, name
-  // the one that isn't ("Shed NAS can't be reached"), not "5 connected".
+  // the one that isn't ("Can't reach Shed NAS"), not "5 connected". The
+  // outage words lead, so the phone footer's end ellipsis shortens the name
+  // and never the verb ("Can't reach Build Server Ra…").
   const down = rows.filter(row => !row.connected);
-  const partial = down.length === 1 ? `${shortMachineName(down[0]!.label)} ${outageWords(down[0]!.connection)}` : `${down.length} not connected`;
+  const partial = down.length === 1 ? `${outageWords(down[0]!.connection)} ${shortMachineName(down[0]!.label)}` : `${down.length} not connected`;
   const state = loading ? 'Loading…' : connected ? (connected === rows.length ? 'Connected' : partial)
     : !rows.length ? 'Not paired'
     : !retryable.length ? labels[0]
@@ -46,7 +87,7 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
 }
 
 /** "Shed NAS · Linux" reads "Shed NAS" where room is short. */
@@ -54,13 +95,14 @@ function shortMachineName(label: string): string {
   return label.split(' · ')[0]?.trim() || label.trim();
 }
 
-/** A machine's connection in the footer's words: "can't be reached", "reconnecting", "needs pairing" (cas-0739). */
+/** A machine's connection in the footer's words, put before its name: "Can't reach", "Reconnecting to", "Needs pairing:" (cas-0739). */
 function outageWords(connection: string): string {
-  if (connection === CANT_REACH_RETRYING || connection === 'Unreachable') return "can't be reached";
-  if (connection === NEEDS_PAIRING) return 'needs pairing';
-  if (connection === UNSTEADY) return 'unsteady';
-  if (connection.startsWith('Connecting') || connection === 'Idle') return 'connecting';
-  return connection.toLowerCase();
+  if (connection === CANT_REACH_RETRYING || connection === 'Unreachable') return "Can't reach";
+  if (connection === NEEDS_PAIRING) return 'Needs pairing:';
+  if (connection === UNSTEADY) return 'Unsteady:';
+  if (connection === 'Reconnecting') return 'Reconnecting to';
+  if (connection.startsWith('Connecting') || connection === 'Idle') return 'Connecting to';
+  return `${connection}:`;
 }
 
 /**
@@ -77,7 +119,7 @@ export function pairedMachinesDialogMarkup(): string {
 }
 
 /** Keyed register: status ticks preserve focused controls and removal confirmation. */
-export function renderPairedMachines(container: HTMLElement, rows: readonly PairedMachineRow[], remove: (id: string) => Promise<void>, options: { reorder?: boolean } = {}): void {
+export function renderPairedMachines(container: HTMLElement, rows: readonly PairedMachineRow[], remove: (id: string) => Promise<void>, options: { reorder?: boolean } & PairedMachineActions = {}): void {
   const ids = new Set(rows.map(row => row.id));
   for (const node of container.querySelectorAll<HTMLElement>('[data-machine-id]')) if (!ids.has(node.dataset.machineId!)) node.remove();
   let empty = container.querySelector<HTMLElement>('.machine-register-empty');
@@ -87,8 +129,8 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
     let node = Array.from(container.children).find(node => (node as HTMLElement).dataset.machineId === row.id) as HTMLElement | undefined;
     if (!node) {
       node = document.createElement('section'); node.className = 'paired-machine'; node.dataset.machineId = row.id;
-      node.innerHTML = '<h3></h3><p class="paired-machine-address"></p><p class="paired-machine-state"></p><p class="paired-machine-seen"></p><p class="paired-machine-runtime"></p><button type="button">Remove from this browser</button>';
-      const button = node.querySelector('button')!;
+      node.innerHTML = '<h3></h3><p class="paired-machine-address"></p><p class="paired-machine-state"></p><p class="paired-machine-seen"></p><p class="paired-machine-runtime"></p><section class="paired-machine-fleet" hidden></section><button type="button" class="paired-machine-remove">Remove from this browser</button>';
+      const button = node.querySelector<HTMLButtonElement>('.paired-machine-remove')!;
       button.onclick = async () => {
         if (button.dataset.confirm !== 'true') { button.dataset.confirm = 'true'; button.textContent = 'Confirm removal'; return; }
         button.disabled = true;
@@ -99,6 +141,7 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
     }
     const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Version unknown until it connects' };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
+    renderFleetPermissions(node, row, options);
   }
   // cas-0739: put rows in the given order. An open register passes
   // reorder: false so a status tick never moves a row under the operator's
@@ -109,4 +152,36 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
   if (nodes.every((node, index) => current[index] === node)) return;
   const anchor = container.querySelector('.machine-register-empty');
   for (const node of nodes) container.insertBefore(node, anchor);
+}
+
+/**
+ * Fill a machine's Fleet permissions block (cas-d382). Rebuilt only when what
+ * it says changes, so a status tick never drops focus from its buttons.
+ */
+function renderFleetPermissions(node: HTMLElement, row: PairedMachineRow, actions: PairedMachineActions): void {
+  const block = node.querySelector<HTMLElement>('.paired-machine-fleet');
+  if (!block) return;
+  const markup = fleetPermissionsMarkup(row);
+  block.hidden = markup === '';
+  if (block.dataset.markup === markup) return;
+  block.dataset.markup = markup;
+  block.setAttribute('aria-label', `Fleet permissions on ${row.label}`);
+  block.innerHTML = markup;
+  for (const copy of block.querySelectorAll<HTMLButtonElement>('.fleet-permission-copy')) {
+    copy.onclick = () => { void actions.copy?.(copy.dataset.command ?? ''); copy.textContent = 'Copied'; };
+  }
+  const allow = block.querySelector<HTMLButtonElement>('.fleet-permission-allow');
+  if (allow) {
+    // Two deliberate presses, as Remove asks: the first says what it allows.
+    allow.onclick = async () => {
+      if (allow.dataset.confirm !== 'true') { allow.dataset.confirm = 'true'; allow.textContent = `Confirm: allow managing workers on ${row.label}`; return; }
+      allow.disabled = true;
+      try { await actions.allowManagingWorkers?.(row.id); } finally { allow.disabled = false; delete allow.dataset.confirm; allow.textContent = 'Allow managing workers'; }
+    };
+    allow.onblur = () => { delete allow.dataset.confirm; allow.textContent = 'Allow managing workers'; };
+  }
+  for (const control of block.querySelectorAll<HTMLButtonElement>('.fleet-permission-control')) {
+    // Unavailable but focusable, so its description is reachable; a press does nothing.
+    control.onclick = (event) => event.preventDefault();
+  }
 }

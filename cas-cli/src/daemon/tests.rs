@@ -474,6 +474,62 @@ fn test_maintenance_cycle_runs_pruning_and_checkpoint() {
     );
 }
 
+/// cas-9d8a: the maintenance cycle runs prompt-queue retention on the same
+/// schedule as the dead-agent purge, with the default 7-day window, and a
+/// project can disable it with factory.prompt_retention_days = 0.
+#[test]
+fn maintenance_cycle_prunes_aged_terminal_prompts_with_the_dead_agent_purge_cas_9d8a() {
+    use crate::daemon::maintenance::run_once;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let cas_root = temp.path().to_path_buf();
+    let _store = crate::store::open_store(&cas_root).unwrap();
+    let _event_store = crate::store::open_event_store(&cas_root).unwrap();
+    let _agent_store = crate::store::open_agent_store(&cas_root).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+    let pending = queue.enqueue("supervisor", "worker", "pending").unwrap();
+    let aged = queue.enqueue("supervisor", "worker", "aged").unwrap();
+    let recent = queue.enqueue("supervisor", "worker", "recent").unwrap();
+    let age = |id: i64, days: i64| {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        conn.execute(
+            "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
+            rusqlite::params![at, id],
+        )
+        .unwrap();
+    };
+    age(aged, 8);
+    age(recent, 6);
+
+    let config = DaemonConfig {
+        cas_root: cas_root.clone(),
+        auto_prune: false,
+        process_observations: false,
+        consolidate_memories: false,
+        apply_decay: false,
+        index_bm25: false,
+        update_entity_summaries: false,
+        agent_purge_age_hours: 24,
+        ..DaemonConfig::default()
+    };
+    let result = run_once(&config).expect("maintenance cycle");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.prompts_pruned, 1);
+    assert!(queue.message_delivery_report(aged).unwrap().is_none());
+    assert!(queue.message_delivery_report(recent).unwrap().is_some());
+    assert_eq!(queue.pending_count().unwrap(), 1);
+    assert!(queue.message_delivery_report(pending).unwrap().is_some());
+
+    // Disabled by configuration: nothing more is pruned.
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nprompt_retention_days = 0\n").unwrap();
+    age(recent, 30);
+    let result = run_once(&config).expect("maintenance cycle");
+    assert_eq!(result.prompts_pruned, 0);
+    assert!(queue.message_delivery_report(recent).unwrap().is_some());
+}
+
 #[test]
 fn daemon_index_cycle_repairs_the_legacy_tantivy_root_before_draining_pending_entries() {
     use crate::daemon::indexing::run_indexing_cycle;
@@ -921,7 +977,7 @@ fn full_tree_reconciliation_retires_files_deleted_while_daemon_was_stopped() {
     );
     assert_eq!(vectors.stats().expect("vector stats").eligible, 1);
     let scan = vectors
-        .index_state("reconcile-repo")
+        .index_state(&crate::daemon::indexing::code_scan_key(&repo))
         .expect("scan receipt")
         .expect("recorded scan receipt");
     assert_eq!(scan.eligible_files, 1);
@@ -1008,7 +1064,7 @@ fn full_tree_reconciliation_retires_repository_when_eligible_set_becomes_empty()
     );
     assert_eq!(vectors.stats().expect("vector stats").eligible, 0);
     let scan = vectors
-        .index_state("empty-repo")
+        .index_state(&crate::daemon::indexing::code_scan_key(&repo))
         .expect("scan receipt")
         .expect("recorded scan receipt");
     assert_eq!(
@@ -1331,7 +1387,7 @@ fn skipped_files_leave_the_eligible_denominator_so_coverage_can_reach_100_percen
     assert_eq!(result.skipped.len(), 1);
 
     let state = cas_store::SqliteCodeVectorStore::open(&cas_root).expect("state store");
-    let repositories = ["cov-repo".to_string()];
+    let repositories = [crate::daemon::indexing::code_scan_key(&repo)];
     let scan = repositories
         .iter()
         .find_map(|repository| state.index_state(repository).ok().flatten())
@@ -1574,7 +1630,7 @@ fn retiring_a_deleted_file_waits_out_a_foreign_writer_instead_of_failing() {
     );
     let scan = cas_store::SqliteCodeVectorStore::open(&cas_root)
         .expect("vector state")
-        .index_state("busy-repo")
+        .index_state(&crate::daemon::indexing::code_scan_key(&repo))
         .expect("scan receipt")
         .expect("recorded scan receipt");
     assert_eq!(

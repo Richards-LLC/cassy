@@ -226,7 +226,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
         let code_config = cas_config.code();
         let daemon_config = cas_config.daemon();
         let cloud_config = cas_config.cloud.clone().unwrap_or_default();
-        let project_dir = cas_root.parent().unwrap_or(&cas_root);
+        let project_dir = crate::daemon::indexing::code_project_root(&cas_root);
         let code_watch_paths: Vec<std::path::PathBuf> = code_config
             .watch_paths
             .iter()
@@ -332,19 +332,18 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // Load MCP proxy config from .cas/proxy.toml (project) and ~/.config/code-mode-mcp/config.toml (user)
     #[cfg(feature = "mcp-proxy")]
     let proxy = {
-        let cfg = cmcp_core::config::Config::load_merged(if project_proxy_path.exists() {
-            Some(&project_proxy_path)
-        } else {
-            None
-        });
+        let cfg = load_proxy_config_for_process(&cas_root);
         match cfg {
             Ok(mut cfg) if !cfg.servers.is_empty() => {
                 if let Err(error) =
-                    crate::cli::integrate::violet::load_machine_credentials_into_process_env()
+                    crate::cli::integrate::violet::load_machine_credentials_into_process_env_except(
+                        &worker_proxy_policy(&cas_root)?.unwrap_or_default().supervisor_only_env
+                    )
                 {
                     eprintln!("[Cassy] Failed to load machine-scoped proxy credentials: {error}");
                 }
-                if std::env::var_os("VIKTOR_API_KEY").is_none() {
+                if std::env::var_os("VIKTOR_API_KEY").is_none()
+                    && !worker_proxy_policy(&cas_root)?.is_some_and(|policy| policy.denies_env("VIKTOR_API_KEY")) {
                     match crate::cli::viktor::load_machine_credential() {
                         Ok(Some(key)) => install_machine_viktor_credential(&mut cfg, key),
                         Ok(None) => {}
@@ -1099,6 +1098,44 @@ fn load_proxy_config(cas_root: &std::path::Path) -> anyhow::Result<cmcp_core::co
     cmcp_core::config::Config::load_merged(proxy_path.exists().then_some(proxy_path.as_path()))
 }
 
+/// Resolve role from durable registration first, with the spawn stamp as the
+/// bootstrap fallback. A registered supervisor keeps its full upstream set.
+#[cfg(feature = "mcp-proxy")]
+fn worker_proxy_policy(cas_root: &std::path::Path) -> anyhow::Result<Option<cas_types::factory_worker_policy::FactoryWorkerPolicy>> {
+    let session = std::env::var("CAS_SESSION_ID").ok().filter(|id| !id.is_empty())
+        .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok());
+    let role = session.and_then(|id| {
+        crate::store::open_agent_store(cas_root).ok()?.get(&id).ok().map(|agent| agent.role)
+    });
+    let worker = match role {
+        Some(role) => role == crate::types::AgentRole::Worker,
+        None => std::env::var("CAS_AGENT_ROLE").as_deref() == Ok("worker"),
+    };
+    if !worker { return Ok(None) }
+    let policy = cas_mux::worker_resources::load_worker_policy(Some(cas_root))?;
+    Ok((!policy.is_empty()).then_some(policy))
+}
+
+/// Apply worker isolation before connecting or reloading any upstream.
+#[cfg(feature = "mcp-proxy")]
+pub(crate) fn load_proxy_config_for_process(cas_root: &std::path::Path) -> anyhow::Result<cmcp_core::config::Config> {
+    let mut config = load_proxy_config(cas_root)?;
+    if let Some(policy) = worker_proxy_policy(cas_root)? {
+        config.servers.retain(|name, _| !policy.denies_server(name));
+        // Explicit stdio env is installed after inheriting the worker process
+        // environment. Remove denied keys here, before credential resolution,
+        // for both the initial engine and reloads of retained allowed servers.
+        for server in config.servers.values_mut() {
+            if let cmcp_core::config::ServerConfig::Stdio { env, .. } = server {
+                env.retain(|name, _| !policy.denies_env(name));
+            }
+        }
+        config.allowlist.retain(|route| !policy.denies_server(&route.server));
+        config.worker_access.retain(|name, _| !policy.denies_server(name));
+    }
+    Ok(config)
+}
+
 #[cfg(feature = "mcp-proxy")]
 fn sanitized_catalog(catalog: BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
     const MAX_SERVERS: usize = 64;
@@ -1273,6 +1310,9 @@ pub async fn write_proxy_snapshot_cache_for_config(
     engine: &cmcp_core::ProxyEngine,
     config: &cmcp_core::config::Config,
 ) -> anyhow::Result<()> {
+    // The shared project snapshot belongs to the full supervisor engine.
+    // A restricted worker must not erase its health/catalog or fingerprint.
+    if worker_proxy_policy(cas_root)?.is_some() { return Ok(()) }
     let health = engine.health_snapshot().await.sanitized();
     let generated_at_ms = health.generated_at_ms;
     if generated_at_ms == 0 {
@@ -1314,6 +1354,7 @@ fn publish_non_live_proxy_snapshot(
     state: ProxySnapshotState,
     failure: Option<ProxySnapshotFailure>,
 ) -> anyhow::Result<()> {
+    if worker_proxy_policy(cas_root)?.is_some() { return Ok(()) }
     let generated_at_ms = now_millis()?;
     publish_proxy_snapshot(
         cas_root,
@@ -1364,6 +1405,90 @@ pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_
 // =============================================================================
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn worker_proxy_strips_denied_literal_stdio_env_before_connect_and_reload_gh_1047() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n",
+        ).unwrap();
+        std::fs::write(root.join("proxy.toml"), r#"
+allowlist = ["allowed-fixture.*"]
+[servers.allowed-fixture]
+transport = "stdio"
+command = "never-executed-fixture"
+env = { DENIED_LITERAL_FIXTURE_TOKEN = "synthetic-denied", ALLOWED_LITERAL_FIXTURE = "synthetic-allowed" }
+"#).unwrap();
+        env.remove("DENIED_LITERAL_FIXTURE_TOKEN");
+        env.set("CAS_AGENT_ROLE", "worker");
+        for _ in 0..2 {
+            let worker = super::load_proxy_config_for_process(&root).unwrap();
+            let cmcp_core::config::ServerConfig::Stdio { env, .. } =
+                &worker.servers["allowed-fixture"] else { panic!("stdio fixture retained") };
+            assert!(!env.contains_key("DENIED_LITERAL_FIXTURE_TOKEN"));
+            assert_eq!(env.get("ALLOWED_LITERAL_FIXTURE").map(String::as_str), Some("synthetic-allowed"));
+        }
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let supervisor = super::load_proxy_config_for_process(&root).unwrap();
+        let cmcp_core::config::ServerConfig::Stdio { env, .. } =
+            &supervisor.servers["allowed-fixture"] else { panic!("stdio fixture retained") };
+        assert_eq!(env.get("DENIED_LITERAL_FIXTURE_TOKEN").map(String::as_str), Some("synthetic-denied"));
+        assert_eq!(env.get("ALLOWED_LITERAL_FIXTURE").map(String::as_str), Some("synthetic-allowed"));
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn worker_proxy_filters_boot_and_reload_config_preserving_supervisor_gh_1047() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\nsupervisor_only_env = [\"VERCEL_TOKEN\", \"NEON_API_KEY\"]\n").unwrap();
+        std::fs::write(root.join("proxy.toml"), r#"
+allowlist = ["vercel.*", "neon.*", "context7.*"]
+[servers.vercel]
+transport = "http"
+url = "https://vercel.invalid/mcp"
+[servers.neon]
+transport = "http"
+url = "https://neon.invalid/mcp"
+[servers.context7]
+transport = "http"
+url = "https://context7.invalid/mcp"
+"#).unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        for _ in 0..2 {
+            let worker = super::load_proxy_config_for_process(&root).unwrap();
+            assert_eq!(worker.servers.keys().cloned().collect::<Vec<_>>(), ["context7"]);
+            assert!(worker.allowlist.iter().all(|route| route.server == "context7"));
+        }
+        let snapshot = root.join(super::PROXY_SNAPSHOT_CACHE);
+        std::fs::write(&snapshot, "supervisor-health-sentinel").unwrap();
+        super::write_empty_proxy_snapshot_cache(&root).unwrap();
+        assert_eq!(std::fs::read_to_string(snapshot).unwrap(), "supervisor-health-sentinel");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let supervisor = super::load_proxy_config_for_process(&root).unwrap();
+        assert!(supervisor.servers.contains_key("vercel") && supervisor.servers.contains_key("neon"));
+        let core = super::CasCore::with_daemon(root.clone(), None, None);
+        core.register_agent("registered-supervisor".into(), "supervisor-fixture".into(), None).unwrap();
+        let agents = core.open_agent_store().unwrap();
+        let mut agent = agents.get("registered-supervisor").unwrap();
+        agent.role = crate::types::AgentRole::Supervisor;
+        agents.update(&agent).unwrap();
+        env.set("CAS_SESSION_ID", "registered-supervisor");
+        env.set("CAS_AGENT_ROLE", "worker");
+        assert!(super::load_proxy_config_for_process(&root).unwrap().servers.contains_key("vercel"),
+            "durable supervisor registration wins over a stale launch stamp");
+        agent.role = crate::types::AgentRole::Worker;
+        agents.update(&agent).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        assert!(!super::load_proxy_config_for_process(&root).unwrap().servers.contains_key("vercel"),
+            "registered workers cannot acquire supervisor upstreams through an environment stamp");
+    }
     #[tokio::test]
     async fn cas_8095_team_only_startup_without_team_refuses_before_network() {
         let server = wiremock::MockServer::start().await;

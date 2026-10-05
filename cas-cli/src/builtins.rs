@@ -365,6 +365,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/scripts/triage.py",
+        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -587,6 +591,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/registration.md",
         content: include_str!("builtins/skills/violet/references/registration.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/publication.md",
+        content: include_str!("builtins/skills/violet/references/publication.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
@@ -1029,6 +1037,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/scripts/triage.py",
+        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1240,6 +1252,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/registration.md",
         content: include_str!("builtins/skills/violet/references/registration.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/publication.md",
+        content: include_str!("builtins/skills/violet/references/publication.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
@@ -1685,6 +1701,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/scripts/triage.py",
+        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1896,6 +1916,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/registration.md",
         content: include_str!("builtins/skills/violet/references/registration.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/publication.md",
+        content: include_str!("builtins/skills/violet/references/publication.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     BuiltinFile {
@@ -5530,6 +5554,34 @@ This is the body content."#;
                 legacy.exists(),
                 "{harness:?} (project={project_scope}) removed an operator skill"
             );
+        }
+    }
+
+    /// cas-4e45 (GH #1062): a failed or partial read is never "no new
+    /// replies". Agents must check `ok` and `complete` before concluding a
+    /// thread has no answer, and know the include_threads failure mode.
+    #[test]
+    fn test_builtin_violet_skill_reads_check_ok_and_complete() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/violet/SKILL.md")
+                .unwrap_or_else(|| panic!("skills/violet/SKILL.md missing from {label}"));
+            for phrase in [
+                "\"No new replies\" needs `ok: true` and `complete: true`",
+                "never an empty channel",
+                "`complete: false` is a partial digest",
+                "`include_threads: false`",
+            ] {
+                assert!(
+                    skill.content.contains(phrase),
+                    "{label} violet SKILL.md must say {phrase:?} (cas-4e45)"
+                );
+            }
         }
     }
 

@@ -194,7 +194,7 @@ impl CasError {
             ),
             CasError::Search(_) => Some(
                 "Search index error. Try:\n\
-                 - Run 'cas reindex --bm25' to rebuild the search index",
+                 - run the reindex maintenance action (`mcp__cas__system action=reindex bm25=true`) from an agent session",
             ),
             CasError::Embedding(_) | CasError::ModelLoad(_) => Some(
                 "Embedding model error. Try:\n\
@@ -245,3 +245,35 @@ pub type Result<T> = std::result::Result<T, CasError>;
 
 /// Backwards compatibility alias
 pub type MemError = CasError;
+
+#[cfg(test)]
+mod tests {
+    use super::CasError;
+
+    #[test]
+    fn search_recovery_guidance_names_a_registered_request_cas_a957() {
+        let error = CasError::Search(tantivy::TantivyError::InvalidArgument(
+            "index unavailable".into(),
+        ));
+        let suggestion = error.suggestion().unwrap();
+        let invocation = suggestion
+            .split('`')
+            .nth(1)
+            .expect("agent maintenance invocation");
+        let mut words = invocation.split_whitespace();
+        assert_eq!(words.next(), Some("mcp__cas__system"));
+        let mut args = serde_json::Map::new();
+        for word in words {
+            let (key, value) = word.split_once('=').expect("request field");
+            args.insert(
+                key.into(),
+                serde_json::from_str(value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value.into())),
+            );
+        }
+        let request: cas_mcp::types::SystemRequest =
+            serde_json::from_value(args.into()).expect("valid maintenance request");
+        assert!(cas_mcp::actions::system_actions().contains(&request.action.as_str()));
+        assert_eq!(request.bm25, Some(true));
+    }
+}

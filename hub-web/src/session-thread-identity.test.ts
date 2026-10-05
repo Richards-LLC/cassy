@@ -5,8 +5,9 @@
 // sessions are grouped with the most recent one marked.
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
-import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
-import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
+import { applyTerminalOffer, conversationHeaderMarkup } from "./conversation-shell";
+import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy, terminalOfferReason } from "./conversation-view";
+import { activityTime, ConversationList, conversationRowMarkup, ENDED_NOTICE_MS, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
 const at = (day: number, hh: number, mm: number) => new Date(2026, 8, day, hh, mm).toISOString();
@@ -267,6 +268,62 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(document.activeElement).toBe(control.querySelector(".conversation-end-ask"));
   });
 
+  it("keeps a failed End session actionable and focused without dropping its row (cas-a549)", async () => {
+    const container = document.createElement("nav"); document.body.replaceChildren(container);
+    const list = new ConversationList();
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]);
+    const end = vi.fn(async () => { throw new Error("DELETE /v1/sessions/noble-cheetah-84 failed (500)"); });
+    const open = vi.fn();
+    list.render(container, rows, open, end);
+    const keptRow = container.querySelectorAll(".conversation-row")[1];
+    const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
+    control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+    const confirm = control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!;
+    confirm.focus(); confirm.click();
+    await Promise.resolve();
+    const retry = control.querySelector<HTMLButtonElement>(".conversation-end-ask")!;
+    const error = control.querySelector<HTMLElement>(".conversation-end-error")!;
+    expect(error.textContent).toBe("Could not end noble-cheetah-84 on Atlas. Try End session again. If it still fails, check the session on Atlas.");
+    // cas-9ae6: focus is back on End session, which reads the failure as its
+    // description; the line is not also an alert, so it is said once.
+    expect(error.hasAttribute("role")).toBe(false);
+    expect(document.activeElement).toBe(retry);
+    expect(retry.getAttribute("aria-describedby")).toBe(error.id);
+    expect(error.id).not.toBe("");
+    expect(container.querySelectorAll(".conversation-row")).toHaveLength(2);
+    expect(container.querySelectorAll(".conversation-row")[1]).toBe(keptRow);
+    // A catalog heartbeat keeps the actionable error and keyboard position.
+    list.render(container, rows, open, end);
+    expect(document.activeElement).toBe(retry);
+    expect(container.querySelector(".conversation-ended")).toBeNull();
+    // Retrying still asks for confirmation; Cancel does not send another request.
+    retry.click();
+    expect(control.dataset.state).toBe("confirm");
+    expect(document.activeElement).toBe(control.querySelector(".conversation-end-cancel"));
+    control.querySelector<HTMLButtonElement>(".conversation-end-cancel")!.click();
+    expect(end).toHaveBeenCalledOnce();
+  });
+
+  it("does not steal focus if the operator leaves while End session is pending (cas-a549)", async () => {
+    const container = document.createElement("nav");
+    const elsewhere = document.createElement("button"); elsewhere.textContent = "Another action";
+    document.body.replaceChildren(container, elsewhere);
+    let reject!: (error: Error) => void;
+    const end = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; }));
+    new ConversationList().render(container, [row("calm-puma-34", 300, { canEnd: true })], vi.fn(), end);
+    container.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+    const confirm = container.querySelector<HTMLButtonElement>(".conversation-end-confirm")!;
+    confirm.focus(); confirm.click();
+    elsewhere.focus();
+    reject(new Error("request failed (500)"));
+    await Promise.resolve();
+    expect(document.activeElement).toBe(elsewhere);
+    expect(container.querySelector(".conversation-end-error")?.textContent).toContain("Try End session again.");
+    // Focus stayed elsewhere, so nothing reads the description: the failure is an alert (cas-9ae6).
+    expect(container.querySelector(".conversation-end-error")?.getAttribute("role")).toBe("alert");
+    expect(container.querySelectorAll(".conversation-row")).toHaveLength(1);
+  });
+
   it("gives End session its own column only on rows that can end (cas-339a)", () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100)]);
@@ -309,6 +366,87 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(document.activeElement).not.toBe(document.body);
   });
 
+  it("dates a machine-stamped activity in this browser's time when the machine clock runs ahead (cas-24fe)", () => {
+    const now = new Date(2026, 9, 1, 12, 0).getTime();
+    const AHEAD = 5 * 60_000;
+    // With the lead measured, the stamp less the lead: three minutes ago reads 3m, not "now".
+    expect(machineActivityAt(now - 3 * 60_000 + AHEAD, AHEAD, undefined, now)).toEqual({ at: now - 3 * 60_000 });
+    expect(activityTime(machineActivityAt(now - 3 * 60_000 + AHEAD, AHEAD, undefined, now).at, now).short).toBe("3m");
+    // A lead never puts the activity after now.
+    expect(machineActivityAt(now + AHEAD + 60_000, AHEAD, undefined, now)).toEqual({ at: now });
+    // A stamp in the past with no lead known is its own time.
+    expect(machineActivityAt(now - 60_000, undefined, undefined, now)).toEqual({ at: now - 60_000 });
+    // With no lead known, a future stamp dates from when this page first saw it, so the row ages.
+    const first = machineActivityAt(now + 2 * 60_000, undefined, undefined, now);
+    expect(first).toEqual({ at: now, seen: { stamp: now + 2 * 60_000, seen: now } });
+    const fiveLater = machineActivityAt(now + 2 * 60_000, undefined, first.seen, now + 5 * 60_000);
+    expect(activityTime(fiveLater.at, now + 5 * 60_000).short).toBe("5m");
+    // A newer stamp is new activity.
+    expect(machineActivityAt(now + 9 * 60_000, undefined, first.seen, now + 5 * 60_000)).toEqual({ at: now + 5 * 60_000, seen: { stamp: now + 9 * 60_000, seen: now + 5 * 60_000 } });
+  });
+
+  it("never ends a session on the second click of a double-click: Cancel sits first, and neither button takes it (cas-f60a)", () => {
+    const container = document.createElement("nav"); document.body.replaceChildren(container);
+    const end = vi.fn(async (_row: ConversationRow) => {});
+    new ConversationList().render(container, groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]), vi.fn(), end);
+    const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
+    const click = (node: Element, detail: number) => node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail }));
+    click(control.querySelector(".conversation-end-ask")!, 1);
+    expect([...control.querySelectorAll("button")].map((node) => node.textContent)).toEqual(["Cancel", "End session"]);
+    // The double-click's second press keeps focus on Cancel and selects nothing.
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, detail: 2 });
+    control.querySelector(".conversation-end-question")!.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
+    // The double-click's second click, wherever it lands, does nothing.
+    click(control.querySelector(".conversation-end-confirm")!, 2);
+    click(control.querySelector(".conversation-end-cancel")!, 2);
+    click(control.querySelector(".conversation-end-confirm")!, 3);
+    expect(end).not.toHaveBeenCalled();
+    expect(control.dataset.state).toBe("confirm");
+    // A deliberate click, or a key (detail 0), ends it.
+    click(control.querySelector(".conversation-end-confirm")!, 0);
+    expect(end).toHaveBeenCalledOnce();
+  });
+
+  it("says a session ended where its row was and in a polite live region, then lets it go (cas-f60a)", async () => {
+    vi.useFakeTimers();
+    try {
+      const sidebar = document.createElement("aside");
+      const container = document.createElement("nav"); container.id = "conversation-list";
+      sidebar.append(container, Object.assign(document.createElement("footer"), { textContent: "2 paired machines" }));
+      document.body.replaceChildren(sidebar);
+      const list = new ConversationList();
+      let live = [row("calm-puma-34", 300, { canEnd: true }), row("wild-shark-68", 200, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })];
+      const open = vi.fn();
+      const end = vi.fn(async (ended: ConversationRow) => {
+        live = live.filter((item) => item.key !== ended.key);
+        list.render(container, groupConversationRows(live), open, end);
+      });
+      list.render(container, groupConversationRows(live), open, end);
+      // The live region is beside the list from the first render, empty, so its first sentence is announced.
+      const status = container.nextElementSibling as HTMLElement;
+      expect(status.getAttribute("role")).toBe("status");
+      expect(status.classList.contains("sr-only")).toBe(true);
+      expect(status.textContent).toBe("");
+      const control = [...container.querySelectorAll<HTMLElement>(".conversation-end")].find((node) => node.previousElementSibling?.textContent?.includes("wild-shark-68"))!;
+      control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+      control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(status.textContent).toBe("wild-shark-68 on Atlas ended.");
+      expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-ended", "conversation-row", "conversation-end"]);
+      expect(container.querySelector(".conversation-ended")?.textContent).toBe("wild-shark-68 on Atlas ended.");
+      // A catalog poll keeps it in place.
+      list.render(container, groupConversationRows(live), open, end);
+      expect(container.querySelector(".conversation-ended")?.previousElementSibling?.previousElementSibling?.textContent).toContain("calm-puma-34");
+      await vi.advanceTimersByTimeAsync(ENDED_NOTICE_MS);
+      expect(container.querySelector(".conversation-ended")).toBeNull();
+      expect(status.textContent).toBe("");
+      expect(container.nextElementSibling).toBe(status);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("times a row from its own activity only: now under a minute, then words for assistive tech (cas-6acf)", () => {
     const now = new Date(2026, 9, 1, 12, 0).getTime();
     expect(activityTime(now - 20_000, now)).toEqual({ short: "now", spoken: "just now" });
@@ -340,5 +478,48 @@ describe("grouped project sessions (cas-55a4)", () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     new ConversationList().render(container, groupConversationRows([row("a-b-1", 2), row("c-d-2", 1)]), vi.fn(), vi.fn());
     expect(container.querySelector(".conversation-end")).toBeNull();
+  });
+});
+
+describe("cas-6b75: the header's Terminal view while the connection is lost", () => {
+  it("is offered whenever the empty card would offer it, and says why when it is not", () => {
+    for (const live of [undefined, "Live", "Degraded"]) {
+      expect(terminalOfferReason(live, "Atlas · Linux")).toBeUndefined();
+      expect(emptyThreadCopy({ machine: "Atlas · Linux", connection: live, resolved: true }).terminal).toBe(true);
+    }
+    expect(terminalOfferReason("Reconnecting", "Atlas · Linux")).toBe("Reconnecting to Atlas · Linux — Terminal view opens once it's back.");
+    expect(terminalOfferReason("Needs pairing", "Atlas · Linux")).toBe("Atlas · Linux needs pairing again before Terminal view can open.");
+    expect(terminalOfferReason("Unreachable · message pending", "Atlas · Linux")).toBe("Atlas · Linux can't be reached — Terminal view opens once it's back.");
+    expect(terminalOfferReason("Reconnecting", undefined)).toBe("Reconnecting to this machine — Terminal view opens once it's back.");
+    for (const lost of ["Reconnecting", "Needs pairing", "Unreachable · message pending"]) {
+      expect(emptyThreadCopy({ machine: "Atlas · Linux", connection: lost, resolved: true }).terminal).toBe(false);
+    }
+  });
+
+  it("is still offered on a first connection, which is on its way rather than lost", () => {
+    expect(terminalOfferReason("Connecting", "Atlas · Linux")).toBeUndefined();
+    expect(terminalOfferReason("Idle", "Atlas · Linux")).toBeUndefined();
+  });
+});
+
+describe("cas-6b75: applyTerminalOffer", () => {
+  it("marks the header's Terminal view unavailable with a spoken reason, and restores it", () => {
+    document.body.innerHTML = conversationHeaderMarkup({ supervisor: "patient-pelican-9", projectDir: "/projects/cas-src", host: "Atlas · Linux", selected: true, loaded: true, paired: true });
+    const button = document.querySelector<HTMLButtonElement>("#conversation-terminal")!;
+    const reason = terminalOfferReason("Reconnecting", "Atlas · Linux")!;
+    applyTerminalOffer(document, reason);
+    applyTerminalOffer(document, reason);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.dataset.disabledReason).toBe(reason);
+    expect(button.title).toBe(reason);
+    expect(document.querySelectorAll("#conversation-terminal-reason")).toHaveLength(1);
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(reason);
+    expect(button.getAttribute("aria-label")).toBe("Terminal view");
+    applyTerminalOffer(document, undefined);
+    expect(button.hasAttribute("aria-disabled")).toBe(false);
+    expect(button.hasAttribute("aria-describedby")).toBe(false);
+    expect(button.hasAttribute("title")).toBe(false);
+    expect(button.dataset.disabledReason).toBeUndefined();
+    expect(document.querySelector("#conversation-terminal-reason")).toBeNull();
   });
 });

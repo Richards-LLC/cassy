@@ -400,6 +400,59 @@ describe("a reload keeps each turn's time (cas-8d52, journey F11)", () => {
     expect(shownLabels(history, later)).toEqual(["09:00", "09:30"]);
   });
 
+  it("marks a live turn on a reload exactly as the visit did (cas-9e33)", () => {
+    const marks = (history: ConversationHistory, now: number) => shownTimes(history.events, now).map((time) => `${clockLabel(time.at)}${time.clockAhead ? " ahead" : ""}`);
+    // The visit: nothing yet says the machine's clock runs ahead, so the live answer shows 12:00 unmarked.
+    const visit = new ConversationHistory();
+    visit.currentSession = "live";
+    visit.receive(reply(7, "answer"), at(12, 0), "live");
+    expect(marks(visit, at(12, 0))).toEqual(["12:00"]);
+    expect(visit.arrivalsRecord().live).toEqual({ "r:7": false });
+    // The reload, three minutes later, rebuilds it from the machine's stamp, 12:05.
+    const reloaded = new ConversationHistory();
+    reloaded.currentSession = "live";
+    reloaded.seedArrivals(visit.arrivalsRecord());
+    reloaded.hydrateReply({ ...reply(7, "answer"), at: iso(at(12, 0) + AHEAD), session: "live" } as never, at(12, 3));
+    expect(marks(reloaded, at(12, 3)), "the reload agrees with the visit").toEqual(["12:00"]);
+    // It still measures the lead, so the next live turn is marked, and that mark survives the next reload too.
+    expect(reloaded.arrivalsRecord().skew).toBe(AHEAD);
+    reloaded.receive(reply(8, "answer"), at(12, 4), "live");
+    expect(marks(reloaded, at(12, 4))).toEqual(["12:00", "12:04 ahead"]);
+    expect(reloaded.arrivalsRecord().live).toEqual({ "r:7": false, "r:8": true });
+    const again = new ConversationHistory();
+    again.currentSession = "live";
+    again.seedArrivals(reloaded.arrivalsRecord());
+    again.hydrateReply({ ...reply(7, "answer"), at: iso(at(12, 0) + AHEAD), session: "live" } as never, at(12, 9));
+    again.hydrateReply({ ...reply(8, "answer"), at: iso(at(12, 4) + AHEAD), session: "live" } as never, at(12, 9));
+    expect(marks(again, at(12, 9))).toEqual(["12:00", "12:04 ahead"]);
+    // A turn never seen live, or a record from before cas-9e33, is still marked from its stamp.
+    const legacy = new ConversationHistory();
+    legacy.currentSession = "live";
+    legacy.seedArrivals({ at: visit.arrivalsRecord().at });
+    legacy.hydrateReply({ ...reply(7, "answer"), at: iso(at(12, 0) + AHEAD), session: "live" } as never, at(12, 3));
+    expect(marks(legacy, at(12, 3))).toEqual(["12:00 ahead"]);
+  });
+
+  it("dates the thread's activity by the time it shows, not the machine's stamp (cas-24fe)", () => {
+    const visit = new ConversationHistory();
+    visit.currentSession = "live";
+    visit.receive(reply(7, "answer"), at(12, 0), "live");
+    expect(visit.lastActivityAt()).toBe(at(12, 0));
+    // After a reload the turn comes back stamped five minutes ahead; the row still dates it 12:00.
+    const reloaded = new ConversationHistory();
+    reloaded.currentSession = "live";
+    reloaded.seedArrivals(visit.arrivalsRecord());
+    reloaded.hydrateReply({ ...reply(7, "answer"), at: iso(at(12, 0) + AHEAD), session: "live" } as never, at(12, 3));
+    expect(reloaded.lastActivityAt()).toBe(at(12, 0));
+    // A live turn sorted after a future-stamped one keeps its own arrival.
+    reloaded.receive(reply(8, "answer"), at(12, 4), "live");
+    expect(reloaded.lastActivityAt()).toBe(at(12, 4));
+    // A message that never reached the machine does not date the row (cas-b00c).
+    reloaded.submit("c1", "sup", "Still there?", at(12, 6), undefined, "live");
+    expect(reloaded.lastActivityAt()).toBe(at(12, 4));
+    expect(new ConversationHistory().lastActivityAt()).toBeUndefined();
+  });
+
   it("keeps a turn first shown from history at that time on the next reload", () => {
     // First visit at 09:02: an old blocker stamped 09:05 by a clock five minutes ahead shows 09:02.
     const first = new ConversationHistory();

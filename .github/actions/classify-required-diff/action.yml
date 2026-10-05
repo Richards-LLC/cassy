@@ -90,6 +90,23 @@ runs:
             ;;
         esac
 
+        # Match the web gate's conservative input hash: web tests import/read
+        # repo-level scripts (notably scripts/visual-qa.mjs), not just hub-web/.
+        # Decide coverage by paths independently of Rust's class, including
+        # Markdown fixtures. An unavailable diff must still run the checks.
+        web_check_needed=true
+        if [[ -n "${merge_base:-}" ]]; then
+          if web_diff="$(git diff --name-only "$merge_base" HEAD -- hub-web scripts .github)"; then
+            [[ -n "$web_diff" ]] || web_check_needed=false
+          else
+            echo "::warning title=CI web check::Could not diff web test inputs; running their checks"
+          fi
+        fi
+        if [[ "$web_check_needed" == true && "$class" == docs-only ]]; then
+          # Job-level docs-only gates would otherwise skip this signaled work.
+          class=hub-web-only
+        fi
+
         # The Slack bridge is decided by changed paths, not by class: a mixed
         # Rust + bridge diff must still run the bridge's own tests. Uncertainty
         # runs them, matching the Rust tier's fail-closed default.

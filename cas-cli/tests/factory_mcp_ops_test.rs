@@ -475,6 +475,7 @@ fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
         action: action.to_string(),
         id: None,
+        name: None,
         count: None,
         accept: None,
         limit: None,
@@ -482,6 +483,8 @@ fn factory_req(action: &str) -> FactoryRequest {
         summary: None,
         worker_names: None,
         task_id: None,
+        status: None,
+        owner: None,
         delivery_mode: None,
         target: None,
         message: None,
@@ -571,6 +574,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cross_session: None,
         all: None,
         status: None,
+        owner: None,
         orphans: None,
         dry_run: None,
         command: None,
@@ -2726,33 +2730,164 @@ async fn test_recycle_worker_preserves_name_worktree_and_recipe() {
     assert_eq!(spec.config_dir.as_deref(), Some(account_dir.to_str().unwrap()));
 }
 
-/// GH #889: recycling must not turn an in-progress task into a silent worker
-/// loss. The preflight refusal must leave both queue rows absent.
-#[tokio::test]
-async fn test_recycle_worker_refuses_in_progress_task() {
-    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle-busy")]);
-    let env = FactoryTestEnv::new();
-    let worker_id = env.register_worker_in_session("busy-worker", "session-recycle-busy");
-    let mut task = Task::new("cas-recycle-busy".to_string(), "busy task".to_string());
-    task.status = TaskStatus::InProgress;
-    task.assignee = Some("busy-worker".to_string());
-    env.task_store().add(&task).expect("add task");
-    env.agent_store()
-        .try_claim(&task.id, &worker_id, 600, Some("working"))
-        .expect("claim task")
-        .is_success();
+/// A worker checkout whose `factory/<worker>` branch is pushed to a bare
+/// `origin`, so the push-branch safety probe sees `unpushed_commits=0`
+/// (cas-a622).
+fn init_pushed_worker_repo(env: &FactoryTestEnv, worker: &str) -> PathBuf {
+    let worker_path = init_sync_repo(env, worker);
+    let origin = env.cas_root.join(format!("{worker}-origin.git"));
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(
+        env.cas_root.parent().expect("project root"),
+        &["init", "--bare", origin.to_str().unwrap()],
+    );
+    git(&worker_path, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&worker_path, &["push", "-q", "origin", &format!("factory/{worker}")]);
+    worker_path
+}
 
-    let mut req = factory_req("recycle_worker");
-    req.target = Some("busy-worker".to_string());
-    let error = env
-        .service
-        .factory_request(Parameters(req))
-        .await
-        .expect_err("in-progress worker must not be recycled");
-    assert!(error.message.contains("force=true"), "{error:?}");
+fn register_codex_worker_at(env: &FactoryTestEnv, name: &str, session: &str, path: &std::path::Path) -> String {
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), path.display().to_string());
+    metadata.insert("worker_cli".to_string(), "codex".to_string());
+    let worker_id = env.register_worker_with_metadata(name, metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some(session.to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+    worker_id
+}
+
+/// cas-a622: a clean, pushed worker holding nonterminal tasks must be
+/// refreshable. Observed: wise-raven-87 (Codex, clean, 0 unpushed) asked for a
+/// context refresh under 20% context and `clear_context` refused — with and
+/// without force=true — because it held an in-progress task. Recycling keeps
+/// every task binding and the worktree, so holding work is not a reason to
+/// refuse; the request must be queued and the tasks left exactly as they were.
+#[tokio::test]
+async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_cas_a622() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "wise-raven");
+    let worker_id = register_codex_worker_at(&env, "wise-raven", "session-a622", &worker_path);
+    let held = [
+        ("cas-e0be", TaskStatus::InProgress),
+        ("cas-7cb3", TaskStatus::AwaitingMerge),
+        ("cas-ed87", TaskStatus::Open),
+        ("cas-96c0", TaskStatus::Blocked),
+    ];
+    for (id, status) in held {
+        let mut task = Task::new(id.to_string(), format!("task {id}"));
+        task.status = status;
+        task.assignee = Some("wise-raven".to_string());
+        env.task_store().add(&task).expect("add task");
+    }
+    assert!(
+        env.agent_store()
+            .try_claim("cas-e0be", &worker_id, 600, Some("working"))
+            .expect("claim in-progress task")
+            .is_success()
+    );
+
+    for force in [None, Some(true)] {
+        let mut req = factory_req("clear_context");
+        req.target = Some("wise-raven".to_string());
+        req.force = force;
+        let text = get_text(
+            &env.service
+                .factory_request(Parameters(req))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("force={force:?}: a clean, pushed worker must be refreshable: {}", error.message)
+                }),
+        );
+        assert!(text.contains("recycle") && text.contains("wise-raven"), "{text}");
+        let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
+        assert_eq!(entries.len(), 1, "force={force:?}: one recycle request");
+        assert_eq!(entries[0].action, cas_store::SpawnAction::Recycle);
+        assert_eq!(entries[0].worker_names, vec!["wise-raven"]);
+        // Drain it so the second iteration is not refused as already queued.
+        env.spawn_queue().mark_processed(entries[0].id).expect("drain request");
+    }
+
+    for (id, status) in held {
+        let task = env.task_store().get(id).expect("task");
+        assert_eq!(task.assignee.as_deref(), Some("wise-raven"), "{id} keeps its assignee");
+        assert_eq!(task.status, status, "{id} keeps its status");
+    }
+    assert!(worker_path.join("README").is_file(), "the worktree is kept");
+}
+
+/// GH #1098: a delivered, parked task alone must not block a context reset.
+#[tokio::test]
+async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-1098")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "parked-worker");
+    register_codex_worker_at(&env, "parked-worker", "session-1098", &worker_path);
+    let mut task = Task::new("cas-parked1098".into(), "Delivered task".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("parked-worker".into());
+    env.task_store().add(&task).unwrap();
+    let mut req = factory_req("clear_context");
+    req.target = Some("parked-worker".into());
+    let result = env.service.factory_request(Parameters(req)).await
+        .expect("a clean pushed worker with only parked work can reset");
+    assert!(get_text(&result).contains("recycle"));
+    assert_eq!(env.spawn_queue().peek(10).unwrap()[0].action, cas_store::SpawnAction::Recycle);
+    let after = env.task_store().get(&task.id).unwrap();
+    assert_eq!(after.status, task.status);
+    assert_eq!(after.assignee, task.assignee);
+}
+
+/// cas-a622: unsaved work still refuses a recycle, and the refusal names what
+/// to do instead of suggesting a `force=true` that recycling never honours.
+#[tokio::test]
+async fn test_recycle_worker_refuses_unpushed_commits_without_suggesting_force_cas_a622() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "ahead-worker");
+    std::fs::write(worker_path.join("local.txt"), "not pushed\n").expect("write");
+    for args in [&["add", "local.txt"][..], &["commit", "-qm", "local only"][..]] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&worker_path)
+            .status()
+            .expect("git");
+        assert!(status.success());
+    }
+    register_codex_worker_at(&env, "ahead-worker", "session-a622-unpushed", &worker_path);
+
+    for force in [None, Some(true)] {
+        let mut req = factory_req("recycle_worker");
+        req.target = Some("ahead-worker".to_string());
+        req.force = force;
+        let error = env
+            .service
+            .factory_request(Parameters(req))
+            .await
+            .expect_err("an unpushed worker must not be recycled");
+        assert!(error.message.contains("unpushed_commits=1"), "{error:?}");
+        assert!(
+            !error.message.contains("force=true"),
+            "the refusal must not suggest a flag that cannot work: {error:?}"
+        );
+        assert!(error.message.contains("push"), "the refusal says what to do: {error:?}");
+    }
     assert!(
         env.spawn_queue().peek(10).expect("peek queue").is_empty(),
-        "refusal must not queue shutdown or spawn"
+        "refusal must not queue a lifecycle action"
     );
 }
 
@@ -2776,7 +2911,11 @@ async fn test_recycle_worker_refuses_dirty_worktree() {
         .factory_request(Parameters(req))
         .await
         .expect_err("dirty worker must not be recycled");
-    assert!(error.message.contains("force=true"), "{error:?}");
+    assert!(error.message.contains("dirty_files=1"), "{error:?}");
+    assert!(
+        !error.message.contains("force=true"),
+        "cas-a622: the refusal must not suggest a flag that cannot work: {error:?}"
+    );
     assert!(
         env.spawn_queue().peek(10).expect("peek queue").is_empty(),
         "dirty refusal must not queue a lifecycle action"
@@ -5511,8 +5650,8 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
 
 }
 
-// Target-cache process liveness is implemented with Linux `/proc`; other
-// platforms intentionally fail closed and cannot select a cache for cleanup.
+// Linux reclamation requires readable process evidence; unavailable evidence
+// must remain visible through the public JSON and preserve every fixture byte.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
@@ -5522,11 +5661,75 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("artifact.rlib"), vec![0u8; 64]).unwrap();
     std::fs::write(worker.join("source.rs"), b"source").unwrap();
+    let source = std::fs::read(worker.join("source.rs")).unwrap();
+    let artifact = std::fs::read(target.join("artifact.rlib")).unwrap();
     std::fs::write(
         env.cas_root.join("config.toml"),
         "[factory]\ntarget_cache_high_watermark_percent = 1\ntarget_cache_low_watermark_percent = 0\ntarget_cache_min_idle_secs = 0\ntarget_cache_retention_count = 0\n",
     )
     .unwrap();
+
+    // Probe a separate, fresh, unregistered cache with no retained handles or
+    // fixture processes. A live result here establishes unavailable visibility,
+    // independently of genuine liveness in the actual MCP worker below. With
+    // readable visibility, an accidentally live MCP fixture must fail selection.
+    let baseline = TempDir::new().unwrap();
+    let baseline_root = baseline.path().join(".cas");
+    let baseline_worker = baseline_root.join("worktrees/capability-probe");
+    let baseline_cache = baseline_worker.join("target");
+    std::fs::create_dir_all(&baseline_cache).unwrap();
+    std::fs::write(baseline_cache.join("probe"), b"x").unwrap();
+    use cas::factory_target_cache::{CacheDisposition, TargetCachePolicy};
+    let native = cas::factory_target_cache::inspect(
+        &baseline_root,
+        TargetCachePolicy {
+            high_watermark_percent: 1,
+            low_watermark_percent: 0,
+            min_idle_secs: 0,
+            retention_count: 0,
+        },
+        &[],
+        &[],
+        true,
+    )
+    .unwrap();
+    assert_eq!(native.caches.len(), 1);
+    assert_eq!(native.candidate_bytes, 1);
+    assert_eq!(native.caches[0].bytes, 1);
+    assert_eq!(
+        native.caches[0].path,
+        baseline_cache.canonicalize().unwrap()
+    );
+    assert_ne!(native.caches[0].worktree, worker.canonicalize().unwrap());
+    let reclaim = match native.caches[0].disposition {
+        CacheDisposition::Selected => true,
+        CacheDisposition::LiveProcess => {
+            eprintln!(
+                "RECLAIM PROOF UNAVAILABLE: separate idle capability fixture has unverifiable native process evidence; actual MCP fixture must preserve source/cache bytes and JSON status. LiveProcess does not prove an observed process."
+            );
+            false
+        }
+        other => panic!("unexpected native GC fixture state: {other:?}"),
+    };
+    assert_eq!(native.selected_bytes, if reclaim { 1 } else { 0 });
+    assert_eq!(native.reclaimed_bytes, 0);
+    assert_eq!(std::fs::read(baseline_cache.join("probe")).unwrap(), b"x");
+    let disposition = if reclaim { "selected" } else { "live_process" };
+    let cache_path = worker.join("target").canonicalize().unwrap();
+    let assert_preserved = || {
+        assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
+        assert_eq!(
+            std::fs::read(target.join("artifact.rlib")).unwrap(),
+            artifact
+        );
+    };
+    fn status(text: &str) -> serde_json::Value {
+        let machine = text
+            .lines()
+            .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
+            .expect("machine-readable target-cache status line");
+        serde_json::from_str(machine).expect("valid status JSON")
+    }
 
     let report = env
         .service
@@ -5538,40 +5741,78 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
         report_text.contains("TARGET_CACHE_STATUS_JSON="),
         "{report_text}"
     );
-    let machine = report_text
-        .lines()
-        .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
-        .expect("machine-readable target-cache status line");
-    let machine: serde_json::Value = serde_json::from_str(machine).expect("valid status JSON");
+    let machine = status(&report_text);
     assert_eq!(machine["schema_version"], 1);
     assert_eq!(machine["dry_run"], true);
+    assert_eq!(machine["candidate_bytes"], 64);
+    assert_eq!(machine["selected_bytes"], if reclaim { 64 } else { 0 });
+    assert_eq!(machine["reclaimed_bytes"], 0);
+    assert_eq!(machine["caches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        machine["caches"][0]["path"],
+        serde_json::to_value(&cache_path).unwrap()
+    );
+    assert_eq!(machine["caches"][0]["bytes"], 64);
+    assert_eq!(machine["caches"][0]["disposition"], disposition);
     assert!(
         report_text.contains(&worker.join("target").display().to_string()),
         "dry-run must report the exact cache path: {report_text}"
     );
     assert!(report_text.contains("bytes=64"), "{report_text}");
+    assert_preserved();
 
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
     let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
     let preview_text = get_text(&preview);
     assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
-    assert!(
-        worker.join("target").exists(),
-        "omitted dry_run must not delete"
+    let preview_status = status(&preview_text);
+    assert_eq!(preview_status["schema_version"], 1);
+    assert_eq!(preview_status["dry_run"], true);
+    assert_eq!(preview_status["candidate_bytes"], 64);
+    assert_eq!(
+        preview_status["selected_bytes"],
+        if reclaim { 64 } else { 0 }
     );
+    assert_eq!(preview_status["reclaimed_bytes"], 0);
+    assert_eq!(preview_status["caches"][0]["disposition"], disposition);
+    assert_preserved(); // force alone/omitted dry_run never deletes.
 
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let cleanup = env.service.factory_request(Parameters(cleanup)).await.unwrap();
     let cleanup_text = get_text(&cleanup);
-    assert!(
-        cleanup_text.contains("reclaimed_bytes=64"),
-        "{cleanup_text}"
+    assert!(cleanup_text.contains("mode=cleanup"), "{cleanup_text}");
+    let cleaned = status(&cleanup_text);
+    assert_eq!(cleaned["schema_version"], 1);
+    assert_eq!(cleaned["dry_run"], false);
+    assert_eq!(cleaned["candidate_bytes"], 64);
+    assert_eq!(cleaned["selected_bytes"], if reclaim { 64 } else { 0 });
+    assert_eq!(cleaned["reclaimed_bytes"], if reclaim { 64 } else { 0 });
+    assert_eq!(cleaned["caches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        cleaned["caches"][0]["path"],
+        serde_json::to_value(&cache_path).unwrap()
     );
-    assert!(!worker.join("target").exists());
-    assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), b"source");
+    assert_eq!(cleaned["caches"][0]["bytes"], 64);
+    assert_eq!(
+        cleaned["caches"][0]["disposition"],
+        if reclaim { "reclaimed" } else { "live_process" }
+    );
+    assert_eq!(worker.join("target").exists(), !reclaim);
+    if !reclaim {
+        assert_preserved();
+        assert!(cleanup_text.contains("state=LiveProcess"), "{cleanup_text}");
+        assert_eq!(
+            cleaned["caches"][0]["reason"],
+            "registered or OS-visible live process uses this worktree"
+        );
+        eprintln!(
+            "RECLAIM PROOF UNAVAILABLE: raw actual-fixture status (ambiguous live/unknown reason, not an observed-process claim): {cleanup_text}"
+        );
+    }
+    assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
 }
 
 // =============================================================================
@@ -5592,8 +5833,8 @@ async fn test_gc_cleanup_without_force() {
 
     let text = get_text(&result.unwrap());
     assert!(
-        text.contains("Prompt queue entries cleared: 0"),
-        "Should NOT clear prompts without force: {text}"
+        text.contains("Prompt queue entries pruned: 0"),
+        "Should NOT prune prompts without force: {text}"
     );
     assert!(
         text.contains("Orphan worker process groups reaped: 0"),
@@ -5631,13 +5872,37 @@ async fn test_gc_cleanup_removes_only_stale_skill_markers_and_invalid_bare_marke
     assert!(current.exists(), "live session marker must be preserved");
 }
 
+/// cas-9d8a: `force=true` without `older_than_secs` is a retention sweep, not
+/// an all-history clear. Terminal rows older than the window go; recent
+/// forensics, pending rows and relay episode rows stay.
 #[tokio::test]
-async fn test_gc_cleanup_with_force() {
+async fn test_gc_cleanup_with_force_prunes_by_retention_window() {
     let env = FactoryTestEnv::new();
 
     let pq = env.prompt_queue();
-    pq.enqueue("src", "wolf", "test1").expect("enqueue");
-    pq.enqueue("src", "fox", "test2").expect("enqueue");
+    let pending = pq.enqueue("src", "wolf", "still pending").expect("enqueue");
+    let old_a = pq.enqueue("src", "fox", "old delivered").expect("enqueue");
+    let old_b = pq.enqueue("src", "fox", "old acked").expect("enqueue");
+    let recent = pq.enqueue("src", "fox", "recent delivered").expect("enqueue");
+    let episode = match pq
+        .enqueue_idempotent("daemon", "supervisor", "relay", None, None, None, "lifecycle-relay:old", None)
+        .unwrap()
+    {
+        cas_store::EnqueueIdempotentResult::Created(id) => id,
+        other => panic!("{other:?}"),
+    };
+    {
+        let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+        let aged = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        let fresh = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        for (id, at) in [(old_a, &aged), (old_b, &aged), (episode, &aged), (recent, &fresh)] {
+            conn.execute(
+                "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
+                rusqlite::params![at, id],
+            )
+            .unwrap();
+        }
+    }
 
     let mut req = factory_req("gc_cleanup");
     req.force = Some(true);
@@ -5647,11 +5912,16 @@ async fn test_gc_cleanup_with_force() {
 
     let text = get_text(&result.unwrap());
     assert!(
-        text.contains("Prompt queue entries cleared: 2"),
-        "Should clear prompts with force: {text}"
+        text.contains("Prompt queue entries pruned: 2 (terminal rows older than 7 days)"),
+        "force prunes only aged terminal rows: {text}"
     );
-
-    assert_eq!(pq.pending_count().expect("count"), 0);
+    assert!(text.contains("Prompt queue episode rows retained: 1"), "{text}");
+    assert_eq!(pq.pending_count().expect("count"), 1, "pending rows are never pruned");
+    assert!(pq.message_delivery_report(pending).unwrap().is_some());
+    assert!(pq.message_delivery_report(recent).unwrap().is_some(), "recent forensics stay");
+    assert!(pq.message_delivery_report(episode).unwrap().is_some(), "episode rows stay");
+    assert!(pq.message_delivery_report(old_a).unwrap().is_none());
+    assert!(pq.message_delivery_report(old_b).unwrap().is_none());
 }
 
 #[tokio::test]
@@ -5671,7 +5941,7 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
         "targeted remediation must report terminalized rows: {text}"
     );
     assert!(
-        text.contains("Prompt queue entries cleared: 0"),
+        text.contains("Prompt queue entries pruned: 0"),
         "age-targeted remediation must preserve history: {text}"
     );
     assert_eq!(pq.pending_count().unwrap(), 0);
@@ -6200,6 +6470,7 @@ fn coord_msg(
         cross_session: None,
         all: None,
         status: None,
+        owner: None,
         orphans: None,
         dry_run: None,
         command: None,
@@ -6863,6 +7134,141 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
     assert!(
         !close_text.contains("WORK HALTED"),
         "answered urgent must not leave a collateral halt: {close_text}"
+    );
+}
+
+/// cas-4a8e1 (GH #1064): a supervisor interrupts a worker, which answers with
+/// an ordinary message (not message_ack). That reply discharges the halt, so
+/// a later unrelated close is not refused with WORK HALTED. Before the reply,
+/// the refusal names the interrupt's notification id and the exact ack.
+#[tokio::test]
+async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_close() {
+    let mut role_guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_AGENT_NAME", Some("supervisor")),
+        ("CAS_SUPERVISOR_NAME", Some("supervisor")),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker_id = env.register_worker("swift-fox");
+
+    let interrupt = coord_msg("interrupt", "swift-fox", "Stop and tell me where cas-12b5 stands", None);
+    let error = env
+        .service
+        .coordination(Parameters(interrupt))
+        .await
+        .expect_err("the fixture has no live Claude pane to confirm");
+    assert!(
+        error.message.contains("Could not confirm Claude interrupt delivery"),
+        "unexpected interrupt error: {}",
+        error.message
+    );
+    let interrupt_id = env
+        .prompt_queue()
+        .peek_all(10)
+        .expect("peek")
+        .into_iter()
+        .next()
+        .expect("interrupt row")
+        .id;
+    assert!(env.worker_halted("swift-fox"), "the interrupt must arm the halt");
+
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing(worker_id);
+    let worker_service = CasService::new(worker_core, None);
+    role_guard._guard.set("CAS_AGENT_ROLE", "worker");
+    role_guard._guard.set("CAS_AGENT_NAME", "swift-fox");
+
+    let task_id = env.task_store().generate_id().expect("task id");
+    let mut task = Task::new(task_id.clone(), "unrelated merged work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("someone-else".to_string());
+    env.task_store().add(&task).expect("add unrelated task");
+    let close = |reason: &str| cas::mcp::tools::TaskCloseRequest {
+        stranded_branch_override: None,
+        id: task_id.clone(),
+        reason: Some(reason.to_string()),
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
+
+    // Still halted: the refusal names this interrupt and the exact ack.
+    let refused = worker_service
+        .inner
+        .cas_task_close(Parameters(close("before answering")))
+        .await
+        .expect_err("an unanswered interrupt still halts close");
+    assert!(refused.message.contains("WORK HALTED"), "{}", refused.message);
+    assert!(
+        refused.message.contains(&format!("notification {interrupt_id}"))
+            && refused
+                .message
+                .contains(&format!("action=message_ack notification_id={interrupt_id}")),
+        "the refusal names the notification and the exact ack: {}",
+        refused.message
+    );
+
+    // The interrupt reaches the worker's pane; the worker reads it and answers
+    // with an ordinary message, as keen-cobra-50 did.
+    env.prompt_queue()
+        .mark_transport_delivered(interrupt_id)
+        .expect("deliver interrupt");
+    worker_service
+        .coordination(Parameters(coord_msg(
+            "message",
+            "supervisor",
+            "cas-12b5: tests green, closing next",
+            None,
+        )))
+        .await
+        .expect("worker reply");
+    assert!(
+        !env.worker_halted("swift-fox"),
+        "an ordinary reply after the interrupt reached the worker discharges the halt"
+    );
+
+    let closed = worker_service
+        .inner
+        .cas_task_close(Parameters(close("already merged before the interrupt")))
+        .await
+        .expect("the answered interrupt must allow the later close to proceed");
+    let text = get_text(&closed);
+    assert!(!text.contains("WORK HALTED"), "no collateral halt: {text}");
+}
+
+/// cas-4a8e1: a reply written before the interrupt reached the worker cannot
+/// have answered it, so the halt stays.
+#[tokio::test]
+async fn cas_4a8e1_reply_before_the_interrupt_reached_the_worker_keeps_the_halt() {
+    let mut role_guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_AGENT_NAME", Some("supervisor")),
+        ("CAS_SUPERVISOR_NAME", Some("supervisor")),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker_id = env.register_worker("swift-fox");
+    let _ = env
+        .service
+        .coordination(Parameters(coord_msg("interrupt", "swift-fox", "Stop now", None)))
+        .await;
+    assert!(env.worker_halted("swift-fox"), "the interrupt must arm the halt");
+
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing(worker_id);
+    let worker_service = CasService::new(worker_core, None);
+    role_guard._guard.set("CAS_AGENT_ROLE", "worker");
+    role_guard._guard.set("CAS_AGENT_NAME", "swift-fox");
+    // Never handed to the worker: still pending when it writes.
+    worker_service
+        .coordination(Parameters(coord_msg("message", "supervisor", "status: still running tests", None)))
+        .await
+        .expect("worker message");
+    assert!(
+        env.worker_halted("swift-fox"),
+        "a message the worker wrote before the interrupt reached it must not discharge it"
     );
 }
 

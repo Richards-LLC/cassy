@@ -20,10 +20,12 @@ fn record(name: &str, shared: bool) -> RegisteredServer {
         expected_port: Some(5173),
         owner_task: Some("cas-7c93".to_string()),
         owner_worker: Some("young-finch-81".to_string()),
+        owner_agent_id: None,
         factory_session: Some("session-a".to_string()),
         shared,
         cgroup: None,
         log_path: None,
+        docker: None,
         started_at: Utc::now(),
         state: ServerState::Running,
         ended_at: None,
@@ -116,6 +118,82 @@ fn a_stopped_entry_keeps_its_own_state_label() {
 }
 
 #[test]
+fn cas_ced2_server_rows_are_single_line_and_bounded() {
+    let mut server = record("web", true);
+    server.name = "界\n".repeat(2000);
+    server.id = "界\r".repeat(2000);
+    server.command = "界\t".repeat(2000);
+    server.cwd = std::path::PathBuf::from("界\n".repeat(2000));
+    server.owner_worker = Some("界\n".repeat(2000));
+    server.owner_task = Some("界\n".repeat(2000));
+    let ports: Vec<_> = (1..=1000).collect();
+    let line = render_server_line(&server, ServerLiveness::Live, &ports);
+    assert_eq!(line.lines().count(), 1, "a server must occupy one line");
+    assert!(line.len() <= 512, "row emitted {} bytes", line.len());
+    assert!(!line.contains(['\r', '\t']));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn cas_ced2_server_list_caps_running_and_excludes_unverified() {
+    use crate::mcp::{CasCore, CasService};
+    use rmcp::model::RawContent;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let service = CasService::new(CasCore::with_daemon(root.clone(), None, None), None);
+    let pid = std::process::id();
+    let starttime =
+        crate::mcp::daemon::read_pid_starttime(pid).expect("current process fingerprint");
+    for i in 0..25 {
+        let mut server = record(&format!("live-{i}"), true);
+        server.pid = pid;
+        server.pgid = None;
+        server.pid_starttime = Some(starttime);
+        server_registry::write_record(&root, &server).unwrap();
+    }
+    let mut unverified = record("unverified-server", true);
+    unverified.pid = pid;
+    unverified.pid_starttime = None;
+    server_registry::write_record(&root, &unverified).unwrap();
+    let text = |result: CallToolResult| {
+        result
+            .content
+            .into_iter()
+            .filter_map(|c| match c.raw {
+                RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let req = serde_json::from_value(serde_json::json!({"action": "server_list"})).unwrap();
+    let listed = text(service.factory_server_list(req).await.unwrap());
+    assert_eq!(
+        listed.lines().filter(|line| line.starts_with("  ")).count(),
+        20,
+        "{listed}"
+    );
+    assert!(listed.contains("Showing 20 of 25 matches"), "{listed}");
+    assert!(!listed.contains("unverified-server"), "{listed}");
+
+    let req = serde_json::from_value(
+        serde_json::json!({"action": "server_list", "status": "unverified"}),
+    )
+    .unwrap();
+    let listed = text(service.factory_server_list(req).await.unwrap());
+    assert!(
+        listed.contains("unverified-server") && listed.contains("unverified"),
+        "{listed}"
+    );
+    assert_eq!(
+        listed.lines().filter(|line| line.starts_with("  ")).count(),
+        1,
+        "{listed}"
+    );
+}
+
+#[test]
 fn default_names_come_from_the_command_and_are_filename_safe() {
     assert_eq!(default_server_name("npm run dev"), "npm-run");
     assert_eq!(default_server_name("cargo watch -x run"), "cargo-watch");
@@ -127,4 +205,51 @@ fn default_names_come_from_the_command_and_are_filename_safe() {
     assert_eq!(default_server_name("///"), "server");
     assert_eq!(default_server_name(""), "server");
     assert!(!default_server_name("../../etc/passwd").contains('/'));
+}
+
+#[test]
+fn cas_7694_names_ignore_environment_prefixes() {
+    for command in [
+        "PORT=4000 npm run dev",
+        "env -i PORT=4000 npm run dev",
+        "PORT=4000 LABEL='hello world' npm run dev",
+    ] {
+        assert_eq!(
+            default_server_name(command),
+            default_server_name("npm run dev"),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn cas_9723_server_ownership_rejects_identity_and_session_reuse() {
+    use crate::types::{Agent, AgentRole};
+    let mut server = record("owned", true);
+    let mut caller = Agent::new_with_role(
+        "worker-id".into(),
+        "young-finch-81".into(),
+        AgentRole::Worker,
+    );
+    caller.factory_session = server.factory_session.clone();
+    assert!(
+        owns_server(&server, &caller),
+        "legacy matching name and session remain stoppable"
+    );
+    caller.factory_session = Some("different-session".into());
+    assert!(!owns_server(&server, &caller));
+    caller.factory_session = server.factory_session.clone();
+    server.owner_agent_id = Some(caller.id.clone());
+    assert!(owns_server(&server, &caller));
+    caller.id = "replacement-id".into();
+    assert!(
+        !owns_server(&server, &caller),
+        "same-name replacement cannot stop the original owner's server"
+    );
+    server.owner_worker = None;
+    server.owner_agent_id = None;
+    assert!(
+        !owns_server(&server, &caller),
+        "unowned legacy entries are supervisor-only"
+    );
 }

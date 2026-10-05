@@ -35,7 +35,6 @@ const SYSTEMD_FORCE_RESTART_SIGNALS: &str = "SIGHUP SIGINT SIGPIPE";
 // one is running and (re)starts the installed service.
 pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str = "service installed but inactive, detached hub running without restart supervision. Fix: run `cas hub restart` to hand the hub back to the service";
 pub(crate) const INACTIVE_SERVICE_NO_HUB_ERROR: &str = "service installed but inactive, and no hub is running. Fix: run `cas hub restart` to start the hub under the service";
-const LAUNCHD_TAILSCALE_REFUSAL: &str = "`cas hub service install --tailscale-serve` is not supported for launchd: Tailscale Serve needs the interactive user's GUI namespace, while launchd starts in its bootstrap namespace. Install the loopback-only service with `cas hub service install`, or run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell when Commander pairing needs a public URL.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServicePlatform {
@@ -205,9 +204,6 @@ fn install(
     }
     match platform {
         ServicePlatform::Launchd => {
-            if tailscale_serve {
-                anyhow::bail!("{LAUNCHD_TAILSCALE_REFUSAL}");
-            }
             let path = launchd_path()?;
             let binary = service_binary(dry_run)?;
             let definition =
@@ -301,28 +297,22 @@ pub(super) fn restart_supervised(
                 ["print", &format!("{domain}/{}", launchd_label())],
             );
             let definition = fs::read_to_string(&path)?;
-            let service_tailscale = definition.contains("--tailscale-serve");
-            let rewritten = if service_publication_repair_needed(tailscale_serve, service_tailscale)
-            {
-                rewrite_launchd_publication_flags(&definition, true, tailscale_port)?
-            } else {
-                ensure_launchd_cli_environment(&definition)?
-            };
-            let rewritten = (rewritten != definition).then_some(rewritten);
+            let rewritten =
+                rewrite_launchd_publication_flags(&definition, tailscale_serve, tailscale_port)?;
             let paths = HubRuntimePaths::default_for_user()?;
             stop_detached_hub_if_present(cli, &paths, active)?;
             let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
-            if let Some(rewritten) = rewritten {
-                if active {
-                    run_manager_vec("launchctl", &launchd_bootout_args(&domain, &path))?;
-                }
-                write_service_file(&path, &rewritten)?;
-                run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
-            } else if !active {
-                run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
+            // update may already have rewritten the file. Always reload the
+            // job so launchd cannot keep cached ProgramArguments from before it.
+            if active {
+                run_manager_vec("launchctl", &launchd_bootout_args(&domain, &path))?;
             }
+            if rewritten != definition {
+                write_service_file(&path, &rewritten)?;
+            }
+            run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
             run_manager_vec("launchctl", &launchd_kickstart_args(&domain))?;
-            wait_for_supervised_hub(previous_pid, tailscale_serve || service_tailscale)?;
+            wait_for_supervised_hub(previous_pid, tailscale_serve)?;
             Ok(true)
         }
         ServicePlatform::Systemd => {
@@ -331,10 +321,7 @@ pub(super) fn restart_supervised(
                 return Ok(false);
             }
             capture_launch_profiles_best_effort(cli);
-            let service_tailscale = service_file_requests_tailscale(&path)?;
-            if service_publication_repair_needed(tailscale_serve, service_tailscale) {
-                repair_systemd_publication_flags(&path, tailscale_port)?;
-            }
+            repair_systemd_publication_flags(&path, tailscale_serve, tailscale_port)?;
             refresh_systemd_unit(&path)?;
             let paths = HubRuntimePaths::default_for_user()?;
             let active = command_succeeds(
@@ -344,7 +331,7 @@ pub(super) fn restart_supervised(
             stop_detached_hub_if_present(cli, &paths, active)?;
             let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
             run_manager("systemctl", ["--user", "restart", SYSTEMD_UNIT], None)?;
-            wait_for_supervised_hub(previous_pid, tailscale_serve || service_tailscale)?;
+            wait_for_supervised_hub(previous_pid, tailscale_serve)?;
             Ok(true)
         }
         ServicePlatform::ManualLinux => {
@@ -442,7 +429,7 @@ fn rewrite_launchd_publication_flags(
     let mut rewritten_args = Vec::new();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
-        if arg == "--tailscale-serve" {
+        if arg == "--tailscale-serve" || arg == "--no-tailscale-serve" {
             continue;
         }
         if arg == "--tailscale-serve-port" {
@@ -460,6 +447,8 @@ fn rewrite_launchd_publication_flags(
             "--tailscale-serve-port".to_owned(),
             tailscale_port.to_string(),
         ]);
+    } else {
+        rewritten_args.push("--no-tailscale-serve".to_owned());
     }
     let array = rewritten_args
         .iter()
@@ -539,15 +528,6 @@ fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
     ))
 }
 
-fn service_publication_repair_needed(requested: bool, configured: bool) -> bool {
-    // The CLI boolean is additive: bare `restart` does not mean "turn Serve off".
-    // Lifecycle also recovers intent from the owned receipt. Systemd repairs
-    // only the false -> true case, so launchd must preserve an existing route
-    // when the request is false as well. Reinstalling a loopback-only service
-    // is the explicit flag-off operation today.
-    requested && !configured
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum DetachedTakeover {
     None,
@@ -591,10 +571,123 @@ fn describe_holders(holders: &[HubLockHolder]) -> String {
         .join(", ")
 }
 
-fn repair_systemd_publication_flags(path: &Path, tailscale_port: u16) -> Result<()> {
-    let binary = systemd_service_binary(path)?;
-    write_service_file(path, &systemd_unit(&binary, true, tailscale_port))?;
-    run_manager("systemctl", ["--user", "daemon-reload"], None)
+/// Preserve quoted tokens verbatim: decoding/re-escaping would also change
+/// systemd specifiers, environment expansions and quoted executable paths.
+fn systemd_argument_tokens(command: &str) -> Result<Vec<&str>> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, byte) in command.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte.is_ascii_whitespace() && quote.is_none() {
+            if let Some(start) = start.take() {
+                tokens.push(&command[start..offset]);
+            }
+            continue;
+        }
+        start.get_or_insert(offset);
+        if byte == b'\\' {
+            escaped = true;
+        } else if Some(byte) == quote {
+            quote = None;
+        } else if quote.is_none() && matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        }
+    }
+    ensure!(
+        quote.is_none() && !escaped,
+        "hub service ExecStart has an incomplete quote or escape"
+    );
+    if let Some(start) = start {
+        tokens.push(&command[start..]);
+    }
+    Ok(tokens)
+}
+
+/// Amend only publication arguments; preserve the executable, listener,
+/// environment and operator unit customizations, including quoted values.
+fn rewrite_systemd_publication_flags(
+    definition: &str,
+    enabled: bool,
+    tailscale_port: u16,
+) -> Result<String> {
+    let mut found = false;
+    let mut lines = Vec::new();
+    for line in definition.lines() {
+        let Some(command) = line.strip_prefix("ExecStart=") else {
+            lines.push(line.to_owned());
+            continue;
+        };
+        let mut args = Vec::new();
+        let tokens = systemd_argument_tokens(command)?;
+        let mut iter = tokens.into_iter();
+        while let Some(arg) = iter.next() {
+            if matches!(arg, "--tailscale-serve" | "--no-tailscale-serve") {
+                continue;
+            }
+            if arg == "--tailscale-serve-port" {
+                ensure!(
+                    iter.next().is_some(),
+                    "systemd unit has a missing Tailscale port"
+                );
+                continue;
+            }
+            args.push(arg.to_owned());
+        }
+        ensure!(!args.is_empty(), "systemd ExecStart is empty");
+        if enabled {
+            args.extend([
+                "--tailscale-serve".to_owned(),
+                "--tailscale-serve-port".to_owned(),
+                tailscale_port.to_string(),
+            ]);
+        } else {
+            args.push("--no-tailscale-serve".to_owned());
+        }
+        lines.push(format!("ExecStart={}", args.join(" ")));
+        found = true;
+    }
+    ensure!(found, "installed hub service has no ExecStart");
+    let mut rewritten = lines.join("\n");
+    if definition.ends_with('\n') {
+        rewritten.push('\n');
+    }
+    Ok(rewritten)
+}
+
+fn repair_systemd_publication_flags(
+    path: &Path,
+    enabled: bool,
+    tailscale_port: u16,
+) -> Result<bool> {
+    let definition = fs::read_to_string(path)?;
+    let rewritten = rewrite_systemd_publication_flags(&definition, enabled, tailscale_port)?;
+    if rewritten == definition {
+        return Ok(false);
+    }
+    write_service_file(path, &rewritten)?;
+    run_manager("systemctl", ["--user", "daemon-reload"], None)?;
+    Ok(true)
+}
+
+fn service_https_port(definition: &str) -> u16 {
+    let normalized = definition
+        .replace("<string>", " ")
+        .replace("</string>", " ");
+    let mut args = normalized.split_whitespace();
+    while let Some(arg) = args.next() {
+        if arg == "--tailscale-serve-port" {
+            return args
+                .next()
+                .and_then(|port| port.parse().ok())
+                .unwrap_or(443);
+        }
+    }
+    443
 }
 
 /// Bring an installed unit's restart policy up to the current template
@@ -643,25 +736,62 @@ fn refresh_systemd_unit(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// `cas update` entry point: bring an installed hub service definition up to
-/// the current template even when the hub itself needs no restart. launchd
-/// plists have carried `KeepAlive` since the service was introduced, so only
-/// systemd units need rewriting.
-pub(crate) fn refresh_installed_service() -> Result<bool> {
+/// Refresh publication policy even when the old process was loopback-only.
+/// Return true when a manager reload/restart is needed before early verification.
+pub(crate) fn refresh_installed_service(tailscale_serve: bool) -> Result<bool> {
     match native_platform() {
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
             if !path.is_file() {
                 return Ok(false);
             }
-            refresh_systemd_unit(&path)
+            let port = service_https_port(&fs::read_to_string(&path)?);
+            let publication_changed =
+                repair_systemd_publication_flags(&path, tailscale_serve, port)?;
+            Ok(refresh_systemd_unit(&path)? || publication_changed)
         }
-        ServicePlatform::Launchd | ServicePlatform::ManualLinux | ServicePlatform::Unsupported => {
-            Ok(false)
+        ServicePlatform::Launchd => {
+            let path = launchd_path()?;
+            if !path.is_file() {
+                return Ok(false);
+            }
+            let definition = fs::read_to_string(&path)?;
+            let rewritten = rewrite_launchd_publication_flags(
+                &definition,
+                tailscale_serve,
+                service_https_port(&definition),
+            )?;
+            if rewritten == definition {
+                return Ok(false);
+            }
+            write_service_file(&path, &rewritten)?;
+            Ok(true)
         }
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
     }
 }
 
+pub(super) fn installed_https_port() -> Result<Option<u16>> {
+    let path = match native_platform() {
+        ServicePlatform::Launchd => launchd_path()?,
+        ServicePlatform::Systemd | ServicePlatform::ManualLinux => systemd_path()?,
+        ServicePlatform::Unsupported => return Ok(None),
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(service_https_port(&fs::read_to_string(path)?)))
+}
+
+pub(super) fn installed_service_exists() -> Result<bool> {
+    match native_platform() {
+        ServicePlatform::Launchd => Ok(launchd_path()?.is_file()),
+        ServicePlatform::Systemd | ServicePlatform::ManualLinux => Ok(systemd_path()?.is_file()),
+        ServicePlatform::Unsupported => Ok(false),
+    }
+}
+
+#[cfg(test)]
 fn systemd_service_binary(path: &Path) -> Result<PathBuf> {
     let command = fs::read_to_string(path)?
         .lines()
@@ -756,6 +886,7 @@ pub(crate) fn inactive_detached_warning_for(
     (launched_by != Some("service")).then_some(INACTIVE_DETACHED_HUB_WARNING)
 }
 
+#[cfg(test)]
 fn service_file_requests_tailscale(path: &Path) -> Result<bool> {
     Ok(fs::read_to_string(path)?.contains("--tailscale-serve"))
 }
@@ -1292,6 +1423,8 @@ fn service_args(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> Ve
             "--tailscale-serve-port".into(),
             tailscale_port.to_string(),
         ]);
+    } else {
+        args.push("--no-tailscale-serve".into());
     }
     args
 }
@@ -1493,11 +1626,44 @@ mod tests {
     }
 
     #[test]
-    fn service_restart_publication_policy_matches_systemd_additive_repair() {
-        assert!(!service_publication_repair_needed(false, false));
-        assert!(!service_publication_repair_needed(false, true));
-        assert!(service_publication_repair_needed(true, false));
-        assert!(!service_publication_repair_needed(true, true));
+    fn service_publication_rewrites_preserve_custom_settings_and_opt_out() {
+        let old = LEGACY_SYSTEMD_UNIT
+            .replace(
+                "--tailscale-serve --tailscale-serve-port 8443",
+                "--no-tailscale-serve",
+            )
+            .replace(
+                "RestartSec=3",
+                "RestartSec=7\nEnvironment=OPERATOR_SETTING=kept",
+            );
+        let old = old.replace("/opt/cas/bin/cas", "\"/opt/cas  dir/bin/cas\"");
+        let enabled = rewrite_systemd_publication_flags(&old, true, 8443).unwrap();
+        assert!(
+            enabled.contains("\"/opt/cas  dir/bin/cas\""),
+            "quoted executable must survive byte-for-byte"
+        );
+        assert!(enabled.contains("--tailscale-serve --tailscale-serve-port 8443"));
+        assert!(enabled.contains("RestartSec=7\nEnvironment=OPERATOR_SETTING=kept"));
+        let disabled = rewrite_systemd_publication_flags(&enabled, false, 443).unwrap();
+        assert!(disabled.contains("--no-tailscale-serve"));
+        assert!(!disabled.contains("--tailscale-serve "));
+        assert_eq!(
+            rewrite_systemd_publication_flags(&disabled, false, 443).unwrap(),
+            disabled
+        );
+        let plist = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/tmp/hub.log"),
+            false,
+            443,
+        );
+        assert!(plist.contains("--no-tailscale-serve"));
+        let published = rewrite_launchd_publication_flags(&plist, true, 8443).unwrap();
+        assert!(!published.contains("--no-tailscale-serve"));
+        assert_eq!(service_https_port(&published), 8443);
+        let loopback = rewrite_launchd_publication_flags(&published, false, 443).unwrap();
+        assert!(loopback.contains("--no-tailscale-serve"));
+        assert!(!loopback.contains("<string>--tailscale-serve</string>"));
     }
 
     #[test]
@@ -1732,16 +1898,6 @@ exit 0
     }
 
     #[test]
-    fn launchd_tailscale_refusal_names_the_interactive_pairing_recovery() {
-        assert!(LAUNCHD_TAILSCALE_REFUSAL.contains("bootstrap namespace"));
-        assert!(LAUNCHD_TAILSCALE_REFUSAL.contains("cas hub service install`"));
-        assert!(
-            LAUNCHD_TAILSCALE_REFUSAL
-                .contains("cas hub service uninstall && cas hub start --tailscale-serve")
-        );
-    }
-
-    #[test]
     fn service_definition_detection_distinguishes_serve_arguments() {
         let temp = tempfile::tempdir().unwrap();
         let loopback = temp.path().join("loopback.service");
@@ -1786,7 +1942,27 @@ exit 0
                 "--port",
                 "4173",
                 "--launched-by",
-                "service"
+                "service",
+                "--no-tailscale-serve"
+            ]
+        );
+    }
+
+    #[test]
+    fn service_arguments_with_default_host_policy_request_tailscale_serve() {
+        let default_policy = crate::config::Config::default()
+            .get("hub.tailscale_serve")
+            .expect("registered host publication key")
+            .parse::<bool>()
+            .expect("boolean host publication policy");
+        // pin: An unset host publication policy must emit the Serve-on form;
+        // explicit off must emit --no-tailscale-serve so the child stays off.
+        assert_eq!(
+            service_args(Path::new("/opt/cas/bin/cas"), default_policy, 443),
+            vec![
+                "/opt/cas/bin/cas", "hub", "serve", "--bind", "127.0.0.1",
+                "--port", "4173", "--launched-by", "service",
+                "--tailscale-serve", "--tailscale-serve-port", "443"
             ]
         );
     }

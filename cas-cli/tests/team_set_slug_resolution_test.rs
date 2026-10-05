@@ -175,6 +175,7 @@ async fn team_set_preserves_existing_config_toml_canonical_id() {
 
     let args = CloudTeamSetArgs {
         id: Some(TEST_TEAM.to_string()),
+        store: Default::default(),
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -210,6 +211,7 @@ async fn team_set_resolves_slug_from_cached_memberships() {
 
     let args = CloudTeamSetArgs {
         id: Some("petra-stella".to_string()),
+        store: Default::default(),
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -241,6 +243,7 @@ async fn team_set_derives_canonical_id_from_https_git_remote() {
 
     let args = CloudTeamSetArgs {
         id: Some(TEST_TEAM.to_string()),
+        store: Default::default(),
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -283,6 +286,7 @@ async fn team_set_derives_canonical_id_from_ssh_git_remote() {
 
     let args = CloudTeamSetArgs {
         id: Some(TEST_TEAM.to_string()),
+        store: Default::default(),
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -318,6 +322,7 @@ async fn team_set_does_not_default_to_basename_when_neither_source_resolves() {
 
     let args = CloudTeamSetArgs {
         id: Some(TEST_TEAM.to_string()),
+        store: Default::default(),
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -351,6 +356,7 @@ async fn project_set_writes_canonical_id_to_config_toml() {
 
     let args = CloudProjectSetArgs {
         canonical_id: "github.com/foo/bar".to_string(),
+        store: Default::default(),
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();

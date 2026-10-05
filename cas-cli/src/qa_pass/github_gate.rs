@@ -737,7 +737,7 @@ fn github_status_enabled(cas_root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The checkout a task's delivery lives in, for `gh`'s `{owner}/{repo}`.
+/// The checkout a task's delivery lives in, for explicit origin resolution.
 fn delivery_repo(cas_root: &Path, task_id: &str) -> PathBuf {
     crate::store::open_task_store(cas_root)
         .ok()
@@ -787,13 +787,18 @@ pub fn publish_not_required(cas_root: &Path, repo: &Path, head: &str) {
     );
 }
 
-/// The `gh api` arguments that publish one status on the current repo.
-pub fn status_publish_args(sha: &str, state: QaCommitState, description: &str) -> Vec<String> {
+/// The `gh api` arguments that publish one status on an explicit repo.
+pub fn status_publish_args(
+    repo: &str,
+    sha: &str,
+    state: QaCommitState,
+    description: &str,
+) -> Vec<String> {
     vec![
         "api".to_string(),
         "--method".to_string(),
         "POST".to_string(),
-        format!("repos/{{owner}}/{{repo}}/statuses/{sha}"),
+        format!("repos/{repo}/statuses/{sha}"),
         "-f".to_string(),
         format!("state={}", state.as_str()),
         "-f".to_string(),
@@ -809,9 +814,27 @@ fn spawn_publish(repo: PathBuf, sha: String, state: QaCommitState, description: 
     let spawned = std::thread::Builder::new()
         .name("cas-qa-github-status".to_string())
         .spawn(move || {
+            let timeout = Duration::from_secs(2);
+            let origin = match crate::github_repo::origin_slug(&repo, timeout) {
+                Ok(Some(origin)) => origin,
+                result => {
+                    tracing::warn!(target: "cas::qa", ?result, "QA STATUS PUBLISH FAILED: GitHub origin unavailable; required check stays unmet");
+                    return;
+                }
+            };
+            let publish_repo = match crate::github_repo::resolve_slug(&origin, &repo, Path::new(&gh), timeout) {
+                Ok(repo) => repo.canonical,
+                Err(error) => {
+                    // Try the explicit origin endpoint when metadata is unavailable;
+                    // upstream/default selection must never suppress the status.
+                    tracing::warn!(target: "cas::qa", %error, %origin, "independent QA canonical repository lookup failed; publishing against explicit origin");
+                    origin
+                }
+            };
             let mut command = Command::new(gh);
             command
-                .args(status_publish_args(&sha, state, &description))
+                .env("GH_HOST", "github.com")
+                .args(status_publish_args(&publish_repo, &sha, state, &description))
                 .current_dir(&repo);
             match run_bounded(command, GH_PUBLISH_TIMEOUT) {
                 Some(_) => tracing::info!(
@@ -972,14 +995,19 @@ mod tests {
 
     #[test]
     fn status_publication_targets_the_required_context() {
-        let args = status_publish_args("abc123", QaCommitState::Pending, "round open");
+        let args = status_publish_args(
+            "Richards-LLC/cassy",
+            "abc123",
+            QaCommitState::Pending,
+            "round open",
+        );
         assert_eq!(
             args,
             vec![
                 "api",
                 "--method",
                 "POST",
-                "repos/{owner}/{repo}/statuses/abc123",
+                "repos/Richards-LLC/cassy/statuses/abc123",
                 "-f",
                 "state=pending",
                 "-f",

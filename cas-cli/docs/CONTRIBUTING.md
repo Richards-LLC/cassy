@@ -86,9 +86,123 @@ silently reintroduce fixed bugs.
 
 **New migration**: Create file in `cas-cli/src/migration/migrations/` following naming convention `m{NNN}_{table}_{description}.rs`. Add to the `MIGRATIONS` array in `migrations/mod.rs`. Each migration needs: unique sequential ID, up SQL, and a detect query. See `cas-cli/docs/MIGRATIONS.md` for full details. Migration ID ranges: Entries 1-50, Rules 51-70, Skills 71-90, Agents 91-110, Entities/Worktrees 111+, Verification 131+, Loops/Events 151+.
 
+### Code index ownership across worktrees
+
+Code-file rows retain their normalized absolute source paths. Reconciliation
+only retires absent paths owned by the checkout it scanned; sibling and nested
+linked checkouts keep their rows. Retirement and scan receipts derive authority
+from configured scan roots; recursive watcher events cannot add a nested checkout.
+A full reconciliation uses a fresh scan of those roots. An explicitly configured
+nested checkout retains its own reconciliation scope. A configured subdirectory
+can retire its own absent files; it preserves the full-checkout scan receipt
+until a full checkout root is visited. Paths without an identifiable checkout
+remain untouched rather than being treated as another checkout's deletions.
+
+Code scan receipts use `worktree:<canonical checkout root>` in the existing
+`code_index_state.repository` TEXT key. Historical repository-name receipts
+remain stored but do not certify checkout coverage or HEAD. `cas doctor` and
+`cas status` count current eligible, decodable source files from disk. The
+manual index command and daemon select the current linked checkout when its
+Git common directory matches the explicit store's repository.
+
+A busy BM25 writer defers the remaining retirement sweep after one bounded wait;
+source rows remain its retry manifest. `cas index code --json` reports
+`files_deferred`, separately from errors, and the daemon schedules a fresh
+reconciliation without requiring another filesystem event. Doctor autofix keeps
+its warning while retirements are deferred and supplies `cas index code` to retry;
+it reports the symbol index fixed only after deferred work and errors are clear.
+
 ### cas-src close surfaces
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
+
+### Evidence-only task close
+
+Successful QA reports, ledgers and release drafts intentionally retained outside
+integration can close through the MCP task tool with `action=close`,
+`evidence_only=true`, `evidence_only_artifact_path=<existing durable evidence>`,
+`evidence_only_reference=<PR URL or branch:factory/name>`, and a non-empty
+`reason`. Only a live registered supervisor can authorize this disposition.
+There is no CLI task-lifecycle command; the unified MCP task tool owns dispatch.
+
+CAS measures the recorded delivery anchor (or the assigned worker branch before
+parking) against the fresh integration target. Every unmerged commit must touch
+only regular, non-executable evidence formats under `docs/` or `artifacts/`:
+Markdown, text, HTML, PDF, SVG, images, JSON, CSV/TSV, logs or YAML. Source changes,
+code renamed into docs, reverted code, symlinks and submodules are refused.
+Measurement is bounded to 256 commits and fails closed when Git cannot prove it.
+The artifact must exist beneath this project's configured task artifacts directory;
+local paths and secret-shaped values are forbidden in the portable PR/branch reference.
+
+The successful `evidence_only` terminal outcome counts completed report delivery,
+requires no parent-epic code integration, and logs supervisor identity, rationale,
+base SHA, delivery SHA and measured paths. Reopening clears the structured receipt.
+It cannot combine with negative-result, completion or external-verification receipts,
+or close a Gate/Epic. Ordinary closes keep the merge gate; measured negative
+experiments retain their separate `negative_result=true` outcome.
+
+### Factory worker MCP and credential access
+
+A supervisor can waive independent QA before a delivery parks with
+`verification action=qa_waive task_id=<id> head_sha=<full pushed SHA> summary="<reason>"`.
+The supplied SHA must equal the live origin tip of the task's factory branch;
+the waiver covers only that commit. Without `head_sha`, the existing recorded
+delivery and rebase rules choose the binding. This operation is MCP-only.
+
+Declare resources that stay on the supervisor in `.cas/config.toml`:
+
+```toml
+[factory]
+supervisor_only_mcp = ["vercel", "neon"]
+supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY"]
+```
+
+Both lists default to empty and appear in `cas config list`. Server names are
+exact. These denials override project proxy credential grants and read-only
+server declarations for every worker harness. The supervisor's configuration
+and environment are preserved. Spawn diagnostics record denied names only.
+
+Configured workers get a private, materialized MCP configuration under
+`<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`
+files stay unchanged, so provisioning keeps the tree clean and cannot commit
+supervisor-only removals into the project. Claude
+uses `--strict-mcp-config` so local and user scopes cannot add servers; allowed
+direct servers must be declared in the project file. Cassy remains available
+even if it was registered only in local scope. Every worker uses the same private
+store path, including shared-cwd workers. Codex disables the named native MCP servers, and
+its Cassy proxy filters those upstreams before startup and reload.
+Codex addresses dotted or otherwise special server names with a quoted key in
+a parent-table override so the name remains literal.
+Worker snapshots cannot overwrite the supervisor's shared proxy catalog/health.
+Listed environment names are removed from inherited and explicitly granted
+values, including machine credential bootstrap and retained proxy stdio
+servers' explicit environment maps, before credential resolution and reload.
+Codex workers remain spawnable with environment restrictions. Before launch,
+Cassy parses the selected user Codex home (`CODEX_HOME` or `~/.codex`) and the
+project `.codex/config.toml` files along the launch directory's ancestors,
+without running native inventory or discovery. A server whose literal `env`
+table contains any denied name is disabled for that worker. Keys retained
+from any parsed layer count, even if a later layer changes their values.
+Other native servers remain enabled, and the supervisor's files stay unchanged.
+
+This inspection covers parsed TOML, not expanded plugin or runtime
+contributions. Unknown plugin/layer contributions and unreadable or malformed
+Codex files produce one warning naming the unevaluated sources; the worker
+still spawns. Review those contributions before granting credentials. Process
+environment removal and the explicit supervisor-only server overrides still
+apply. This bounded policy deliberately preserves the standard Codex worker
+lane; it does not promise complete isolation of unknown native contributions.
+Grok and other native harnesses without supported per-launch MCP/environment
+isolation refuse a worker launch when either list is nonempty. They retain
+ordinary native discovery with empty lists; the supervisor remains unrestricted.
+The refusal does not select a different harness or provider. Invalid
+configuration or a failed materialization also refuses the worker launch.
+
+Deployment and production operations needing denied resources run through the
+supervisor. Workers never source an interactive shell to obtain operator
+credentials. Existing explicit project grants and the operator-provisioned
+read-only GitHub token remain available unless denied here; this policy adds
+no credentials to any harness.
 
 ### Factory worker account selection
 
@@ -103,7 +217,98 @@ explicit `config_dir` removes `ANTHROPIC_API_KEY`, because that key overrides
 Claude subscription OAuth; propagated supervisor settings retain existing API
 key inheritance.
 
+For CLI chores that need operator credentials, explicitly grant environment
+names in the project's `.cas/config.toml`:
+
+```toml
+[factory]
+worker_credential_env = ["GITHUB_TOKEN", "VERCEL_TOKEN"]
+```
+
+This list defaults to empty, appears in `cas config list`, and applies equally
+to Claude and Codex workers. Only listed names override the default removal of
+protected operator tokens. Values come from the operator environment or the
+existing private credentials-file/login-profile reader; Cassy never executes
+an interactive shell. Configure these grants only when workers should perform
+the associated operations. Factory identity variables (`CAS_*`, except
+protected credential names such as `CAS_CLOUD_TOKEN`) cannot be granted.
+
+Missing names generate one names-only warning in the worker spawn receipt and
+the worker still starts. A name also listed in `supervisor_only_env` stays
+denied, with the conflict named in the same warning. An operation needing an
+unavailable credential then fails visibly; one missing token does not stop the
+fleet. Supervisors keep their own credentials and configuration.
+
 ## Testing
+
+### Duplicate-task warnings
+
+Task creation excludes common planning words and prose such as `NOT` and
+`before/after` from distinctive identifiers. Generic-only title overlaps
+require near identity; exact duplicate titles and concrete code/path overlap
+still warn. Intentional duplicates retain the `confirm_warning=true` escape.
+
+### Task lease release
+
+`task action=release` lets a live registered supervisor release a worker's
+lease and records the supervisor identity in lease history. Other callers
+may release only their own lease; `force=true` does not grant that authority.
+Releasing an InProgress task returns it to Open and clears its assignee.
+AwaitingMerge retains its delivery state, including when no active lease remains.
+
+### Branch-only target correction
+
+`task action=update target_branch=<branch>` preserves the task's repository
+binding or defaults a legacy targetless task to the current project repository.
+The corrected branch is validated, so a deleted old epic branch can be repaired.
+The same default applies to supervisor `proof_scope_fix=true` corrections.
+An unchanged correction leaves the proof cycle intact and reports the last
+recorded close rejection for that task, including pre-close hook failures.
+Retry `task action=close` to refresh the current gate before correcting scope
+again; historical diagnostics do not replace a fresh close attempt.
+
+### Server-list MCP contract
+
+`factory action=server_list` reports verified running servers by default.
+Use `status=stopped`, `status=dead`, `status=unverified`, or `status=all` to
+inspect history or entries whose process identity cannot be verified.
+`task_id` filters by exact owning task; `owner` accepts an exact worker name
+or registered agent ID. Filters combine. `limit` defaults to 20, must be
+positive, and is capped at 50. Each server occupies one line of at most 512
+bytes; long fields and port lists are abbreviated. A truncation notice gives
+the number of matching entries. The legacy coordination route uses the same
+filters and limits. Regression coverage lives in `server_registry_mcp_test`
+and the service's `server_ops_tests`; no new CLI command is introduced.
+
+### Task branch adoption
+
+For an inherited factory delivery, use `task action=transfer id=<task-id>
+to_agent=<worker> adopt_branch=true` (add `supervisor_override=true` when a
+supervisor transfers another worker's active lease). Cassy copies the task's
+recorded delivery tip to `factory/<receiver>-<task-id>` in the receiver's
+registered worktree, then updates its assignment and delivery anchor. Commit
+there; the isolation guard still rejects the old owner on that branch.
+
+The receiver must have a clean isolated worktree in the task's repository,
+with HEAD able to fast-forward to the delivery. Dirty, divergent and foreign
+checkouts are refused before assignment or lease changes. The original branch
+is preserved as handoff history. Omitting `adopt_branch` keeps the existing
+assignment-only transfer behavior.
+
+### MCP mutation timeout receipts
+
+The MCP response budget is 55 seconds; timeout diagnostics report the measured
+elapsed time and budget separately. Message enqueues and task writes carry
+request-scoped commit evidence. A timeout after an observed commit reports
+`COMMITTED`; message receipts include `notification_id`. `UNKNOWN` means this
+request's commit was not confirmed. Re-query state before retrying either case.
+The error's structured data includes `mutation_outcome`, `notification_id`,
+`elapsed_ms` and `budget_ms`.
+
+Optional resource notifications and factory recall have bounded response waits.
+Late recall output is retained for the next successful response, including mail
+already consumed by the background reader. Message delivery remains asynchronous;
+use `coordination action=message_status` to inspect handoff and recipient evidence.
 
 Integration tests are in `cas-cli/tests/`. Key test files:
 
@@ -128,6 +333,9 @@ table, a progress line, an error) is designed under the `cas-cli-craft` builtin 
 and both Solarized palettes plus piped, `NO_COLOR` and `LC_ALL=C` runs, and fails on wrapped rows,
 split tokens, colour under 3:1 (marks) or 4.5:1 (text), truncation with no escape flag, glyphs on a
 C locale, SGR under `NO_COLOR`, redraws in a pipe, and a `--json` stream that is not one document.
+BSD/macOS and util-linux `script` are supported. Empty captures fail; unavailable runners
+exit 2 without retaining a PASS receipt. Diagnostic stderr is captured and checked, while
+JSON stdout stays separate. Expected nonzero command exits do not fail rendering QA.
 
 ```bash
 node scripts/terminal-qa.mjs --label cas-doctor --escape-flag --verbose --json-flag --json -- cas doctor
@@ -177,7 +385,10 @@ Workers may type-check their committed change with exactly
 `--tests` when test files changed; choose one target flag. Include consumers of
 changed shared interfaces. The PreToolUse guard routes that command through
 `cas factory worker-check`, which holds an OS builder-slot lock until Cargo
-exits. Lock descriptors are close-on-exec so compiler-cache daemons cannot
+exits. The route covers Claude's Bash and Codex's `exec_command`, including
+calls made from code mode (`functions.exec`). Codex applies a hook's rewritten
+input only with `permissionDecision: "allow"`, so the hook emits that for Codex
+(cas-980d). Lock descriptors are close-on-exec so compiler-cache daemons cannot
 retain slots after the runner exits. It checks the existing build guard, and enforces `max_concurrent_builders`
 even across simultaneous launches. A refusal requires retrying later. Run long
 checks in the background with a log. Compile checks execute no tests.
@@ -201,6 +412,15 @@ records PASS only for the resulting tree. Lane-tip receipts do not qualify.
 The preview preflight, `release-train.sh --check-lane`, and the actual detached
 Git merge enforce this evidence before the epic ref advances. Docs/scripts-only
 merges need no compile receipt. Rust merges require clean linked target checkouts.
+
+The no-build lane preview uses a load-aware wall budget for fast rows: 60 seconds
+times `(1 + one-minute load / CPU count)`, capped at 600 seconds. At load of
+1–1.5 times the core count, this allows 120–150 seconds. An exhausted budget
+reports unfinished rows from the gate's plan and timing receipts, plus a retry
+command. Supervisors can rerun
+`python3 scripts/check-lane-fast-rows.py . <target> <source> --timeout-secs 180`
+with an explicit bound of 1–1800 seconds. The preview preserves branch refs and
+cleans its temporary checkout on success, row failure, and timeout.
 
 Workers may also run exactly
 `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
@@ -231,17 +451,70 @@ file (default `<git-common-dir>/cas/scoped-proof/<head>.receipt`) and close
 verifies its digest. Non-Rust suites are unaffected. An older runtime that denies the check exception requires parking
 with the unverified crates and test filters named for assembly.
 
-The assembly command first runs the gate's `ci-script-tests` row:
+The assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
 dry-run/ignore-error modes removed. A failing script suite retains its output
 and stops assembly before either Rust suite. The full release gate runs this
 same mandatory row before build and Rust test rows; it is excluded from the
 short `--fast-rows` lane checks.
 
-The assembly command then runs native full-workspace nextest in the factory
-worktree, then the gate's archive-mode row in a plain clone outside every
-`.cas` ancestor. The archive consumer uses the queue's remapped environment
-and excludes component-output snapshots, already covered by the native run.
+Release scripts used from macOS source `scripts/release-portable.sh` for
+timestamp parsing and canonical paths. The timestamp helper retains GNU date
+results on Linux and falls back to Python for timezone-qualified ISO values
+on BSD hosts, including offsets and fractional seconds. The path helper
+resolves symlinks and missing trailing components without GNU `realpath -m`
+or `readlink -f`. Receipt paths and their worktree use the same canonical
+form before containment checks. `scripts/test-release-portable.py` exercises
+the report stage with GNU date and path commands unavailable. Provisioning
+and persistent Actions cache maintenance remain Linux-only and explicitly
+require GNU tools and Linux kernel interfaces.
+
+When memory permits, the script tier overlaps the native nextest precompile
+and archive producer compile. Both producer phases finish and the script tier
+passes before native full-workspace tests run, followed by the archive consumer.
+The two test consumers remain sequential: nextest groups apply within one
+process, and host ports and hub processes may be shared between suites. Native
+and clone builds use separate Cargo targets; each row has separate logs and
+gate scratch directories. The plain clone and archive remap remain outside
+disposable roots and every `.cas` ancestor. Archive extraction stays on disk
+with `--extract-to`; only disposable test temp directories and fixture HOMEs
+use the native temp filesystem. Missing-wrapper, empty Cargo home, reduced
+PATH and the component-output snapshot exclusion remain archive requirements.
+
+Assembly reads Linux `MemAvailable`, or macOS `hw.memsize` and `vm_stat`
+free/inactive/speculative pages, before admitting producers and each consumer.
+`CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS` sets a per-producer job ceiling; the
+default shares available cores equally, and memory may lower it further.
+`CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB` overrides the reserve; its default is
+the larger of 25% of physical RAM and 8 GiB. Both knobs accept positive integers.
+The producer budget uses 8 GiB for the large cas compile/link unit, rounded up
+from soundwave's measured 7,293,348 KiB maximum RSS (serial proof `7e4c6f50`,
+head `abd6817b5`), plus an assumed 256 MiB per dependency job and 2 GiB for
+scripts. A shared host/user linker slot bounds both producers to one link at a
+time, budgeted at 2.1 GiB. Soundwave's 2026-10-05 incremental relink sampler
+(`.cas/perf-98a0/link-rss.log`, 0.5s samples) measured 2,190,228 KiB maximum
+`ld.mold` RSS (2.089 GiB), with `rustc` peaking at 4,775,752 KiB (4.555 GiB).
+The cold-proof 8 GiB producer bound remains because incremental code generation
+does not establish the cold peak. Link admission rechecks memory while holding
+the slot; every invocation records child peak RSS in `link-rss.jsonl`.
+Supervisor memory/PSI samples must validate the estimates on each host.
+Insufficient concurrent capacity selects sequential legs with a fresh memory
+admission before each phase. `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS`
+(default 600) bounds memory/slot waits and compile pauses;
+`CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS` (default 1 for guards, 2 for phase
+admission) controls resampling. Both accept positive integers. Each refusal and
+later admission is recorded, including on timeout. The compile guard pauses the
+producer process group within 2 GiB of the reserve and resumes once 4 GiB is
+available above it; a deadline or observed reserve breach aborts the producer
+and prevents PASS. It records every sample and pause/resume in
+`compile-memory.jsonl`; the assembly receipt includes both guard and link logs.
+Native linker selection, Cargo target rustflags, explicit environment flags and
+the worker job ceiling are preserved. Immutable helper paths keep clone-path
+changes out of the shared Cargo dependency fingerprint. Configurations using
+`cfg(...)` target rustflags must supply explicit native flags for this guard.
+Missing memory probes fail admission. Consumers have a fresh
+thread ceiling using an assumed 4 GiB base plus 256 MiB per test thread, and
+never overlap a producer. These are admission estimates, not OS memory limits.
 
 The gate prints a reuse hit for both suite rows or a `MISS assembly key=…`
 reason. Environment misses from new receipts also name the first changed
@@ -249,6 +522,25 @@ variable; receipts store only per-variable hashes. `CAS_RELEASE_ARTIFACTS_ROOT`
 and `CAS_RELEASE_RECEIPTS_RUN_DIR` are output locations and do not invalidate
 proof. Compiler flags, HOME, PATH, local environment/config files and the
 resolved Zig binary remain inputs.
+
+The environment fingerprint includes every variable passed to the test rows by
+default, including unknown `CAS_*` variables. Assembly first removes the exact
+harness/session names in `scripts/assembly-proof.py`'s `IDENTITY` set from both
+the test environment and the fingerprint: factory/agent/session identity,
+`CAS_ROOT`, `CAS_CLONE_PATH`, `AI_AGENT`, `CLAUDECODE`,
+`CLAUDE_CODE_CHILD_SESSION`, `CAS_FACTORY_MODE`, `CAS_FACTORY_SUPERVISOR_CLI`
+and `CAS_FACTORY_WORKER_CLI`. A factory shell and a scrubbed release shell can
+therefore share the same proof without passing harness context to test children.
+There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
+`CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
+`CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.
+The explicit `VOLATILE` set excludes shell bookkeeping, build/output locations
+and `CAS_RELEASE_ENV_FILE` (the publisher's env-file locator); values loaded
+from that file still count under their own names. Release gate/train
+orchestration variables are also excluded. Zig is keyed by binary contents
+instead of its worktree path; ignored local environment/config files are keyed
+by contents too. New exclusions require confirming that they cannot change the
+compiled candidate or test behavior.
 
 For daemon-initiated sweeps, persist the scratch base with
 `cas config set factory.release_gate_home_dir /home/cas-release-gate/base`
@@ -272,15 +564,17 @@ The script tier must pass, and both Rust contexts must report nonzero passed
 tests, before an atomic PASS is written
 under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
 records the tested Git tree, script-tier status/tree/log, each Rust context's
-tree and pass count, toolchain,
+tree and pass count, per-leg and compile-phase intervals and CPU timings,
+memory scheduling decisions and serial fallback reasons, toolchain,
 environment and archive size. Full Cassy integration sweeps and the train's
 assembly stage use this same command; retries cite the existing receipt.
 
 Before the pipeline lands, `--cut --resume` compares the integration tip/base
 with the input recorded by assemble. A changed integration input archives the
 old stage receipts and reruns assemble, prep, ledger and every later stage.
-Release prose, member-version bumps and the generated ledger are replayed onto
-the new tested tip; source edits block automatic replay. A rebase conflict
+Release prose, journey-evaluation reports, member-version bumps and the
+generated ledger are replayed onto the new tested tip; source edits block
+automatic replay. A rebase conflict
 restores the checkout and prints a named blocker with a recovery command.
 After a valid pipeline/publish receipt exists, resume finishes that landed
 release without adopting a newer integration tip.
@@ -288,9 +582,10 @@ release without adopting a newer integration tip.
 The first full release gate automatically reuses its nextest and archive-mode
 rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
 expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows,
-toolchain or test environment cause a miss. Only `CHANGELOG.md` and release
-prose under `docs/release-notes/` and `docs/release-reports/` are excluded from
-the code-input hash; embedded Rust documentation fixtures remain inputs.
+toolchain or test environment cause a miss. `CHANGELOG.md`, release prose under
+`docs/release-notes/` and `docs/release-reports/`, and Markdown under
+`docs/qa/journey-evaluations/` are excluded from the code-input hash; embedded
+Rust documentation fixtures remain inputs.
 The prep stage's workspace-member `[package]` version values and corresponding
 source-less member `[[package]]` lock versions are normalized. The generated
 `cas-cli/src/builtins/reference-history.json` ledger is excluded; its source
@@ -334,6 +629,36 @@ not serialize. An existing `RUSTC_WRAPPER` wins; set
 `CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
 cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
 
+When a worker delivery parks awaiting merge or closes, Cassy keeps only
+`factory.target_cache_retention_count` warm parked check caches (default: 1).
+It prunes the other private `target/debug` outputs under the same per-worktree
+lane lock used by the capped runner, with a Cargo-lock and open-output check.
+Place durable check logs at `target/worker-check.log`, nextest reports under
+`target/nextest`, or in the task artifact directory; these survive pruning.
+The next check re-seeds missing debug outputs from the immutable baseline.
+Active builders and open test/output handles prevent reclamation. Source files,
+receipts and the baseline stay intact; concurrent workers keep independent targets.
+
+Lane compile previews carry provenance and a lifetime owner lock. Explicit
+`gc_cleanup force=true dry_run=false` removes stale owned detached previews,
+including their Git registration, after revalidating ownership, process liveness
+and `factory.target_cache_min_idle_secs`. Recent or live previews survive;
+previews created before provenance was recorded remain inventory-only. The
+`TARGET_CACHE_STATUS_JSON` report includes nested preview target sizes and
+`lane_previews` dispositions. The existing high/low watermark configuration
+controls cache pressure warnings; preview cleanup does not need disk pressure.
+On macOS, liveness uses NUL-delimited `lsof` field output and fails closed if
+that probe is unavailable or reports errors. Only the evictor's held Cargo-lock
+file descriptor is exempt; other same-process handles and executable/mapped
+artifacts preserve the cache. Linux also inspects `/proc/PID/exe` and `maps`,
+and unknown/inaccessible evidence keeps the cache; reclamation therefore needs
+a readable process table. Same-HEAD parks have distinct marker generations,
+so an older retention inventory cannot evict a newly parked warm cache.
+Interrupted `.cas-parked-debug-*` quarantines remain preserved for explicit
+whole-target GC once the worktree is inactive and the recency/pressure policy
+permits it. They are included in target byte inventory; automatic park-time
+cleanup does not retry a quarantine or delete proof logs to recover it.
+
 New isolated workers also seed their private `target/` from compiled artifacts
 hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
 small Cargo dep-info files are copied with their target root rebased. The release
@@ -347,6 +672,23 @@ live Cargo writer. Old snapshots remain valid for in-flight seeders and should
 only be removed during a maintenance window. Set
 `CAS_FACTORY_DISABLE_TARGET_SEED=1` to skip seeding. Do not replace this with a
 shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
+
+Worker provisioning (including store and Git base resolution) runs in a separate
+process group with a five-minute deadline. Timeout, targeted shutdown and
+`restart_spawn_queue` kill only that generation's provisioner and descendants;
+the daemon keeps processing shutdowns and messages. Reset drops already-dequeued
+spawn actions and reports them; persistent queue rows continue draining. Retirement cleans newly-created checkout/branch metadata and worker-specific
+Git locks best-effort; reused worktrees are preserved. Inspect any reported
+leftovers before retrying.
+
+Before creating or reusing a checkout, `factory.spawn_min_free_gib` checks
+available space on the worker filesystem (default 25 GiB; 0 disables the floor).
+Below the floor, the spawn fails with `spawn_disk_floor` before a checkout or
+branch is created. Set it with `cas config set factory.spawn_min_free_gib 30`.
+The target repository's config applies to cross-repository workers. Existing
+usable targets and `CAS_FACTORY_DISABLE_TARGET_SEED=1` bypass seeding, while
+all spawn paths still apply the disk floor. Seeding normally hardlinks artifacts;
+the floor reserves space for subsequent worker writes and builds.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with
@@ -564,6 +906,16 @@ is not parked for merge. A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
 
+A live registered supervisor may repair an incorrect execution methodology with
+`task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`
+to clear it, or supply a valid replacement methodology. Switching to `no-code`
+requires a portable `external_ref`, either stored or supplied in the same update.
+This correction invalidates the old verification cycle and reopens the task with
+its assignee, delivery anchors and immutable merge facts preserved. It supports
+task-only investigation proofs as well as merged code deliveries. Ordinary close
+proofs still apply: declaring `no-code` never hides delivered code. Correct only
+one of methodology, work target, proof targets or risk in each update.
+
 A passed or waived independent QA round remains bound to its reviewed tip after
 a squash merge. Close proves that the integrated receipt carries the same trees
 over the aggregate delivered paths, or the same stable aggregate patch ID.
@@ -574,6 +926,28 @@ A live registered supervisor may use `supervisor_override=true` with a non-empty
 reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository
 binding, ancestry, non-empty delivery, and target-content checks still apply.
+
+A delivery's final file that is byte-identical on the authoritative target and
+still differs from the task's delivery base is present, even when historical
+intermediate builds disappeared during recovery. This exact-file proof applies
+to any path; it grants no exemption for minified or generated files. Child close
+and epic accounting use task-attributed history for merge deliveries rather
+than crediting only the epic changes imported by a worker's sync merge. Epic
+accounting compares the recorded child anchor, so a later task on the same lane
+cannot supply its final snapshot. Exact-file recovery also requires a
+task-attributed path effect to survive, including attributed side-parent work. Restoring any imported path baseline, even
+one newer than the task's original base, rejects both explicit and unlabeled
+inverse changes unless a supervisor records the audited supersession below.
+
+For an older runtime that falsely reports dropped historical bundle lines,
+first inspect the recorded anchor and authoritative target with `git ls-tree`
+and `git diff <anchor>..<target> -- <paths>`. Preserve branches and evidence.
+Upgrade to the runtime containing the exact-file proof, or use the authenticated
+supervisor review below with the real integration/replacement commit and exact
+blob comparison in the review. Do not manufacture a corrective commit or edit
+task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
+64d1740bd7bb065049dea3b9c7eee2e712738e68 as its reviewed-drop receipt; anchor
+6ff3c4d6e and target held app.js blob 5bde1a1d1bf2b077538c054ee758bc8ffcdd4006.
 
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and
@@ -634,9 +1008,24 @@ when requested. Rust re-exec helpers require the exact child name, one selected
 test, and one passing result; intentional signal/atexit children instead prove
 entry into the test body before their early exit.
 
+The full release gate's `hub-web-tests` row runs `npm ci`, `npm run typecheck`,
+and `npm test` before build and Rust suite rows. A failure prevents pipeline
+admission. Its cached PASS depends on `hub-web`, `scripts`, and `.github`,
+including the repo-level `scripts/visual-qa.mjs` that web tests import and read.
+Both scoped CI lanes use the same conservative paths for `web-check-needed`;
+Markdown fixtures beneath those paths still require web tests. The no-build
+fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
+
 Closing a task that changes a committed `*.snap` or
 `opencode_projection.snapshot.json` requires a task decision note:
 `snapshot-approved: <relative file> — <actual +added or -removed line> — <why>`.
+The equivalent digest form is
+`snapshot-approved: <relative file> — sha256:<64 lowercase hex digits> — <why>`.
+SHA256 covers the complete UTF-8 diff line, including its leading `+`/`-` and
+whitespace, excluding the newline. The refusal prints this bounded form when
+the changed line exceeds 256 characters, so long prompts fit the default
+1500-character note limit. Copy the suggested token and explain the reviewed
+change; existing short-line literal approvals remain valid.
 The close gate checks the task-attributed Git diff, even after merge, and names
 the exact `task action=notes` command when approval is missing. Approval for a
 different file or a line absent from that diff does not satisfy the gate.

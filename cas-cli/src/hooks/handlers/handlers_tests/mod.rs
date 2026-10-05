@@ -14,6 +14,7 @@ mod ripple_path_scope;
 mod send_message_autoroute;
 mod session_title;
 mod slack_transport;
+mod publication_gate;
 mod stop_hook_active;
 mod supervisor_reminder;
 mod tmpfs_guardrail;

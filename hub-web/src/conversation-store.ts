@@ -26,6 +26,7 @@ export class ConversationStore<T> {
   readonly key: string;
   private readonly maxConversations: number;
   private readonly maxValueChars: number;
+  private readCleanupAttempted = false;
 
   constructor(
     private readonly storage: StorageLike | undefined,
@@ -49,18 +50,30 @@ export class ConversationStore<T> {
     return this.read().get(conversation)?.value;
   }
 
-  /** Store one conversation's value, evicting the least recently written beyond the bound. */
-  set(conversation: string, value: T): void {
+  /**
+   * Store one conversation's value, evicting the least recently written beyond
+   * the bound. A value over the per-conversation bound is not stored (and any
+   * older copy is removed): false says so, so the caller can tell the operator
+   * it will not survive a reload (cas-adfc).
+   */
+  set(conversation: string, value: T): boolean {
+    return this.put(conversation, value) !== "too-long";
+  }
+
+  /**
+   * As `set`, saying what happened: `kept` is on disk, `too-long` is over the
+   * per-conversation bound, `not-saved` fit but the browser refused the write
+   * (a full or denied localStorage), so it lives only in this page (cas-f657).
+   */
+  put(conversation: string, value: T): "kept" | "too-long" | "not-saved" {
     const records = this.read();
-    if (JSON.stringify(value).length > this.maxValueChars) {
-      records.delete(conversation);
-    } else {
-      records.delete(conversation);
-      records.set(conversation, { value, updatedAt: this.now() });
-    }
+    const fits = JSON.stringify(value).length <= this.maxValueChars;
+    records.delete(conversation);
+    if (fits) records.set(conversation, { value, updatedAt: this.now() });
     const ordered = [...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt);
     while (ordered.length > this.maxConversations) ordered.shift();
-    this.write(new Map(ordered));
+    const written = this.write(new Map(ordered));
+    return !fits ? "too-long" : written ? "kept" : "not-saved";
   }
 
   delete(conversation: string): void {
@@ -70,34 +83,50 @@ export class ConversationStore<T> {
   }
 
   private read(): Map<string, Record_<T>> {
-    const records = new Map<string, Record_<T>>();
+    let records = new Map<string, Record_<T>>();
     let raw: string | null = null;
-    try { raw = this.storage?.getItem(this.key) ?? null; } catch { return records; }
-    if (!raw) return records;
+    try { raw = this.storage?.getItem(this.key) ?? null; } catch { this.cleanupRead(records); return records; }
+    if (raw === null) return records;
     let parsed: unknown;
-    try { parsed = JSON.parse(raw); } catch { return records; }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return records;
+    try { parsed = JSON.parse(raw); } catch { this.cleanupRead(records); return records; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { this.cleanupRead(records); return records; }
+    let dropped = false;
     for (const [conversation, entry] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!entry || typeof entry !== "object") continue;
+      if (!entry || typeof entry !== "object") { dropped = true; continue; }
       const { value, updatedAt } = entry as { value?: unknown; updatedAt?: unknown };
-      // cas-8f19: the bounds `set` keeps are kept on read too. A value this
-      // page could not have written (corrupted, or written by something
-      // else) is dropped, never acted on.
-      if (JSON.stringify(value ?? null).length > this.maxValueChars) continue;
-      const narrowed = this.validate(value);
-      if (narrowed === undefined) continue;
-      records.set(conversation, { value: narrowed, updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0 });
+      // The bounds kept on write also apply to storage planted by another
+      // page. Unreadable or invalid values never act on this conversation.
+      try {
+        if (JSON.stringify(value ?? null).length > this.maxValueChars) { dropped = true; continue; }
+        const narrowed = this.validate(value);
+        if (narrowed === undefined) { dropped = true; continue; }
+        records.set(conversation, { value: narrowed, updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0 });
+      } catch { dropped = true; }
     }
-    if (records.size <= this.maxConversations) return records;
-    return new Map([...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt).slice(-this.maxConversations));
+    if (records.size > this.maxConversations) {
+      records = new Map([...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt).slice(-this.maxConversations));
+      dropped = true;
+    }
+    if (dropped) this.cleanupRead(records);
+    return records;
   }
 
-  private write(records: Map<string, Record_<T>>): void {
-    if (!this.storage) return;
+  /** Repair once per load, including a failed attempt, so denied storage does
+   * not turn every get/entries call into another quota-consuming write. */
+  private cleanupRead(records: Map<string, Record_<T>>): void {
+    if (this.readCleanupAttempted) return;
+    this.readCleanupAttempted = true;
+    this.write(records);
+  }
+
+  /** False when the browser refused the write (full or denied): the in-memory state still holds for this page. */
+  private write(records: Map<string, Record_<T>>): boolean {
+    if (!this.storage) return false;
     try {
       if (records.size) this.storage.setItem(this.key, JSON.stringify(Object.fromEntries(records)));
       else this.storage.removeItem(this.key);
-    } catch { /* full or denied: the in-memory state still holds for this page */ }
+      return true;
+    } catch { return false; }
   }
 }
 
@@ -144,17 +173,27 @@ export function validDraft(raw: unknown): Draft | undefined {
   return { text, caret: at };
 }
 
+/**
+ * What saving a draft did: `kept` is on disk for the next load, `cleared` was
+ * blank (or withheld) and is gone, `too-long` is over the store's bound, so it
+ * lives only in this page and a reload loses it (cas-adfc), and `not-saved`
+ * fit but the browser refused to store it (full or denied localStorage), so it
+ * too lives only in this page (cas-f657).
+ */
+export type DraftSave = "kept" | "cleared" | "too-long" | "not-saved";
+
 /** The drafts store: a blank draft is a deletion, never a stored entry. */
-export function draftStore(storage: StorageLike | undefined): {
+export function draftStore(storage: StorageLike | undefined, options: ConversationStoreOptions = {}): {
   load(): Map<string, Draft>;
-  save(conversation: string, draft: Draft | undefined): void;
+  save(conversation: string, draft: Draft | undefined): DraftSave;
 } {
-  const store = new ConversationStore(storage, "drafts", validDraft);
+  const store = new ConversationStore(storage, "drafts", validDraft, options);
   return {
     load: () => store.entries(),
     save: (conversation, draft) => {
       const valid = draft && validDraft(draft);
-      if (valid) store.set(conversation, valid); else store.delete(conversation);
+      if (!valid) { store.delete(conversation); return "cleared"; }
+      return store.put(conversation, valid);
     },
   };
 }
@@ -244,8 +283,11 @@ export function pendingSendStore(storage: StorageLike | undefined): {
  * clock's measured lead over this browser (`skew`, ms; positive when ahead).
  * A reload rebuilds the thread from the machine's stamps; these keep each turn
  * at the time the visit showed it instead of the moment of the reload.
+ * `live` names the supervisor turns this browser saw arrive live, and whether
+ * the visit marked each "machine clock ahead" (cas-9e33): a reload shows the
+ * same mark, even when the visit could not yet know the machine's lead.
  */
-export type Arrivals = { skew?: number; at: Record<string, number> };
+export type Arrivals = { skew?: number; at: Record<string, number>; live?: Record<string, boolean> };
 
 /** At most this many turns' times are kept per conversation, the newest. */
 export const MAX_ARRIVALS = 400;
@@ -265,7 +307,12 @@ export function validArrivals(raw: unknown): Arrivals | undefined {
   }
   const lead = finite(skew);
   if (!Object.keys(times).length && lead === undefined) return undefined;
-  return { ...(lead === undefined ? {} : { skew: lead }), at: times };
+  const marks: Record<string, boolean> = {};
+  const live = (raw as Record<string, unknown>).live;
+  if (live && typeof live === "object" && !Array.isArray(live)) {
+    for (const [key, value] of Object.entries(live as Record<string, unknown>)) if (key in times && key.startsWith("r:") && typeof value === "boolean") marks[key] = value;
+  }
+  return { ...(lead === undefined ? {} : { skew: lead }), at: times, ...(Object.keys(marks).length ? { live: marks } : {}) };
 }
 
 /** The turn-times store (cas-8d52): an empty record is a deletion. */

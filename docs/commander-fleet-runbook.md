@@ -8,19 +8,52 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 - Install Tailscale, join every machine and browser device to the same tailnet, enable MagicDNS and HTTPS certificates for the tailnet, and confirm `tailscale status` reports `Running`.
 - On Linux, authorize the account that runs the hub to operate Tailscale without sudo: `sudo tailscale set --operator="$USER"`. Verify it with `sudo tailscale debug prefs`; `OperatorUser` must equal that account. Without this one-time host setting, Cassy reports `permission-denied` and keeps the hub loopback-only.
 - Choose one machine URL as the browser profile's controller origin. Pair every other machine to that exact origin; changing it requires re-pairing.
-- The default controller origin is a paired hub. The hosted static origin is `https://hub.petrastella.io`, an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes, then create new invitations with `cas hub pair --origin https://hub.petrastella.io` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
+- The default controller origin is a paired hub. The hosted static origin is `https://hub.petrastella.io`, an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes (see [Hub promotion](#hub-promotion-hosted-commander-at-hubpetrastellaio)), then create new invitations with `cas hub pair --origin https://hub.petrastella.io` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
 - Do not expose port 4173 on a LAN interface. The Cassy hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
+- In Chrome, allow **Local network access** for `https://hub.petrastella.io` in the page's site settings when connecting to a tailnet hub; Tailscale's `100.64.0.0/10` addresses are [classified as local by Chromium](https://chromium.googlesource.com/chromium/src/+/d1e9879b75be1e3ef0f9b9991f6831dca5a618f8), so a denied permission blocks requests before they reach the hub and does not mean the browser needs pairing again.
 
-## Hosted Commander bundle pin (3.18.0)
+## Hub promotion (hosted Commander at hub.petrastella.io)
 
-The hosted static origin must serve the byte-identical `hub-web/dist` rebuilt
-from the assembled 3.18.0 source. Verify this pin before creating invitations:
+Standing policy: after any `main` merge that changes `hub-web/dist`, or hub-web
+source that implies a dist rebuild, promote that dist to
+`https://hub.petrastella.io`. A supervisor treats such a merge as carrying the
+promotion duty. The hosted origin is never left pinned behind `main`.
 
-- Dist source commit: `dcd381a9` (the assembled epic tip used for this rebuild).
-- Dist digest: `2058683fe868dd1cfef06b7f9acf4c62c9c6ad58ed4617bfc9203507598645cd`.
-  Compute it as `(cd hub-web && find dist -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum`.
-- `ghostty-vt.wasm`: `6b1df1a96d59adc26360c312924898dbc122f980c17a32eb1624e48795b83f7e`.
-- `ghostty-write-pty.wasm`: `75cb147e98ede3f85f3cd6236a30f6d12565b0b237e1d8db941f5f3e8ad3d903`.
+The procedure and the current pin live in `Richards-LLC/petra-stella-cloud`,
+not in this repository:
+
+- Procedure: [`hub-static/GO-LIVE.md`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/GO-LIVE.md).
+- Verifier: [`hub-static/scripts/verify-dist.sh`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/scripts/verify-dist.sh), run as `CAS_SRC_DIR=<pinned cas-src checkout> scripts/verify-dist.sh` from `hub-static/`.
+- Current pin and deployment record: [`hub-static/PROVENANCE.md`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/PROVENANCE.md).
+  This names the source commit, dist tree, verify-dist digest, `app.js` and
+  `app.css` hashes, Vercel deployment ID and rollback anchor. It is the only
+  authority for what the hosted origin serves; this runbook keeps no copy.
+
+In outline:
+
+1. Pin a clean cas-src checkout of the exact commit, normally the release tag,
+   and copy only `hub-web/dist/` into `hub-static/public/commander/`. Copy
+   `index.html` to `hub-static/public/index.html` as well.
+2. Run `verify-dist.sh`. It recomputes the dist digest and the two WASM
+   integrity hashes, and the hashes in [`hub-web/README.md`](../hub-web/README.md)
+   are the authority: `ghostty-vt.wasm` `6b1df1a9…3f7e` and
+   `ghostty-write-pty.wasm` `75cb147e…d3d903`. Stop on any mismatch.
+3. Deploy the `hub-static` directory with the Vercel CLI to the `cas-hub-static`
+   project in the Richards-LLC team. Never use the `petra-stella-cloud` Vercel
+   project, and never create a git-sourced deployment.
+4. Verify the live bytes on both the custom and the immutable origin. For
+   example, `curl -fsS https://hub.petrastella.io/commander/app.js | md5` must
+   match the md5 of `hub-web/dist/app.js` at the pin, and likewise `app.css`
+   and both WASM files. Every route must return HTTP 200 with no redirect to
+   Vercel SSO.
+5. Record the commit, digest, deployment ID, URL and rollback anchor in
+   `PROVENANCE.md`, and merge that through a petra-stella-cloud pull request.
+
+Changing the relay metadata or the origin itself is a security-domain move that
+requires every hub to re-pair. A dist-only promotion does not.
+
+Work from a fresh clone or `git fetch` of petra-stella-cloud. A long-lived local
+checkout can trail `origin/main`, and then its `PROVENANCE.md` names an old pin.
 
 ## Start and verify one machine
 
@@ -30,20 +63,20 @@ Run these commands in order:
 cas --version
 tailscale status --json
 tailscale serve status --json
-cas hub --tailscale-serve
+cas hub start
 cas hub status
 tailscale serve status --json
 curl --fail --silent --show-error https://MACHINE.TAILNET.ts.net/v1/health
 ```
 
-`cas hub --tailscale-serve` prints the stable HTTPS URL. The health response is intentionally minimal: `schema_version` and `ready`. The private files `~/.cas/hub/tailscale-serve.json` and `~/.cas/hub/tailscale-serve-teardown.json` preserve exact before/after Serve status receipts with mode 0600.
+`cas hub start` prints the stable HTTPS URL. The health response is intentionally minimal: `schema_version` and `ready`. The private files `~/.cas/hub/tailscale-serve.json` and `~/.cas/hub/tailscale-serve-teardown.json` preserve exact before/after Serve status receipts with mode 0600.
 
 If Tailscale is absent, logged out, lacks Serve permission, or the requested HTTPS port already has another handler, startup prints a refusal and the local hub remains available at `http://127.0.0.1:4173`. Cassy never runs `tailscale serve reset` and never replaces an unrelated handler.
 
 Use a non-default port only when 443 is deliberately assigned elsewhere:
 
 ```sh
-cas hub --tailscale-serve --tailscale-serve-port 8443
+cas hub start --tailscale-serve-port 8443
 ```
 
 The corresponding stable URL includes `:8443`.
@@ -66,13 +99,48 @@ cas hub service install --dry-run
 
 On macOS this writes and bootstraps the launchd LaunchAgent at
 `~/Library/LaunchAgents/dev.cas.commander-hub.plist` with `RunAtLoad` and
-`KeepAlive`; launchd supervision is loopback-only because Tailscale Serve cannot
-publish from its bootstrap namespace. To pair Commander on macOS, run
-`cas hub service uninstall && cas hub start --tailscale-serve` from an interactive
-shell instead. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
+`KeepAlive`. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
 enables it, starts it, and enables user lingering so it survives logout and
-reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`;
-they never contain hub identity, auth state, tokens, or credential paths.
+reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`
+and request tailnet-only Tailscale Serve HTTPS by default. They never contain
+hub identity, auth state, tokens, or credential paths.
+
+`cas hub start`, `cas hub restart`, service install and `cas update` request
+Serve even when the previous hub was loopback-only. Existing HTTPS port choices
+are preserved during restart/update. Use `--no-tailscale-serve` for an explicit
+loopback-only launch or service install. For a persistent host opt-out, add to
+`~/.cas/config.toml` (the hub reads host configuration, not project configuration):
+
+```toml
+[hub]
+tailscale_serve = false
+```
+
+An explicit `--tailscale-serve` overrides this setting for that launch; an
+explicit `--no-tailscale-serve` overrides the default. Service definitions encode
+the resolved choice so the service child cannot re-enable an opted-out launch.
+The next update reapplies the host configuration. Configure this host file with
+`CAS_ROOT="$HOME/.cas" cas config set hub.tailscale_serve false --store cas-root`.
+
+After a binary update, Cassy starts a stopped hub if its service is installed
+or `~/.cas/hub/machine-id` exists. A machine with neither stays stopped and
+prints `hub not running; start with cas hub start`. Start/restart and transport
+checks have bounded timeouts. Starting a previously absent hub is best effort:
+one attempt records `action=start_failed` and its cause if the service cannot
+start, while update continues. Recovery of an existing runtime still fails
+if loopback cannot be verified. Missing Tailscale, logout, Serve permission or publication
+failure leaves a healthy loopback hub and does not fail the update. Its receipt
+records `verified=true`, `loopback_verified=true`, `transport_verified=false`,
+a reason in `transport_warning`, and a remedy; run `tailscale status`, then
+`cas hub restart` after fixing the cause.
+
+On macOS, the CLI selected through `TAILSCALE`, Homebrew or the app bundle must
+be usable by the LaunchAgent. The GUI app and a separately installed tailscaled
+can have different login/session state; inspect the actual CLI's `tailscale
+status` when publication is unavailable. Installation now attempts Serve and
+falls back to loopback instead of refusing launchd publication up front. Check
+`cas hub status` for `Tailscale Serve: OK` before relying on phone access.
+
 Service output is written to `~/.cas/hub/hub.log`; `cas hub service status`
 reports the manager state, hub health, and this log path.
 

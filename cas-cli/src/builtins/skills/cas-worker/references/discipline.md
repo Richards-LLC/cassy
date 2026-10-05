@@ -22,11 +22,15 @@ repository must be Git-ignored, such as `target/worker-check.log`; a bare
 `worker-check.log` is refused. Task artifact directories remain valid outside
 the checkout. Create the parent directory before invoking the check.
 
-The PreToolUse hook routes this command through the capped runner. It uses your
-private seeded target cache, holds a builder slot for the Cargo process lifetime,
-and refuses when the existing build guard or `max_concurrent_builders` cap is
-exceeded. Retry later after a refusal; do not bypass it with a toolchain,
-environment override, shell wrapper, broader flags, or another command.
+The PreToolUse hook routes this command through the capped runner. That applies to
+Claude's Bash and to Codex's `exec_command`, including calls made from code mode
+(`functions.exec`). The runner uses your private seeded target cache, holds a
+builder slot for the Cargo process lifetime, and refuses when the existing build
+guard or `max_concurrent_builders` cap is exceeded. Retry later after a refusal;
+do not bypass it with a toolchain, environment override, shell wrapper, broader
+flags, or another command. If a check ever runs as raw `cargo` (no runner
+process, no `check: PASS` line), stop it and report a blocker rather than
+running Cargo another way.
 
 On success the runner records `check: PASS <sha>` against the clean commit.
 Close copies that receipt into task notes when it matches the delivered SHA.

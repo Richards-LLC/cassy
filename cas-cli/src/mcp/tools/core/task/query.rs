@@ -233,6 +233,13 @@ impl CasCore {
             }
         }
 
+        if let Some(batch) = task.deliverables.integration_batch.as_ref() {
+            output.push_str(&format!(
+                "{}: {}@{} (base {}, delivery {}, supervisor {})\n",
+                if task.status == TaskStatus::AwaitingMerge { "Staged in integration batch" } else { "Integration batch receipt" }, batch.branch, batch.tip, batch.base, batch.delivered_head, batch.supervisor_id
+            ));
+        }
+
         if !task.description.is_empty() {
             output.push_str(&format!("\nDescription:\n{}\n", task.description));
         }
@@ -319,6 +326,9 @@ impl CasCore {
             match outcome {
                 cas_types::TaskTerminalOutcome::Delivered => {
                     output.push_str("\nOutcome: delivered");
+                }
+                cas_types::TaskTerminalOutcome::EvidenceOnly => {
+                    output.push_str("\nOutcome: successful evidence-only delivery (not for integration)");
                 }
                 cas_types::TaskTerminalOutcome::NegativeResult => {
                     output.push_str("\nOutcome: measured negative result (no delivery)");

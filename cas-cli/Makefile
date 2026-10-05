@@ -215,10 +215,13 @@ test-ci-tiers:
 	cd .. && bash scripts/test-no-mecha-references.sh
 	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py
+	cd .. && python3 scripts/test-assembly-memory.py
 	cd .. && python3 scripts/test-review-pr-body.py
 	cd .. && python3 scripts/test-builtin-contract-phrases.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
 	cd .. && python3 scripts/test-fast-release-rows.py
+	cd .. && python3 scripts/test-hub-web-gate.py
+	cd .. && python3 scripts/test-release-portable.py
 	cd .. && ./scripts/test-workflow-run-interpolation.sh
 	cd .. && ./scripts/test-run-verified-tests.sh
 	cd .. && ./scripts/test-classify-fast-admission.sh

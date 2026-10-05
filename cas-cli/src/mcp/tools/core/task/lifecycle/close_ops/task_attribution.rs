@@ -11,16 +11,7 @@ struct DeliveryRange {
     tip: String,
 }
 
-fn git_text(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
+use crate::git_evidence::git_text;
 
 fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     message
@@ -33,6 +24,123 @@ fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool
                 })
                 && identity.task_id.as_deref() != Some(word)
         })
+}
+
+/// cas-f38ca / cas-f2eb: the subject line names the task that owns a
+/// commit. One whose subject claims another task, and not this one, is that
+/// task's work even when its body mentions this task as context ("workers on
+/// cas-940f base on this").
+fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> bool {
+    let subject = message.trim().lines().next().unwrap_or("");
+    !identity
+        .task_id
+        .as_deref()
+        .is_some_and(|id| message_references_task(subject, id))
+        && references_foreign_task(subject, identity)
+}
+
+/// cas-93db: what `branch`'s recent first-parent work claims, under the
+/// subject rule above. Returns the first commit claiming this task, if any,
+/// and the newest commit claiming only another task (its subject line), if
+/// any, among the last 50 non-merge first-parent commits. `None` when Git
+/// cannot read the branch.
+pub(super) fn branch_task_claims(
+    repo: &Path,
+    branch: &str,
+    identity: &TaskCommitIdentity,
+) -> Option<(Option<String>, Option<String>)> {
+    let history = git_text(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "--no-merges",
+            "-n",
+            "50",
+            "--format=%H%x1f%B%x1e",
+            branch,
+            "--",
+        ],
+    )?;
+    let mut own = None;
+    let mut foreign = None;
+    for record in history.split('\u{1e}') {
+        let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
+            continue;
+        };
+        if subject_claims_another_task(message, identity) {
+            if foreign.is_none() {
+                let subject = message.trim().lines().next().unwrap_or("").trim();
+                foreign = Some(format!("{} {subject}", &sha[..sha.len().min(9)]));
+            }
+        } else if own.is_none()
+            && (identity.matches_known_commit(sha)
+                || identity
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|id| message_references_task(message, id)))
+        {
+            own = Some(sha.to_string());
+        }
+    }
+    Some((own, foreign))
+}
+
+/// cas-f2eb: a lane merge is task delivery only when everything it brings in
+/// is this task's work. A merge that brings a commit claimed by another task,
+/// or another lane's commit already on the target, imports someone else's
+/// content: its first-parent diff is theirs. Unnamed commits off the target
+/// stay attributable (a worker's own side branch). Unknowable Git state keeps
+/// the merge, as before.
+fn merge_brings_foreign_work(
+    repo: &Path,
+    first_parent: &str,
+    merged_parents: &[String],
+    target: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    for parent in merged_parents {
+        let exclude_first = format!("^{first_parent}");
+        let exclude_target = format!("^{target}");
+        let Some(brought) = git_text(
+            repo,
+            &[
+                "log",
+                "--no-merges",
+                "--format=%H%x1f%B%x1e",
+                parent,
+                &exclude_first,
+            ],
+        ) else {
+            return false;
+        };
+        let Some(off_target) = git_text(
+            repo,
+            &["rev-list", "--no-merges", parent, &exclude_first, &exclude_target],
+        ) else {
+            return false;
+        };
+        let off_target: HashSet<&str> = off_target.lines().collect();
+        for record in brought.split('\u{1e}') {
+            let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
+                continue;
+            };
+            if identity.matches_known_commit(sha) {
+                continue;
+            }
+            if subject_claims_another_task(message, identity) {
+                return true;
+            }
+            let named = identity
+                .task_id
+                .as_deref()
+                .is_some_and(|id| message_references_task(message, id));
+            if !named && !off_target.contains(sha) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {
@@ -76,7 +184,8 @@ fn task_delivery_ranges(
 }
 
 /// The selected delivery ranges, plus whether a target-sync merge that would
-/// otherwise have been selected was excluded (cas-2664 defect 7). Empty
+/// otherwise have been selected was excluded (cas-2664 defect 7), or a merge
+/// that brought another task's work (cas-f2eb). Empty
 /// ranges with that flag set are a positive finding, "this task only brought
 /// the target into its lane", not an attribution failure.
 struct DeliverySelection {
@@ -142,11 +251,12 @@ fn task_delivery_selection(
             let message = fields[3];
             let owned = (historical_receipt && sha == tip)
                 || window.identity.matches_known_commit(&sha)
-                || window
+                || (window
                     .identity
                     .task_id
                     .as_deref()
-                    .is_some_and(|id| message_references_task(message, id));
+                    .is_some_and(|id| message_references_task(message, id))
+                    && !subject_claims_another_task(message, &window.identity));
             let foreign = !owned
                 && message
                     .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
@@ -189,7 +299,20 @@ fn task_delivery_selection(
             // effect is other tasks' delivered content. Deselecting it also
             // splits the ranges, so no range spans the target content it
             // brought in. Only otherwise-selected merges cost a Git call.
-            if candidate && c.merge && is_target_sync_merge(repo, &c.merged_parents, &target) {
+            // cas-f2eb: likewise a merge that brings another task's work
+            // (an epic tip the target does not hold yet, or main) imports
+            // that work; only the task's own commits around it are delivery.
+            if candidate
+                && c.merge
+                && (is_target_sync_merge(repo, &c.merged_parents, &target)
+                    || merge_brings_foreign_work(
+                        repo,
+                        &c.parent,
+                        &c.merged_parents,
+                        &target,
+                        &window.identity,
+                    ))
+            {
                 excluded_target_sync = true;
                 return false;
             }
@@ -397,6 +520,147 @@ pub(super) fn delivery_base(
     (!base.is_empty()).then_some(base)
 }
 
+/// Shared candidate selection for whole-delivery and final-snapshot proof.
+/// Preserve side-parent identity, foreign-subject and work-window rules.
+fn attributed_content_commits(
+    repo: &Path,
+    target: &str,
+    tip: &str,
+    window: &TaskCommitReceiptWindow,
+    identity: &TaskCommitIdentity,
+) -> Option<Vec<String>> {
+    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
+
+    let mut commits = Vec::new();
+    for range in ranges {
+        let range = format!("{}..{}", range.base, range.tip);
+        let range_commits = git_text(repo, &["rev-list", "--first-parent", "--reverse", &range])?;
+        for commit in range_commits.lines().filter(|commit| !commit.is_empty()) {
+            if !commits.iter().any(|known| known == commit) && !is_merge_commit(repo, commit) {
+                commits.push(commit.to_string());
+            }
+        }
+    }
+
+    // A supervisor can put the task lane on the merge's second-parent
+    // side. Its identified content still belongs to the task; restricting
+    // attribution to first-parent history would silently omit that delivery.
+    if let Some(id) = identity.task_id.as_deref() {
+        let mut args = vec![
+            "log".to_string(),
+            "--no-merges".into(),
+            "--reverse".into(),
+            "--format=%H%x1f%ct%x1f%B%x1e".into(),
+            "--fixed-strings".into(),
+            format!("--grep={id}"),
+        ];
+        if let Some(since) = task_commit_receipt_since(window.task_floor) {
+            args.push(format!("--since-as-filter={since}"));
+        }
+        args.push(tip.into());
+        let history = git_text(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        for record in history.split('\u{1e}') {
+            let fields: Vec<_> = record.trim().splitn(3, '\u{1f}').collect();
+            if fields.len() != 3
+                || !message_references_task(fields[2], id)
+                || delivery_evolution::is_revert_message(fields[2])
+            {
+                continue;
+            }
+            // cas-f38ca: another lane's commit can mention this task as
+            // context ("dep_add no longer strands cas-940f") and reach the
+            // tip through a merge of the epic. Its subject names the task
+            // that owns it; a body mention does not make its lines ours.
+            if !identity.matches_known_commit(fields[0])
+                && subject_claims_another_task(fields[2], identity)
+            {
+                continue;
+            }
+            let Ok(epoch) = fields[1].parse::<i64>() else {
+                continue;
+            };
+            if in_work_window(window, epoch, true)
+                && !commits.iter().any(|known| known == fields[0])
+            {
+                commits.push(fields[0].to_string());
+            }
+        }
+    }
+
+    Some(commits)
+}
+
+/// Exact snapshot recovery needs a surviving task-attributed path effect,
+/// including side-parent authors, not an imported baseline. Delivery ranges
+/// split at target-sync/foreign merges;
+/// record their path baselines before crediting ordinary task-authored blobs.
+/// Returning to any imported baseline removes the task effect even when that
+/// baseline differs from the task's earliest spawn tree (cas-5f0b).
+/// `None` is undecidable Git evidence and never authorizes recovery.
+pub(super) fn final_path_snapshot_proven(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+    measured_target: &str,
+    path: &str,
+) -> Option<bool> {
+    let snapshot = tree_path_blob(repo, tip, path)?;
+    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
+    let mut authored_blobs = Vec::new();
+    let mut imported_baselines = Vec::new();
+    for range in ranges {
+        let history = git_text(repo, &["rev-list", "--first-parent", "--reverse", &format!("{}..{}", range.base, range.tip)])?;
+        let mut path_commits = Vec::new();
+        for commit in history.lines().filter(|commit| !commit.is_empty()) {
+            if super::commit_changes_path(repo, commit, path).ok()? {
+                path_commits.push(commit);
+            }
+        }
+        if path_commits.is_empty() {
+            continue;
+        }
+        let baseline = tree_path_blob(repo, &range.base, path)?;
+        if !authored_blobs.contains(&baseline) && !imported_baselines.contains(&baseline) {
+            imported_baselines.push(baseline);
+        }
+        for commit in path_commits {
+            let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
+            let ordinary_authored = !is_merge_commit(repo, commit)
+                && !delivery_evolution::is_revert_message(&message);
+            let blob = tree_path_blob(repo, commit, path)?;
+            // Imported/reverted states never become task-owned baselines.
+            if ordinary_authored && !imported_baselines.contains(&blob) && !authored_blobs.contains(&blob) {
+                authored_blobs.push(blob.clone());
+            }
+        }
+    }
+    if imported_baselines.contains(&snapshot) {
+        return Some(false);
+    }
+    for commit in attributed_content_commits(repo, target, tip, window, &window.identity)? {
+        let message = git_text(repo, &["show", "-s", "--format=%B", &commit])?;
+        if delivery_evolution::is_revert_message(&message)
+            || !super::commit_changes_path(repo, &commit, path).ok()? {
+            continue;
+        }
+        let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+        match delivery_evolution::surviving_line_content(repo, &parent, &commit, measured_target, path).ok()? {
+            Some(DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. }) => return Some(true),
+            None => {
+                // Binary/deletion-only effects use the existing reverse-patch
+                // proof, still bound to an attributed commit and final tree.
+                if tree_path_blob(repo, &commit, path)? == snapshot
+                    && super::reverse_delivery_path_applies_to_tree(repo, &parent, &commit, measured_target, path).ok()? {
+                    return Some(true);
+                }
+            }
+            _ => {},
+        }
+    }
+    Some(false)
+}
+
 /// Prove the content of a merge-tip delivery from the task's first-parent
 /// commits rather than from the merge tip itself.
 ///
@@ -431,8 +695,6 @@ pub(super) fn merge_tip_content_presence(
         identity: identity.clone(),
     };
     let window = window.unwrap_or(&fallback_window);
-    let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
-
     let first_parent_commits = git_text(
         repo,
         &["rev-list", "--first-parent", "--reverse", merge_tip],
@@ -442,52 +704,7 @@ pub(super) fn merge_tip_content_presence(
         .filter(|commit| !commit.is_empty())
         .collect::<Vec<_>>();
 
-    let mut commits = Vec::new();
-    for range in ranges {
-        let range = format!("{}..{}", range.base, range.tip);
-        let range_commits = git_text(repo, &["rev-list", "--first-parent", "--reverse", &range])?;
-        for commit in range_commits.lines().filter(|commit| !commit.is_empty()) {
-            if !commits.iter().any(|known| known == commit) && !is_merge_commit(repo, commit) {
-                commits.push(commit.to_string());
-            }
-        }
-    }
-
-    // A supervisor can put the task lane on the merge's second-parent
-    // side. Its identified content still belongs to the task; restricting
-    // attribution to first-parent history would silently omit that delivery.
-    if let Some(id) = identity.task_id.as_deref() {
-        let mut args = vec![
-            "log".to_string(),
-            "--no-merges".into(),
-            "--reverse".into(),
-            "--format=%H%x1f%ct%x1f%B%x1e".into(),
-            "--fixed-strings".into(),
-            format!("--grep={id}"),
-        ];
-        if let Some(since) = task_commit_receipt_since(window.task_floor) {
-            args.push(format!("--since-as-filter={since}"));
-        }
-        args.push(merge_tip.into());
-        let history = git_text(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        for record in history.split('\u{1e}') {
-            let fields: Vec<_> = record.trim().splitn(3, '\u{1f}').collect();
-            if fields.len() != 3
-                || !message_references_task(fields[2], id)
-                || delivery_evolution::is_revert_message(fields[2])
-            {
-                continue;
-            }
-            let Ok(epoch) = fields[1].parse::<i64>() else {
-                continue;
-            };
-            if in_work_window(window, epoch, true)
-                && !commits.iter().any(|known| known == fields[0])
-            {
-                commits.push(fields[0].to_string());
-            }
-        }
-    }
+    let mut commits = attributed_content_commits(repo, target, merge_tip, window, identity)?;
 
     if let Some(receipt) = validated_receipt
         .and_then(|receipt| super::resolve_task_commit_receipt_sha(repo, receipt).ok())

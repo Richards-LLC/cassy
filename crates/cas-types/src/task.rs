@@ -168,6 +168,8 @@ pub enum TaskTerminalOutcome {
     /// A measured experiment completed negatively and was intentionally not
     /// merged under the structured supervisor receipt.
     NegativeResult,
+    /// Successful report/artifact delivery intentionally excluded from code integration.
+    EvidenceOnly,
     /// A human/supervisor decision completed the task without code delivery.
     Decision,
     /// Planned work ended without delivery. `superseded_by` may identify the
@@ -488,9 +490,37 @@ pub struct NegativeResultEvidence {
     pub supervisor_name: String,
 }
 
+/// Audited successful evidence delivery that does not enter code integration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceOnlyEvidence {
+    pub artifact_path: String,
+    pub reference: String,
+    pub rationale: String,
+    pub supervisor_id: String,
+    pub supervisor_name: String,
+    pub commit_sha: String,
+    pub base_sha: String,
+    pub paths: Vec<String>,
+}
+
+/// Supervisor-pinned integration batch carrying one parked delivery. The batch
+/// remains awaiting merge until its aggregate delta lands on the task target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationBatchEvidence {
+    pub branch: String,
+    pub tip: String,
+    pub base: String,
+    pub delivered_head: String,
+    pub supervisor_id: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_batch: Option<IntegrationBatchEvidence>,
+
     /// Portable repository/branch binding used by close, verification, and
     /// worktree mutations. Legacy JSON defaults to no explicit binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -506,6 +536,9 @@ pub struct TaskDeliverables {
     /// a closed task is reopened into a fresh work cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negative_result: Option<NegativeResultEvidence>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_only: Option<EvidenceOnlyEvidence>,
 
     /// Files changed (excluding deletions)
     #[serde(default)]
@@ -602,11 +635,15 @@ pub struct TaskDeliverables {
 #[derive(Debug, Deserialize)]
 struct TaskDeliverablesObject {
     #[serde(default)]
+    integration_batch: Option<IntegrationBatchEvidence>,
+    #[serde(default)]
     work_target: Option<WorkTarget>,
     #[serde(default)]
     pre_close_hook: Option<PreCloseHookEvidence>,
     #[serde(default)]
     negative_result: Option<NegativeResultEvidence>,
+    #[serde(default)]
+    evidence_only: Option<EvidenceOnlyEvidence>,
     #[serde(default)]
     files_changed: Vec<String>,
     #[serde(default)]
@@ -636,9 +673,11 @@ struct TaskDeliverablesObject {
 impl From<TaskDeliverablesObject> for TaskDeliverables {
     fn from(value: TaskDeliverablesObject) -> Self {
         Self {
+            integration_batch: value.integration_batch,
             work_target: value.work_target,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
+            evidence_only: value.evidence_only,
             files_changed: value.files_changed,
             commit_hash: value.commit_hash,
             merge_commit: value.merge_commit,
@@ -846,6 +885,46 @@ impl TaskDeliverables {
         }
     }
 
+    /// Record the delivery a fresh park (InProgress -> AwaitingMerge) is
+    /// about: the branch the merge gate measured and its tip.
+    ///
+    /// cas-4b3f/cas-3d37: a commit-time anchor already recorded for this
+    /// cycle is kept; otherwise the measured tip becomes the anchor.
+    ///
+    /// cas-a44a: a reopened, reassigned task still names the previous
+    /// worker's `parked_branch`. When the gate measured a tip on a different
+    /// branch, this park is a new delivery there: the parked branch and the
+    /// anchor move to it, and the previous branch and anchor stay as handoff
+    /// and historical records (cas-a844 ownership, cas-e33f handoffs). A park
+    /// on the recorded branch, or one whose branch did not resolve, keeps the
+    /// existing records.
+    pub fn record_park(
+        &mut self,
+        measured_branch: Option<&str>,
+        measured_tip: Option<&str>,
+        assignee: Option<&str>,
+    ) {
+        let branch = measured_branch
+            .map(|branch| branch.strip_prefix("origin/").unwrap_or(branch).to_string())
+            .or_else(|| assignee.map(|assignee| format!("factory/{assignee}")));
+        if let (Some(branch), Some(tip), Some(previous)) =
+            (branch.as_deref(), measured_tip, self.parked_branch.clone())
+            && previous != branch
+        {
+            self.record_handoff_branch(&previous);
+            self.retain_factory_branch_anchor_as_history();
+            self.factory_branch_anchor = Some(tip.to_string());
+            self.parked_branch = Some(branch.to_string());
+            return;
+        }
+        if self.factory_branch_anchor.is_none() {
+            self.factory_branch_anchor = measured_tip.map(str::to_string);
+        }
+        if self.parked_branch.is_none() {
+            self.parked_branch = branch;
+        }
+    }
+
     /// Move the active factory anchor out of close authority while retaining
     /// it as task-owned commit identity for later merge-gate attribution.
     ///
@@ -853,6 +932,7 @@ impl TaskDeliverables {
     /// The anchor is never retained as active authority, and blank values are
     /// ignored so an empty recovery record cannot create identity.
     pub fn retain_factory_branch_anchor_as_history(&mut self) {
+        self.integration_batch = None;
         let Some(anchor) = self.factory_branch_anchor.take() else {
             return;
         };
@@ -871,6 +951,7 @@ impl TaskDeliverables {
         self.work_target.is_none()
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
+            && self.evidence_only.is_none()
             && self.files_changed.is_empty()
             && self.commit_hash.is_none()
             && self.merge_commit.is_none()
@@ -1129,6 +1210,9 @@ impl Task {
     /// legacy NULL rows. This never mutates or backfills persistence.
     pub fn effective_terminal_outcome(&self) -> Option<TaskTerminalOutcome> {
         self.terminal_outcome.clone().or_else(|| match self.status {
+            TaskStatus::Closed if self.deliverables.evidence_only.is_some() => {
+                Some(TaskTerminalOutcome::EvidenceOnly)
+            }
             TaskStatus::Closed if self.deliverables.negative_result.is_some() => {
                 Some(TaskTerminalOutcome::NegativeResult)
             }
@@ -1145,7 +1229,7 @@ impl Task {
         self.is_terminal()
             && matches!(
                 self.effective_terminal_outcome(),
-                Some(TaskTerminalOutcome::Delivered)
+                Some(TaskTerminalOutcome::Delivered | TaskTerminalOutcome::EvidenceOnly)
             )
     }
 
@@ -1157,7 +1241,8 @@ impl Task {
         !matches!(
             self.effective_terminal_outcome(),
             Some(
-                TaskTerminalOutcome::NegativeResult
+                TaskTerminalOutcome::EvidenceOnly
+                    | TaskTerminalOutcome::NegativeResult
                     | TaskTerminalOutcome::Decision
                     | TaskTerminalOutcome::Cancelled { .. }
             )

@@ -800,3 +800,7 @@ fn merge_worktree_permissions(
 #[cfg(test)]
 #[path = "hook_tests/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "hook_tests/matcher_churn.rs"]
+mod matcher_churn_tests;

@@ -30,9 +30,13 @@ Any of these sets the whole score to 0 until fixed; the gate detects each one:
 
 ## Procedure
 
-1. Run the gate, which ships with this skill (Node 18+ and the `script` pty utility):
+1. Run the gate, which ships with this skill (Node 18+ and BSD/macOS or util-linux `script`):
    `node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <command> --out <artifacts_root>/<project-key>/<task-id>/terminal-qa/<command> [--json-flag --json] -- <command …>`.
    Read `report.md`; fix every finding or allowlist it with a reason a reviewer would accept.
+   Every run needs visible command output; empty captures cannot be allowlisted. A broken
+   runner exits 2 without a PASS receipt. Nonzero command exits are valid diagnostic captures.
+   Human pipe captures include stdout and stderr; JSON stdout remains one document, with
+   stderr analyzed separately and retained beside the capture.
    **Fallback, stated once:** where the script cannot run, capture the command yourself at 80
    and 120 columns, piped, with `NO_COLOR=1`, and with `LC_ALL=C`, check each mechanical zero by
    eye, and write "terminal-qa unavailable: <reason>; checked by hand" in place of the receipt. A

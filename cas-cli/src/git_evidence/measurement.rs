@@ -11,10 +11,10 @@ thread_local! {
     static DEADLINE: Cell<Option<Deadline>> = const { Cell::new(None) };
 }
 
-pub(super) struct Scope(Option<Deadline>);
+pub(crate) struct Scope(Option<Deadline>);
 
 impl Scope {
-    pub(super) fn new(budget: Duration) -> Self {
+    pub(crate) fn new(budget: Duration) -> Self {
         let next = (budget != Duration::MAX).then(|| Deadline::after(budget));
         Self(DEADLINE.replace(next))
     }
@@ -26,15 +26,15 @@ impl Drop for Scope {
     }
 }
 
-pub(super) fn deadline() -> Option<Deadline> {
+pub(crate) fn deadline() -> Option<Deadline> {
     DEADLINE.get()
 }
 
-pub(super) fn expired() -> bool {
+pub(crate) fn expired() -> bool {
     deadline().is_some_and(|deadline| deadline.remaining().is_zero())
 }
 
-pub(super) fn check() -> Result<(), String> {
+pub(crate) fn check() -> Result<(), String> {
     if expired() {
         Err("epic delivery measurement budget exhausted".into())
     } else {
@@ -44,7 +44,7 @@ pub(super) fn check() -> Result<(), String> {
 
 /// Thread-local, deterministic load injection; never reads process-wide env.
 #[cfg(test)]
-pub(super) mod test_load {
+pub(crate) mod test_load {
     use std::cell::Cell;
     use std::time::Duration;
 
@@ -87,7 +87,7 @@ fn io_error(error: BoundedCommandError) -> io::Error {
     }
 }
 
-pub(super) trait CommandExt {
+pub(crate) trait CommandExt {
     fn measurement_output(&mut self) -> io::Result<Output>;
     fn measurement_output_with_stdin(&mut self, stdin: Stdio) -> io::Result<Output>;
     fn measurement_status(&mut self) -> io::Result<ExitStatus>;

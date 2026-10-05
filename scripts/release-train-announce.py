@@ -221,6 +221,21 @@ def announce_token_env(credentials: dict[str, str]) -> str | None:
     return None
 
 
+def resolve_announce_token(adapter: Any, credentials: dict[str, str]) -> str:
+    """Share local credential selection between preflight and posting."""
+    token_env = announce_token_env(credentials)
+    if token_env:
+        os.environ["VIOLET_SLACK_TOKEN_ENV"] = token_env
+    return adapter.resolve_token(credentials)
+
+
+def check_token() -> None:
+    # Resolve locally, without creating an MCP client or displaying the secret.
+    adapter = load_report_adapter()
+    resolve_announce_token(adapter, adapter.parse_credentials(adapter.credential_file()))
+    print("announce token resolution PASS")
+
+
 def receipt(path: Path, values: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.partial")
@@ -241,10 +256,7 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
         if not expected.is_file() or expected.read_text(encoding="utf-8").strip("\n") != body:
             fail(f"validated body is missing or changed: {expected}")
     credentials = adapter.parse_credentials(adapter.credential_file())
-    token_env = announce_token_env(credentials)
-    if token_env:
-        os.environ["VIOLET_SLACK_TOKEN_ENV"] = token_env
-    token = adapter.resolve_token(credentials)
+    token = resolve_announce_token(adapter, credentials)
     bypass = adapter.resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials)
     url = os.environ.get("CAS_RELEASE_TRAIN_ANNOUNCE_MCP_URL", adapter.DEFAULT_MCP_URL)
     channel = os.environ.get("CAS_RELEASE_TRAIN_ANNOUNCE_CHANNEL", adapter.DEFAULT_CHANNEL)
@@ -326,6 +338,9 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
 
 def main(argv: list[str]) -> int:
     try:
+        if len(argv) == 2 and argv[1] == "--check-token":
+            check_token()
+            return 0
         if len(argv) == 5 and argv[1] == "--record-latency":
             record_latency(argv[2], argv[3], argv[4])
             return 0
@@ -340,7 +355,7 @@ def main(argv: list[str]) -> int:
             return 0
         print(
             "usage: release-train-announce.py --validate DRAFT BODY_DIR [--pre-publication] | "
-            "--post VERSION DRAFT RECEIPT BODY_DIR | --record-latency TAG RECEIPT DRAFT",
+            "--check-token | --post VERSION DRAFT RECEIPT BODY_DIR | --record-latency TAG RECEIPT DRAFT",
             file=sys.stderr,
         )
         return 2

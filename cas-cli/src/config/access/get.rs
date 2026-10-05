@@ -19,6 +19,13 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "hub.tailscale_serve" => Some(
+                self.hub
+                    .as_ref()
+                    .and_then(|hub| hub.tailscale_serve)
+                    .unwrap_or(true)
+                    .to_string(),
+            ),
             "jev.gate.shadow" => Some(self.jev.clone().unwrap_or_default().gate.shadow.to_string()),
             "jev.model" => Some(self.jev.clone().unwrap_or_default().model),
             "jev.key_file" => Some(
@@ -90,11 +97,16 @@ impl Config {
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
+            "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),
+            "factory.supervisor_only_env" => Some(factory.worker_policy.supervisor_only_env.join(",")),
+            "factory.worker_credential_env" => Some(factory.worker_policy.worker_credential_env.join(",")),
             "factory.message_max_chars_escalation" => {
                 Some(factory.message_max_chars_escalation.to_string())
             }
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.spawn_min_free_gib" => Some(factory.spawn_min_free_gib.to_string()),
+            "factory.prompt_retention_days" => Some(factory.prompt_retention_days.to_string()),
             "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
                 Some(factory.cargo_build_jobs.clone())
             }
@@ -121,6 +133,7 @@ impl Config {
             "qa.independent_pass" => Some(qa.independent_pass.to_string()),
             "qa.evidence_gate" => Some(qa.evidence_gate.to_string()),
             "qa.terminal_render_paths" => Some(qa.terminal_render_paths.join(",")),
+            "qa.terminal_interaction_paths" => Some(qa.terminal_interaction_paths.join(",")),
             "qa.user_facing_paths" => Some(qa.user_facing_paths.join(",")),
             "qa.pass_timeout_mins" => Some(qa.pass_timeout_mins.to_string()),
             "qa.max_rounds" => Some(qa.max_rounds.to_string()),

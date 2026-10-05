@@ -128,7 +128,7 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button><button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
@@ -312,6 +312,7 @@ function contextRailMarkup(selected: boolean): string {
 export const appearanceButtonMarkup = (shortcut = paletteShortcutLabel()): string => `<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands (${shortcut} twice)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>`;
 
 export function conversationShellMarkup(model: ConversationShellModel): string {
+  const networkHelp = '<p id="network-access-help" class="compatibility-warning" role="status" hidden></p>';
   // First run: the welcome carries the one primary "Pair a machine". The list
   // header's chip is hidden beside it on wide screens (styles.css
   // .welcome-pairs) and, on a phone where the welcome is not shown, it is the
@@ -322,11 +323,12 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
       <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div><div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
+      ${!model.selected ? networkHelp : ""}
       ${model.paired ? composeFabMarkup : ""}
       <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
     </aside>
     <main class="conversation-main">
-      ${model.selected ? `${conversationHeaderMarkup(model)}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}
+      ${model.selected ? `${conversationHeaderMarkup(model)}${networkHelp}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}
     </main>
     ${contextRailMarkup(model.selected)}
   </div>`;
@@ -382,6 +384,36 @@ export function fitConversationHost(root: ParentNode): void {
     - (avatar ? avatar.getBoundingClientRect().width + (parseFloat(style.columnGap) || 0) : 0);
   const connection = host.querySelector<HTMLElement>("#conversation-connection");
   fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0));
+}
+
+/**
+ * cas-6b75 (journey F03): while the connection is lost, the header's
+ * Terminal view says why it can't open, as the empty card stops offering it,
+ * instead of offering a terminal it cannot reach. It stays focusable; a
+ * click or Enter says the reason.
+ */
+export function applyTerminalOffer(root: Document, reason: string | undefined): void {
+  const button = root.querySelector<HTMLButtonElement>("#conversation-terminal");
+  if (!button) return;
+  const note = root.querySelector<HTMLElement>("#conversation-terminal-reason");
+  if (reason === undefined) {
+    if (button.dataset.disabledReason === undefined) return;
+    delete button.dataset.disabledReason;
+    button.removeAttribute("aria-disabled");
+    button.removeAttribute("aria-describedby");
+    button.removeAttribute("title");
+    note?.remove();
+    return;
+  }
+  if (button.dataset.disabledReason === reason && note) return;
+  button.dataset.disabledReason = reason;
+  button.setAttribute("aria-disabled", "true");
+  button.setAttribute("aria-describedby", "conversation-terminal-reason");
+  button.title = reason;
+  const line = note ?? root.createElement("span");
+  line.id = "conversation-terminal-reason"; line.className = "sr-only";
+  if (line.textContent !== reason) line.textContent = reason;
+  if (!note) button.after(line);
 }
 
 export function arrangeConversationShell(app: HTMLElement, model: ConversationShellModel): void {

@@ -10,8 +10,11 @@
     "tokens": "node scripts/generate-tokens.mjs",
     "visual-qa": "npm exec --yes --package=playwright -- node scripts/visual-qa.mjs",
     "check:journey-clock": "node --test scripts/check-journey-clock.test.mjs && node scripts/check-journey-clock.mjs",
-    "prejourneys": "npm run check:journey-clock",
-    "journeys": "node scripts/run-verified-tests.mjs playwright --project=journeys"
+    "check:journey-receipts": "node --test e2e/journeys/receipt-directory.test.mjs",
+    "prejourneys": "npm run check:journey-clock && npm run check:journey-receipts",
+    "journeys": "node scripts/run-verified-tests.mjs playwright --project=journeys",
+    "prejourneys:real-hub": "npm run check:journey-clock && npm run check:journey-receipts",
+    "journeys:real-hub": "node scripts/run-verified-tests.mjs playwright --config playwright.real-hub.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

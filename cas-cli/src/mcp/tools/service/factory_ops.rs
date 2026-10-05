@@ -615,18 +615,20 @@ impl ShutdownWorkerSnapshot {
     }
 
     fn render(&self) -> String {
+        format!("{}; {}", self.render_state(), self.worktree_cleanup_verdict)
+    }
+
+    /// Tasks and worktree state without the shutdown cleanup verdict, which
+    /// does not apply to a recycle (it keeps the worktree).
+    fn render_state(&self) -> String {
         let tasks = if self.task_states.is_empty() {
             "none".to_string()
         } else {
             self.task_states.join(", ")
         };
         format!(
-            "{} (id={}): tasks=[{}]; {}; {}",
-            self.worker_name,
-            self.worker_id,
-            tasks,
-            self.worktree_state,
-            self.worktree_cleanup_verdict
+            "{} (id={}): tasks=[{}]; {}",
+            self.worker_name, self.worker_id, tasks, self.worktree_state
         )
     }
 }
@@ -1393,6 +1395,17 @@ fn spawn_warning_for_request(
         spawn_spec_warning(model_explicit, effort_explicit, spec_json)
     } else {
         spawn_specs_warning(model_explicit, effort_explicit, specs)
+    }
+}
+
+/// The factory context an MCP caller acts in: this process's factory
+/// session, supervisor ownership and role, and its own account dirs.
+fn mcp_fleet_context() -> crate::ops::fleet::FleetContext {
+    crate::ops::fleet::FleetContext {
+        factory_session: current_factory_session(),
+        owned_workers: supervisor_owned_workers(),
+        supervisor_authorized: crate::harness_policy::is_supervisor_from_env(),
+        requester_from_env: true,
     }
 }
 
@@ -2183,6 +2196,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_spawn_workers_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_spawn_workers`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_spawn_workers_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
@@ -2497,8 +2521,14 @@ impl CasService {
         // harness; a Claude supervisor's profile must never become a Codex
         // worker's CODEX_HOME (or vice versa).
         for spec in &mut specs {
-            spec.requester_config_dir = requester_account_dir(spec.cli);
-            spec.requester_secure_storage_dir = requester_secure_storage_dir(spec.cli);
+            spec.requester_config_dir = ctx
+                .requester_from_env
+                .then(|| requester_account_dir(spec.cli))
+                .flatten();
+            spec.requester_secure_storage_dir = ctx
+                .requester_from_env
+                .then(|| requester_secure_storage_dir(spec.cli))
+                .flatten();
             if spec.cli == cas_mux::SupervisorCli::Codex
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
@@ -2644,7 +2674,7 @@ impl CasService {
             .map(|warning| format!("\nWARNING — SHARED-CLONE SUPERVISOR OVERLAP: {warning}"))
             .unwrap_or_default();
 
-        let factory_session = current_factory_session();
+        let factory_session = ctx.factory_session.clone();
         if let Some(delivery_mode) = requested_delivery_mode {
             let session = factory_session.as_deref().ok_or_else(|| {
                 Self::error(
@@ -2757,7 +2787,7 @@ impl CasService {
             .as_deref()
             .and_then(|task_id| task_store.get(task_id).ok())
             .or_else(|| {
-                let session = current_factory_session()?;
+                let session = ctx.factory_session.clone()?;
                 let raw = std::fs::read_to_string(metadata_path(&session)).ok()?;
                 let metadata =
                     serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok()?;
@@ -2805,6 +2835,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_shutdown_workers_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_shutdown_workers`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_shutdown_workers_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_store::SpawnLifecycleState;
         use cas_types::{AgentRole, AgentStatus};
@@ -2834,8 +2875,8 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
-        let owned = supervisor_owned_workers();
-        let factory_session = current_factory_session();
+        let owned = ctx.owned_workers.clone();
+        let factory_session = ctx.factory_session.clone();
         let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -2874,19 +2915,21 @@ impl CasService {
             .filter(|agent| agent.role == AgentRole::Worker)
             .cloned()
             .collect();
+        // The durable factory-session registration owns shutdown scope, not
+        // the launch-time pane roster or a live-only status filter. Dead and
+        // already-shutdown rows remain addressable for notification cleanup.
+        // Keep the historical roster/status scope for non-factory callers.
         let (known_workers, _) = dedupe_authoritative_agents(
             all_agents
                 .into_iter()
                 .filter(|agent| {
                     agent.role == AgentRole::Worker
-                        && matches!(
-                            agent.status,
-                            AgentStatus::Active | AgentStatus::Idle | AgentStatus::Stale
-                        )
                         && agent.visible_to_factory_session(factory_session.as_deref())
-                        && owned
-                            .as_ref()
-                            .is_none_or(|names| names.contains(&agent.name))
+                        && (factory_session.is_some()
+                            || (matches!(
+                                agent.status,
+                                AgentStatus::Active | AgentStatus::Idle | AgentStatus::Stale
+                            ) && owned.as_ref().is_none_or(|names| names.contains(&agent.name))))
                 })
                 .collect(),
         );
@@ -2917,6 +2960,9 @@ impl CasService {
             let limit = req.count.unwrap_or(0) as usize;
             known_workers
                 .iter()
+                // Already-retired rows are explicit/all cleanup targets, but
+                // must not consume a request to stop N nonterminal workers.
+                .filter(|worker| limit == 0 || worker.status != AgentStatus::Shutdown)
                 .take(if limit == 0 {
                     known_workers.len()
                 } else {
@@ -3101,6 +3147,25 @@ impl CasService {
                     format!("Failed to queue shutdown request: {e}"),
                 )
             })?;
+        // No daemon pane is needed to retire a confirmed-dead registration.
+        // Do this only after selector and force validation, and re-read all
+        // same-name identities so a recycled live worker cannot lose its mail.
+        for worker in &selected {
+            retire_dead_worker_for_shutdown(
+                &self.inner.cas_root,
+                &worker.name,
+                factory_session.as_deref(),
+            )
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Shutdown request {request_id} queued, but dead-worker cleanup for {} failed: {error}",
+                        worker.name
+                    ),
+                )
+            })?;
+        }
         let request_id_text = request_id.to_string();
         let count_text = req.count.map(|value| value.to_string()).unwrap_or_default();
         let worker_names_text = worker_names.join(",");
@@ -3143,6 +3208,17 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_recycle_worker_in(&mcp_fleet_context(), req).await
+    }
+
+    /// [`Self::factory_recycle_worker`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_recycle_worker_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_types::{AgentRole, AgentStatus};
 
@@ -3157,8 +3233,8 @@ impl CasService {
                     "recycle_worker requires target=<worker-name>",
                 )
             })?;
-        let factory_session = current_factory_session();
-        let owned = supervisor_owned_workers();
+        let factory_session = ctx.factory_session.clone();
+        let owned = ctx.owned_workers.clone();
         if let Some(owned) = owned.as_ref() {
             if !owned.contains(worker_name) {
                 return Err(Self::error(
@@ -3222,12 +3298,19 @@ impl CasService {
             local_merge_delivery,
             pinned_epic_branch.as_deref(),
         );
-        if snapshot.requires_force() {
+        // cas-a622: a recycle keeps the worktree and every task binding (the
+        // daemon respawns the same name and re-delivers the in-progress
+        // brief), so holding work is no reason to refuse. Only work that
+        // exists nowhere but this checkout is, and no flag overrides that.
+        if snapshot.unsafe_worktree {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "recycle_worker refused: selected worker state requires force=true, but recycling never force-destroys work.\n- {}",
-                    snapshot.render()
+                    "recycle_worker refused: {worker_name} has work that is only in its worktree. \
+                     Have it commit and push its branch (or get it merged, for local delivery), \
+                     then retry; recycling keeps the worktree and task bindings but never \
+                     restarts a worker over unsaved work.\n- {}",
+                    snapshot.render_state()
                 ),
             ));
         }
@@ -3290,7 +3373,8 @@ impl CasService {
         );
 
         Ok(Self::success(format!(
-            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe."
+            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe. Its task bindings are kept and its open work is re-delivered as a resume brief.\n- {}",
+            snapshot.render_state()
         )))
     }
 
@@ -3364,7 +3448,18 @@ impl CasService {
         req: FactoryRequest,
         held: bool,
     ) -> Result<CallToolResult, McpError> {
-        use crate::harness_policy::is_supervisor_from_env;
+        self.factory_set_worker_hold_in(&mcp_fleet_context(), req, held).await
+    }
+
+    /// [`Self::factory_set_worker_hold`] with the factory context passed in rather than read
+    /// from this process's environment, so the Commander hub's operator
+    /// facade runs the same body (cas-9b08).
+    pub(crate) async fn factory_set_worker_hold_in(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        held: bool,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_reminder_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_worker_hold_at};
         use cas_types::{AgentRole, AgentStatus};
@@ -3374,10 +3469,10 @@ impl CasService {
         } else {
             "release_worker"
         };
-        worker_hold_role_gate(is_supervisor_from_env(), action)
+        worker_hold_role_gate(ctx.supervisor_authorized, action)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
-        let factory_session = current_factory_session().ok_or_else(|| {
+        let factory_session = ctx.factory_session.clone().ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_REQUEST,
                 format!(
@@ -3403,7 +3498,7 @@ impl CasService {
                 format!("Failed to open agent store: {error}"),
             )
         })?;
-        let owned = supervisor_owned_workers();
+        let owned = ctx.owned_workers.clone();
         let worker = agent_store
             .list(None)
             .map_err(|error| {
@@ -6385,6 +6480,13 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
+        if !staged.is_empty() {
+            report.push_str("\nStaged integration batch receipts:\n");
+            for (task, batch) in staged {
+                report.push_str(&format!("- {}: {}@{} (delivery {})\n", task.id, batch.branch, batch.tip, batch.delivered_head));
+            }
+        }
         // cas-619f: independent QA state per child, including supervisor
         // waivers and their reasons. Omitted entirely when no child has a
         // round, so epics without user-facing work render as before.
@@ -6409,12 +6511,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
-        use crate::store::open_task_store;
-        use crate::ui::factory::{
-            metadata_path, persist_session_metadata_delivery_mode_at,
-            persist_session_metadata_pinned_epic_id_at,
-        };
-        use cas_types::{TaskStatus, TaskType};
+        use crate::ops::fleet::{FocusEpic, OperationError, focus_epic};
 
         let factory_session = current_factory_session().ok_or_else(|| {
             Self::error(
@@ -6427,129 +6524,37 @@ impl CasService {
 
         let clear = req.clear.unwrap_or(false);
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let metadata_path = metadata_path(&factory_session);
-
-        if clear {
-            persist_session_metadata_pinned_epic_id_at(&metadata_path, None).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to clear pinned epic focus: {e}"),
-                )
-            })?;
-            self.record_focus_epic_event(&factory_session, None, None);
-            return Ok(Self::success(format!(
-                "Cleared pinned epic focus for factory session {factory_session}"
-            )));
-        }
-
-        let Some(epic_id) = epic_id else {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "focus_epic requires `id=<epic-id>` or `clear=true`",
-            ));
-        };
-
-        let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open task store: {e}"),
-            )
-        })?;
-
-        let mut epic = task_store.get(epic_id).map_err(|e| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("Task not found: {epic_id}: {e}"),
-            )
-        })?;
-
-        if epic.task_type != TaskType::Epic {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "focus_epic: task {epic_id} is not an Epic (task_type={:?}). \
-                     This action only operates on Epic-type tasks.",
-                    epic.task_type
-                ),
-            ));
-        }
-        if epic.status == TaskStatus::Closed {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "focus_epic: task {epic_id} is Closed. \
-                     Closed epics cannot be pinned as the active factory focus.",
-                ),
-            ));
-        }
-
-        let delivery_mode = requested_delivery_mode.unwrap_or(epic.delivery_mode);
-        if requested_delivery_mode.is_some() {
-            epic.delivery_mode = delivery_mode;
-            task_store.update(&epic).map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to persist epic delivery mode: {error}"),
-                )
-            })?;
-        }
-
-        persist_session_metadata_pinned_epic_id_at(&metadata_path, Some(epic_id)).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to persist pinned epic focus: {e}"),
-            )
-        })?;
-        persist_session_metadata_delivery_mode_at(&metadata_path, delivery_mode).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to persist factory delivery mode: {e}"),
-            )
-        })?;
-        self.record_focus_epic_event(&factory_session, Some(epic_id), Some(delivery_mode));
-
-        Ok(Self::success(format!(
-            "Pinned epic focus to {epic_id} for factory session {factory_session} (delivery_mode={delivery_mode})"
-        )))
-    }
-
-    fn record_focus_epic_event(
-        &self,
-        factory_session: &str,
-        epic_id: Option<&str>,
-        delivery_mode: Option<cas_types::DeliveryMode>,
-    ) {
-        use crate::store::open_event_store;
-        use cas_types::{Event, EventEntityType, EventType};
-
-        let Ok(event_store) = open_event_store(&self.inner.cas_root) else {
-            return;
-        };
-
-        let summary = match epic_id {
-            Some(epic_id) => format!("Pinned factory epic focus to {epic_id}"),
-            None => "Cleared factory epic focus pin".to_string(),
-        };
-        let entity_type = if epic_id.is_some() {
-            EventEntityType::Task
+        let request = if clear {
+            FocusEpic::Clear
         } else {
-            EventEntityType::Session
+            let Some(epic_id) = epic_id else {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "focus_epic requires `id=<epic-id>` or `clear=true`",
+                ));
+            };
+            FocusEpic::Pin {
+                epic_id,
+                delivery_mode: requested_delivery_mode,
+            }
         };
-        let entity_id = epic_id.unwrap_or(factory_session);
-        let metadata = serde_json::json!({
-            "factory_session": factory_session,
-            "epic_id": epic_id,
-            "delivery_mode": delivery_mode.map(|mode| mode.to_string()),
-        });
-        let event = Event::new(
-            EventType::SupervisorInjected,
-            entity_type,
-            entity_id,
-            summary,
-        )
-        .with_metadata(metadata)
-        .with_session(factory_session);
-        let _ = event_store.record(&event);
+
+        // cas-566b: the body is the operator facade the Commander hub also
+        // calls; this arm keeps MCP's request parsing and error codes.
+        focus_epic(&self.inner.cas_root, &factory_session, request)
+            .map(|text| Self::success(text))
+            .map_err(|error| match error {
+                OperationError::Failed(message) => {
+                    Self::error(ErrorCode::INTERNAL_ERROR, message)
+                }
+                OperationError::NotFound(message)
+                | OperationError::Invalid(message) => {
+                    Self::error(ErrorCode::INVALID_PARAMS, message)
+                }
+                stale @ OperationError::Stale(_) => {
+                    Self::error(ErrorCode::INVALID_PARAMS, stale.to_string())
+                }
+            })
     }
 
     pub(super) async fn factory_gc_cleanup(
@@ -6677,9 +6682,11 @@ impl CasService {
             }
         }
 
-        // Clear prompt queue only when explicitly forced.
+        // Prompt-queue remediation only when explicitly forced.
         let mut cleared_prompts = 0usize;
         let mut expired_prompts = 0usize;
+        let mut prompt_episode_rows_retained = 0usize;
+        let mut prompt_retention_note = String::new();
         if req.force.unwrap_or(false) {
             let prompt_queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
                 Self::error(
@@ -6690,13 +6697,34 @@ impl CasService {
             if let Some(older_than_secs) = prompt_expiry_age {
                 // Targeted poison-queue remediation: preserve forensic rows
                 // and terminally abandon only pending entries older than the
-                // explicit cutoff. Omitting the cutoff retains the legacy
-                // force-clear behavior.
+                // explicit cutoff.
                 expired_prompts = prompt_queue
                     .abandon_pending_older_than(older_than_secs)
                     .unwrap_or(0);
             } else {
-                cleared_prompts = prompt_queue.clear().unwrap_or(0);
+                // cas-9d8a: retention, not an all-history clear. Recent
+                // forensics, pending rows and relay episode keys survive.
+                let retention_days = crate::config::Config::load(&self.inner.cas_root)
+                    .map(|config| config.factory().prompt_retention_days)
+                    .unwrap_or_else(|_| crate::config::default_prompt_retention_days());
+                if retention_days == 0 {
+                    prompt_retention_note =
+                        " (factory.prompt_retention_days=0: retention disabled)".to_string();
+                } else {
+                    match prompt_queue
+                        .prune_terminal_older_than(i64::from(retention_days) * 24 * 60 * 60)
+                    {
+                        Ok(sweep) => {
+                            cleared_prompts = sweep.pruned;
+                            prompt_episode_rows_retained = sweep.retained_episode_rows;
+                            prompt_retention_note =
+                                format!(" (terminal rows older than {retention_days} days)");
+                        }
+                        Err(error) => {
+                            prompt_retention_note = format!(" (retention sweep failed: {error})");
+                        }
+                    }
+                }
             }
         }
 
@@ -6773,7 +6801,7 @@ impl CasService {
         };
 
         let mut output = format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}\nOrphan processes killed: {}\nStale server registrations cleared: {}\nOrphan candidates spared or refused: {}",
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries pruned: {cleared_prompts}{prompt_retention_note}\nPrompt queue episode rows retained: {prompt_episode_rows_retained}\nStale skill markers removed: {stale_skill_markers_removed}\nOrphan processes killed: {}\nStale server registrations cleared: {}\nOrphan candidates spared or refused: {}",
             unverifiable_process_groups.len(),
             orphan_process_summary.killed.len(),
             orphan_process_summary.records_cleared.len(),
@@ -7286,6 +7314,55 @@ fn cleanup_stale_skill_markers(cas_root: &std::path::Path, max_age: std::time::D
             (invalid_empty_suffix || stale) && std::fs::remove_file(entry.path()).is_ok()
         })
         .count()
+}
+
+/// Retire registered dead workers without requiring a live pane. Returns
+/// None for an unknown or still-live identity; no worktree or process is
+/// removed. The daemon also uses this when a queued shutdown reaches a worker
+/// whose pane was already removed by crash/recycle handling.
+pub(crate) fn retire_dead_worker_for_shutdown(
+    cas_root: &std::path::Path,
+    name: &str,
+    factory_session: Option<&str>,
+) -> crate::Result<Option<usize>> {
+    let agents = crate::store::open_agent_store(cas_root)?;
+    let matching: Vec<_> = agents
+        .list(None)?
+        .into_iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Worker
+                && agent.name == name
+                && agent.visible_to_factory_session(factory_session)
+        })
+        .collect();
+    if matching.is_empty() || super::agent_liveness::has_live_agent_named(&matching, name) {
+        return Ok(None);
+    }
+    let queue = crate::store::open_prompt_queue_store(cas_root)?;
+    let detail =
+        format!("Cancelled: shutdown requested for dead worker {name}; its recipient is retired");
+    let mut recipients = std::collections::BTreeSet::from([name.to_string()]);
+    for agent in &matching {
+        let held_task_ids = agents.graceful_shutdown(&agent.id)?;
+        if agent.status != cas_types::AgentStatus::Shutdown {
+            super::orphan_recovery::recover_worker_vanished(
+                cas_root,
+                agents.as_ref(),
+                agent,
+                &held_task_ids,
+                "dead worker retired by shutdown request",
+            );
+        }
+        recipients.insert(agent.id.clone());
+        if let Some(session_id) = &agent.cc_session_id {
+            recipients.insert(session_id.clone());
+        }
+    }
+    let mut cancelled = 0;
+    for recipient in recipients {
+        cancelled += queue.cancel_unread_for_shutdown(&recipient, factory_session, &detail)?;
+    }
+    Ok(Some(cancelled))
 }
 
 /// Returns the set of worker names this supervisor owns, derived from the `CAS_FACTORY_WORKER_NAMES`
@@ -11489,6 +11566,324 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn shutdown_dead_session_worker_cancels_notifications_cas_c653() {
+        use cas_store::{AgentStore, PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore};
+        use cas_types::AgentStatus;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-c653");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "live-worker");
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let agents = SqliteAgentStore::open(&cas_root).expect("agents");
+        let queue = SqlitePromptQueueStore::open(&cas_root).expect("queue");
+        queue.init().expect("initialize queue");
+        let mut sender = cas_types::Agent::new("sender-c653".into(), "scope-supervisor".into());
+        sender.role = AgentRole::Supervisor;
+        sender.factory_session = Some("shutdown-c653".into());
+        agents.register(&sender).expect("register watchdog sender");
+        let mut cancelled = Vec::new();
+        for (name, status) in [
+            ("proud-newt-45", AgentStatus::Stale),
+            ("bold-stork-90", AgentStatus::Shutdown),
+        ] {
+            let mut worker = worker_named(name, &format!("id-{name}"));
+            worker.factory_session = Some("shutdown-c653".into());
+            worker.status = status;
+            worker.cc_session_id = Some(format!("session-{name}"));
+            worker.pid = Some(i32::MAX as u32);
+            worker.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(10);
+            assert!(!agent_process_is_alive(&worker), "fixture PID must be dead");
+            agents.register(&worker).expect("register dead worker");
+            for target in [
+                name,
+                worker.id.as_str(),
+                worker.cc_session_id.as_deref().unwrap(),
+            ] {
+                let id = queue
+                    .enqueue_with_session("supervisor", target, "unfinished message", "shutdown-c653")
+                    .expect("enqueue");
+                cancelled.push(id);
+            }
+        }
+        // Already handed to the transport, but unread: cancellation must not
+        // rely on processed_at being NULL or pretend the recipient read it.
+        queue
+            .mark_transport_delivered(cancelled[0])
+            .expect("handoff");
+        let broadcast = queue
+            .enqueue_with_session("supervisor", "all_workers", "broadcast", "shutdown-c653")
+            .unwrap();
+        let foreign = queue
+            .enqueue_with_session(
+                "supervisor",
+                "proud-newt-45",
+                "foreign message",
+                "other-session",
+            )
+            .unwrap();
+        let unrelated = queue
+            .enqueue_with_session("supervisor", "live-worker", "live message", "shutdown-c653")
+            .unwrap();
+
+        // Watchdog eligibility requires a registered sender. Prove that the
+        // incident rows would alert before cancellation, then disappear from
+        // that same read path after shutdown.
+        let before = queue
+            .delivery_stalled_candidates("shutdown-c653", 0, 0, 100)
+            .unwrap();
+        assert!(
+            cancelled
+                .iter()
+                .all(|id| before.iter().any(|row| row.id == *id))
+        );
+
+        let core = CasCore::with_daemon(cas_root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "proud-newt-45,bold-stork-90"
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("same-session dead workers remain shutdownable without panes");
+        // A repeated shutdown by opaque ID remains accepted and must not
+        // resurrect or reclassify already-cancelled mail.
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "id": "id-proud-newt-45"
+        }))
+        .unwrap();
+        service.factory_shutdown_workers(request).await.unwrap();
+        assert!(
+            queue
+                .message_delivery_report(cancelled[0])
+                .unwrap()
+                .unwrap()
+                .delivered_at
+                .is_some()
+        );
+        assert!(
+            queue
+                .delivery_stalled_candidates("shutdown-c653", 0, 0, 100)
+                .unwrap()
+                .iter()
+                .all(|row| !cancelled.contains(&row.id))
+        );
+        for id in cancelled {
+            let report = queue.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+            assert_eq!(
+                report.pending_reason,
+                Some(cas_store::PendingReason::ShutdownCancelled)
+            );
+            assert!(
+                report
+                    .pending_detail
+                    .as_deref()
+                    .unwrap()
+                    .contains("shutdown"),
+                "{report:?}"
+            );
+            assert!(queue.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
+        }
+        for id in [broadcast, foreign, unrelated] {
+            assert_eq!(
+                queue.message_delivery_report(id).unwrap().unwrap().stage,
+                cas_store::DeliveryStage::Enqueued
+            );
+        }
+        for name in ["proud-newt-45", "bold-stork-90"] {
+            assert_eq!(
+                agents.get(&format!("id-{name}")).unwrap().status,
+                AgentStatus::Shutdown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_scope_and_force_guards_cas_c653() {
+        use cas_types::{AgentStatus, Task, TaskStatus};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-guards");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "unrelated-pane");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut worker = worker_named("dead-guard-worker", "dead-guard-id");
+        worker.factory_session = Some("shutdown-guards".into());
+        worker.status = AgentStatus::Stale;
+        worker.pid = Some(i32::MAX as u32);
+        agents.register(&worker).unwrap();
+        let mut foreign = worker_named("foreign-worker", "foreign-id");
+        foreign.factory_session = Some("foreign-session".into());
+        foreign.status = AgentStatus::Shutdown;
+        agents.register(&foreign).unwrap();
+        let mut supervisor = worker_named("guard-supervisor", "supervisor-id");
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("shutdown-guards".into());
+        agents.register(&supervisor).unwrap();
+        let message = queue
+            .enqueue_with_session("supervisor", &worker.name, "work", "shutdown-guards")
+            .unwrap();
+        let mut task = Task::new("cas-shutdown-guard".into(), "Retain unfinished work".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        for target in [
+            "foreign-worker",
+            "guard-supervisor",
+            "unknown-worker",
+            "dead-guard-id",
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "shutdown_workers", "id": target
+            }))
+            .unwrap();
+            let error = service
+                .factory_shutdown_workers(request)
+                .await
+                .expect_err("policy refusal");
+            if target == "dead-guard-id" {
+                assert!(error.message.contains("requires force=true"), "{error:?}");
+            }
+            assert_eq!(
+                queue
+                    .message_delivery_report(message)
+                    .unwrap()
+                    .unwrap()
+                    .stage,
+                cas_store::DeliveryStage::Enqueued
+            );
+            assert_eq!(agents.get(&worker.id).unwrap().status, AgentStatus::Stale);
+        }
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "id": "dead-guard-id", "force": true
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("explicit force preserves prior override");
+        assert_eq!(
+            queue
+                .message_delivery_report(message)
+                .unwrap()
+                .unwrap()
+                .stage,
+            cas_store::DeliveryStage::Suppressed
+        );
+        assert_ne!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(
+            agents.get(&foreign.id).unwrap().status,
+            AgentStatus::Shutdown
+        );
+        assert_eq!(
+            agents.get(&supervisor.id).unwrap().status,
+            AgentStatus::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_live_successor_keeps_unread_mail_cas_c653() {
+        use cas_types::AgentStatus;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-successor");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let mut live = worker_named("recycled-worker", "live-generation");
+        live.factory_session = Some("shutdown-successor".into());
+        live.pid = Some(std::process::id());
+        agents.register(&live).unwrap();
+        let mut dead = worker_named("recycled-worker", "dead-generation");
+        dead.factory_session = live.factory_session.clone();
+        dead.status = AgentStatus::Shutdown;
+        dead.pid = Some(i32::MAX as u32);
+        // Make the dead row win the display dedupe. Retirement must inspect
+        // all registrations, including the older still-running successor.
+        dead.last_heartbeat = chrono::Utc::now() + chrono::Duration::seconds(1);
+        agents.register(&dead).unwrap();
+        let message = queue
+            .enqueue_with_session("supervisor", &live.name, "new work", "shutdown-successor")
+            .unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "recycled-worker"
+        }))
+        .unwrap();
+        service.factory_shutdown_workers(request).await.unwrap();
+        assert_eq!(
+            queue
+                .message_delivery_report(message)
+                .unwrap()
+                .unwrap()
+                .stage,
+            cas_store::DeliveryStage::Enqueued
+        );
+        assert_eq!(agents.get(&live.id).unwrap().status, AgentStatus::Idle);
+        // The absent-pane daemon path shares the same conservative check.
+        assert_eq!(
+            retire_dead_worker_for_shutdown(&root, &live.name, Some("shutdown-successor")).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_positive_count_skips_retired_history_cas_c653() {
+        use cas_types::AgentStatus;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-count");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut retired = worker_named("retired-count-worker", "retired-count-id");
+        retired.factory_session = Some("shutdown-count".into());
+        retired.status = AgentStatus::Shutdown;
+        retired.registered_at = chrono::Utc::now() - chrono::Duration::days(1);
+        retired.pid = Some(i32::MAX as u32);
+        agents.register(&retired).unwrap();
+        let mut live = worker_named("live-count-worker", "live-count-id");
+        live.factory_session = Some("shutdown-count".into());
+        live.pid = Some(std::process::id());
+        agents.register(&live).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "count": 1
+        }))
+        .unwrap();
+        service.factory_shutdown_workers(request).await.unwrap();
+        let requests = crate::store::open_spawn_queue_store(&root)
+            .unwrap()
+            .poll("shutdown-count", 10)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].worker_names, vec![live.name]);
+        assert_eq!(
+            requests[0].count, None,
+            "daemon receives an exact target, never a count to expand"
+        );
     }
 
     #[tokio::test]

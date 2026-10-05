@@ -45,6 +45,7 @@ mod file_change;
 mod lease;
 mod loop_state;
 mod preview;
+pub mod factory_worker_policy;
 mod prompt;
 pub mod provenance;
 mod public_identifier;
@@ -102,7 +103,7 @@ pub use sort::{
 };
 pub use spec::{Spec, SpecStatus, SpecType};
 pub use task::{
-    DeliveryMode, NegativeResultEvidence, PreCloseHookEvidence, Priority,
+    DeliveryMode, IntegrationBatchEvidence, EvidenceOnlyEvidence, NegativeResultEvidence, PreCloseHookEvidence, Priority,
     TASK_EXECUTION_STATE_MAX_BYTES, Task, TaskDeliverables, TaskDepth, TaskDoor, TaskRisk,
     TaskStatus, TaskTerminalOutcome, TaskType, WorkTarget, merge_task_execution_state_patch,
     normalize_proof_targets, parse_proof_targets, proof_targets_to_string,

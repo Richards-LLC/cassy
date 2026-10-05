@@ -632,7 +632,7 @@ impl DirectorData {
                     .into_iter()
                     .filter_map(|lease| task_by_id.get(&lease.task_id).copied())
                     .find(|task| {
-                        matches!(
+                        task.deliverables.integration_batch.is_none() && matches!(
                             task.status,
                             TaskStatus::InProgress | TaskStatus::AwaitingMerge
                         )
@@ -640,6 +640,7 @@ impl DirectorData {
                     .or_else(|| {
                         tasks.iter().find(|task| {
                             task.status == TaskStatus::AwaitingMerge
+                                && task.deliverables.integration_batch.is_none()
                                 && task.assignee.as_deref() == Some(a.name.as_str())
                         })
                     })

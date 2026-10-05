@@ -13,6 +13,587 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+#[tokio::test]
+async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['GITHUB_TOKEN', 'VERCEL_TOKEN']\n").unwrap();
+    let credentials = env.home().join("credentials.env");
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
+    env.set("NEON_API_KEY", "not-granted-fixture");
+    env.set("CAS_FACTORY_WORKER_CREDENTIAL_WARNING", "stale-fixture");
+    env.remove("CAS_WORKER_GITHUB_READ_TOKEN");
+    for from_file in [false, true] {
+        if from_file {
+            env.remove("GITHUB_TOKEN");
+            env.remove("VERCEL_TOKEN");
+            std::fs::write(&credentials,
+                "export GITHUB_TOKEN='github-fixture'\nexport VERCEL_TOKEN='vercel-fixture'\n").unwrap();
+        } else {
+            env.set("GITHUB_TOKEN", "github-fixture");
+            env.set("VERCEL_TOKEN", "vercel-fixture");
+            std::fs::write(&credentials, "").unwrap();
+        }
+        for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let configs = Mux::factory_pane_configs(&MuxConfig {
+                cwd: project.path().into(), cas_root: Some(root.clone()),
+                workers: 1, worker_cli: cli, include_director: false,
+                ..Default::default()
+            });
+            let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+            assert_eq!(env_value(worker, "GITHUB_TOKEN"), Some("github-fixture"));
+            assert_eq!(env_value(worker, "VERCEL_TOKEN"), Some("vercel-fixture"));
+            assert!(env_value(worker, "NEON_API_KEY").is_none());
+            assert!(worker.env_remove.iter().any(|name| name == "NEON_API_KEY"));
+            assert!(!worker.env_remove.iter().any(|name| name == "GITHUB_TOKEN" || name == "VERCEL_TOKEN"));
+            assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING").is_none());
+            assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+            assert!(!worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            let mut probe = worker.clone();
+            probe.command = "/bin/sh".into();
+            probe.args = vec!["-c".into(),
+                "test \"$GITHUB_TOKEN\" = github-fixture && test \"$VERCEL_TOKEN\" = vercel-fixture && test -z \"${NEON_API_KEY+x}${CAS_FACTORY_WORKER_CREDENTIAL_WARNING+x}\" && printf 'declared-credentials-received\\n'".into()];
+            let mut pty = crate::pty::Pty::spawn("credential-probe", probe).unwrap();
+            let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut output = Vec::new();
+                loop {
+                    match pty.recv().await {
+                        Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                        Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                        Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                        None => panic!("credential probe ended without process status"),
+                    }
+                }
+                output
+            }).await.expect("bounded credential handoff probe");
+            assert!(String::from_utf8_lossy(&output).contains("declared-credentials-received"));
+        }
+    }
+}
+
+#[test]
+fn missing_declared_worker_credential_warns_without_refusing_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    env.remove("GITHUB_TOKEN");
+    env.remove("CAS_WORKER_GITHUB_READ_TOKEN");
+    let credentials = env.home().join("credentials.env");
+    std::fs::write(&credentials, "").unwrap();
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['GITHUB_TOKEN']\n").unwrap();
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()),
+            workers: 1, worker_cli: cli, include_director: false,
+            ..Default::default()
+        });
+        let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert!(env_value(worker, "GITHUB_TOKEN").is_none());
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING")
+            .unwrap().contains("missing=GITHUB_TOKEN"));
+    }
+}
+
+#[tokio::test]
+async fn supervisor_only_credential_conflict_warns_and_denies_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("VERCEL_TOKEN", "operator-fixture");
+    env.set("GH_TOKEN", "operator-fixture");
+    env.set("CAS_WORKER_GITHUB_READ_TOKEN", "read-token-fixture");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['VERCEL_TOKEN', 'GH_TOKEN']\nsupervisor_only_env = ['VERCEL_TOKEN', 'GH_TOKEN']\n").unwrap();
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()),
+            workers: 1, worker_cli: cli, include_director: false,
+            ..Default::default()
+        });
+        let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert!(env_value(worker, "VERCEL_TOKEN").is_none());
+        assert!(env_value(worker, "GH_TOKEN").is_none());
+        assert!(worker.env_remove.iter().any(|name| name == "VERCEL_TOKEN"));
+        assert!(worker.env_remove.iter().any(|name| name == "GH_TOKEN"));
+        let warning = env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING").unwrap();
+        assert!(warning.contains("supervisor_only=GH_TOKEN,VERCEL_TOKEN"));
+        assert!(!warning.contains("operator-fixture"));
+        assert!(!warning.contains("read-token-fixture"));
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        let mut probe = worker.clone();
+        probe.command = "/bin/sh".into();
+        probe.args = vec!["-c".into(),
+            "test -z \"${VERCEL_TOKEN+x}${GH_TOKEN+x}${CAS_FACTORY_WORKER_CREDENTIAL_WARNING+x}\" && printf 'conflicting-grants-denied\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("conflicting-credential-probe", probe).unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("conflicting credential probe ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded denial precedence probe");
+        assert!(String::from_utf8_lossy(&output).contains("conflicting-grants-denied"));
+    }
+}
+
+#[test]
+fn credential_allowlist_cannot_override_factory_identity_cas_82bc() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['CAS_AGENT_ROLE']\n").unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(root), workers: 1,
+        worker_cli: SupervisorCli::Codex, include_director: false,
+        ..Default::default()
+    });
+    let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+    assert_eq!(env_value(worker, "CAS_AGENT_ROLE"), Some("worker"));
+    assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING")
+        .unwrap().contains("reserved=CAS_AGENT_ROLE"));
+}
+
+/// GH #1047: configured supervisor-only resources win over project proxy
+/// credential grants. Claude isolates local scopes; Codex disables named native
+/// servers and remains spawnable with environment restrictions.
+#[test]
+fn factory_supervisor_only_mcp_and_env_isolate_claude_and_codex_gh_1047() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    let worktree = project.path().join("worker");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(cas_root.join("config.toml"), r#"
+[factory]
+supervisor_only_mcp = ["vercel", "neon"]
+supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"]
+"#).unwrap();
+    std::fs::write(cas_root.join("proxy.toml"), r#"
+[servers.vercel]
+transport = "http"
+auth = "env:VERCEL_TOKEN"
+[servers.neon]
+transport = "http"
+auth = "env:NEON_API_KEY"
+[servers.context7]
+transport = "http"
+auth = "env:DEPLOY_FIXTURE_TOKEN"
+"#).unwrap();
+    let source = project.path().join(".mcp.json");
+    std::fs::write(&source, serde_json::json!({"mcpServers": {
+        "vercel": {"command": "vercel-fixture"},
+        "neon": {"command": "neon-fixture"},
+        "context7": {"command": "context7-fixture"}
+    }}).to_string()).unwrap();
+    let before = std::fs::read(&source).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&source, worktree.join(".mcp.json")).unwrap();
+    #[cfg(not(unix))]
+    std::fs::copy(&source, worktree.join(".mcp.json")).unwrap();
+    for name in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+        env.set(name, "operator-fixture");
+    }
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let config = MuxConfig {
+            cwd: project.path().into(),
+            cas_root: Some(cas_root.clone()),
+            workers: 1,
+            worker_names: vec!["worker-1".into()],
+            worker_cwds: [("worker-1".into(), worktree.clone())].into(),
+            worker_cli: cli,
+            include_director: false,
+            ..Default::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let (_, worker) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+        let (_, supervisor) = configs.iter().find(|(name, _)| name == &config.supervisor_name).unwrap();
+        for key in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+            assert!(worker.env_remove.iter().any(|name| name == key), "{cli:?} must remove {key}");
+            assert!(env_value(worker, key).is_none(), "{cli:?} must not grant {key}");
+            assert!(!supervisor.env_remove.iter().any(|name| name == key));
+            assert!(std::env::var_os(key).is_some(), "parent retains its credentials");
+        }
+        assert!(env_value(supervisor, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(std::fs::read(&source).unwrap(), before, "supervisor config is untouched");
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        let materialized: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap()
+        ).unwrap();
+        assert!(!std::fs::symlink_metadata(cas_root.join("worker-mcp/worker-1.json")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(worktree.join(".mcp.json")).unwrap(), before, "existing worker configuration is untouched");
+        assert!(materialized["mcpServers"].get("vercel").is_none());
+        assert!(materialized["mcpServers"].get("neon").is_none());
+        assert!(materialized["mcpServers"].get("context7").is_some());
+        assert!(materialized["mcpServers"].get("cas").is_some());
+        match cli {
+            SupervisorCli::Claude => {
+                assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+                let flag = worker.args.iter().position(|arg| arg == "--mcp-config").unwrap();
+                assert_eq!(worker.args[flag + 1], cas_root.join("worker-mcp/worker-1.json").display().to_string());
+            }
+            SupervisorCli::Codex => {
+                for name in ["vercel", "neon"] {
+                    assert!(worker.args.iter().any(|arg|
+                        arg == &format!("mcp_servers.{name}.enabled=false")));
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(!supervisor.args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert_eq!(std::fs::read(&source).unwrap(), before, "supervisor config is untouched");
+    }
+}
+
+/// Policy dispatch must follow the executable through supported nice forms,
+/// including forms where the harness is not the third argument.
+#[test]
+fn worker_resource_policy_uses_effective_command_for_nice_wrappers_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[factory]\nsupervisor_only_mcp = ['vercel', 'neon']\n",
+    )
+    .unwrap();
+    for cli in ["claude", "codex"] {
+        for prefix in [
+            vec![],
+            vec!["--"],
+            vec!["-n", "10"],
+            vec!["--adjustment=10"],
+        ] {
+            let mut worker = crate::pty::PtyConfig {
+                command: "nice".into(),
+                args: prefix.into_iter().chain([cli, "--model", "claude"])
+                    .map(str::to_owned).collect(),
+                cwd: Some(project.path().to_path_buf()),
+                ..Default::default()
+            };
+            crate::backend::finish_worker_config(
+                &mut worker, SupervisorCli::Codex, None, None, Some(&cas_root),
+            );
+            assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+            if cli == "claude" {
+                let flag = worker.args.iter().position(|arg| arg == "--mcp-config").unwrap();
+                assert!(worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+                assert_eq!(worker.args[flag + 1],
+                    cas_root.join("worker-mcp/worker.json").display().to_string());
+            } else {
+                assert!(!worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+                for name in ["vercel", "neon"] {
+                    assert!(worker.args.iter().any(|arg|
+                        arg == &format!("mcp_servers.{name}.enabled=false")));
+                }
+            }
+        }
+    }
+}
+
+/// Grok's native project/user MCP discovery has no per-launch isolation flag.
+/// Refuse a restricted worker while leaving the unrestricted adapter intact.
+#[test]
+fn restricted_grok_adapter_refuses_native_discovery_without_substitution_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let original = r#"{"mcpServers":{"denied-fixture":{"command":"never-executed-fixture"}}}"#;
+    std::fs::write(project.path().join(".mcp.json"), original).unwrap();
+    for (policy, restricted) in [
+        ("[factory]\n", false),
+        ("[factory]\nsupervisor_only_mcp = ['denied-fixture']\n", true),
+        ("[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true),
+        ("[factory]\nsupervisor_only_mcp = []\nsupervisor_only_env = []\n", false),
+    ] {
+        std::fs::write(cas_root.join("config.toml"), policy).unwrap();
+        let config = MuxConfig {
+            cwd: project.path().to_path_buf(),
+            cas_root: Some(cas_root.clone()),
+            workers: 1,
+            worker_cli: SupervisorCli::Grok,
+            supervisor_cli: SupervisorCli::Grok,
+            include_director: false,
+            ..Default::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        let supervisor = &configs.iter().find(|(name, _)| name == &config.supervisor_name).unwrap().1;
+        assert_eq!(worker.effective_command(), "grok");
+        assert_eq!(supervisor.effective_command(), "grok");
+        assert_eq!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_some(), restricted);
+        assert!(env_value(supervisor, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(), original);
+    }
+}
+
+/// Read native TOML without discovery and disable only the affected servers.
+/// Unknown plugin contributions must not prevent the worker from spawning.
+#[test]
+fn codex_env_policy_disables_literal_env_servers_preserving_safe_launch_gh_1047() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    let native_root = project.path().join(".codex");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::create_dir_all(&native_root).unwrap();
+    let native_config = "[mcp_servers.context7]\ncommand = 'never-executed-fixture'\n[mcp_servers.context7.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'literal-fixture'\n[plugins.unknown_fixture]\nenabled = true\n";
+    std::fs::write(native_root.join("config.toml"), native_config).unwrap();
+    env.set("DENIED_LITERAL_FIXTURE_TOKEN", "parent-fixture");
+    for (policy, env_restricted, server_restricted) in [
+        ("[factory]\n", false, false),
+        ("[factory]\nsupervisor_only_env = []\n", false, false),
+        ("[factory]\nsupervisor_only_mcp = ['vercel']\n", false, true),
+        ("[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true, false),
+        ("[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true, true),
+    ] {
+        std::fs::write(cas_root.join("config.toml"), policy).unwrap();
+        let config = MuxConfig {
+            cwd: project.path().to_path_buf(),
+            cas_root: Some(cas_root.clone()),
+            workers: 1,
+            worker_cli: SupervisorCli::Codex,
+            supervisor_cli: SupervisorCli::Codex,
+            include_director: false,
+            ..Default::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let worker = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        let supervisor = &configs.iter().find(|(name, _)| name == &config.supervisor_name).unwrap().1;
+        assert_eq!(worker.effective_command(), "codex");
+        assert_eq!(supervisor.effective_command(), "codex");
+        assert!(env_value(supervisor, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert!(!supervisor.env_remove.iter().any(|key| key == "DENIED_LITERAL_FIXTURE_TOKEN"));
+        assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.context7.enabled=false"), env_restricted);
+        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_restricted);
+        if env_restricted {
+            assert!(worker.env_remove.iter().any(|key| key == "DENIED_LITERAL_FIXTURE_TOKEN"));
+            assert!(env_value(worker, "DENIED_LITERAL_FIXTURE_TOKEN").is_none());
+        }
+        assert_eq!(std::fs::read_to_string(native_root.join("config.toml")).unwrap(), native_config);
+        assert!(std::env::var_os("DENIED_LITERAL_FIXTURE_TOKEN").is_some());
+    }
+}
+
+/// The real PTY command builder must remove inherited AND explicitly granted
+/// credentials for both supported harnesses without launching a live harness.
+#[test]
+fn codex_env_denials_read_selected_home_and_nested_project_layers_gh_1047() {
+    let mut env = TestEnvGuard::temp_home();
+    env.remove("CODEX_HOME");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    let nested = project.path().join("nested");
+    let account = project.path().join("account");
+    for path in [&cas_root, &project.path().join(".codex"), &nested.join(".codex"),
+        &env.home().join(".codex"), &account] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(cas_root.join("config.toml"),
+        "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n").unwrap();
+    for (path, source) in [
+        (env.home().join(".codex/config.toml"),
+            "[mcp_servers.default_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'default-fixture'\n"),
+        (account.join("config.toml"),
+            "[mcp_servers.account_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'account-fixture'\n"),
+        (project.path().join(".codex/config.toml"),
+            "[mcp_servers.project_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'parent-fixture'\n"),
+        (nested.join(".codex/config.toml"),
+            "[mcp_servers.project_env.env]\nALLOWED_FIXTURE_TOKEN = 'child-fixture'\n\
+             [mcp_servers.safe.env]\nALLOWED_FIXTURE_TOKEN = 'safe-fixture'\n\
+             [plugins.unknown_fixture]\nenabled = true\n"),
+    ] {
+        std::fs::write(path, source).unwrap();
+    }
+    for alternate in [false, true] {
+        let mut worker = crate::pty::PtyConfig {
+            command: "codex".into(),
+            cwd: Some(nested.clone()),
+            ..Default::default()
+        };
+        if alternate {
+            worker.env.push(("CODEX_HOME".into(), account.display().to_string()));
+        }
+        crate::backend::finish_worker_config(
+            &mut worker, SupervisorCli::Codex, None, None, Some(&cas_root),
+        );
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        for (server, disabled) in [
+            ("project_env", true), ("safe", false),
+            ("default_env", !alternate), ("account_env", alternate),
+        ] {
+            assert_eq!(worker.args.iter().any(|arg|
+                arg == &format!("mcp_servers.{server}.enabled=false")), disabled);
+        }
+    }
+    // Unreadable/invalid/unknown contributions warn rather than refusing the
+    // whole worker. No parser error or credential value reaches launch errors.
+    std::fs::write(account.join("config.toml"), "invalid = [ 'secret-fixture'").unwrap();
+    let mut worker = crate::pty::PtyConfig {
+        command: "codex".into(), cwd: Some(nested),
+        env: vec![("CODEX_HOME".into(), account.display().to_string())],
+        ..Default::default()
+    };
+    crate::backend::finish_worker_config(
+        &mut worker, SupervisorCli::Codex, None, None, Some(&cas_root),
+    );
+    assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+    assert!(worker.args.iter().any(|arg| arg == "mcp_servers.project_env.enabled=false"));
+    assert!(worker.args.iter().all(|arg| !arg.contains("secret-fixture")));
+}
+
+/// The actual PTY boundary removes denied process env for both native adapters.
+#[tokio::test]
+async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\nsupervisor_only_env = [\"VERCEL_TOKEN\", \"NEON_API_KEY\", \"DEPLOY_FIXTURE_TOKEN\"]\n").unwrap();
+    std::fs::write(cas_root.join("proxy.toml"), "[servers.context7]\ntransport = 'http'\nauth = 'env:DEPLOY_FIXTURE_TOKEN'\n").unwrap();
+    let source = project.path().join(".mcp.json");
+    let original = serde_json::json!({"mcpServers": {
+        "vercel": {"command": "vercel-fixture"},
+        "neon": {"command": "neon-fixture"}
+    }}).to_string();
+    std::fs::write(&source, &original).unwrap();
+    for key in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+        env.set(key, "inherited-fixture");
+    }
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(cas_root.clone()), workers: 1,
+            worker_cli: cli, include_director: false, ..Default::default()
+        });
+        let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        let worker_mcp = cas_root.join("worker-mcp/worker-1.json");
+        let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(worker_mcp).unwrap()).unwrap();
+        assert!(mcp["mcpServers"].get("vercel").is_none() && mcp["mcpServers"].get("neon").is_none());
+        // Replace only the harness executable with a local probe, retaining
+        // the generated environment and the production Pty::spawn path.
+        worker.command = "/bin/sh".into();
+        worker.args = vec!["-c".into(), "test -z \"${VERCEL_TOKEN+x}${NEON_API_KEY+x}${DEPLOY_FIXTURE_TOKEN+x}\" && printf 'worker-env-isolated\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("resource-probe", worker).unwrap();
+        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("PTY ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded local probe");
+        assert!(String::from_utf8_lossy(&events).contains("worker-env-isolated"));
+    }
+    assert_eq!(std::fs::read_to_string(source).unwrap(), original, "shared-cwd workers keep supervisor configuration intact");
+    for key in ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"] {
+        assert!(std::env::var_os(key).is_some());
+    }
+}
+
+/// Environment restrictions must preserve supported Codex admission.
+/// Execute only a local shell probe through the admitted config's PTY boundary;
+/// actual native Codex discovery remains a separate supervisor demo.
+#[tokio::test]
+async fn codex_unrestricted_and_server_only_admission_preserves_spawn_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    for (policy, server_only) in [
+        ("[factory]\n", false),
+        ("[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = []\n", true),
+    ] {
+        std::fs::write(cas_root.join("config.toml"), policy).unwrap();
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().to_path_buf(), cas_root: Some(cas_root.clone()),
+            workers: 1, worker_cli: SupervisorCli::Codex,
+            include_director: false, ..Default::default()
+        });
+        let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert_eq!(worker.effective_command(), "codex");
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_only);
+        worker.env.push(("CAS_GH1047_SAFE_LAUNCH_FIXTURE".into(), "allowed-fixture".into()));
+        worker.command = "/bin/sh".into();
+        worker.args = vec!["-c".into(), "test \"$CAS_GH1047_SAFE_LAUNCH_FIXTURE\" = allowed-fixture && printf 'safe-codex-admission\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("safe-codex-local-probe", worker).unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("PTY ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded local safe-admission probe");
+        assert!(String::from_utf8_lossy(&output).contains("safe-codex-admission"));
+    }
+}
+
+#[test]
+fn invalid_worker_resource_policy_refuses_launch_before_execution_gh_1047() {
+    let _env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    for policy in [
+        "[factory]\nsupervisor_only_mcp = 'not-a-list'\n",
+        "[factory]\nsupervisor_only_mcp = ['vercel']\n",
+    ] {
+        std::fs::write(cas_root.join("config.toml"), policy).unwrap();
+        std::fs::write(project.path().join(".mcp.json"), "invalid JSON fixture").unwrap();
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(cas_root.clone()), workers: 1,
+            include_director: false, ..Default::default()
+        });
+        let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        worker.command = "/bin/sh".into();
+        worker.args = vec!["-c".into(), "exit 0".into()];
+        assert!(crate::pty::Pty::spawn("refused-worker", worker).is_err());
+    }
+    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = ['server.with.dots']\n").unwrap();
+    std::fs::write(project.path().join(".mcp.json"), "{}").unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(cas_root), workers: 1,
+        worker_cli: SupervisorCli::Codex, include_director: false, ..Default::default()
+    });
+    let worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+    assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+    let override_arg = worker.args.iter()
+        .find(|arg| arg.starts_with("mcp_servers={"))
+        .expect("dotted name must use a parent table override");
+    let overrides: toml::Value = toml::from_str(override_arg).unwrap();
+    assert_eq!(overrides["mcp_servers"]["server.with.dots"]["enabled"].as_bool(), Some(false));
+    assert!(overrides["mcp_servers"].get("server").is_none());
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1049,14 +1630,31 @@ fn factory_pane_configs_codex_worker_inherits_supervisor_cli_in_cs_env_cas_1544(
 // Tests the MuxConfig.resolved_worker_specs → factory_pane_configs per-worker
 // CLI selection path, and the Mux::add_worker explicit spec override path.
 
-/// Return the effective binary name from a PtyConfig, stripping any `nice`
-/// wrapper that `CAS_FACTORY_NICE_WORKER=1` injects in the test environment.
-fn effective_command(pty: &crate::pty::PtyConfig) -> &str {
-    if pty.command == "nice" {
-        // nice -n <level> <binary> [args...] → binary is at index 2
-        pty.args.get(2).map(String::as_str).unwrap_or("nice")
-    } else {
-        &pty.command
+#[test]
+fn effective_command_parses_nice_layouts_cas_046c() {
+    for (command, args, expected) in [
+        ("codex", vec!["--model", "large", "--effort", "high"], "codex"),
+        ("nice", vec!["-n", "10", "codex", "--model", "large", "--effort", "high"], "codex"),
+        ("nice", vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex"),
+        ("nice", vec!["--adjustment", "-5", "claude", "--effort", "high", "--model", "codex"], "claude"),
+        ("nice", vec!["-n10", "claude", "--model", "codex"], "claude"),
+        ("nice", vec!["--", "codex", "--model", "large"], "codex"),
+        ("nice", vec!["claude", "--model", "codex"], "claude"),
+        ("nice", vec![], "nice"),
+        ("nice", vec!["--"], "nice"),
+        ("nice", vec!["-n", "10"], "nice"),
+        ("nice", vec!["-n"], "nice"),
+        ("nice", vec!["-n", "not-a-number", "codex"], "nice"),
+        ("nice", vec!["--adjustment=bad", "codex"], "nice"),
+        ("nice", vec!["-nbad", "codex"], "nice"),
+        ("nice", vec!["-n", "2147483648", "codex"], "nice"),
+        ("nice", vec!["--unknown", "codex"], "nice"),
+    ] {
+        let config = crate::pty::PtyConfig {
+            command: command.into(), args: args.into_iter().map(str::to_string).collect(),
+            ..Default::default()
+        };
+        assert_eq!(config.effective_command(), expected, "command={command}, args={:?}", config.args);
     }
 }
 
@@ -1105,12 +1703,12 @@ fn factory_pane_configs_uses_per_worker_specs() {
         .expect("worker-2 must be present");
 
     assert_eq!(
-        effective_command(w1),
+        w1.effective_command(),
         "codex",
         "worker-1 with Codex spec must use codex binary"
     );
     assert_eq!(
-        effective_command(w2),
+        w2.effective_command(),
         "claude",
         "worker-2 with Claude spec must use claude binary"
     );
@@ -1153,13 +1751,13 @@ fn factory_pane_configs_falls_back_to_singular_when_specs_empty() {
     for (name, pty_config) in &configs {
         if name == &config.supervisor_name {
             assert_eq!(
-                effective_command(pty_config),
+                pty_config.effective_command(),
                 "claude",
                 "supervisor must use claude binary"
             );
         } else {
             assert_eq!(
-                effective_command(pty_config),
+                pty_config.effective_command(),
                 "codex",
                 "worker {name} with empty resolved_worker_specs must fall back to worker_cli=Codex"
             );
@@ -1199,7 +1797,7 @@ fn add_worker_uses_explicit_spec() {
     );
 
     assert_eq!(
-        effective_command(&pty_config),
+        pty_config.effective_command(),
         "codex",
         "explicit Codex spec must override Claude default in dynamic add_worker path"
     );
@@ -1214,7 +1812,7 @@ fn add_worker_uses_explicit_spec() {
         None,
     );
     assert_eq!(
-        effective_command(&claude_config),
+        claude_config.effective_command(),
         "claude",
         "no explicit spec must fall back to Mux default (Claude)"
     );

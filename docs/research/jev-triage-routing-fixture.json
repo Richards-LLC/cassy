@@ -1,0 +1,209 @@
+{
+  "provenance": "GH1115 reported rejected suggestions; absent retrieval is deliberately preserved. Offline routing is tested, not model accuracy.",
+  "cases": [
+    {
+      "state": {
+        "task": {
+          "id": "cas-eb10"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "FIXED",
+            "confidence": 0.72
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-f2eb"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "FIXED",
+            "confidence": 0.55
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-f50f"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "FIXED",
+            "confidence": 0.52
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-1451"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "FIXED",
+            "confidence": 0.44
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-24fe"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "FIXED",
+            "confidence": 0.35
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-99d7"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "FIXED",
+            "confidence": 0.24
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-8121"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "OBSOLETE",
+            "confidence": 0.68
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-d4a0"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "OBSOLETE",
+            "confidence": 0.65
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-d362"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "OBSOLETE",
+            "confidence": 0.48
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-e7ae"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "OBSOLETE",
+            "confidence": 0.39
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-dae6"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "DUPLICATE",
+            "confidence": 0.31
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    },
+    {
+      "state": {
+        "task": {
+          "id": "cas-3e8d"
+        },
+        "evidence_complete": false
+      },
+      "evaluation": {
+        "answers": {
+          "verdict": {
+            "choice": "VALID",
+            "confidence": 0.98
+          }
+        }
+      },
+      "expected": "UNCLEAR"
+    }
+  ]
+}

@@ -19,18 +19,6 @@ use cas_mux::{Mux, MuxConfig, WorkerSpec};
 use cas_mux::SupervisorCli;
 use std::path::PathBuf;
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-/// Return the effective binary name from a `PtyConfig`, stripping any `nice`
-/// wrapper that `CAS_FACTORY_NICE_WORKER=1` injects in the test environment.
-fn effective_command(pty: &cas_mux::PtyConfig) -> &str {
-    if pty.command == "nice" {
-        pty.args.get(2).map(String::as_str).unwrap_or("nice")
-    } else {
-        &pty.command
-    }
-}
-
 // ── Path A: startup via factory_pane_configs ─────────────────────────────────
 
 /// Claude supervisor + resolved_worker_specs routes alice to Codex at startup.
@@ -64,12 +52,12 @@ fn heterogeneous_spawn_factory_pane_configs() {
         .expect("supervisor must be present in factory_pane_configs output");
 
     assert_eq!(
-        effective_command(alice_pty),
+        alice_pty.effective_command(),
         "codex",
         "alice with Codex spec must use the codex binary even when worker_cli defaults to Claude"
     );
     assert_eq!(
-        effective_command(sup_pty),
+        sup_pty.effective_command(),
         "claude",
         "supervisor must keep its claude binary in a heterogeneous session"
     );
@@ -103,7 +91,7 @@ fn heterogeneous_spawn_dynamic_add_worker() {
     );
 
     assert_eq!(
-        effective_command(&pty),
+        pty.effective_command(),
         "codex",
         "explicit Codex spec at dynamic spawn time must override the Claude session default"
     );
@@ -118,7 +106,7 @@ fn heterogeneous_spawn_dynamic_add_worker() {
         None, // no override → session default (Claude)
     );
     assert_eq!(
-        effective_command(&default_pty),
+        default_pty.effective_command(),
         "claude",
         "no explicit spec must fall back to the Claude session default"
     );

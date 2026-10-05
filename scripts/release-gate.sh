@@ -18,7 +18,7 @@ cd "$repo_root"
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
-    version-literals ci-script-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
@@ -208,12 +208,14 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # like failures; the temporary fallback remains useful for direct diagnostics.
 row_log_dir="${CAS_RELEASE_GATE_LOG_DIR:-$tmp_dir/rows}"
 mkdir -p "$row_log_dir"
+rm -f "$row_log_dir/compile-timing.tsv" "$row_log_dir/memory-admission.json"
+rm -f "$row_log_dir/compile-memory.jsonl" "$row_log_dir/link-rss.jsonl"
 printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
 cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
 # The train owns durable row evidence; unchanged inputs reuse it automatically.
 [[ -z "$cache_dir" || -n "$only_rows" ]] || reuse_rows=true
 cache_head="$(git rev-parse HEAD)"
-gate_implementation="$(realpath "${BASH_SOURCE[0]}")"
+gate_implementation="$(release_portable_realpath "${BASH_SOURCE[0]}")"
 cache_toolchain=''
 if [[ ( -n "$cache_dir" || "$reuse_rows" == true ) && -z "$only_rows" ]]; then
     [[ -z "$cache_dir" ]] || mkdir -p "$cache_dir"
@@ -268,7 +270,7 @@ print(hashlib.sha256(material.encode()).hexdigest())'
 cache_input_hash() {
     local name="$1"
     case "$name" in
-        hub-web-visual-qa|hub-web-dist-drift)
+        hub-web-tests|hub-web-visual-qa|hub-web-dist-drift)
             git ls-tree -r HEAD -- hub-web scripts .github | sha256sum | cut -d' ' -f1
             ;;
         fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
@@ -336,7 +338,7 @@ row_cache_key() {
     [[ -z "$(git ls-files --others --exclude-standard)" ]] || return 1
     local -a inputs=()
     case "$name" in
-        hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
+        hub-web-tests|hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
         fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
             inputs=(.) ;;
         *) return 1 ;;
@@ -467,6 +469,7 @@ if [[ -n "$only_rows" ]]; then
         fi
     done
 fi
+printf '%s\n' "${selected_rows_summary//,/$'\n'}" >"$row_log_dir/plan.txt"
 
 # This is deliberately the first receipt row. It must reject a bad scratch
 # location in seconds, before a Cargo process can spend a gate cycle filling the
@@ -737,6 +740,18 @@ install_hub_web_dependencies() {
     : >"$tmp_dir/hub-web-npm-installed"
 }
 
+check_hub_web_tests() {
+    local npm_bin="${NPM:-npm}"
+    if [[ ! -f hub-web/package.json ]]; then
+        printf 'hub-web-tests: hub-web/package.json is not present; row not applicable to this release\n'
+        return 0
+    fi
+    install_hub_web_dependencies || return $?
+    (cd hub-web && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" "$npm_bin" run typecheck && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" "$npm_bin" test)
+}
+
 check_hub_web_dist_drift() {
     local npm_bin
     if [[ ! -f hub-web/package.json ]]; then
@@ -856,6 +871,93 @@ EOF
 # The merge queue validates the whole workspace, so the suite and archive rows
 # do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
 # `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
+run_assembly_compile() {
+    local row="$1" started ended wall user system status=0
+    shift
+    local policy="${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}"
+    [[ -n "$policy" ]] || policy='{}'
+    local -a guarded=(python3 "$repo_root/scripts/assembly-memory.py" \
+        --policy "$policy" \
+        --events "$row_log_dir/compile-memory.jsonl" --root "$repo_root" -- "$@")
+    started="$(date -u +%FT%TZ)"
+    local LC_NUMERIC=C TIMEFORMAT='%R %U %S'
+    if { time "${guarded[@]}" 2>&1; } 2>"$tmp_dir/$row-compile.time"; then
+        :
+    else
+        status=$?
+    fi
+    ended="$(date -u +%FT%TZ)"
+    read -r wall user system <"$tmp_dir/$row-compile.time"
+    printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' \
+        >"$row_log_dir/compile-timing.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$row" "$started" "$ended" "$wall" "$user" "$system" "$status" "$cache_head" \
+        >>"$row_log_dir/compile-timing.tsv"
+    printf 'assembly compile: %s interval=%s to %s wall=%ss user=%ss system=%ss jobs=%s\n' \
+        "$row" "$started" "$ended" "$wall" "$user" "$system" "${CARGO_BUILD_JOBS:-auto}"
+    return "$status"
+}
+
+await_assembly_test_slot() {
+    if [[ -z "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}" ]]; then
+        [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]] || return 0
+        local test_threads
+        test_threads="$(python3 - "$repo_root/scripts/assembly-proof.py" \
+            "$CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY" "$1" "$row_log_dir/memory-admission.json" <<'PY_ASSEMBLY_MEMORY'
+import contextlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("assembly_proof", sys.argv[1])
+proof = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proof)
+execution = {"phases": []}
+try:
+    with contextlib.redirect_stdout(sys.stderr):
+        threads = proof.admit_phase(json.loads(sys.argv[2]), execution, sys.argv[3] + "-tests")
+finally:
+    Path(sys.argv[4]).write_text(json.dumps({"samples": execution["phases"]}) + "\n")
+print(threads)
+PY_ASSEMBLY_MEMORY
+)" || return $?
+        export NEXTEST_TEST_THREADS="$test_threads"
+        return 0
+    fi
+    local test_threads
+    test_threads="$(python3 - "$CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR" "$1" <<'PY_ASSEMBLY_SLOT'
+import os
+from pathlib import Path
+import re
+import sys
+import time
+
+sync, row = Path(sys.argv[1]), sys.argv[2]
+(sync / ("compiled-" + row)).touch()
+owner = int((sync / "owner").read_text())
+deadline = time.monotonic() + 3600
+while True:
+    if (sync / "abort").exists():
+        sys.exit("assembly test admission aborted: " + row)
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        sys.exit("assembly proof owner exited: " + row)
+    if (sync / ("release-" + row)).exists():
+        threads = (sync / ("release-" + row)).read_text().strip()
+        if not re.fullmatch(r"[1-9][0-9]*", threads):
+            sys.exit("invalid assembly test thread admission: " + row)
+        print(threads)
+        break
+    if time.monotonic() >= deadline:
+        sys.exit("assembly test admission timed out: " + row)
+    time.sleep(0.1)
+PY_ASSEMBLY_SLOT
+)" || return $?
+    export NEXTEST_TEST_THREADS="$test_threads"
+}
+
 check_nextest() {
     # The archive row executes the remaining workspace tests in the queue's
     # remapped environment. Cover its one exclusion here, once, instead of
@@ -863,6 +965,13 @@ check_nextest() {
     local -a selection=()
     if row_selected archive-mode; then
         selection=(--filterset 'binary_id(~component_output_test)')
+    fi
+    if [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]]; then
+        run_assembly_compile nextest \
+            env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+            -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+            "$cargo_bin" nextest run --workspace "${selection[@]}" --no-run || return $?
+        await_assembly_test_slot nextest || return $?
     fi
     env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
@@ -986,10 +1095,14 @@ check_archive_mode() {
     archive_dir="$(mktemp -d "${archive_base}.XXXXXX")"
     archive="$archive_dir/suite.tar.zst"
     remap="$archive_dir/workspace-remap"
-    archive_tmp="$archive_dir/tmp"
+    # The archive and extraction can be several GB: keep them on the checkout
+    # disk. Test fixtures are disposable, and their SQLite/index commits must
+    # use the same temp filesystem as native tests (cas-98a0).
+    archive_tmp="$tmp_dir/archive-test-tmp"
     archive_cargo_home="$archive_dir/cargo-home"
     archive_bin="$archive_dir/bin"
     mkdir -p "$remap" "$archive_tmp" "$archive_cargo_home" "$archive_bin"
+    assert_no_cas_ancestor "$archive_tmp" || return 1
     [[ -f Cargo.toml ]] || {
         printf 'archive-mode: root Cargo.toml is missing\n'
         return 1
@@ -1012,9 +1125,13 @@ check_archive_mode() {
         rm -rf "$archive_dir"
         return "$status"
     }
-    if env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+    local -a compile_command=(env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
-        "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then
+        "$cargo_bin" nextest archive --workspace --archive-file "$archive")
+    if [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]]; then
+        compile_command=(run_assembly_compile archive-mode "${compile_command[@]}")
+    fi
+    if "${compile_command[@]}"; then
         :
     else
         status=$?
@@ -1037,9 +1154,29 @@ check_archive_mode() {
     fi
     printf 'archive-mode: archive size %s bytes recorded%s\n' "$archive_bytes" \
         "${archive_size_file:+ in $archive_size_file}"
-    # Extraction is deliberately on the home disk, not a small /tmp tmpfs.
-    # The remap has every package cwd but no source; snapshot tests read
-    # source-tree .snap files and are excluded rather than "fixed".
+    if await_assembly_test_slot archive-mode; then
+        :
+    else
+        status=$?
+        git worktree remove --force "$remap" >/dev/null 2>&1 || true
+        rm -rf "$archive_dir"
+        return "$status"
+    fi
+    # nextest canonicalizes --extract-to before extracting, so it must exist.
+    # Match the private 0700 mktemp base, with the same process owner/group.
+    # The whole archive_dir (including extracted files) is removed below.
+    mkdir -p -m 700 "$archive_dir/extract" || {
+        status=$?
+        git worktree remove --force "$remap" >/dev/null 2>&1 || true
+        rm -rf "$archive_dir"
+        return "$status"
+    }
+    printf 'archive-mode: test TMPDIR=%s; extraction=%s; workspace-remap=%s\n' \
+        "$archive_tmp" "$archive_dir/extract" "$remap"
+    # --extract-to decouples the large disk extraction from test-time TMPDIR.
+    # Producer and remap remain outside disposable roots in assembly proofs;
+    # missing-wrapper, empty CARGO_HOME, PATH and snapshot exclusion still
+    # exercise the queue consumer's independent archive environment.
     if (
         cd "$archive_dir"
         env -u CAS_ROOT -u COLUMNS -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE \
@@ -1049,7 +1186,7 @@ check_archive_mode() {
             INSTA_WORKSPACE_ROOT="$remap" CARGO="$cargo_bin" \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
             "$remap/scripts/run-verified-tests.sh" nextest run --archive-file "$archive" \
-            --workspace-remap "$remap" --no-fail-fast \
+            --extract-to "$archive_dir/extract" --workspace-remap "$remap" --no-fail-fast \
             --filterset 'not binary_id(~component_output_test)'
     ); then
         status=0
@@ -1204,7 +1341,13 @@ check_test_env() {
         return 1
     }
     if [[ "$fast_rows" == true ]]; then
-        python3 scripts/check-test-env.py --changed-since "${fast_base:-HEAD^}" || return $?
+        python3 scripts/check-test-env.py --changed-since "${fast_base:-HEAD^}" --changed-paths || return $?
+        # Fixture suites belong to the full gate, unless this lane changes the
+        # lint implementation/fixtures themselves.
+        if git diff --quiet "${fast_base:-HEAD^}" -- scripts/check-test-env.py scripts/rust_test_source.py \
+            scripts/test-check-test-env.py scripts/fixtures/test-env-lint.json; then
+            return 0
+        fi
     else
         python3 scripts/check-test-env.py || return $?
     fi
@@ -1233,14 +1376,25 @@ check_builtin_doc_hygiene() {
     python3 scripts/check-builtin-contract-phrases.py
 }
 
-check_ci_script_tests() {
+check_ci_script_tests() (
     # This is the queue's script-only preflight, not a Cargo test target.
+    # Nested gate self-tests own their receipts and synchronization. Otherwise
+    # they truncate this row's timing.tsv and append synthetic failed rows.
+    # Keep the outer gate's controls intact by scrubbing only this subshell.
+    local key
+    while IFS= read -r key; do
+        case "$key" in
+            CAS_RELEASE_GATE_*|CAS_RELEASE_ARTIFACTS_ROOT|CAS_RELEASE_RECEIPTS_RUN_DIR|VERIFIED_TEST_COUNT_FILE|VERIFIED_TEST_LOG)
+                unset "$key"
+                ;;
+        esac
+    done < <(compgen -e)
     # Also discard inherited make modes: -n/-t/-i can manufacture a PASS.
     env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID -u CAS_SESSION_ID -u CAS_ROOT \
         -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKELEVEL \
         make -C cas-cli test-ci-tiers
-}
+)
 
 check_working_tree() {
     local untracked
@@ -1306,6 +1460,13 @@ if row_selected ci-script-tests && [[ "${failures[*]}" == *ci-script-tests* ]]; 
     printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
     exit 1
 fi
+run_check hub-web-tests \
+    'npm ci --no-audit --no-fund && npm run typecheck && npm test' \
+    check_hub_web_tests
+if row_selected hub-web-tests && [[ "${failures[*]}" == *hub-web-tests* ]]; then
+    printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
+    exit 1
+fi
 run_check fixture-paths \
     "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src" \
     check_fixture_paths
@@ -1357,7 +1518,7 @@ if [[ "$fast_rows" == true && ! -f scripts/check-test-shape.py ]]; then
 else
     run_check test-shape 'python3 scripts/check-test-shape.py (changed lane in fast mode)' check_test_shape
 fi
-run_check test-env 'whole-workspace process-state test lint and strict baseline ratchet' check_test_env
+run_check test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 run_check builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \

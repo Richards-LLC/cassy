@@ -231,11 +231,54 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       return overflow === 'auto' || overflow === 'scroll';
     });
     const ariaHidden = (element) => ancestors(element).some((current) => current.getAttribute('aria-hidden') === 'true');
+    // GH #1081: a visually-hidden helper keeps a positioned box of at most one
+    // pixel and clips what it holds, so screen readers still read it. Its text
+    // can never fit that box by design, whatever class names it carries.
+    const visuallyHiddenBox = (current) => {
+      const style = getComputedStyle(current);
+      if (style.position !== 'absolute' && style.position !== 'fixed') return false;
+      const rect = current.getBoundingClientRect();
+      if (rect.width > 1.5 || rect.height > 1.5) return false;
+      return (style.clip && style.clip !== 'auto') || /inset\(\s*50%/.test(style.clipPath || '') || ['hidden', 'clip'].includes(style.overflowX) || ['hidden', 'clip'].includes(style.overflowY);
+    };
+    // A closed off-canvas drawer is moved fully off the screen and holds
+    // nothing a keyboard can reach; its text is not on the page for anyone.
+    // An off-screen subtree a keyboard CAN reach is still reported.
+    const focusableSelector = 'a[href], button, input, select, textarea, summary, iframe, [tabindex], [contenteditable=""], [contenteditable="true"]';
+    const reachable = (element) => !element.disabled && element.tabIndex >= 0 && !element.closest('[inert]') && visibility(element).hidden === false;
+    const offCanvasCache = new Map();
+    const closedOffCanvas = (element) => {
+      for (const current of ancestors(element)) {
+        if (current === document.documentElement || current === document.body) continue;
+        if (!offCanvasCache.has(current)) {
+          const rect = current.getBoundingClientRect();
+          const off = rect.width > 0 && rect.height > 0 && (rect.right <= boxTolerance || rect.left >= window.innerWidth - boxTolerance || rect.bottom <= boxTolerance);
+          const keyboard = off && !current.closest('[inert]') && [current, ...current.querySelectorAll(focusableSelector)].some((candidate) => candidate.matches(focusableSelector) && reachable(candidate));
+          offCanvasCache.set(current, off && !keyboard);
+        }
+        if (offCanvasCache.get(current)) return true;
+      }
+      return false;
+    };
+    // A closed <details> keeps a layout box for its content without drawing
+    // it, so that content can sit past a scroller's range; it is folded, not
+    // clipped. Only its summary is on screen, and opening it brings the rest
+    // into the page's flow.
+    const collapsedDisclosure = (element) => {
+      for (let details = element.closest('details:not([open])'); details; details = details.parentElement?.closest('details:not([open])') ?? null) {
+        const summary = details.querySelector(':scope > summary');
+        if (!summary || !summary.contains(element)) return true;
+      }
+      return false;
+    };
     const nonVisualReason = (element) => {
       if (!element) return null;
       if (ariaHidden(element)) return 'aria-hidden';
       if (element.closest('svg title, svg desc')) return 'svg-accessibility-text';
-      if (element.closest('.skip, .sr, .sr-only, .visually-hidden, .visuallyHidden, [data-visual-qa-hidden]')) return 'accessibility-helper';
+      if (element.closest('.skip, .sr, .sr-only, .visually-hidden, .visuallyHidden, .nuxt-route-announcer, [data-visual-qa-hidden]')) return 'accessibility-helper';
+      if (ancestors(element).some(visuallyHiddenBox)) return 'visually-hidden';
+      if (closedOffCanvas(element)) return 'closed-off-canvas';
+      if (collapsedDisclosure(element)) return 'collapsed-disclosure';
       return null;
     };
     const visibility = (element) => {
@@ -370,7 +413,9 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const overflowY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const contentExceedsBorder = element !== document.documentElement && element !== document.body && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance);
       const clipped = (overflowX && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
-      if (clipped) {
+      // GH #1081: an explicit single-line ellipsis is the design, not lost text.
+      const intentionalEllipsis = overflowX && style.textOverflow === 'ellipsis' && element.scrollHeight <= element.clientHeight + boxTolerance;
+      if (clipped && !intentionalEllipsis) {
         add('content-overflow', item, { reason: 'content-exceeds-clipped-border-box', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         add('clipped-content', item, { reason: 'scroll-size-exceeds-client-size', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         if (style.textOverflow !== 'ellipsis' && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance)) add('truncated-container', item, { reason: 'overflow-without-ellipsis', textOverflow: style.textOverflow, scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
@@ -382,17 +427,37 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       }
     }
 
+    // Each axis is judged on its own (GH #1073). A vertical scroller
+    // (`overflow-x: hidden; overflow-y: auto`) clips sideways but scrolls
+    // down: text below its fold is reachable, so it ends the vertical walk
+    // instead of counting as a clip boundary on both axes. Only text outside
+    // the scroller's scrollable range is unreachable. The horizontal axis is
+    // unchanged: a horizontal scroller above the text's own parent ends it.
     for (const item of textNodes) {
       if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
       const svgBoundary = item.node.parentElement?.closest('svg');
       let ancestor = item.node.parentElement;
-      while (ancestor) {
+      let checkX = true;
+      let checkY = true;
+      while (ancestor && (checkX || checkY)) {
         if (ancestor === svgBoundary) break;
-        if (ancestor !== item.node.parentElement && ['auto', 'scroll'].includes(getComputedStyle(ancestor).overflowX)) break;
         const style = getComputedStyle(ancestor);
-        if (style.overflowX === 'hidden' || style.overflowX === 'clip' || style.overflowY === 'hidden' || style.overflowY === 'clip') {
+        if (ancestor !== item.node.parentElement && ['auto', 'scroll'].includes(style.overflowX)) checkX = false;
+        const clipsX = checkX && (style.overflowX === 'hidden' || style.overflowX === 'clip');
+        const clipsY = checkY && (style.overflowY === 'hidden' || style.overflowY === 'clip');
+        const scrollsY = checkY && (style.overflowY === 'auto' || style.overflowY === 'scroll');
+        if (clipsX || clipsY || scrollsY) {
           const ancestorBox = ancestor.getBoundingClientRect();
-          if (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance || item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
+          const ellipsisX = clipsX && style.textOverflow === 'ellipsis' && ancestor.scrollHeight <= ancestor.clientHeight + boxTolerance;
+          const outsideX = clipsX && !ellipsisX && (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance);
+          const outsideY = clipsY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
+          if (outsideX || outsideY) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
+          if (scrollsY) {
+            const contentTop = ancestorBox.y + ancestor.clientTop - ancestor.scrollTop;
+            const contentBottom = contentTop + ancestor.scrollHeight;
+            if (item.box.y < contentTop - boxTolerance || item.box.bottom > contentBottom + boxTolerance) add('clipped-content', item, { reason: 'text-outside-scroll-range', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox), scrollTop: ancestor.scrollTop, scrollHeight: ancestor.scrollHeight });
+            checkY = false;
+          }
         }
         ancestor = ancestor.parentElement;
       }
@@ -839,6 +904,37 @@ async function runStep(page, context, step, timeout) {
 }
 
 /**
+ * Settle the page before it is measured. A fixed wait captures colours
+ * mid-transition, so contrast findings vary between runs. Every finite CSS
+ * transition and animation (and any Web Animation) is finished at its end
+ * state; an infinite one is paused at its start so every run reads the same
+ * frame. Repeats until no finite animation is left, then waits two frames so
+ * the settled styles are painted.
+ */
+async function settlePage(page) {
+  await page.evaluate(async () => {
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    for (let round = 0; round < 10; round += 1) {
+      await frame();
+      let running = 0;
+      for (const animation of document.getAnimations()) {
+        if (animation.playState === 'finished') continue;
+        try {
+          animation.finish();
+          running += 1;
+        } catch {
+          if (animation.playState !== 'paused') animation.pause();
+          animation.currentTime = 0;
+        }
+      }
+      if (!running) break;
+    }
+    await frame();
+    await frame();
+  });
+}
+
+/**
  * Render and inspect one or more HTML URLs.
  * With `journey` (a journey file path or object, see loadJourney), its
  * declared states are rendered and inspected after the resting pages.
@@ -884,7 +980,7 @@ async function inspectVisualQa(options) {
           const page = await context.newPage();
           try {
             await page.goto(url, { waitUntil: 'load' });
-            await page.waitForTimeout(50);
+            await settlePage(page);
             const recordFinding = (finding, informational = false) => {
               const enriched = { ...finding, url: source, scheme, viewport };
               const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
@@ -997,7 +1093,7 @@ async function inspectVisualQa(options) {
                 }
                 entry.ms = Date.now() - started;
               }
-              await page.waitForTimeout(50);
+              await settlePage(page);
               const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
               for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
               for (const finding of inspection.findings) recordFinding(finding);

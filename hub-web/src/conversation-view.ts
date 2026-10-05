@@ -1,4 +1,5 @@
 import { fitMachineLine, hostMarkup } from "./conversation-shell";
+import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
 import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
@@ -42,6 +43,8 @@ export interface TurnRenderContext {
   readonly turn: ThreadTurn;
   readonly reply: OperatorReply;
   readonly supervisor: string;
+  /** How a screen reader names this turn's supervisor: "cas-src supervisor" (cas-d8a5, journey F32). */
+  readonly spokenSupervisor?: string;
   /** Renders the message body (prose + evidence tables) the way a plain bubble would. */
   readonly body: () => HTMLElement[];
   /** Set for the `attachment` kind: the artifact this call renders. */
@@ -211,6 +214,36 @@ export function askLine(message: string): string {
   return question ?? lines[0] ?? "";
 }
 
+/**
+ * The block in a rendered ask that carries its question (the line `askLine`
+ * names), innermost and last when several match.
+ */
+export function askLineElement(body: HTMLElement, message: string): HTMLElement | undefined {
+  const question = askLine(message);
+  if (!question) return undefined;
+  const blocks = [...body.querySelectorAll<HTMLElement>("p, li, h1, h2, h3, h4, h5, h6, blockquote")];
+  return blocks.reverse().find((block) => askLine(block.textContent ?? "") === question);
+}
+
+/**
+ * cas-8674 (journey F6): an opened pinned card's body scrolls inside a
+ * quarter of the screen, and a question usually ends its message, under the
+ * preamble. Scroll the body (only the body, never the page) so the question
+ * sits in view beside its choices; one taller than the body shows its start.
+ */
+export function revealAskLine(body: HTMLElement, message: string): void {
+  if (body.scrollHeight <= body.clientHeight) return;
+  const line = askLineElement(body, message);
+  if (!line) return;
+  const style = body.ownerDocument.defaultView?.getComputedStyle(body);
+  const padTop = parseFloat(style?.paddingTop ?? "") || 0;
+  const padBottom = parseFloat(style?.paddingBottom ?? "") || 0;
+  const box = body.getBoundingClientRect();
+  const rect = line.getBoundingClientRect();
+  const offset = rect.top - box.top - body.clientTop + body.scrollTop;
+  body.scrollTop = Math.max(0, Math.min(offset - padTop, offset + rect.height + padBottom - body.clientHeight));
+}
+
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
 /**
@@ -225,6 +258,34 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   if (target) { target.focus({ preventScroll: true }); return; }
   bubble.tabIndex = -1;
   bubble.focus({ preventScroll: true });
+}
+
+/** The header's connection label, as the empty thread and Terminal view's offer read it. */
+function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "reconnecting" | "unreachable" {
+  return label === undefined || label === "Live" ? "live"
+    : label === "Degraded" ? "degraded"
+      : label === NEEDS_PAIRING ? "pairing"
+        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
+          : "unreachable";
+}
+
+/**
+ * Why the conversation header's Terminal view can't open now, or nothing
+ * when it can (cas-6b75, journey F03). The empty card stops offering
+ * Terminal view once the connection is lost; the header says the same
+ * instead of offering a terminal it cannot reach. A first connection
+ * ("Connecting", "Idle") is on its way, not lost, so it is still offered.
+ */
+export function terminalOfferReason(connection: string | undefined, machine: string | undefined): string | undefined {
+  if (connection === "Connecting" || connection === "Idle") return undefined;
+  const where = machine || "this machine";
+  const subjectMachine = machine || "This machine";
+  switch (connectionKind(connection)) {
+    case "pairing": return `${subjectMachine} needs pairing again before Terminal view can open.`;
+    case "reconnecting": return `Reconnecting to ${where} — Terminal view opens once it's back.`;
+    case "unreachable": return `${subjectMachine} can't be reached — Terminal view opens once it's back.`;
+    default: return undefined;
+  }
 }
 
 /**
@@ -243,11 +304,7 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
   const where = input.machine || "this machine";
   const subjectMachine = input.machine || "This machine";
   const label = input.connection;
-  const kind = label === undefined || label === "Live" ? "live"
-    : label === "Degraded" ? "degraded"
-      : label === NEEDS_PAIRING ? "pairing"
-        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
-          : "unreachable";
+  const kind = connectionKind(label);
   const none = `No messages from ${subject} in this session yet`;
   if (!input.resolved) {
     if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "", terminal: false };
@@ -286,11 +343,14 @@ function relativeAgo(at: number, now: number): string {
   return `${Math.floor(elapsed / 86_400_000)}d ago`;
 }
 
-/** "re: earlier session calm-puma-34" above an answer to another session's turn (cas-e829). */
-export function earlierReplyQuote(document: Document, session: string): HTMLElement {
+/** Name the question an answer belongs to; unavailable history stays explicit. */
+export function earlierReplyQuote(document: Document, session: string, question?: string): HTMLElement {
   const quote = document.createElement("div");
   quote.className = "reply-quote";
-  quote.textContent = `re: earlier session ${sessionCodename(session)}`;
+  const firstLine = question ? plainTextMarkdown(question.split(/\r?\n/, 1)[0] ?? "").trim() : "";
+  quote.textContent = firstLine
+    ? `Reply to “${firstLine}” · ${sessionCodename(session)}`
+    : `Reply to your message in earlier session ${sessionCodename(session)}`;
   quote.title = session;
   return quote;
 }
@@ -331,6 +391,30 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
   return details;
 }
 
+/**
+ * The dismissed-messages chip's words (cas-6a96, journey F36). It counts the
+ * messages the operator dismissed, so it says "dismissed": a thread notice
+ * beside it counts the not-confirmed messages still in the thread, and the
+ * two used to read as contradicting counts of the same thing ("2 messages
+ * not confirmed" over "Show 3 messages not confirmed"). Messages known not to
+ * have gone keep their plain "unsent" name.
+ */
+export function unsentChipCopy(count: number, unconfirmed: number): { text: string; label: string } {
+  if (unconfirmed === 0) {
+    const noun = count === 1 ? "1 unsent message" : `${count} unsent messages`;
+    return { text: noun, label: `Show ${noun}` };
+  }
+  const messages = count === 1 ? "message" : "messages";
+  const status = unconfirmed === count ? "not confirmed" : "not sent or not confirmed";
+  return { text: `${count} dismissed`, label: `Show ${count} dismissed ${messages}, ${status}` };
+}
+
+/**
+ * How long a just-opened pinned question ignores presses on its choices: a
+ * double tap's second tap, not a deliberate answer (cas-450b).
+ */
+const PINNED_OPEN_GUARD_MS = 400;
+
 export class ConversationView {
   readonly element: HTMLElement;
   /**
@@ -366,6 +450,8 @@ export class ConversationView {
    */
   private composing = false;
   private pinnedChoice?: { id: number; collapsed: boolean };
+  /** When the folded bar last opened the question (cas-450b). */
+  private pinnedOpenedAt = -Infinity;
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
@@ -392,6 +478,18 @@ export class ConversationView {
    * either used to drop focus to the page body.
    */
   private loadEarlierFocus = false;
+  /**
+   * cas-c2cb: a control in the thread the reader moved focus to. Their focus
+   * scrolled it into view, so it outranks a pending put-back of the reading
+   * position (placePending), which would scroll it back out of the thread.
+   * The same control given focus back after a rebuild (recovery) is not a move,
+   * and neither is focus this view places itself.
+   */
+  private focusMoved?: HTMLElement;
+  /** The control in the thread that last held focus, kept across a re-mount's drop to <body>. */
+  private focusedControl?: HTMLElement;
+  /** Set while this view places focus itself (Load earlier's own recovery). */
+  private placingFocus = false;
   private pinPending = false;
   /** The thread's height at the last scroll or resize it saw (cas-16eed). */
   private lastHeight?: number;
@@ -426,6 +524,8 @@ export class ConversationView {
     // lands above and the turn on screen stays put (journey F7).
     this.loadEarlier.onclick = () => {
       this.following = false;
+      // Paging holds the reader's turn from here (journey F7), not the button.
+      this.focusMoved = undefined;
       this.loadEarlierFocus = this.element.ownerDocument.activeElement === this.loadEarlier;
       this.options.loadEarlier?.();
     };
@@ -434,7 +534,7 @@ export class ConversationView {
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
-    this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
+    this.jump.onclick = () => { this.following = true; this.focusMoved = undefined; this.update(); this.pin(); };
     this.unsent = document.createElement("button"); this.unsent.type = "button";
     this.unsent.className = "conversation-unsent"; this.unsent.hidden = true;
     this.unsent.onclick = () => this.restoreUnsent();
@@ -443,6 +543,17 @@ export class ConversationView {
     this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
+    // cas-450b: the opened card can put a choice right under the folded bar's
+    // tap point (a phone with its keyboard up), so the second tap of a double
+    // tap would answer the question. A choice ignores a press that arrives
+    // within a double tap of the bar opening it; a deliberate tap still answers.
+    this.pinned.addEventListener("click", (event) => {
+      if (performance.now() - this.pinnedOpenedAt >= PINNED_OPEN_GUARD_MS) return;
+      const target = event.target instanceof Element ? event.target.closest("button") : null;
+      if (!target || !target.closest(".obj")) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     this.element.addEventListener("scroll", () => {
@@ -466,8 +577,37 @@ export class ConversationView {
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
       this.scrolledTo = this.element.scrollTop;
+      // The reader scrolled their focused control away: their scroll is the place now.
+      if (this.focusMoved && !this.shows(this.focusMoved)) this.focusMoved = undefined;
       this.notePlace();
     }, { passive: true });
+    this.element.addEventListener("focusin", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || target === this.element) return;
+      if (target !== this.focusedControl && !this.placingFocus) {
+        this.focusMoved = target;
+        // The reader moved to a control the thread does not show, or one a
+        // thread following its tail would pin out of view (Load earlier, above,
+        // just after a reconnect reset the scroll to the top). The browser
+        // shows it; pinning to the tail, or putting a reconnect's reading
+        // position back, would scroll it straight out again. The reader's
+        // focus is the place now.
+        if (!this.shows(target) || (this.following && this.hiddenAtTail(target))) {
+          this.following = false;
+          this.jump.hidden = false;
+          this.placePending = false;
+          this.place = undefined;
+        }
+      }
+      this.focusedControl = target;
+    });
+    this.element.addEventListener("focusout", (event) => {
+      const next = event.relatedTarget;
+      // No next target: a re-mount dropped it, and recovery gives the same control focus back.
+      if (!(next instanceof Node) || this.element.contains(next)) return;
+      this.focusedControl = undefined;
+      this.focusMoved = undefined;
+    });
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => {
         for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
@@ -552,7 +692,7 @@ export class ConversationView {
     const lost = !active || active === document.body || active === this.loadEarlier;
     if (!this.loadEarlier.hidden) {
       if (!lost) this.loadEarlierFocus = false;
-      else if (active !== this.loadEarlier) this.loadEarlier.focus({ preventScroll: true });
+      else if (active !== this.loadEarlier) this.placeFocus(this.loadEarlier);
       return;
     }
     this.loadEarlierFocus = false;
@@ -560,7 +700,41 @@ export class ConversationView {
     const target = this.msgs.querySelector<HTMLElement>(":scope > .history-end") ?? this.msgs.querySelector<HTMLElement>("[data-key]");
     if (!target) { this.element.focus({ preventScroll: true }); return; }
     target.tabIndex = -1;
-    target.focus({ preventScroll: true });
+    this.placeFocus(target);
+  }
+
+  /** Focus this view places itself, without scrolling: not the reader moving it (cas-c2cb). */
+  private placeFocus(target: HTMLElement): void {
+    this.placingFocus = true;
+    try { target.focus({ preventScroll: true }); } finally { this.placingFocus = false; }
+  }
+
+  /** Whether the element sits wholly above the thread's last screenful, where following the tail cannot show it. */
+  private hiddenAtTail(element: HTMLElement): boolean {
+    const view = this.element.getBoundingClientRect();
+    const bottom = element.getBoundingClientRect().bottom - view.top + this.element.scrollTop;
+    return bottom <= this.element.scrollHeight - this.element.clientHeight;
+  }
+
+  /** Whether any of the element shows inside the thread's scroll box. */
+  private shows(element: HTMLElement): boolean {
+    const view = this.element.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    return box.height > 0 && box.bottom > view.top && box.top < view.bottom;
+  }
+
+  /**
+   * The control the reader moved focus to, while it still has focus (cas-c2cb).
+   * A re-mount drops focus to <body> for a moment before recovery gives it
+   * back, so that does not count as the reader moving on.
+   */
+  private focusHeld(): HTMLElement | undefined {
+    const target = this.focusMoved;
+    const active = target?.ownerDocument.activeElement;
+    if (target && target.isConnected && this.element.contains(target)
+      && (active === target || !active || active === target.ownerDocument.body)) return target;
+    this.focusMoved = undefined;
+    return undefined;
   }
 
   /**
@@ -627,8 +801,19 @@ export class ConversationView {
     // Not drawn yet: try again on the next update.
     if (!node) return;
     this.placePending = false;
+    // cas-c2cb: the reader tabbed to a control here after the reset, and their
+    // focus scrolled it into view. If putting the old position back would
+    // scroll that control out of the thread, their focus is the place now.
+    const focused = this.focusHeld();
+    const before = this.element.scrollTop;
+    const shownBefore = focused !== undefined && this.shows(focused);
     const offset = node.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
     this.element.scrollTop += offset - place.offset;
+    if (focused && shownBefore && !this.shows(focused)) {
+      this.element.scrollTop = before;
+      this.scrolledTo = before;
+      this.notePlace();
+    }
   }
 
   private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {
@@ -691,6 +876,7 @@ export class ConversationView {
       expand.append(label, " ", text, glyph.content.firstElementChild!);
       expand.title = "Show the question";
       expand.onclick = () => {
+        this.pinnedOpenedAt = performance.now();
         this.pinnedChoice = { id: ask.notification_id, collapsed: false };
         this.renderPinned(document);
         this.pinned.querySelector<HTMLElement>(".pinned-collapse")?.focus({ preventScroll: true });
@@ -718,6 +904,8 @@ export class ConversationView {
       this.pinned.replaceChildren(head, object);
     }
     this.pinned.hidden = false;
+    const body = collapsed ? null : this.pinned.querySelector<HTMLElement>(".obj-body");
+    if (body) revealAskLine(body, ask.message);
     // A control rebuilt under keyboard focus hands it to its counterpart.
     if (hadFocus && !this.pinned.contains(document.activeElement)) {
       [...this.pinned.querySelectorAll<HTMLElement>("button")].find((button) => button.className === hadFocus)?.focus({ preventScroll: true });
@@ -791,15 +979,13 @@ export class ConversationView {
     // caution tone the thread gives them; any message known not to be sent
     // keeps the critical tone, because that one certainly needs the operator.
     this.unsent.dataset.tone = unconfirmed === count ? "caution" : "critical";
-    const noun = unconfirmed === 0 ? (count === 1 ? "1 unsent message" : `${count} unsent messages`)
-      : unconfirmed === count ? (count === 1 ? "1 message not confirmed" : `${count} messages not confirmed`)
-      : `${count} messages not sent or not confirmed`;
+    const copy = unsentChipCopy(count, unconfirmed);
     const document = this.element.ownerDocument;
     const glyph = document.createElement("template"); glyph.innerHTML = WARN;
-    const text = document.createElement("span"); text.textContent = noun;
+    const text = document.createElement("span"); text.textContent = copy.text;
     const action = document.createElement("span"); action.className = "conversation-unsent-show"; action.setAttribute("aria-hidden", "true"); action.textContent = "Show";
     this.unsent.replaceChildren(glyph.content.firstElementChild!, text, action);
-    this.unsent.setAttribute("aria-label", `Show ${noun}`);
+    this.unsent.setAttribute("aria-label", copy.label);
   }
 
   /**
@@ -811,15 +997,33 @@ export class ConversationView {
     return session && this.history.currentSession !== undefined && session !== this.history.currentSession ? sessionCodename(session) : this.options.supervisor;
   }
 
+  /**
+   * cas-d8a5 (journey F32): a group is spoken as "cas-src supervisor", with
+   * the codename (or its earlier session) as the description.
+   */
+  private spokenSpeakerOf(session: string | undefined): { name: string; description?: string } {
+    const codename = this.speakerOf(session);
+    const other = Boolean(session && this.history.currentSession !== undefined && session !== this.history.currentSession);
+    const description = supervisorDescription(this.options.project, codename, other);
+    return { name: spokenSupervisor(this.options.project, codename), ...(description ? { description } : {}) };
+  }
+
   private context(document: Document, turn: ThreadTurn, reply: OperatorReply, pinned = false): TurnRenderContext {
     const context: TurnRenderContext = {
-      document, turn, reply, supervisor: this.speakerOf(turn.event.session),
+      document, turn, reply, supervisor: this.speakerOf(turn.event.session), ...(this.options.project ? { spokenSupervisor: this.spokenSpeakerOf(turn.event.session).name } : {}),
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
       pinned,
     };
     return context;
+  }
+
+  private earlierQuestion(reply: OperatorReply): string | undefined {
+    if (!reply.reply_to_session || reply.reply_to === null) return undefined;
+    const entry = this.history.earlierSessions().find((entry) => entry.session === reply.reply_to_session);
+    const question = entry?.events.find((event) => event.kind === "send" && event.value.notificationId === reply.reply_to);
+    return question?.kind === "send" ? question.value.text : undefined;
   }
 
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
@@ -841,7 +1045,8 @@ export class ConversationView {
     const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
     // cas-b00c: a run of unconfirmed messages repaints when Review opens or closes it.
     const review = settled === false ? [...this.reviewedRuns].join(",") : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
+    const earlierQuestion = reply?.reply_to_session ? this.earlierQuestion(reply) : undefined;
+    return JSON.stringify([turn.event, earlierQuestion, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
   }
 
   /**
@@ -1001,7 +1206,8 @@ export class ConversationView {
     const document = node.ownerDocument;
     const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
-    speaker(node, `${this.speakerOf(item.session)}, status`, item.time, item.clockAhead);
+    const spokenStatus = this.spokenSpeakerOf(item.session);
+    speaker(node, `${spokenStatus.name}, status`, item.time, item.clockAhead, spokenStatus.description);
     const line = document.createElement("div"); line.className = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
@@ -1034,7 +1240,8 @@ export class ConversationView {
     node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
     // F19 (cas-17e3): a screen reader hears who spoke and when, not bare
     // paragraphs and times. The visible time stays for sighted readers.
-    speaker(node, group.side === "you" ? "You" : this.speakerOf(group.turns[0]?.event.session), group.time, group.clockAhead);
+    const spoken = group.side === "you" ? { name: "You" } : this.spokenSpeakerOf(group.turns[0]?.event.session);
+    speaker(node, spoken.name, group.time, group.clockAhead, "description" in spoken ? spoken.description : undefined);
     // Bubbles are keyed too: a later turn re-derives the earlier one's corner
     // classes without replacing its node, so a selection or focus inside it
     // survives the update.
@@ -1354,7 +1561,7 @@ export class ConversationView {
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
     // cas-e829: an answer to another session's turn stays in this thread and
     // only names what it answers; the earlier session itself is read-only.
-    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session));
+    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session, this.earlierQuestion(reply)));
     return { bubble, sheets };
   }
 
@@ -1378,7 +1585,9 @@ export class ConversationView {
     this.pinPending = true;
     requestAnimationFrame(() => {
       if (this.disposed) return;
-      this.element.scrollTop = this.element.scrollHeight;
+      // cas-c2cb: a reader who moved focus off the tail meanwhile stopped
+      // following it; the frame-late re-pin leaves them where they went.
+      if (this.following) this.element.scrollTop = this.element.scrollHeight;
       requestAnimationFrame(() => { this.pinPending = false; });
     });
   }
@@ -1406,9 +1615,10 @@ function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => stri
 }
 
 /** Names a message group for assistive tech: "You, 12:45" or "<supervisor>, 12:45". */
-function speaker(node: HTMLElement, who: string, time: string | undefined, clockAhead = false): void {
+function speaker(node: HTMLElement, who: string, time: string | undefined, clockAhead = false, description?: string): void {
   node.setAttribute("role", "group");
-  node.setAttribute("aria-label", time ? `${who}, ${time}${clockAhead ? `, ${CLOCK_AHEAD}` : ""}` : who);
+  node.setAttribute("aria-label", joinSpoken([who, time, clockAhead && CLOCK_AHEAD]));
+  if (description) node.setAttribute("aria-description", description); else node.removeAttribute("aria-description");
 }
 
 /** The quiet hint beside a time that is the arrival time, not the machine's own stamp (cas-1f13). */

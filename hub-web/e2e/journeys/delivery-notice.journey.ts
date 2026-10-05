@@ -1,6 +1,7 @@
-import { test, expect } from "./journey";
+import { test, expect, expectWholeFocusRing } from "./journey";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
+import { expectDetailsCopyRow } from "../details-copy-row";
 
 // cas-e829: the operator's 2026-10-01 Accounting screenshot. The live session
 // has a blocker from yesterday, a later message from the operator that does
@@ -15,6 +16,7 @@ const ATLAS: Machine = {
   sessions: [{ name: SESSION, supervisor: SUPERVISOR, project_dir: "/projects/Accounting", workers: [], liveness: "live" }],
 };
 const NOTICE_SUMMARY = "Supervisor hasn't seen: worker died: daring-robin-43 (9m)";
+const NOTICE_HEADLINE = "The supervisor missed an update: a worker stopped";
 const NOTICE_TEXT = "The supervisor (happy-cheetah-1, Codex) was told 9 minutes ago that worker died: daring-robin-43, and the message never reached it.";
 const notice = (id: number, at: string, resolved = false) => ({
   notification_id: id, reply_to: null, message: NOTICE_TEXT, summary: NOTICE_SUMMARY, device_id: "*", kind: "blocker", attachments: [], session: SESSION, at,
@@ -30,7 +32,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     paired: ["atlas"],
     history: {
       [SESSION]: [{ has_earlier: false,
-        messages: [{ notification_id: 902, target: SUPERVISOR, text: "Looking at the ledger import now.", state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: SESSION, at: journeyStamp(-60 * 60_000) }],
+        messages: [{ notification_id: 3196200, target: SUPERVISOR, text: "Did the bank feed reconcile?\nPlease check the ledger.", state: "acknowledged", stamped: true, device_id: "journey-device", session: "Accounting-wise-lion-31", at: journeyDay(1, 16, 50) }, { notification_id: 902, target: SUPERVISOR, text: "Looking at the ledger import now.", state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: SESSION, at: journeyStamp(-60 * 60_000) }],
         replies: [
           { notification_id: 900, reply_to: null, message: "The ledger import is red: 3 rows failed validation.", summary: "", device_id: "journey-device", kind: "blocker", attachments: [], session: SESSION, at: journeyDay(1, 17, 20) },
           notice(901, journeyDay(1, 17, 49)),
@@ -38,7 +40,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     },
   });
   const log = page.getByRole("log");
-  const attentionItems = page.locator("#attention-panel article", { hasText: NOTICE_SUMMARY });
+  const attentionItems = page.locator("#attention-panel article", { hasText: NOTICE_HEADLINE });
 
   await journey.stage("Open the session: only its conversation", async () => {
     await journey.open();
@@ -66,6 +68,10 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(log).not.toContainText("never reached it");
     // cas-5c22: the item carries the notice's own time, not when this page heard of it.
     await expect(attentionItems.locator("time")).toHaveText("Sep 29, 17:49");
+    await expect(attentionItems.locator(".attention-title")).toHaveText(NOTICE_HEADLINE);
+    await expect(attentionItems.locator(".attention-detail")).toHaveText("Worker daring-robin-43 stopped. The update did not reach the supervisor.");
+    await expect(page.locator(".attention-group-label")).toHaveText("Accounting · happy-cheetah-1");
+    await expect(page.locator(".attention-dismiss-group")).toHaveCount(0);
   });
 
   const desktop = page.viewportSize()!;
@@ -78,8 +84,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const sheet = page.getByRole("dialog", { name: "Attention for this session" });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close attention" })).toBeFocused();
-    await expect(sheet.locator("article", { hasText: NOTICE_SUMMARY })).toBeVisible();
-    await expect(sheet.locator("article", { hasText: NOTICE_SUMMARY }).locator("time")).toHaveText("Sep 29, 17:49");
+    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE })).toBeVisible();
+    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE }).locator("time")).toHaveText("Sep 29, 17:49");
   });
 
   await journey.stage("Keyboard stays in the sheet", async () => {
@@ -114,7 +120,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     expect(lap, `Tab comes back round to Close: ${stops.join(" → ")}`).toBeGreaterThan(1);
     expect(new Set(stops.slice(0, lap)).size, `each Tab moves on: ${stops.join(" → ")}`).toBe(lap);
     // QA F03: a heartbeat redraw (every 5 s) never moves the keyboard user.
-    while (!(await focused()).startsWith("button.attention-dismiss-group")) await page.keyboard.press("Tab");
+    while (!(await focused()).startsWith("button.attention-dismiss")) await page.keyboard.press("Tab");
     const resting = await focused();
     // A catalog refetch and redraw is driven by a machine event (cas-9772), not waited out.
     await hub.announceCatalog("atlas");
@@ -124,8 +130,18 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // redraw either. Open the notice's Details, rest on its Copy, cross a
     // minute on the page clock: the same element keeps focus, Details stays open.
     const notice = sheet.locator("article.attention-item").first();
+    // cas-b56b: while Details is closed its Copy is not laid out at all, so
+    // no "Copy" box sits below the rail's scroll range for a layout check
+    // (the strict visual inspector) to find. Opening Details brings it back.
+    expect(await notice.locator(".attention-copy").evaluate((node) => node.getBoundingClientRect().height), "a closed notice's Copy has no box").toBe(0);
     await notice.locator("summary").click();
-    await notice.getByRole("button", { name: "Copy" }).focus();
+    await expectDetailsCopyRow(notice, "Copy has its own row, above the full Details text at390px");
+    await expect(notice.locator("pre")).toContainText("9 minutes ago");
+    // cas-ed87: Details reads as the message, never as a {summary, message} object.
+    await expect(notice.locator("pre"), "Details is the message as text at 390px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
+    await notice.locator("summary").focus();
+    await page.keyboard.press("Tab");
+    await expectWholeFocusRing(notice.getByRole("button", { name: "Copy" }), { vertical: true });
     const copy = await focused();
     await page.clock.fastForward(61_000);
     await hub.announceCatalog("atlas");
@@ -146,7 +162,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     atlas.pop();
     await hub.announceCatalog("atlas");
     await expect.poll(async () => sameControl(await focused())).toBe(sameControl(copy));
-    await sheet.locator(".attention-dismiss-group").focus();
+    await sheet.locator(".attention-dismiss").focus();
     await expect(page.locator(".conversation-main")).toHaveAttribute("inert", "");
     await expect(sheet).toBeVisible();
   });
@@ -162,8 +178,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.keyboard.press("Escape");
     await expect(palette).not.toHaveAttribute("open", "");
     await expect(sheet).toBeVisible();
-    // Focus is back in the sheet, on the control it left (Dismiss group).
-    await expect(sheet.locator(".attention-dismiss-group")).toBeFocused();
+    // Focus is back in the sheet, on the control it left (Dismiss notice).
+    await expect(sheet.locator(".attention-dismiss")).toBeFocused();
   });
 
   await journey.stage("Close it and keep reading", async () => {
@@ -202,6 +218,25 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 
   await journey.stage("It retires once the update gets through", async () => {
     await page.setViewportSize(desktop);
+    // cas-94b6: force the catalog redraw that previously landed during Copy's
+    // boundingBox call. A retained node loses its box, while the current
+    // Details stays open and must still satisfy the same layout assertion.
+    const staleCopy = await attentionItems.getByRole("button", { name: "Copy" }).elementHandle();
+    const sessions = hub.machine("atlas").sessions;
+    sessions.push({ name: "Accounting-bright-lark-8", supervisor: "bright-lark-8", project_dir: "/projects/Audit", workers: [], liveness: "live" });
+    await hub.announceCatalog("atlas");
+    await expect.poll(() => staleCopy!.evaluate((node) => node.isConnected)).toBe(false);
+    expect(await staleCopy!.boundingBox(), "the replaced Copy has no geometry").toBeNull();
+    await expect(attentionItems.locator("details")).toHaveAttribute("open", "");
+    await expectDetailsCopyRow(attentionItems, "Copy has its own row at1280px too after a catalog redraw");
+    sessions.pop();
+    await hub.announceCatalog("atlas");
+    await expectDetailsCopyRow(attentionItems, "Copy keeps its row after the catalog settles");
+    await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
+    // cas-177c: Copy says what it copied, the Details text, not an "event payload".
+    await attentionItems.getByRole("button", { name: "Copy" }).click();
+    await expect(page.locator("#toast")).toHaveText("Details copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy copies the Details text").toBe(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
     hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.
@@ -216,8 +251,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // it arrives in this thread, naming the session it answers.
     hub.supervisorSays(SESSION, "The bank feed reconciled overnight.", { reply_to: 3196200, reply_to_session: "Accounting-wise-lion-31" });
     const answer = log.locator(".bub", { hasText: "The bank feed reconciled overnight." });
-    await expect(answer.locator(".reply-quote")).toHaveText("re: earlier session wise-lion-31");
+    await expect(answer.locator(".reply-quote")).toHaveText("Reply to “Did the bank feed reconcile?” · wise-lion-31");
     await expect(answer).toHaveAttribute("data-reply-to", "3196200");
-    await expect(page.getByRole("region", { name: "Earlier sessions" })).toBeHidden();
+    await expect(page.getByRole("region", { name: "Earlier sessions" }).locator("details[open]")).toHaveCount(0);
   });
 });

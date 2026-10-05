@@ -8,6 +8,44 @@
 | Machine output | `--json`: one array of `{name, status, group, message, remediation, duration_ms, phase}`; nothing else on stdout. |
 | Omitted | Per-check timings, the slow-phase table, and instances beyond the first of a repeated finding — all under `--verbose`; detailed payload sections remain in the SessionStart references. |
 
+## Read-only queue diagnostics (cas-d6b9)
+
+The `supervisor relay` and `delivery retries` checks inspect an existing SQLite
+queue through a dedicated read-only connection, and never initialize or migrate
+the database. A project that has never queued anything has no `prompt_queue`
+table; that is healthy: `[OK] supervisor relay  no relays yet` and
+`[OK] delivery retries  none queued` (cas-5b0b). A queue that exists but can't be
+read warns in plain words with no SQL text: in use by another process, from an
+older cas (run `cas update --schema-only`), damaged, or not openable.
+Populated and empty queues retain their existing health messages and JSON shape.
+No renderer, palette, grouping or output flag changes. The assembled binary owns
+the attributed `doctor_snapshot` regeneration and terminal captures; worker
+regressions prove schema/count preservation and the diagnostic verdicts.
+
+## GitHub origin diagnostic (cas-28c8)
+
+The `GitHub origin` integration row warns when GitHub resolves the explicit origin
+slug to a renamed repository, names both slugs, and supplies
+`git remote set-url origin https://github.com/<canonical>.git`. A failed bounded
+lookup says the origin could not be checked; it never claims the origin is current.
+Non-GitHub projects omit this check. The existing JSON check shape and renderer
+remain unchanged. Fresh terminal capture against the assembled binary belongs to
+the supervisor; named tests prove the warning, remedy and JSON row.
+
+## Deferred symbol-index autofix (cas-e4aa)
+
+| Field | Sentence |
+| --- | --- |
+| First two lines | A busy symbol-index writer leaves a warning and a count of deferred retirements instead of a fixed verdict. |
+| Scannable | The existing auto-fix row shows one deferred count, the writer cause, and the actual error count. |
+| Readable | The row supplies one copyable retry command, `cas index code`, after the cause. |
+| Machine output | The existing JSON check object carries the warning status and the same deferred-work message. |
+| Omitted | Individual deferred filenames remain in the durable code-file retry manifest rather than repeated report rows. |
+
+Fresh terminal rendering and treatment runtime proof remain supervisor-owned:
+the worker was instructed to deliver Rust unbuilt. Existing palette, renderer
+and JSON document contracts apply; no new terminal PASS is claimed here.
+
 ## Rendering decisions
 
 - The verdict word is the count of findings (`2 warnings`, `1 error`, `healthy`); the healthy

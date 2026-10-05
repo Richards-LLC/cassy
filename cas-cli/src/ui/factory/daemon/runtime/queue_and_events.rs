@@ -206,6 +206,13 @@ fn delivery_stalled_notice(
         .num_seconds()
         .max(0);
     let summary = queued.summary.as_deref().unwrap_or("(no summary)");
+    // Commander is a paired-device recipient, not a factory harness. Keep
+    // transport/read state untouched: an unanswered ask can still stall.
+    let recipient_harness = if queued.target.eq_ignore_ascii_case("operator") {
+        "commander"
+    } else {
+        recipient_harness.backend().name()
+    };
     let delivery_state = report.map_or_else(
         || "delivery state unavailable".to_string(),
         |report| {
@@ -219,7 +226,7 @@ fn delivery_stalled_notice(
         "<system-notice>Delivery stalled: notification_id={}; recipient='{}'; recipient_harness={}; age_secs={}; summary='{}'; delivery_state={}. The recipient has not acknowledged or read this message. Switch to another channel if this is time-critical.</system-notice>",
         queued.id,
         queued.target,
-        recipient_harness.backend().name(),
+        recipient_harness,
         age_secs,
         summary,
         delivery_state,
@@ -320,10 +327,14 @@ fn cancel_targeted_in_flight_spawn(
     cancelled_spawns: &mut std::collections::HashSet<String>,
     in_flight_worker: Option<&str>,
     shutdown_targets: &[String],
+    cancellation: Option<&crate::ui::factory::app::provisioning::ProvisioningCancellation>,
 ) {
     if let Some(worker) = in_flight_worker {
         if shutdown_targets.iter().any(|target| target == worker) {
             cancelled_spawns.insert(worker.to_string());
+            if let Some(cancellation) = cancellation {
+                cancellation.cancel();
+            }
         }
     }
 }
@@ -1558,6 +1569,105 @@ pub(super) fn claude_turn_aware_retry(
     } else {
         TurnAwareRetry::OfferNow
     }
+}
+
+/// cas-5129: how long a transcript write still counts as the recipient
+/// working. A Claude turn writes on every tool call and result, so a turn
+/// that is moving writes far more often than this; one long tool call is
+/// covered by the in-flight-call evidence instead.
+pub(super) const CLAUDE_ACTIVE_TRANSCRIPT_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+/// cas-5129 (GH #1054): how long a freshly registered Claude worker with no
+/// transcript yet is treated as still booting its TUI rather than unreachable.
+pub(super) const CLAUDE_FIRST_PROMPT_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
+/// cas-5129: evidence about a Claude recipient beyond its turn boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct RecipientWakeEvidence {
+    /// The transcript was written within [`CLAUDE_ACTIVE_TRANSCRIPT_WINDOW`],
+    /// or it shows a tool call still in flight: the turn is progressing.
+    /// The registry heartbeat is deliberately not used: the MCP server beats
+    /// on a timer while the harness process lives, wedged or not.
+    pub recently_active: bool,
+    /// No transcript exists yet and the worker registered within
+    /// [`CLAUDE_FIRST_PROMPT_GRACE`]: its session has not started.
+    pub awaiting_first_prompt: bool,
+}
+
+/// cas-5129: [`claude_turn_aware_retry`] that also refuses to spend the wake
+/// budget on a recipient that is evidently busy or still booting.
+///
+/// - A turn that is still progressing (recent transcript writes or an
+///   in-flight tool call) keeps waiting for its end past
+///   [`CLAUDE_TURN_END_WAIT_MAX`]. Long builds and test runs are normal; only
+///   a long *and silent* turn falls back to the cadence and its escalation.
+/// - A worker that has not received its first prompt yet waits out
+///   [`CLAUDE_FIRST_PROMPT_GRACE`] after the first offer instead of burning
+///   the remaining attempts while its TUI starts (GH #1054).
+///
+/// The first offer (`attempts == 0`) is never held back, and an idle,
+/// settled recipient is offered at once as before.
+pub(super) fn claude_turn_aware_retry_with_evidence(
+    attempts: u32,
+    recipient_mid_turn: Option<bool>,
+    pane_settled: bool,
+    last_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    evidence: RecipientWakeEvidence,
+) -> TurnAwareRetry {
+    let base =
+        claude_turn_aware_retry(attempts, recipient_mid_turn, pane_settled, last_attempt, now);
+    if attempts == 0 || base != TurnAwareRetry::UseCadence {
+        return base;
+    }
+    match recipient_mid_turn {
+        None if evidence.awaiting_first_prompt => TurnAwareRetry::Wait,
+        Some(mid_turn) if (mid_turn || !pane_settled) && evidence.recently_active => {
+            TurnAwareRetry::Wait
+        }
+        _ => base,
+    }
+}
+
+/// Persist a declined worker wake only when the recipient is not inside an
+/// observed tool call. Pausing leaves both the count and cadence clock intact.
+fn record_worker_wake_decline(
+    queue: &dyn cas_store::PromptQueueStore,
+    id: i64,
+    decision: WakeDecision,
+    tool_call: ToolCallEvidence,
+) -> cas_store::Result<Option<u32>> {
+    if tool_call == ToolCallEvidence::InFlight {
+        queue.record_pending_reason(
+            id,
+            cas_store::PendingReason::GatedNotReady,
+            Some("wake budget paused while the recipient has a tool call in flight"),
+        )?;
+        return Ok(None);
+    }
+    queue
+        .record_wake_gate_decline(id, &decision.status_detail())
+        .map(Some)
+}
+
+fn worker_recipient_shut_down(
+    target: &str,
+    dead: &std::collections::HashSet<String>,
+    live: &[String],
+    agents: &[cas_types::Agent],
+) -> bool {
+    // Registration IDs retire independently of reusable pane names. Only the
+    // newest registration for a name may veto a live replacement.
+    if agents
+        .iter()
+        .filter(|agent| agent.name == target || agent.id == target)
+        .max_by_key(|agent| agent.registered_at)
+        .is_some_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
+    {
+        return true;
+    }
+    dead.contains(target) && !live.iter().any(|name| name == target)
 }
 
 /// Whether a completed harness turn is newer than the wake attempt that
@@ -3019,6 +3129,49 @@ impl FactoryDaemon {
     /// cas-913c: whether `pane_target` is inside a turn by its harness
     /// transcript (latest turn start not yet followed by a turn end), or
     /// `None` when no transcript can be read.
+    /// cas-5129: activity and first-prompt evidence for a Claude recipient,
+    /// read from its transcript and registry row. Unknown evidence is the
+    /// default (no activity, not booting), which keeps the existing cadence.
+    fn recipient_wake_evidence(&self, pane_target: &str) -> RecipientWakeEvidence {
+        let Some(agent) = open_agent_store(self.app.cas_dir())
+            .ok()
+            .and_then(|store| store.list(None).ok())
+            .and_then(|agents| agents.into_iter().find(|agent| agent.name == pane_target))
+        else {
+            return RecipientWakeEvidence::default();
+        };
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            self.app.cas_dir(),
+            &agent,
+        )
+        .filter(|path| path.exists());
+        let now = chrono::Utc::now();
+        match path {
+            Some(path) => {
+                let written_recently = std::fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|written| std::time::SystemTime::now().duration_since(written).ok())
+                    .is_some_and(|age| age <= CLAUDE_ACTIVE_TRANSCRIPT_WINDOW);
+                RecipientWakeEvidence {
+                    recently_active: written_recently
+                        || crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                            &path, cli,
+                        ),
+                    awaiting_first_prompt: false,
+                }
+            }
+            None => RecipientWakeEvidence {
+                recently_active: false,
+                awaiting_first_prompt: cli == cas_mux::SupervisorCli::Claude
+                    && (now - agent.registered_at)
+                        .to_std()
+                        .is_ok_and(|age| age <= CLAUDE_FIRST_PROMPT_GRACE),
+            },
+        }
+    }
+
     fn recipient_mid_turn(&self, pane_target: &str) -> Option<bool> {
         let store = open_agent_store(self.app.cas_dir()).ok()?;
         let agent = store
@@ -3068,10 +3221,9 @@ impl FactoryDaemon {
     /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
     /// this daemon's own transport put in front of `recipient`.
     ///
-    /// Best-effort by design, like every other observability write on the
-    /// delivery path: a receipt that fails to persist costs a redelivery, and a
-    /// delivery failed over a receipt costs the message. The former is
-    /// recoverable and the latter is not, so this never propagates.
+    /// Retain the pre-write channel claim after a successful handoff. This
+    /// helper also repairs historical success paths without weakening another
+    /// channel's receipt. The reservation itself must succeed before sending.
     fn record_transport_receipt(
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
@@ -3081,7 +3233,7 @@ impl FactoryDaemon {
             queue,
             prompt_id,
             recipient,
-            cas_store::SurfacingSource::TransportDelivered,
+            cas_store::SurfacingSource::TransportClaimed,
         );
     }
 
@@ -4730,6 +4882,25 @@ impl FactoryDaemon {
 
         let queue = open_prompt_queue_store(self.app.cas_dir())?;
 
+        // Revalidate before watchdogs and roster selection: an old assignee
+        // may already have left the roster, but its task's notice is still live.
+        for id in queue.refresh_qa_rejection_targets(&self.session_name, None)? {
+            self.forget_row_delivery_state(id);
+        }
+        let registered_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
+        let mut retired_candidates = registered_prompt_sweep_agents(&registered_agents, &self.session_name);
+        retired_candidates.extend(self.dead_workers.iter().cloned());
+        retired_candidates.sort();
+        retired_candidates.dedup();
+        for name in retired_candidates {
+            if worker_recipient_shut_down(&name, &self.dead_workers, self.app.worker_names(), &registered_agents) {
+                queue.cancel_unread_for_shutdown(&name, Some(&self.session_name),
+                    "wake withdrawn: recipient has shut down")?;
+                self.normal_delivery_probes.retain(|_, probe| probe.pane != name && probe.target != name);
+                self.urgent_wake_probes.retain(|_, probe| probe.pane != name && probe.target != name);
+            }
+        }
+
         // cas-45c4 (GH #102): advance every pane's quiet streak once per poll,
         // before any delivery decision reads it.
         self.refresh_pane_quiet_samples();
@@ -4753,10 +4924,6 @@ impl FactoryDaemon {
         // Native-extension agents consume their own queue rows. Excluding them
         // from the daemon's target universe prevents this PTY/inbox processor
         // from repeatedly selecting rows it deliberately cannot consume.
-        let registered_agents = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .unwrap_or_default();
         let native_agents: std::collections::HashSet<String> = registered_agents
             .iter()
             .filter(|agent| {
@@ -4929,7 +5096,20 @@ impl FactoryDaemon {
         // wake-slot comment at the decision site.
         let mut supervisor_wake_sent = false;
 
-        for queued in prompts {
+        for selected in prompts {
+            // The assignee may have changed while earlier rows were delivered.
+            for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
+                self.forget_row_delivery_state(id);
+            }
+            let Some(queued) = queue.queued_prompt(selected.id)? else { continue };
+            if queued.processed_at.is_some() { continue; }
+            let current_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
+            if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), &current_agents) {
+                queue.cancel_unread_for_shutdown(&queued.target, Some(&self.session_name),
+                    "wake withdrawn: recipient has shut down")?;
+                self.forget_row_delivery_state(queued.id);
+                continue;
+            }
             let target = &queued.target;
             // cas-d9a8: resolve the row's server-stamped sender ONCE per row.
             // Every wake question below — is this a wake signal at all, may it
@@ -5018,7 +5198,6 @@ impl FactoryDaemon {
                     MergeRequestDecision, MergeRequestDelivery, merge_landed_guidance,
                     merge_request_anchor_invalidated_guidance, merge_request_delivery_decision,
                     merge_request_moot_guidance, merge_request_request_changes_guidance,
-                    revalidate_merge_request,
                 };
 
                 let task = crate::store::open_task_store_local(self.app.cas_dir())
@@ -5055,18 +5234,11 @@ impl FactoryDaemon {
                 // the same helper the compose path uses, so the two cannot
                 // drift apart. Falls back to the envelope tip only when the
                 // branch itself no longer resolves.
-                let live_branch_tip =
-                    crate::prompt_revalidation::merge_request_branch(task.as_ref())
-                        .and_then(|branch| {
-                            crate::prompt_revalidation::resolve_live_branch_tip(
-                                &repo_root,
-                                &branch,
-                                Some(envelope.branch_tip.as_str()),
-                            )
-                        })
-                        .unwrap_or_else(|| envelope.branch_tip.clone());
-                let git =
-                    revalidate_merge_request(&repo_root, &live_branch_tip, &envelope.target_branch);
+                let git = crate::prompt_revalidation::queued_merge_request_decision(
+                    &repo_root,
+                    task.as_ref(),
+                    &envelope,
+                );
 
                 let (suppress_detail, guidance, summary) =
                     match merge_request_delivery_decision(task.as_ref(), &envelope, &git) {
@@ -5317,7 +5489,7 @@ impl FactoryDaemon {
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
                 "{}\n{}\n{}",
-                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
+                crate::mcp::tools::service::agent_search_system::message::first_message_provenance(
                     &queued
                 ),
                 crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
@@ -5483,7 +5655,13 @@ impl FactoryDaemon {
                 // still-busy pane is certain to refuse. Three such refusals
                 // used to mark the row undelivered, so a worker in a long turn
                 // never got the message at all.
-                let turn_aware = claude_turn_aware_retry(
+                // cas-5129: a busy or still-booting recipient keeps the
+                // budget; only a silent long turn or an unreachable worker
+                // spends it and reaches the supervisor.
+                let turn_aware = if self.recipient_tool_call_evidence(pane_target) == ToolCallEvidence::InFlight {
+                    TurnAwareRetry::Wait
+                } else {
+                    claude_turn_aware_retry_with_evidence(
                     attempts,
                     self.recipient_mid_turn(pane_target),
                     self.pane_wake_state(pane_target)
@@ -5491,7 +5669,9 @@ impl FactoryDaemon {
                         .is_some_and(|silent| silent >= SILENCE_FOR_IDLE_RECIPIENT_WAKE),
                     last_attempt,
                     chrono::Utc::now(),
-                );
+                    self.recipient_wake_evidence(pane_target),
+                    )
+                };
                 if retry_at_turn_end {
                     tracing::debug!(
                         target: "cas::coordination",
@@ -5896,6 +6076,8 @@ impl FactoryDaemon {
                     .filter(|name| {
                         // Skip native extension agents (they self-serve via extension polling).
                         !native_agents.contains(name.as_str())
+                            && !worker_recipient_shut_down(name, &self.dead_workers,
+                                self.app.worker_names(), &current_agents)
                     })
                     .cloned()
                     .collect();
@@ -5925,6 +6107,10 @@ impl FactoryDaemon {
                     if queued.urgent && !self.app.mux.pane_ready_for_injection(name) {
                         failed += 1;
                         fail_notes.push(format!("{name}: pane not ready"));
+                        continue;
+                    }
+                    if !queue.claim_recipient_transport(queued.id, name)? {
+                        succeeded += 1;
                         continue;
                     }
                     let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
@@ -5963,6 +6149,9 @@ impl FactoryDaemon {
                         )
                         .await
                     };
+                    if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
+                        queue.release_recipient_transport(queued.id, name)?;
+                    }
                     match inject_result {
                         Ok(cas_mux::InjectOutcome::Delivered) => {
                             succeeded += 1;
@@ -6071,6 +6260,10 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
+                if !queue.claim_recipient_transport(queued.id, &queued.target)? {
+                    // A hook/poll may have won after this pass peeked the row.
+                    continue;
+                }
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. An attached
@@ -6256,10 +6449,11 @@ impl FactoryDaemon {
                         // cas-d9a8: persist the OUTCOME KIND alongside the
                         // reason so `message_status` separates "this was never
                         // a wake" from "this was eligible and refused".
-                        match queue
-                            .record_wake_gate_decline(queued.id, &wake_decision.status_detail())
+                        match record_worker_wake_decline(
+                            queue.as_ref(), queued.id, wake_decision, pane_state.tool_call,
+                        )
                         {
-                            Ok(declines) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
+                            Ok(Some(declines)) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
                                 let detail = format!(
                                     "wake gate declined {declines} consecutive re-offers while the recipient remained busy; \
                                      flagged undelivered_after instead of waiting indefinitely for pane silence"
@@ -6285,6 +6479,7 @@ impl FactoryDaemon {
                                     declines,
                                     "cas-dcf2: normal message exhausted consecutive busy wake declines"
                                 );
+                                queue.release_recipient_transport(queued.id, &queued.target)?;
                                 continue;
                             }
                             Ok(_) => {}
@@ -6352,6 +6547,9 @@ impl FactoryDaemon {
                     }
                 }
                 let inject_result = inject_result.map(|report| report.outcome);
+                if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
+                    queue.release_recipient_transport(queued.id, &queued.target)?;
+                }
                 match inject_result {
                     Ok(cas_mux::InjectOutcome::Delivered) => {
                         success = true;
@@ -6817,6 +7015,9 @@ impl FactoryDaemon {
         if let Some((pending_name, request_id, _, pending_task_id, handle)) = self.spawn_task.take()
         {
             self.spawn_started_at = None;
+            if let Some(cancellation) = self.spawn_cancellation.take() {
+                cancellation.cancel();
+            }
             handle.abort();
             self.app.remove_pending_worker(&pending_name);
             take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
@@ -7134,6 +7335,9 @@ impl FactoryDaemon {
             let (pending_name, request_id, _, pending_task_id, handle) =
                 self.spawn_task.take().unwrap();
             self.spawn_started_at = None;
+            if let Some(cancellation) = self.spawn_cancellation.take() {
+                cancellation.cancel();
+            }
             handle.abort();
             self.app.remove_pending_worker(&pending_name);
             take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
@@ -7207,24 +7411,57 @@ impl FactoryDaemon {
             // shutdown may cancel the currently-building spawn, but a retired
             // name in dead_workers must not cancel a later independent spawn.
             let cancelled = take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
-            match handle.await {
-                Ok(Ok(mut result)) if cancelled => {
+            self.spawn_cancellation = None;
+            let outcome = handle.await.map(|outcome| {
+                outcome.map(|provisioned| {
+                    if !cancelled {
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&pending_name),
+                            "provision",
+                            "prepared",
+                            &provisioned.receipt,
+                        );
+                        if let Some(provenance) = &provisioned.base_provenance {
+                            append_spawn_audit(
+                                self.app.cas_dir(),
+                                &self.session_name,
+                                request_id,
+                                Some(&pending_name),
+                                "provision",
+                                "base",
+                                provenance,
+                            );
+                        }
+                        report_spawn_warnings(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &pending_name,
+                            &provisioned.warnings,
+                        );
+                        for warning in &provisioned.warnings {
+                            self.app.set_error(warning.clone());
+                        }
+                    }
+                    if cancelled {
+                        provisioned.retire();
+                    }
+                    provisioned.result
+                })
+            });
+            match outcome {
+                Ok(Ok(_)) if cancelled => {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
                         vec![("success", "false"), ("reason", "cancelled_by_shutdown")],
                     );
-                    let cleanup_status =
-                        match self.app.cleanup_cancelled_spawn_worktree(&mut result) {
-                            Ok(true) => {
-                                "The newly-created worktree and branch were removed.".to_string()
-                            }
-                            Ok(false) => {
-                                "No worktree created by this spawn required cleanup.".to_string()
-                            }
-                            Err(e) => {
-                                format!("Worktree cleanup failed and needs operator attention: {e}")
-                            }
-                        };
+                    // Dropping the cancelled provisioned envelope queues cleanup
+                    // off-loop, retaining its per-name lease until retirement ends.
+                    let cleanup_status = "Best-effort removal of the new worktree, branch and own Git locks is queued off-loop; reused worktrees are preserved.";
                     let visible_error = format!(
                         "Spawn for worker '{pending_name}' was cancelled by shutdown before its \
                          pane registered. {cleanup_status}"
@@ -7440,6 +7677,34 @@ impl FactoryDaemon {
                         }
                     }
                 }
+                Ok(Err(e)) if cancelled => {
+                    let detail = format!(
+                        "Spawn cancelled by targeted shutdown: {e}. Provisioner retirement performs best-effort cleanup; inspect any reported leftovers before retrying."
+                    );
+                    if let Some(ref task_id) = pending_task_id {
+                        crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
+                            self.app.cas_dir(), task_id, &pending_name,
+                        );
+                    }
+                    crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), &pending_name);
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        request_id,
+                        Some(&pending_name),
+                        "provision",
+                        "cancelled",
+                        &detail,
+                    );
+                    self.app.set_error(detail.clone());
+                    let _ = enqueue_spawn_cancelled_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        &pending_name,
+                        &detail,
+                    );
+                }
                 Ok(Err(e)) => {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
@@ -7536,7 +7801,7 @@ impl FactoryDaemon {
                 // epic branch), not the session's pinned epic focus.
                 match self
                     .app
-                    .prepare_worker_spawn(None, isolate, task_id.as_deref())
+                    .snapshot_worker_spawn(None, isolate, task_id.as_deref())
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
@@ -7547,31 +7812,7 @@ impl FactoryDaemon {
                             Some(&worker_name),
                             "provision",
                             "started",
-                            &crate::ui::factory::app::render_and_ops::epic_workers::spawn_provision_receipt(&prep),
-                        );
-                        // cas-7587 (GH #122): record which branch this worker
-                        // was cut from and why (task's epic / pinned focus /
-                        // trunk) so base provenance is never a guess.
-                        if let Some(provenance) = &prep.base_provenance {
-                            append_spawn_audit(
-                                self.app.cas_dir(),
-                                &self.session_name,
-                                request_id,
-                                Some(&worker_name),
-                                "provision",
-                                "base",
-                                provenance,
-                            );
-                        }
-                        // cas-ecf7 (GH #118): a base that is behind trunk must
-                        // be reported before the worker starts working on it.
-                        report_spawn_warnings(
-                            self.app.cas_dir(),
-                            self.app.supervisor_name(),
-                            &self.session_name,
-                            request_id,
-                            &worker_name,
-                            &prep.warnings,
+                            "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
                         // cas-7a94: bind task_id as soon as the worker name is
                         // known — before the isolate worktree finishes — so
@@ -7587,13 +7828,12 @@ impl FactoryDaemon {
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
-                        self.spawn_task = Some((
-                            worker_name,
-                            request_id,
-                            spec,
-                            task_id,
-                            tokio::task::spawn_blocking(move || prep.run()),
-                        ));
+                        let (handle, cancellation) = crate::ui::factory::app::provisioning::launch(
+                            prep,
+                            SPAWN_PROVISION_TIMEOUT,
+                        );
+                        self.spawn_cancellation = Some(cancellation);
+                        self.spawn_task = Some((worker_name, request_id, spec, task_id, handle));
                     }
                     Err(e) => {
                         crate::telemetry::track(
@@ -7644,7 +7884,7 @@ impl FactoryDaemon {
                 // branch outranks the pinned focus for base resolution.
                 match self
                     .app
-                    .prepare_worker_spawn(Some(&name), isolate, task_id.as_deref())
+                    .snapshot_worker_spawn(Some(&name), isolate, task_id.as_deref())
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
@@ -7655,30 +7895,7 @@ impl FactoryDaemon {
                             Some(&worker_name),
                             "provision",
                             "started",
-                            &crate::ui::factory::app::render_and_ops::epic_workers::spawn_provision_receipt(&prep),
-                        );
-                        // cas-7587 (GH #122): record which branch this worker
-                        // was cut from and why (task's epic / pinned focus /
-                        // trunk) so base provenance is never a guess.
-                        if let Some(provenance) = &prep.base_provenance {
-                            append_spawn_audit(
-                                self.app.cas_dir(),
-                                &self.session_name,
-                                request_id,
-                                Some(&worker_name),
-                                "provision",
-                                "base",
-                                provenance,
-                            );
-                        }
-                        // cas-ecf7 (GH #118): see the Anonymous arm.
-                        report_spawn_warnings(
-                            self.app.cas_dir(),
-                            self.app.supervisor_name(),
-                            &self.session_name,
-                            request_id,
-                            &worker_name,
-                            &prep.warnings,
+                            "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
                         if let Some(ref tid) = task_id {
@@ -7690,13 +7907,12 @@ impl FactoryDaemon {
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
-                        self.spawn_task = Some((
-                            worker_name,
-                            request_id,
-                            spec,
-                            task_id,
-                            tokio::task::spawn_blocking(move || prep.run()),
-                        ));
+                        let (handle, cancellation) = crate::ui::factory::app::provisioning::launch(
+                            prep,
+                            SPAWN_PROVISION_TIMEOUT,
+                        );
+                        self.spawn_cancellation = Some(cancellation);
+                        self.spawn_task = Some((worker_name, request_id, spec, task_id, handle));
                     }
                     Err(e) => {
                         crate::telemetry::track(
@@ -7767,6 +7983,7 @@ impl FactoryDaemon {
                     &mut self.cancelled_spawns,
                     cancellable_in_flight,
                     &workers_to_stop,
+                    self.spawn_cancellation.as_deref(),
                 );
 
                 // cas-7a94: drop still-queued spawns for these names and release
@@ -7968,6 +8185,20 @@ impl FactoryDaemon {
                             "completed",
                             "Worker recycled in place with its existing worktree and recipe.",
                         );
+                        // cas-a622: the fresh conversation knows nothing; tell
+                        // it what it still holds and how to resume.
+                        if let Err(error) = crate::ui::factory::app::render_and_ops::epic_workers::enqueue_recycle_resume_brief(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            &name,
+                        ) {
+                            tracing::warn!(
+                                worker = %name,
+                                %error,
+                                "cas-a622: recycled worker kept its tasks but its resume brief could not be queued"
+                            );
+                        }
                         if self.app.record_enabled() {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
@@ -7979,6 +8210,16 @@ impl FactoryDaemon {
                     }
                     Err(e) => {
                         let detail = format!("Failed to recycle {name}: {e}");
+                        // cas-a622: the recycle kept the bindings for a
+                        // replacement that never started. Once the old process
+                        // is gone, release them as a shutdown would, rather
+                        // than leave tasks bound to a dead name.
+                        if !self.app.worker_names().iter().any(|worker| worker == &name) {
+                            crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
+                                self.app.cas_dir(),
+                                &name,
+                            );
+                        }
                         self.app.set_error(detail.clone());
                         append_spawn_audit(
                             self.app.cas_dir(),
@@ -9021,6 +9262,40 @@ mod tests {
         assert_eq!(prompts[0].target, "young-swan-22");
         assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
         assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
+    }
+
+    #[test]
+    fn operator_stall_notice_never_claims_a_worker_harness_cas_8422() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let factory_session = "factory-cas-8422";
+        for (target, expected) in [("operator", "commander"), ("worker", "codex")] {
+            let id = store
+                .enqueue_with_session("supervisor", target, "unanswered ask", factory_session)
+                .unwrap();
+            if target == "operator" {
+                store.stamp_operator_reply(id, "ask", &[]).unwrap();
+            }
+            store.mark_transport_delivered(id).unwrap();
+            let row = store.queued_prompt(id).unwrap().unwrap();
+            assert_eq!(row.factory_session.as_deref(), Some(factory_session));
+            assert!(row.acked_at.is_none());
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(
+                report.confirmation_source,
+                cas_store::ConfirmationSource::Unconfirmed
+            );
+            let text =
+                super::delivery_stalled_notice(&row, cas_mux::SupervisorCli::Codex, Some(&report));
+            assert!(
+                text.contains(&format!("recipient_harness={expected};")),
+                "{text}"
+            );
+            assert!(text.contains("stage=delivered"), "{text}");
+            assert!(text.contains("has not acknowledged or read"), "{text}");
+        }
     }
 
     #[test]
@@ -11051,7 +11326,77 @@ mod tests {
     /// that drops the receipt write from a success arm fails here rather than
     /// in production three releases later.
     #[test]
-    fn a_transport_delivered_row_stays_pollable_until_the_recipient_claims_it() {
+    fn cas_27ad_stale_transport_snapshot_loses_to_hook_or_poll() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        for hook_wins in [true, false] {
+            let id = store.enqueue_with_session("worker", "supervisor", "single message", "session").unwrap();
+            let snapshot = store.peek_for_targets(&["supervisor"], Some("session"), 10).unwrap();
+            assert!(snapshot.iter().any(|row| row.id == id));
+            let claimed = if hook_wins {
+                store.surface_unseen_for_recipient("supervisor", Some("session"), 10)
+            } else {
+                store.poll_unseen_for_recipient("supervisor", Some("session"), 10)
+            }.unwrap();
+            assert_eq!(claimed.len(), 1);
+            assert!(!store.claim_recipient_transport(id, "supervisor").unwrap());
+            assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
+            let rendered = crate::hooks::handlers::handlers_middle::factory_inbox::render_surfaced(&claimed);
+            assert!(rendered.contains("s first]"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn cas_27ad_atomic_channel_race_and_failed_transport_release() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        for _ in 0..8 {
+            let id = store.enqueue_with_session("worker", "supervisor", "race", "session").unwrap();
+            let peer = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let transport_start = barrier.clone();
+            let thread = std::thread::spawn(move || {
+                transport_start.wait();
+                peer.claim_recipient_transport(id, "supervisor").unwrap()
+            });
+            barrier.wait();
+            let hook = store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap();
+            assert_eq!(usize::from(thread.join().unwrap()) + hook.len(), 1);
+            assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
+        }
+        let id = store.enqueue_with_session("worker", "supervisor", "retry", "session").unwrap();
+        assert!(store.claim_recipient_transport(id, "supervisor").unwrap());
+        store.release_recipient_transport(id, "supervisor").unwrap();
+        assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
+        store.release_recipient_transport(id, "supervisor").unwrap();
+        assert!(!store.claim_recipient_transport(id, "supervisor").unwrap());
+        let broadcast = store.enqueue_with_session("supervisor", "all_workers", "peers", "session").unwrap();
+        assert!(store.claim_recipient_transport(broadcast, "worker-a").unwrap());
+        assert!(!store.claim_recipient_transport(broadcast, "worker-a").unwrap());
+        assert_eq!(store.poll_unseen_for_recipient("worker-b", Some("session"), 10).unwrap().len(), 1);
+        assert!(!store.claim_recipient_transport(broadcast, "worker-b").unwrap());
+    }
+
+    #[test]
+    fn cas_27ad_transport_receipt_excludes_hook_and_poll() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store.enqueue_with_session("worker", "supervisor", "single message", "session").unwrap();
+        FactoryDaemon::record_transport_receipt(&store, id, "supervisor");
+        store.mark_transport_delivered(id).unwrap();
+        assert!(store.surface_unseen_for_recipient_delivered_after("supervisor", Some("session"), 10,
+            chrono::Utc::now() - chrono::Duration::minutes(1)).unwrap().is_empty());
+        assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_legacy_transport_receipt_stays_pollable_until_the_recipient_claims_it() {
         use cas_store::PromptQueueStore;
         let temp = tempfile::TempDir::new().unwrap();
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
@@ -11068,8 +11413,8 @@ mod tests {
             "precondition: before delivery the row is genuinely unread"
         );
 
-        // Exactly the pair the daemon's success arms now perform.
-        FactoryDaemon::record_transport_receipt(&store, id, "zealous-fox-95");
+        // Legacy handoffs remain recoverable during an upgrade.
+        store.record_recipient_surfaced(id, "zealous-fox-95", cas_store::SurfacingSource::TransportDelivered).unwrap();
         store.mark_transport_delivered(id).unwrap();
 
         assert_eq!(
@@ -11177,6 +11522,10 @@ mod tests {
             scopes: vec!["message:send".to_string()],
             operator_verified: true,
         };
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut sender = cas_types::Agent::new_with_role("ask-sender".into(), "patient-pelican-9".into(), cas_types::AgentRole::Supervisor);
+        sender.factory_session = Some("factory-1".into());
+        agents.register(&sender).unwrap();
         // The supervisor's ask, stored exactly as message.rs stores a
         // target='operator' Commander turn.
         let ask_payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
@@ -11208,6 +11557,7 @@ mod tests {
         let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
         assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
 
+        assert_eq!(queue.delivery_stalled_candidates("factory-1", 0, 0, 10).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![ask_id]);
         let reply_id = super::super::delivery::enqueue_commander_message(
             &cas_dir,
             "factory-1",
@@ -11232,6 +11582,9 @@ mod tests {
         let after = queue.message_delivery_report(ask_id).unwrap().unwrap();
         assert_eq!(after.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
         assert!(after.confirmed_at.is_some(), "the ask is confirmed by the operator's answer");
+        assert!(queue.delivery_stalled_candidates("factory-1", 0, 0, 10).unwrap().is_empty());
+        assert!(queue.enqueue_delivery_stalled_bounce(ask_id, "factory-1", "stalled", "stalled").unwrap().is_none());
+
 
         // A reference that is not a supervisor→operator turn is refused, and
         // nothing is queued for it.
@@ -11387,16 +11740,16 @@ mod tests {
             queue
                 .count_unseen_for_recipient("worker-1", Some("factory-1"))
                 .unwrap(),
-            2,
-            "transport receipts are provisional for both equivalent rows"
+            0,
+            "both transports own their first delivery claims"
         );
         assert_eq!(
             queue
                 .poll_unseen_for_recipient("worker-1", Some("factory-1"), 20)
                 .unwrap()
                 .len(),
-            2,
-            "inbox_poll must recover both delivered bodies"
+            0,
+            "inbox_poll must not duplicate either delivered body"
         );
         assert!(
             queue
@@ -12376,7 +12729,7 @@ mod tests {
         assert!(!take_spawn_cancellation(&mut cancelled, worker));
 
         // Shutdown-all after completion has no in-flight generation to cancel.
-        cancel_targeted_in_flight_spawn(&mut cancelled, None, &[worker.to_string()]);
+        cancel_targeted_in_flight_spawn(&mut cancelled, None, &[worker.to_string()], None);
 
         // A later spawn reusing the same name is allowed to finish and come up.
         assert!(
@@ -12439,7 +12792,7 @@ mod tests {
         store.add(&task).unwrap();
 
         let mut cancelled = HashSet::new();
-        cancel_targeted_in_flight_spawn(&mut cancelled, Some(worker), &[worker.to_string()]);
+        cancel_targeted_in_flight_spawn(&mut cancelled, Some(worker), &[worker.to_string()], None);
 
         assert!(
             take_spawn_cancellation(&mut cancelled, worker),
@@ -14115,7 +14468,8 @@ mod declined_wake_retry_tests_cas_913c {
     use super::{
         ClaudeRedelivery, DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, PaneWakeState,
         ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome, claude_redelivery_decision_after_turn,
-        claude_turn_aware_retry, deferred_inbox_drain_phase, deferred_inbox_outcome,
+        RecipientWakeEvidence, claude_turn_aware_retry, claude_turn_aware_retry_with_evidence,
+        deferred_inbox_drain_phase, deferred_inbox_outcome,
         idle_unacked_relay_due, wake_retry_due_to_turn_end,
     };
     use chrono::{Duration as Chrono, TimeZone, Utc};
@@ -14251,6 +14605,81 @@ mod declined_wake_retry_tests_cas_913c {
         );
     }
 
+    /// cas-5129: the wake budget is not spent on a Claude worker that is
+    /// visibly working through a long turn, or still booting its first
+    /// session. A long silent turn and a worker past its boot grace still fall
+    /// back to the cadence and its supervisor escalation.
+    #[test]
+    fn busy_or_booting_claude_recipient_keeps_its_wake_budget_cas_5129() {
+        let declined = Utc
+            .with_ymd_and_hms(2026, 10, 2, 22, 50, 0)
+            .single()
+            .unwrap();
+        let active = RecipientWakeEvidence { recently_active: true, awaiting_first_prompt: false };
+        let silent = RecipientWakeEvidence::default();
+        let booting = RecipientWakeEvidence { recently_active: false, awaiting_first_prompt: true };
+
+        // Mid-turn well past the 15-minute bound (a long build or test run):
+        // still writing its transcript, so the message waits for the turn end.
+        for minutes in [16, 30, 90] {
+            let now = declined + Chrono::seconds(minutes * 60);
+            for attempts in [1, 2] {
+                assert_eq!(
+                    claude_turn_aware_retry_with_evidence(attempts, Some(true), false, Some(declined), now, active),
+                    TurnAwareRetry::Wait,
+                    "active mid-turn at +{minutes}m, attempt {attempts}"
+                );
+                // The same turn with no sign of progress is treated as wedged.
+                assert_eq!(
+                    claude_turn_aware_retry_with_evidence(attempts, Some(true), false, Some(declined), now, silent),
+                    TurnAwareRetry::UseCadence
+                );
+            }
+        }
+        // Evidence never holds an idle, settled recipient: inside the bound it
+        // is offered at once, past it the cadence offers it (no Wait).
+        let within = declined + Chrono::seconds(5 * 60);
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, Some(false), true, Some(declined), within, active),
+            TurnAwareRetry::OfferNow
+        );
+        let later = declined + Chrono::seconds(40 * 60);
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, Some(false), true, Some(declined), later, active),
+            TurnAwareRetry::UseCadence
+        );
+
+        // No transcript yet: a worker inside its boot grace keeps its budget;
+        // one without that evidence uses the cadence as before.
+        let soon = declined + Chrono::seconds(45);
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, None, true, Some(declined), soon, booting),
+            TurnAwareRetry::Wait
+        );
+        assert_eq!(
+            claude_turn_aware_retry_with_evidence(1, None, true, Some(declined), soon, silent),
+            TurnAwareRetry::UseCadence
+        );
+        // The first offer is never held back.
+        for evidence in [active, silent, booting] {
+            assert_eq!(
+                claude_turn_aware_retry_with_evidence(0, Some(true), false, None, soon, evidence),
+                TurnAwareRetry::UseCadence
+            );
+            assert_eq!(
+                claude_turn_aware_retry_with_evidence(0, None, true, None, soon, evidence),
+                TurnAwareRetry::UseCadence
+            );
+        }
+        // Waiting spends nothing: with three cadence slots, a waiting
+        // recipient never reaches StopUndelivered.
+        assert_eq!(
+            claude_redelivery_decision_after_turn(false, 2, Some(declined), later, false),
+            ClaudeRedelivery::Deliver,
+            "the cadence itself is unchanged once evidence stops holding it"
+        );
+    }
+
     /// The mid-turn wait spends no budget however long the turn runs (up to
     /// the 15-minute bound), and the re-offer after the turn ends bypasses the
     /// cadence while still honouring the attempt budget and acknowledgement.
@@ -14348,5 +14777,349 @@ mod declined_wake_retry_tests_cas_913c {
             None,
             Some(Duration::from_secs(4 * 60))
         ));
+    }
+}
+
+#[cfg(test)]
+mod wake_recipient_regressions_gh1101 {
+    use super::*;
+    use cas_types::Task;
+    #[test]
+    fn gh1101_in_flight_wakes_preserve_budget_until_tool_result() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let id = queue
+            .enqueue("supervisor", "worker", "fix findings")
+            .unwrap();
+        for _ in 0..4 {
+            record_worker_wake_decline(
+                queue.as_ref(),
+                id,
+                WakeDecision::deny("busy"),
+                ToolCallEvidence::InFlight,
+            )
+            .unwrap();
+        }
+        assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
+        for tool in [ToolCallEvidence::Idle, ToolCallEvidence::Unknown] {
+            record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), tool)
+                .unwrap();
+        }
+        assert_eq!(queue.wake_gate_state(id).unwrap().0, 2);
+        let saved = queue.wake_gate_state(id).unwrap();
+        assert!(
+            record_worker_wake_decline(
+                queue.as_ref(),
+                id,
+                WakeDecision::deny("busy"),
+                ToolCallEvidence::InFlight
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(queue.wake_gate_state(id).unwrap(), saved);
+    }
+
+    #[test]
+    fn gh1101_shutdown_recipient_is_skipped_and_name_reuse_is_live() {
+        let dead = std::collections::HashSet::from(["old-worker".to_string()]);
+        assert!(worker_recipient_shut_down("old-worker", &dead, &[], &[]));
+        let live = vec!["old-worker".to_string()];
+        assert!(!worker_recipient_shut_down("old-worker", &dead, &live, &[]));
+        let mut agent = cas_types::Agent::new("shutdown-id".into(), "shutdown-worker".into());
+        agent.mark_shutdown();
+        assert!(worker_recipient_shut_down(
+            "shutdown-worker",
+            &dead,
+            &[],
+            &[agent]
+        ));
+        assert!(!worker_recipient_shut_down("new-worker", &dead, &[], &[]));
+        let mut old = cas_types::Agent::new("old-id".into(), "reused-name".into());
+        old.mark_shutdown();
+        let mut replacement = cas_types::Agent::new("new-id".into(), "reused-name".into());
+        replacement.registered_at = old.registered_at + chrono::Duration::seconds(1);
+        assert!(!worker_recipient_shut_down(
+            "reused-name",
+            &dead,
+            &["reused-name".into()],
+            &[old, replacement]
+        ));
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let id = queue
+            .enqueue_with_session("supervisor", "old-worker", "fix findings", "session")
+            .unwrap();
+        if worker_recipient_shut_down("old-worker", &dead, &[], &[]) {
+            queue
+                .cancel_unread_for_shutdown("old-worker", Some("session"), "recipient shutdown")
+                .unwrap();
+        }
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+        assert_eq!(
+            report.pending_reason,
+            Some(cas_store::PendingReason::ShutdownCancelled)
+        );
+        assert_eq!(report.wake_gate_declines, 0);
+    }
+
+    #[test]
+    fn gh1101_qa_wake_uses_current_assignee_before_roster_selection() {
+        use cas_store::{EnqueueIdempotentResult, PromptQueueStore};
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-gh1101".into(), "reassigned QA".into());
+        task.assignee = Some("old-worker".into());
+        tasks.add(&task).unwrap();
+        let pass = cas_store::open_qa_pass(
+            &cas_dir,
+            &cas_store::NewQaPass {
+                task_id: &task.id,
+                implementer_agent_id: "old-worker",
+                branch: "factory/old-worker",
+                bound_head: "0123456789abcdef",
+                deadline_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                max_rounds: 3,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let cas_store::QaPassOpen::Dispatched(pass) = pass else {
+            panic!("fresh QA pass")
+        };
+        let key = format!("qa-verdict:{}:implementer", pass.id);
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let enqueue = |session: &str, origin: cas_store::QueueOrigin| match queue
+            .enqueue_idempotent(
+                &key,
+                "old-worker",
+                "fix QA",
+                Some(session),
+                None,
+                None,
+                &format!("{key}:{session}"),
+                Some(&origin),
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => panic!("fresh row"),
+        };
+        // Production uses the exact key as its dedupe key.
+        let id = match queue
+            .enqueue_idempotent(
+                &key,
+                "old-worker",
+                "fix QA",
+                Some("session"),
+                None,
+                None,
+                &key,
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => panic!("fresh row"),
+        };
+        let other = enqueue("other-session", cas_store::QueueOrigin::Daemon);
+        let spoof = enqueue("session", cas_store::QueueOrigin::Unattributed);
+        queue
+            .record_wake_gate_decline(id, "old recipient busy")
+            .unwrap();
+        queue.record_deferred_inbox(id, 99).unwrap();
+        let new_agent = cas_types::Agent::new("new-worker-id".into(), "new-worker".into());
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&new_agent)
+            .unwrap();
+        task.assignee = Some(new_agent.id.clone());
+        tasks.update(&task).unwrap();
+        queue.refresh_qa_rejection_targets("session", None).unwrap();
+        assert_eq!(
+            queue.queued_prompt(id).unwrap().unwrap().target,
+            "new-worker"
+        );
+        assert_eq!(
+            queue
+                .peek_for_targets(&["new-worker"], Some("session"), 10)
+                .unwrap()[0]
+                .id,
+            id
+        );
+        assert_eq!(
+            queue.queued_prompt(other).unwrap().unwrap().target,
+            "old-worker"
+        );
+        assert_eq!(
+            queue.queued_prompt(spoof).unwrap().unwrap().target,
+            "old-worker"
+        );
+        assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
+        assert_eq!(queue.deferred_inbox_state(id).unwrap(), None);
+        task.assignee = None;
+        tasks.update(&task).unwrap();
+        queue
+            .refresh_qa_rejection_targets("session", Some(id))
+            .unwrap();
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
+    }
+}
+
+#[cfg(test)]
+mod stalled_recipient_episode_tests_gh1119 {
+    #[test]
+    fn gh1119_one_stall_notice_per_recipient_episode() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut sender = cas_types::Agent::new_with_role(
+            "sender-id".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        sender.factory_session = Some("session".into());
+        crate::store::open_agent_store(&dir)
+            .unwrap()
+            .register(&sender)
+            .unwrap();
+        let mut peer = cas_types::Agent::new_with_role(
+            "peer-id".into(),
+            "peer".into(),
+            cas_types::AgentRole::Worker,
+        );
+        peer.factory_session = sender.factory_session.clone();
+        crate::store::open_agent_store(&dir)
+            .unwrap()
+            .register(&peer)
+            .unwrap();
+        let queue = crate::store::open_prompt_queue_store(&dir).unwrap();
+        let mut notices = Vec::new();
+        for n in 0..3 {
+            let original = queue
+                .enqueue_with_session(
+                    if n == 1 { "peer" } else { "supervisor" },
+                    "paused-worker",
+                    &format!("request {n}"),
+                    "session",
+                )
+                .unwrap();
+            if let Some(id) = queue
+                .enqueue_delivery_stalled_bounce(original, "session", "Delivery stalled", "stalled")
+                .unwrap()
+            {
+                notices.push(id);
+            }
+        }
+        assert_eq!(
+            notices.len(),
+            1,
+            "three unread requests must cause one notice until recipient reads"
+        );
+        let alerts = queue
+            .peek_for_targets(&["supervisor"], Some("session"), 10)
+            .unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert!(
+            alerts[0]
+                .prompt
+                .contains("Further delivery-stalled notices are paused")
+        );
+        assert!(
+            queue
+                .delivery_stalled_candidates("session", 0, 0, 20)
+                .unwrap()
+                .is_empty()
+        );
+        queue.ack(notices[0]).unwrap();
+        let more = queue
+            .enqueue_with_session("supervisor", "paused-worker", "still paused", "session")
+            .unwrap();
+        assert!(
+            queue
+                .enqueue_delivery_stalled_bounce(more, "session", "still stalled", "stalled")
+                .unwrap()
+                .is_none(),
+            "sender acknowledging the alert cannot reset the recipient episode"
+        );
+        let reopened = crate::store::open_prompt_queue_store(&dir).unwrap();
+        let retry = reopened
+            .enqueue_with_session(
+                "supervisor",
+                "paused-worker",
+                "after daemon restart",
+                "session",
+            )
+            .unwrap();
+        assert!(
+            reopened
+                .enqueue_delivery_stalled_bounce(retry, "session", "still degraded", "stalled")
+                .unwrap()
+                .is_none()
+        );
+        queue
+            .poll_unseen_for_recipient("paused-worker", Some("session"), 10)
+            .unwrap();
+        let resumed = queue
+            .enqueue_with_session("supervisor", "paused-worker", "new stall", "session")
+            .unwrap();
+        let next = queue
+            .enqueue_delivery_stalled_bounce(resumed, "session", "new stalled episode", "stalled")
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            next, notices[0],
+            "a recipient read allows a new stall episode"
+        );
+        let other = queue
+            .enqueue_with_session("supervisor", "other-worker", "different channel", "session")
+            .unwrap();
+        assert!(
+            queue
+                .enqueue_delivery_stalled_bounce(other, "session", "other stalled", "stalled")
+                .unwrap()
+                .is_some()
+        );
+        let mut other_sender = cas_types::Agent::new_with_role(
+            "other-sender-id".into(),
+            "other-supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        other_sender.factory_session = Some("other-session".into());
+        crate::store::open_agent_store(&dir)
+            .unwrap()
+            .register(&other_sender)
+            .unwrap();
+        let other_session = queue
+            .enqueue_with_session(
+                "supervisor",
+                "paused-worker",
+                "isolated channel",
+                "other-session",
+            )
+            .unwrap();
+        assert!(
+            queue
+                .enqueue_delivery_stalled_bounce(
+                    other_session,
+                    "other-session",
+                    "isolated stall",
+                    "stalled"
+                )
+                .unwrap()
+                .is_some(),
+            "recipient name reuse cannot coalesce across sessions"
+        );
     }
 }

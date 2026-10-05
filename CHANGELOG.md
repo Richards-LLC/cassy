@@ -7,6 +7,295 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.46.0] - 2026-10-05
+
+### Changed — faster assembly proof
+
+- The assembly proof overlaps the script tier with the native and archive-mode
+  producer compiles when memory permits. Both producers finish and the script
+  tier passes before the native test consumer runs, followed by the archive
+  consumer; the two test consumers stay sequential. Native and clone builds keep
+  separate Cargo targets, logs and gate scratch, and the receipt records
+  per-leg and compile-phase intervals, CPU timings and the scheduling decision
+  (including any serial fallback reason).
+- Archive-mode tests run at native speed. Archive extraction stays on disk with
+  `--extract-to`, and the plain clone stays outside disposable roots and every
+  `.cas` ancestor; only disposable test temp directories and fixture HOMEs move
+  to the native temp filesystem. On soundwave the archive test phase fell from
+  133.5 s to 34–40 s, and the whole proof from 8 m 36 s to 4 m 56 s on its
+  first concurrent run (6 m 32 s on the final tip, where links are serialized).
+- `.cargo/config.toml` sets `jobs = "default"`, so a stale `jobs = 16` cap from
+  a parent checkout no longer survives into nested worktrees. A cold build on a
+  32-thread host went from 107.0 s to 94.6 s. `CARGO_BUILD_JOBS` still
+  overrides it; worker throttling and the per-producer assembly ceiling are
+  unchanged.
+- The proof's environment fingerprint removes harness and session identity
+  variables, so a factory shell and a scrubbed release shell share one proof
+  without passing harness context to test children. Build, test-safety and
+  compiler controls remain fingerprint inputs.
+
+### Added — assembly memory admission
+
+- Assembly reads available memory (Linux `MemAvailable`; macOS `hw.memsize` and
+  `vm_stat`) before admitting producers and each consumer. The reserve defaults
+  to the larger of 25% of RAM and 8 GiB
+  (`CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB`). Too little room for concurrent
+  legs selects sequential legs with a fresh admission before each phase.
+- Admission waits instead of failing outright: it resamples until memory
+  recovers, bounded by `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS`
+  (default 600), and records every refusal and later admission in the receipt.
+- A compile guard pauses the producer process group within 2 GiB of the
+  reserve and resumes it once 4 GiB is free above it. A deadline or an observed
+  reserve breach aborts the producer and prevents a PASS. A shared linker slot
+  allows one test-binary link at a time across both producers, budgeted from a
+  measured 2.09 GiB `ld.mold` peak; each link records its peak RSS.
+
+### Changed — Commander hub defaults to Tailscale Serve
+
+- `cas hub start`, `cas hub restart`, `cas hub service install` and `cas update`
+  publish the hub through Tailscale Serve (tailnet-only HTTPS) by default, even
+  when the previous hub was loopback-only. Restart and update keep an existing
+  HTTPS port choice. Opt out per launch with `--no-tailscale-serve`, or for the
+  host with `hub.tailscale_serve = false` in `~/.cas/config.toml`. Service
+  definitions encode the resolved choice, including on macOS launchd.
+- After a binary update, `cas update` starts a stopped hub when its service is
+  installed or the machine has a hub identity; otherwise it prints
+  `hub not running; start with cas hub start`. If Tailscale is missing, logged
+  out, lacks Serve permission or cannot publish, the hub stays healthy on
+  loopback and the update still succeeds. The update receipt then records
+  `transport_verified=false`, a `transport_warning` and a remedy.
+
+### Added — Commander fleet operations
+
+- The hub serves `POST /v1/sessions/{s}/operations` for asking the supervisor
+  to merge, focusing an epic, adding, pausing, resuming, restarting and
+  stopping workers, and assigning or unassigning a ready task. Each operation
+  is scoped, replay-safe per device and operation id for 10 minutes, and
+  refused with `409 stale` when the state the operator saw has changed.
+  Requested and outcome rows go to the hub audit log (End session now writes
+  them too), and assign and focus return an Undo operation. Session status
+  reports the focused epic.
+- New pairing scopes split fleet control: `factory:operate` (focus, add, pause,
+  assign; a control device can self-grant it) and `factory:manage` (stop,
+  restart, End session; never self-granted). Paired machines shows each
+  pairing's fleet permissions with a copyable `cas hub pair` command.
+- Commander's conversation rail gains a per-agent ⋯ menu, Assign… on ready
+  tasks, Ask supervisor to merge with a preview of the exact message, Add
+  worker… and Focus epic…, with inline confirmation (Cancel first,
+  double-click guarded) and an 8-second Undo. Phones get the same operations as
+  action sheets. A missing permission is stated once with its command, and a
+  failure reads in plain words instead of a raw route.
+
+### Fixed — Commander connection
+
+- Commander no longer floods the hub with session-list requests. Event-driven
+  refreshes run one at a time, at most one start per second, with a trailing
+  refresh so the list ends current; previously each event issued its own
+  `GET /v1/sessions` (about 12 per second under load).
+- Commander no longer sticks on "Reconnecting" after a browser-side network
+  failure. A failed request no longer counts as a revoked pairing, so the
+  pairing is kept and the connection retries; only an explicit refusal asks to
+  re-pair. Event-stream reads and catalog refreshes have an abort and a
+  deadline.
+- When Chrome's Local network access permission blocks a tailnet hub, a notice
+  names the machine and the browser setting to change. It sits at the list's
+  18 px inset, leaves the single "Can't reach…" sentence to the list's empty
+  state, and keeps its edge in forced colors.
+- A revoked pairing keeps its conversations listed as Needs pairing, and
+  finishing Re-pair returns to the conversation it started from.
+- On a machine whose clock runs ahead, reloads keep each turn's recorded time
+  and clock-ahead mark, and conversation rows age from arrival rather than
+  reading "now" for minutes.
+- An outage is announced once: file cards, Terminal view and the banner no
+  longer repeat it, Terminal view shows "Earlier output" for replayed text, and
+  the header's Terminal view explains why it is unavailable while
+  reconnecting. Footers lead with the verb ("Can't reach …"), so a phone
+  ellipsis cuts the machine name instead, and long machine labels ellipsize.
+- When a machine connection stops retrying because the browser cannot make
+  it, the banner, task status and footer all say so ("Unreachable") with one
+  recovery step (update the browser, then reload), instead of some of them
+  still reading "Reconnecting"; a duplicate session-level card is resolved.
+
+### Fixed — Commander conversations and accessibility
+
+- A draft that is too long to keep, or that full or blocked browser storage
+  refuses, now says so and stays on screen instead of vanishing on reload.
+  Oversized stored conversation values are cleaned up once on load.
+- End session's desktop confirmation no longer accepts a double-click's second
+  click, completion is announced, and a failure is announced once with focus
+  restored for a retry.
+- The keyboard can leave the terminal input. Tab moves on when this browser is
+  not in control; in control, Ctrl+Alt+M or the Leave terminal control (which
+  keeps its key visible at every width) leaves it.
+- Keyboard focus survives shell rebuilds: Load earlier stays focused and in
+  view across a reconnect, Paired machines returns focus to its opener after a
+  revoked pairing, and Back on a phone returns to the row that was open.
+- Attention notices show readable Details instead of JSON, with clearer
+  timestamps and reply context; Copy says "Details copied", and the toast
+  appears above the phone sheet. The dismissed-messages chip says "dismissed",
+  so it no longer disagrees with the thread's not-confirmed count.
+- The palette and list search no longer cover the unread count with the Enter
+  hint or read "Enter ↵" aloud, and palette Enter skips the conversation
+  already open.
+- New session copy wraps grant commands only between tokens, shows a copyable
+  login command on refusal and uses one "Default" treatment. A read-only pair
+  link shows what it withholds and its command without scrolling.
+- The pairing countdown never goes up, and spoken names say "the <project>
+  supervisor". The header's machine and codename line is heard whole at every
+  width.
+- Layout fixes: an opened pinned question scrolls to its Ask line on a phone,
+  and a double tap opens it without answering; the phone machine drawer sits
+  above the Attention panel; Fleet twin tags fit their measured column;
+  activity captions that do not fit are omitted; and a hidden terminal no
+  longer adds to the conversation's scroll height.
+
+### Fixed — factory reliability
+
+- A stalled worktree provisioning no longer wedges the factory daemon. It runs
+  off the loop with a deadline and cancellation, fails only that spawn with a
+  named reason, and lets queued shutdowns and messages proceed. Spawns refuse
+  below `factory.spawn_min_free_gib` (default 25) before staging a checkout.
+- Daemon fork paths close idle shared database connections before `fork()`.
+- Terminal prompt-queue rows are pruned on the maintenance schedule after
+  `factory.prompt_retention_days` (default 7; 0 disables). Pending rows and
+  relay deduplication keys are kept, and `gc_cleanup force=true` prunes
+  instead of clearing all history.
+- Wake delivery keeps its budget for a worker busy in a long tool call or
+  still booting; `worker_status` reports `awaiting_first_prompt` for a booting
+  Claude worker, and wakes revalidate the task's current recipient (#1054,
+  #1101).
+- Delivery-stalled notices coalesce until the recipient reads (#1119), skip
+  informational Commander turns, and respect a recorded decision to hold a
+  merge while naming the task's own delivery branch.
+- One inbox message is no longer delivered on two channels (#1096). Creating
+  a task with an assignee notifies that worker (#1123). A supervisor close is
+  no longer credited to the worker (#1124).
+- Recycling a clean worker keeps its task bindings and re-delivers its brief;
+  a live supervisor can release a worker's lease (#1098). `shutdown_workers`
+  retires the caller's own dead workers and cancels their unread mail.
+  Replacing a dead QA reviewer releases its QA claim (#1089).
+- Worker check caches are bounded (`factory.target_cache_retention_count`,
+  default 1) and owned lane previews can be reclaimed, preventing per-worktree
+  `target/` directories from filling the disk. Seeded worker builds no longer
+  reuse stale Cargo freshness records after a branch change.
+- `server_start` honors `name` and reports a process that exits during startup
+  as a failure (#1102). `server_stop` stops `docker run` containers, including
+  `--rm` and detached ones, and lets workers stop servers they own (#1099).
+  `server_list` defaults to running servers with filters and a 50-entry cap
+  (#1103).
+- `factory.supervisor_only_mcp` and `factory.supervisor_only_env` keep named MCP
+  servers and credentials on the supervisor; workers get a private MCP
+  configuration outside the checkout (#1047). `factory.worker_credential_env`
+  explicitly grants named operator credentials to Claude and Codex workers,
+  with a names-only warning when one is missing.
+- The worker workspace guard covers Codex `apply_patch` writes, judges `rm` as
+  deletion (allowing stale Cassy runtime files but never live sockets, locks or
+  pid files), expands shell variable assignments before checking paths
+  (#1105), and scopes a worker's `cas update`. A Codex worker's `cargo check`
+  is routed through the capped runner, and script-only `make test*` targets
+  are admitted.
+- Factory preflight no longer calls a newer released runtime stale when run
+  from an older source checkout.
+- Builtin guidance: supervisors merge non-Rust deliveries at once and prove
+  parked Rust lanes in parallel; workers stop merge-poll loops after an
+  awaiting-merge handoff; and the search-index error names the supported
+  reindex action instead of a nonexistent command.
+
+### Fixed — close, merge and QA gates
+
+- Large epic overrides close within the MCP deadline: an assembled or released
+  epic defers its build proof to its `ASSEMBLY_PROOF`, and the surface checker
+  is bounded to 15 s (PR #1114).
+- A task close or note that has committed answers `COMMITTED` within the
+  deadline while post-commit work finishes in the background, and message
+  enqueues report their commit and `notification_id` on timeout (#1083).
+- Merge admission requires CI for delivery code beneath a docs-only tip,
+  binds CI lookups to the canonical origin, and withdraws merge intent when CI
+  refuses a delivery. A merge request is judged by its requested delivery,
+  never by a stale branch's landed tip.
+- Close attribution: rebuilt `hub-web/dist` bundles, epic content merged into
+  a lane, and identical minified handoffs no longer read as dropped delivery;
+  other tasks' merged work no longer counts toward a task's diff; and close
+  resolves the branch whose commits claim the task. Epic close measures the
+  epic tip, and a branchless no-code epic can close.
+- Transfers store the worker's registered name, `adopt_branch=true` moves an
+  inherited delivery onto the receiver's branch (#1100), and a re-park on a
+  new branch records it as the delivery. Re-parenting moves a task's lane
+  target, and a branch-only retarget no longer needs `target_repo` (#1107).
+- Supervisors can stage deliveries into an integration batch and close them by
+  an aggregate squash (#1097), close evidence-only report tasks (#1121), repair
+  a locked execution methodology (#1118), and override-close a merged
+  `commit_receipt` after the worker moved on (#1068). Stacked deliveries can
+  park (#1087). Snapshot approvals accept a SHA-256 digest for long lines.
+- QA: redaction placeholders pass the secret scan (#1069); waivers bind to the
+  current tip after a rebase (#1048), to an explicit pushed tip before parking
+  (#1122), and satisfy the ledger at the exact tip (#1110); per-render random
+  ids are normalized (#1078); deliveries already squash-integrated or
+  report-only are not re-dispatched (#1120); classification uses the fresh
+  target (#1066); a supervisor `qa_request` opens one round past escalation;
+  fixture HTML is not user-facing; follow-up tasks keep their text and epic;
+  QA bundles share one artifact path (#1061); and Codex QA reviewers can
+  record verdicts (#1111).
+
+### Fixed — CLI, store and integrations
+
+- `cas update` stops a project's later phases when its store migration fails,
+  naming the processes holding the store, and migrates legacy stores first.
+  Its compact view prints details only for warnings, failures and dry runs.
+- Identity and config writes refuse when `CAS_ROOT` and the working directory
+  resolve different stores, naming both and the `--store` choices.
+- `cas init --force` creates and migrates a missing store while keeping its
+  config. Automatic store discovery requires a store marker, so a socket-only
+  `~/.cas` is skipped.
+- Rule update, promote and delete wait out a concurrent writer instead of
+  failing "database is locked".
+- `proposal_accept` tolerates explicit nulls from older clients (#1043).
+- `cas doctor` inspects the prompt queue without creating it, reports an
+  absent queue as healthy and warns in plain words otherwise; it also probes
+  a project's overriding hub URL.
+- `cas integrate violet --json` prints only JSON. Violet guidance treats a
+  failed or partial thread read as unknown, not "no new replies" (#1062).
+- A PreToolUse publication gate denies Violet file posts and deliverable
+  messages while the epic's verification is open, with a logged six-hour
+  operator override (#1057).
+- Duplicate-task warnings ignore generic words such as `NOT` and
+  `before/after` (#1108).
+- Code indexing scopes reconciliation and coverage to each checkout, so
+  worktrees of one repository no longer retire each other's files.
+- Saved hook defaults map onto canonical matchers, ending matcher churn in the
+  tracked `.claude/settings.json`. `purge-foreign` refuses only for queued
+  changes to rows it would delete.
+- Ghostty builds use a vendored, pinned `uucode`, so they no longer fetch it at
+  compile time.
+
+### Fixed — Jev
+
+- `jev.gate.shadow` (default off) logs Jev risk verdicts for Bash, Write and
+  Edit without changing any hook decision; `cas jev gate-report` summarizes
+  them locally (PR #1117).
+- `jev files` reports capped input as incomplete, resumes sweeps with
+  `next_offset` and can read one Git revision (#1116).
+- The triage recipe abstains without dated, current-code evidence and
+  requires cited sources for a suggested verdict (#1115).
+
+### Fixed — QA and release tooling
+
+- Visual QA judges clipping per axis (#1073), skips screen-reader-only helpers,
+  intentional ellipsis and closed off-canvas drawers (#1081) and closed
+  `<details>` content, and measures colours after transitions settle.
+- Terminal QA supports BSD/macOS `script`, fails empty captures and checks
+  stderr.
+- Release tooling: `--cut --resume` resumes its own release PR; preflight
+  checks the Violet announce token before publishing; the train's `--only`
+  list matches every gate row; hub-web tests run when their inputs change;
+  macOS date/path handling and the release-gate self-test pass on macOS;
+  `find-release-prebuild.sh` resolves its repository or fails loudly;
+  tracked merges run the target tree's own lane policy; and assembly explains
+  metadata blockers.
+- Self-hosted CI reclaims a slot job lock left by a crashed runner. Lane
+  fast-row budgets scale with host load, and a lane proof's `--tests` step
+  inherits its `--lib` step's load admission.
+
 ## [3.45.0] - 2026-10-02
 
 ### Added — Jev decision support

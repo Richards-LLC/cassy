@@ -135,6 +135,11 @@ pub struct TaskTransferRequest {
     #[schemars(description = "ID of the agent to transfer the task to")]
     pub to_agent: String,
 
+    /// Adopt delivery work on the receiver's own per-task branch.
+    #[schemars(description = "Fast-forward a clean receiver worktree to the task delivery tip on its own per-task branch; rebind the anchor and preserve the source branch")]
+    #[serde(default)]
+    pub adopt_branch: Option<bool>,
+
     /// Handoff notes
     #[schemars(description = "Notes for the receiving agent about the work done and what remains")]
     #[serde(default)]

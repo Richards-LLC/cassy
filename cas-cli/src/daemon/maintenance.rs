@@ -86,6 +86,7 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
     let mut indexing_errors = Vec::new();
     let mut agents_cleaned = 0;
     let mut agents_purged = 0;
+    let mut prompts_pruned = 0;
     let mut tasks_interrupted = 0;
     let mut worktrees_cleaned = 0;
     let mut events_pruned = 0;
@@ -288,6 +289,26 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
+    // cas-9d8a: terminal prompt-queue rows are retained only for the
+    // configured window, on the same schedule as the dead-agent purge above.
+    // The store sweep is one IMMEDIATE transaction: concurrent daemon and
+    // supervisor readers see the queue before or after it, never between.
+    let prompt_retention_days = crate::config::Config::load(&config.cas_root)
+        .map(|cas_config| cas_config.factory().prompt_retention_days)
+        .unwrap_or_else(|_| crate::config::default_prompt_retention_days());
+    if prompt_retention_days > 0 {
+        match crate::store::open_prompt_queue_store(&config.cas_root)
+            .map_err(|error| error.to_string())
+            .and_then(|queue| {
+                queue
+                    .prune_terminal_older_than(i64::from(prompt_retention_days) * 24 * 60 * 60)
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(sweep) => prompts_pruned = sweep.pruned,
+            Err(error) => errors.push(format!("Prompt queue retention failed: {error}")),
+        }
+    }
+
     // Archive old events (30-day live retention).  The archive is written
     // before the live rows are removed, so a failed archive leaves the rows
     // available for the next maintenance cycle.
@@ -374,6 +395,7 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         trace_archives_evicted,
         agents_cleaned,
         agents_purged,
+        prompts_pruned,
         tasks_interrupted,
         worktrees_cleaned,
         errors,

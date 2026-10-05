@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only provisioning/runner script: GNU coreutils and Linux kernel interfaces are required.
 # Prepare the pre-provisioned Rust toolchain on a trusted self-hosted runner.
 # The runner slots intentionally share RUSTUP_HOME, so any exceptional install
 # is serialized instead of allowing rustup rollback to race another lane.

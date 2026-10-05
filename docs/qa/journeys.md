@@ -22,7 +22,7 @@ calendar-day fixtures use `journeyDay()` rather than subtracting hours.
 sources before running the suite. Use `performance.now()` for elapsed time.
 To exercise early-morning boundaries, run with
 `HUB_JOURNEY_NOW=2026-09-30T00:30:00Z` or `2026-09-30T05:59:00Z`.
-Every journey also watches each animation frame and fails if an open
+The protocol-double journeys also watch each animation frame and fails if an open
 conversation shows the terminal canvas or sits on a bare panel for more than
 250 ms (`frame_defects` in `result.json`).
 
@@ -122,6 +122,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Nothing live: "No live supervisors listed", with a route to dormant sessions.
 - A machine becomes unreachable while a message is pending: the row stays with "Unreachable · message pending".
 - Many rows: the list is not sorted by attention.
+- On a Mac, every surface names the palette chord "⌘K", never "Ctrl K", and ⌘K reaches the search and then the palette. This runs as a separate HUB-J3 part; the journeys declare a Linux keyboard platform by default, so they read the same on any host (cas-2a33).
 
 ### HUB-J4 · Read the conversation history
 
@@ -136,7 +137,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
-4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off
+4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off; when the connection then drops, that card says it in the banner's words ("Lost connection to <machine>. Reconnecting… Open the file again when it's back") without another click and without a second announcement, never "is connected" beside Reconnecting
+5. The machine reconnects as the reader tabs back to Load earlier — a separate part on a multiplex machine: the reader has loaded one earlier page and moved on to the composer; the machine drops and comes back, and the reader tabs back to "Load earlier" the moment the header reads Live; focus stays on the button through the shell rebuild, and Enter loads the start of the conversation, landing on "No earlier history" (cas-d362)
+6. The reader tabs to Load earlier as the machine comes back, and sees it — four separate parts on a multiplex machine with a tall history, at desktop 1280 and phone 390, with the reader resting in the composer (the thread follows its tail) or outside the thread (the thread stays on their earlier page): the focused "Load earlier" stays inside the thread through the reconnect, never pinned or put back above it, and Enter still loads the start of the conversation (cas-c2cb)
 
 #### Expected experience
 
@@ -222,7 +225,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation where the supervisor asks a question with choices
 - **Goal:** I answer with one tap and the supervisor acts on it
-- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`
+- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`
 - **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`
 - **Gaps:** none
 
@@ -236,6 +239,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 6. Fold, open and dismiss a question — the supervisor posting an FYI and a status update while it waits leaves the question pinned with its choices; on a desktop the pinned question collapses to a one-line bar ("Waiting on you: open the PR…") and opens again, and writing in the composer leaves it open; on a phone (390px, dark) focusing the composer folds it to the bar, and with the keyboard up (about 440px of page) at least three lines of the latest conversation stay readable; a tap on the bar opens it; a swipe takes it off, and its copy in the thread says "Dismissed. You can still answer here." and keeps its choices
 7. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it, with no session line between them
 8. Reopen the page — minutes later, the thread rebuilt from history keeps every turn where the visit showed it and at the same time (not the reload's), in the machine's order, under Today, with times reading in order
+9. The supervisor answers live — a separate part on a machine whose clock runs five minutes ahead, which nothing in the thread has shown yet: the answer shows its arrival, unmarked, and its row reads "now"
+10. Reload three minutes later — the answer shows the same time and still no mark, exactly as the visit showed it (cas-9e33), and its row reads "3m", not "now" (cas-24fe)
+11. Come back five minutes later — the row reads "8m"; the reload measured the machine's lead, so the next live answer is marked "machine clock ahead" and its row reads "now"
 
 #### Expected experience
 
@@ -290,7 +296,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Entry:** `/commander/` on a 390 px wide phone with two paired machines, plus one that is switched off
 - **Goal:** I reply to a supervisor from my phone and get back to the list
 - **Touches:** `hub-web/src/viewport.ts`, `hub-web/src/pane-layout.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/composer-markup.ts`
-- **Suite:** `hub-web/e2e/journeys/phone.journey.ts`
+- **Suite:** `hub-web/e2e/journeys/phone.journey.ts`, `hub-web/e2e/journeys/conversation-layout.journey.ts`
 - **Gaps:** a real on-screen keyboard resize is not emulated
 
 #### Steps
@@ -314,6 +320,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - The "Write to a supervisor" button opens a thread straight away.
 - Attention and machine problems live in the desktop rail and are hidden on a phone.
+- The hidden terminal grid does not widen the conversation reading mount; Terminal view keeps its full grid and returning restores composer focus (cas-ff3d).
 
 ### HUB-J10 · Switch to dark and keep reading
 
@@ -346,17 +353,17 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Entry:** an open conversation when the network to the machine drops
 - **Goal:** I see what is happening, and it recovers without me doing anything
 - **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/session-connection.ts`, `hub-web/src/abort-signals.ts`, `hub-web/src/deferred-render.ts`, `hub-web/src/browser-support.ts`
-- **Suite:** `hub-web/e2e/journeys/reconnect.journey.ts`
-- **Gaps:** a real network loss (heartbeat misses, offline) is simulated by closing the socket
+- **Suite:** `hub-web/e2e/journeys/reconnect.journey.ts`, `hub-web/e2e/journeys/real-hub.journey.ts`
+- **Gaps:** the regular suite uses a protocol double; the separate real-hub part proves Linux recovery with a real disposable hub and real operator queue (see [local run instructions](real-hub-journey.md)); macOS remains follow-up
 
 #### Steps
 
 1. Open the conversation — the thread is live
-2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree
-3. It reconnects on its own — the banner and the waiting line clear, everything says Live again, the held message goes out exactly once and is delivered, and no transport alarm is left
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
+3. It reconnects on its own — the banner and the waiting line clear, everything says Live again (the header announces the return), the held message goes out exactly once and is delivered, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own thread has no session line, and the held message stays above the ones sent after it)
-6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable, and the machine drawer's session row says Reconnecting, not live; all return when the session is back
+6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable (the line under the header says only "Control and interrupts return when it reconnects", so the banner is the one outage line on screen, announced once), the pane header never says "No output yet" above the output the pane shows, and the machine drawer's session row says Reconnecting, not live; all return when the session is back; with the drawer open at 1280 and at 390, every machine and session row is the topmost element where it is drawn, never under the Attention panel (cas-bad9)
 
 #### Expected experience
 
@@ -453,9 +460,10 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
 4. Open Terminal view from the empty session — its "Terminal view" link switches to the session's Terminal view and back; the pane header never says "No activity" for a session that was just active
-5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view; back on, the plain copy and the link return
-6. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
-7. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
+5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view, and the header's Terminal view is dimmed and says why ("Reconnecting to Atlas · Linux — Terminal view opens once it's back") instead of opening; back on, the plain copy, the link and the header's Terminal view return
+6. On a phone, Terminal view on the empty card is a full-size target — at 390 it is at least 44 px each way and opens Terminal view
+7. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
+8. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
 
 #### Expected experience
 
@@ -482,14 +490,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the session: only its conversation — the blocker and the operator's later message are in the thread, the watchdog notice is not, and yesterday's turn shows "Sep 29, 17:20"
 2. A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick, never "you replied"
-3. The delivery problem is one attention item — the notice is a single warning in Attention dated "Sep 29, 17:49" (its own time, not when the page heard of it), and a repeat of it adds nothing
+3. The delivery problem is one attention item — the notice is a single warning dated "Sep 29, 17:49", headed "The supervisor missed an update: a worker stopped", with the worker named in plain words and no baked age; the group is "Accounting · happy-cheetah-1", has no redundant Dismiss group for one item, and a repeat adds nothing
 4. On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1 sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the notice and its date
-5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss group stays there across a 5 s heartbeat; with a notice's Details open and Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
+5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss stays there across a 5 s heartbeat; with a notice's Details open, Copy occupies its own row above the full raw diagnostic at390 and1280px; with Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
 6. A palette opened over the sheet closes first — Ctrl+K opens the command palette over the sheet; Escape closes the palette, the sheet stays open and focus is back on the control it left
 7. Close it and keep reading — Escape closes the sheet even with focus dropped to the page, focus returns to the badge and stays on it when a catalog change rebuilds the page, and the thread is as it was
 8. A sheet left open on a phone is a plain rail on a desktop — reopened, then resized to 1280×800: the rail has no dialog role, aria-modal or sheet label, the badge is not expanded, nothing is inert, and the notice is in the side panel
 9. It retires once the update gets through — the resolution removes it, and a reload does not bring it back
-10. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "re: earlier session wise-lion-31", and no earlier-session section opens for it
+10. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "Reply to “Did the bank feed reconcile?” · wise-lion-31", quoting the question's first line; if its history is unavailable it explicitly says "Reply to your message in earlier session wise-lion-31"; no earlier-session section opens for it
 
 #### Expected experience
 
@@ -529,3 +537,29 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
 - A failed end shows its error under the row and offers End session again.
+
+### HUB-J17 · Run the fleet from a conversation
+
+- **Entry:** `/commander/` at 1280, an open conversation whose session has workers, a ready task and an awaiting-merge task, on a device paired with factory:operate and factory:manage
+- **Goal:** pause a worker and undo it, assign a ready task to an idle worker, stop another worker after confirming, and ask the supervisor to merge after seeing the exact message, with every result announced and nothing refreshing on a timer
+- **Touches:** `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
+- **Suite:** `hub-web/e2e/journeys/fleet-ops.journey.ts`
+- **Gaps:** the hub double serves `POST /v1/sessions/<s>/operations` with the brief's contract (op_id dedupe, 409 stale, FleetChanged); the real endpoint (S1, S2) is verified when those land; the phone part is S6
+
+#### Steps
+
+1. Pause a worker and undo it — the agent row's ⋯ menu lists Pause, Restart… and Stop…, Pause runs at once, the row and the live region say it, and Undo (8 s) resumes it
+2. Assign a ready task to an idle worker — Assign… lists the idle workers, choosing one assigns it, and Undo unassigns it
+3. Stop another worker after confirming — Stop… opens an inline confirmation naming what stops, Cancel first and focused; confirming stops it, and a stale stop says what changed
+4. Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it once and the row reads "Asked … ago"
+5. A pairing without factory:manage — Stop… is disabled, saying it is not allowed on this pairing and naming the command that adds it
+
+#### Expected experience
+
+- Every action is one deliberate tap, destructive ones confirmed, reversible ones undoable.
+- Every result is announced in one live region; menus close with Escape back to their opener.
+
+#### Edge paths
+
+- A stale precondition (the worker restarted, the task was assigned elsewhere) changes nothing and says what changed.
+- A refused operation shows the hub's detail on the row.

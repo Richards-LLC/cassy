@@ -6,6 +6,11 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 
 **Core data flow**: CLI commands and MCP tool calls both go through the store trait abstractions in `cas-cli/src/store/`, which wraps `cas-store` (SQLite) with notification and sync layers.
 
+Automatic project-store discovery requires `.cas/cas.db` or `.cas/config.toml`
+as a file, or the legacy `.cas/entries/` directory. `~/.cas/` also holds factory
+IPC sockets; a socket-only directory is skipped during ancestor and worktree
+discovery. An explicit `CAS_ROOT` still selects any existing directory.
+
 ### cas-cli (main crate) — `cas-cli/src/`
 
 | Module | Purpose |
@@ -57,8 +62,8 @@ Cassy stores agent-facing knowledge in seven distinct surfaces. They are not tie
 | **Skills** | Procedural playbooks — a `SKILL.md` body plus references. | `skills` table; synced to `.claude/skills/`. Builtins ship from `cas-cli/src/builtins/skills/` in three harness flavors (claude / codex / grok). | `skill` MCP tool, `cas skill`, builtin sync on `cas init` | The harness loads them as Agent Skills; also BM25-searchable |
 | **Entities** | Extracted proper nouns (person, project, technology, file, concept, …) and their mentions — the join layer between prose and code. | `entities`, `entity_mentions`, `relationships` | `search action=entity_extract`, background extraction | `search action=entity_list` / `entity_show` |
 | **Code index** | Symbols and files parsed by tree-sitter, plus code↔memory links. | `code_symbols`, `code_files`, `code_relationships`, `code_memory_links` | Daemon code-index cycle (60s), `cas index` | `search action=code_search` / `code_show` / `grep` |
-| **Knowledge pages** | The distilled project wiki: LLM-written prose about *this repo*, with source provenance and a user-sovereignty lock. | Index rows in `knowledge_pages` + `knowledge_sources`; **bodies are markdown files on disk** under `.cas/knowledge/<type>/<title>.md` | `cas knowledge build` (distillation), `knowledge action=write` (hand-authored, always `locked=1`) | `knowledge` MCP tool (`search`/`read`/`list`), `cas knowledge search|read` |
-| **Artifacts** | Files a task published — a PDF report, a capture, a log bundle — with the digest and size measured locally before upload. The pre-signed upload URL is never stored; `cloud_url` is the durable location the server returns at complete. | `artifacts` table; bytes live at their original path and, once uploaded, in Cloud storage | `artifact` MCP tool, `cas artifact publish` | `artifact action=show`/`list`, `cas artifact show|list` |
+| **Knowledge pages** | The distilled project wiki: LLM-written prose about *this repo*, with source provenance and a user-sovereignty lock. | Index rows in `knowledge_pages` + `knowledge_sources`; **bodies are markdown files on disk** under `.cas/knowledge/<type>/<title>.md` | `cas knowledge build` (distillation), `knowledge action=write` (hand-authored, always `locked=1`) | `knowledge` MCP tool (`search`/`read`/`list`), `cas knowledge search\|read` |
+| **Artifacts** | Files a task published — a PDF report, a capture, a log bundle — with the digest and size measured locally before upload. The pre-signed upload URL is never stored; `cloud_url` is the durable location the server returns at complete. | `artifacts` table; bytes live at their original path and, once uploaded, in Cloud storage | `artifact` MCP tool, `cas artifact publish` | `artifact action=show`/`list`, `cas artifact show\|list` |
 | **Patterns** | Cross-project personal/team conventions. | **Not local** — Cassy Cloud, reached over the `/api/patterns` HTTP surface | `pattern` MCP tool | `pattern` MCP tool (requires login) |
 
 Two properties of the knowledge surface are load-bearing and easy to get wrong:
@@ -85,6 +90,7 @@ Rules that keep that boundary honest:
 - **Personal push is incremental and root-bound.** `cas cloud push` and the push leg of `cas cloud sync` read only the personal `sync_queue` in the supplied Cassy root; they do not rescan or re-send the local corpus. The same root supplies `cloud.json`, `config.toml` canonical-id resolution, and `cas.db`, so a push planned for project A cannot consume project B's rows or label them with project B's id. Successful rows are deleted from the queue; failed or server-skipped rows remain retryable. `--entries-only` and `--tasks-only` filter the queue before its batch limit and send no sibling entity kinds.
 - **Dry-run describes the next queue batch, not an invented snapshot.** Its JSON includes `source = "sync_queue"`, the root, canonical project id, scope, per-kind counts, batch limit, and `batch_limit_reached`. A count exactly equal to the limit is explicitly saturated: it is the number in the next attempt, not a claim about the full backlog. The old newest-10,000 snapshot windows (and their inaccurate “last 90 days” labels) are not part of push planning.
 - **Personal request limits are measured in bytes.** Queued upserts are split using the fully serialized envelope, then checked again after gzip. The default pre-gzip budget is 4 MiB and the hard cloud gzip ceiling is 4 MiB; fixed item-count chunking is not used for personal push.
+- **Foreign-row cleanup preserves unrelated queued work.** `cas cloud purge-foreign` exempts queued rows in its classified delete set: deleting an attributed foreign replica is deliberate cleanup, even when an older client enqueued it. The exemption matches entity kind and ID, plus dependency edges touching deleted tasks. Every other queued row survives and is reported as information, including entry metadata and non-content kinds; it never causes an `unpushed_rows` refusal. Dry-run and successful apply JSON expose the numeric `non_overlapping_queued_changes` count. Queue read, schema and row-decode failures still abort inspection; an absent queue table means zero rows. Pull freshness, majority-foreign and proven-rule guards retain their existing `--force` rules, and purge preserves the queue itself.
 
 - **No auth ⇒ no calls, no files, no channel.** `KnowledgeEmbedder::from_config` returns `None` when logged out, and every caller treats `None` as "this installation has no semantic channel" rather than a degraded mode. No LMDB environment is created. This is the same shape as the `dims = 0` provider-absent pattern: unconfigured storage is never materialised.
 - **`has_semantic()` tells the truth.** `HybridSearch::has_semantic` is true only when a channel is attached *and* vectors are actually cached. A configured-but-empty channel still reports false, so `SearchWeights::for_capabilities` keeps redistributing that weight to the live channels instead of allocating mass to a channel that can only return nothing.
@@ -127,6 +133,30 @@ Rules that keep that boundary honest:
 
 **Team scope resolution chain** (`cas-cli/src/cloud/config.rs::active_team_id`, cas-ea2f5): When a write is dual-enqueued to the team push queue, the team UUID is resolved at `open_store` time via a four-step chain. (0) Kill-switch: if `team_auto_promote = Some(false)` in the project `.cas/cloud.json`, the result is always `None` — no team dual-enqueue regardless of other config. (1) Project-level explicit override: `team_id` in the project `.cas/cloud.json` wins unconditionally; set via `cas cloud team set <uuid>`. (2) User default: `default_team_id` in `~/.cas/cloud.json`, populated by `cas cloud team default <slug>` or automatically by `fetch_and_cache_teams` (`cloud/me.rs`) on `cas login`. (3) Implicit single-team auto-pick: if `teams[]` has exactly one entry and no `default_team_id` is set, that team is used automatically — no configuration needed. (4) `None` — ambiguous (0 or ≥2 teams without a nominated default) or not logged in. The testable inner `active_team_id_with_user_config(user_cfg: Option<&CloudConfig>)` accepts an injected user config for unit tests without disk I/O; the production `active_team_id()` reads from `user_level_cloud_json_path()` (honours the `CAS_USER_CLOUD_JSON` test-seam env var).
 
+### Shutdown ownership and dead registrations
+
+`factory action=shutdown_workers` uses each worker registration's factory
+session as the shutdown boundary. A dead or already-shutdown worker remains
+addressable even after its pane disappears or the launch-time
+`CAS_FACTORY_WORKER_NAMES` roster stops naming it. Other sessions and non-worker
+roles stay outside that boundary; non-factory callers retain legacy roster
+filtering. Task/worktree safety and `force` validation run before cleanup.
+
+Accepted shutdown requests re-read all same-name registrations and retire them
+only if none is supervision-live (fresh Active/Idle heartbeat or live process).
+Dead registrations need no pane. Outstanding direct notifications to their name,
+agent IDs and harness session IDs are cancelled with a shutdown reason; shared
+broadcasts, other sessions and recipient-read/acknowledged messages remain intact.
+Cancellation stamps the typed `shutdown_cancelled` reason, preserves prior
+transport evidence and never fabricates an ack.
+This explicit withdrawal can move a transported-but-unread row to `suppressed`;
+the generic monotonic delivery-stage API keeps its existing transition rules
+and late callbacks cannot revive cancelled mail. Positive stop-N requests skip
+already-shutdown registrations; explicit and all-worker requests can clean them.
+The daemon uses the same retirement path if a pane disappeared before consuming
+the queued request. This path preserves worktrees and uses existing orphan
+recovery for any held tasks; live worker termination stays with the daemon.
+
 ### Factory context when a prompt hook is silent
 
 Claude's `UserPromptSubmit` remains the primary context channel. If it does
@@ -141,5 +171,19 @@ and never captures transcript text into attribution or memory stores.
 `cas doctor` reports recent observed prompt-hook misses from these receipts;
 missing attribution rows alone are not evidence because supervisors omit them
 intentionally. Recovery needs a readable Claude transcript; missing or foreign
-transcripts do not authorize context delivery. Explicit PostToolUse matcher
+transcripts do not authorize context delivery. Custom PostToolUse matcher
 filters still apply, while the generated default covers all tools.
+
+Project matcher defaults and their compatibility projection live in
+`config/hooks.rs`. The hook writer used by `cas init`, `cas hook configure`
+and `cas update --sync` recognizes saved legacy default sets and emits the
+current defaults in canonical order, without rewriting `.cas/config.toml`.
+The old PostToolUse set (`Write`, `Edit`, `Bash`) becomes `*` so the first
+Read or MCP result can recover context (cas-b8f6). The old PreToolUse defaults
+gain Slack policy, `AskUserQuestion` and `Agent`: their factory guards in
+`handlers_events/pre_tool.rs` must still receive calls (cas-afe9 and the
+supervisor worktree-spawn guard). Sets that differ from those historical
+defaults retain their custom filters. Disabled hooks retain their behavior;
+Slack policy remains independent of ordinary PreToolUse enablement. Factory
+role settings and Codex's Bash-only tool-hook projection keep their own
+harness-specific coverage.

@@ -233,7 +233,33 @@ struct BinaryFacts {
     configured_sha: Option<String>,
     configured_sha_invalid: bool,
     source_probe_timed_out: bool,
+    provenance: DeploymentProvenance,
     build_date: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeploymentRelation {
+    Ahead,
+    Behind,
+    DivergedDocumentation,
+    DivergedRuntime,
+    Unavailable,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeploymentProvenance {
+    relation: DeploymentRelation,
+    released: bool,
+}
+
+impl Default for DeploymentProvenance {
+    fn default() -> Self {
+        Self {
+            relation: DeploymentRelation::Unavailable,
+            released: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -327,7 +353,7 @@ pub fn collect_factory_preflight(
     let default_versions = probe_default_harness_versions(deadline);
     let receipts = harness_conformance_receipts().unwrap_or_default();
     let facts = PreflightFacts {
-        binary: collect_binary_facts(project_root, &repo_probe),
+        binary: collect_binary_facts(project_root, &repo_probe, deadline),
         repository: collect_repository_facts(invocation_root, cas_root, &repo_probe),
         mcp: McpFacts {
             cas_initialized: cas_root.is_dir(),
@@ -351,6 +377,9 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
     let mut timed_out_components = Vec::new();
     if facts.binary.source_probe_timed_out {
         timed_out_components.push("binary.source".to_string());
+    }
+    if facts.binary.provenance.relation == DeploymentRelation::TimedOut {
+        timed_out_components.push("binary.provenance".to_string());
     }
     if matches!(&facts.repository, Err(RepositoryFailure::TimedOut)) {
         timed_out_components.push("repository".to_string());
@@ -522,17 +551,52 @@ fn classify_binary(facts: BinaryFacts, findings: &mut Vec<PreflightFinding>) -> 
             None,
         ));
         (ComponentState::Stale, Some(remediation))
-    } else if !matches {
+    } else if !matches && facts.configured_sha.is_some() {
         let remediation =
-            "Rebuild Cassy from the expected source commit and restart `cas serve`.".to_string();
+            "Deploy the configured CAS_EXPECTED_DEPLOYMENT_SHA and reconnect MCP; the explicit deployment pin takes precedence over checkout history.".to_string();
         findings.push(warning(
             "binary.deployment_stale",
             "binary",
-            "Running Cassy binary SHA differs from expected deployment/source SHA.",
+            "Running Cassy binary SHA differs from the explicitly configured deployment SHA.",
             &remediation,
             None,
         ));
         (ComponentState::Stale, Some(remediation))
+    } else if !matches {
+        let (code, message, remediation, state) = match facts.provenance.relation {
+            DeploymentRelation::Ahead => (
+                "binary.checkout_behind",
+                "Running Cassy contains the source checkout commit; the checkout is older than the runtime.",
+                "Use a checkout matching the running deployment for source work; no runtime rebuild or downgrade is needed.",
+                ComponentState::Ready,
+            ),
+            DeploymentRelation::DivergedDocumentation if facts.provenance.released => (
+                "binary.checkout_diverged",
+                "Running Cassy matches its release tag; the checkout diverges only in documentation absent from that runtime.",
+                "Use the release checkout for source work, or retain this documentation checkout; no runtime rebuild or downgrade is needed.",
+                ComponentState::Ready,
+            ),
+            DeploymentRelation::Behind => (
+                "binary.deployment_stale",
+                "Running Cassy is an ancestor of the source checkout and may lack required deployment changes.",
+                "Deploy the intended clean source commit and reconnect MCP.",
+                ComponentState::Stale,
+            ),
+            DeploymentRelation::DivergedDocumentation | DeploymentRelation::DivergedRuntime => (
+                "binary.deployment_diverged",
+                "Running Cassy and the source checkout diverge; required runtime compatibility is not established.",
+                "Select the intended deployment with CAS_EXPECTED_DEPLOYMENT_SHA or deploy a clean runtime containing the required source changes; do not infer a downgrade from a different SHA alone.",
+                ComponentState::Stale,
+            ),
+            DeploymentRelation::Unavailable | DeploymentRelation::TimedOut => (
+                "binary.deployment_unverified",
+                "Local Git evidence could not establish the running deployment's relationship to the source checkout.",
+                "Retry preflight with complete, responsive local Git history, or set CAS_EXPECTED_DEPLOYMENT_SHA before deciding whether to replace the runtime.",
+                ComponentState::Stale,
+            ),
+        };
+        findings.push(warning(code, "binary", message, remediation, None));
+        (state, Some(remediation.to_string()))
     } else {
         (ComponentState::Ready, None)
     };
@@ -1155,6 +1219,7 @@ fn harness_name(harness: Harness) -> &'static str {
 fn collect_binary_facts(
     project_root: &Path,
     probe: &crate::mcp::tools::core::task::repo_context::BoundedRepoProbe,
+    deadline: Deadline,
 ) -> BinaryFacts {
     use crate::mcp::tools::core::task::repo_context::BoundedRepoError;
 
@@ -1174,16 +1239,121 @@ fn collect_binary_facts(
     let source_sha = source_result
         .and_then(Result::ok)
         .filter(|sha| valid_sha(sha));
+    let running_sha = option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string();
+    let provenance = match (&source_root, &source_sha) {
+        (Some(root), Some(source))
+            if configured_raw.is_none()
+                && valid_sha(&running_sha)
+                && !shas_compatible(source, &running_sha) =>
+        {
+            probe_deployment_provenance(
+                root,
+                source,
+                &running_sha,
+                env!("CARGO_PKG_VERSION"),
+                probe,
+                deadline,
+            )
+        }
+        _ => DeploymentProvenance::default(),
+    };
     BinaryFacts {
-        running_sha: option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string(),
+        running_sha,
         source_sha,
         configured_sha,
         configured_sha_invalid,
         source_probe_timed_out,
+        provenance,
         build_date: option_env!("CAS_BUILD_DATE")
             .unwrap_or("unknown")
             .to_string(),
     }
+}
+
+/// All provenance commands share collection's absolute deadline. No fetch,
+/// checkout, tag mutation, external diff or textconv is permitted here.
+fn probe_deployment_provenance(
+    root: &Path,
+    source: &str,
+    running: &str,
+    version: &str,
+    probe: &crate::mcp::tools::core::task::repo_context::BoundedRepoProbe,
+    deadline: Deadline,
+) -> DeploymentProvenance {
+    use crate::mcp::tools::core::task::repo_context::BoundedRepoError;
+    let collect = || -> Result<DeploymentProvenance, BoundedRepoError> {
+        let running = probe.output(
+            root,
+            &["rev-parse", "--verify", &format!("{running}^{{commit}}")],
+        )?;
+        let common = probe.output(root, &["merge-base", source, &running])?;
+        if common == source {
+            return Ok(DeploymentProvenance {
+                relation: DeploymentRelation::Ahead,
+                released: false,
+            });
+        }
+        if common == running {
+            return Ok(DeploymentProvenance {
+                relation: DeploymentRelation::Behind,
+                released: false,
+            });
+        }
+        let released = match probe.output(
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/tags/v{version}^{{commit}}"),
+            ],
+        ) {
+            Ok(tag) => tag == running,
+            Err(BoundedRepoError::TimedOut) => return Err(BoundedRepoError::TimedOut),
+            Err(_) => false,
+        };
+        // Exclude known non-runtime documentation only. Some docs (for example
+        // docs/review/pr-body.md) are embedded production inputs. Builtin skills,
+        // hooks, scripts, config, manifests and unknown paths remain required.
+        let output = run_command(
+            Command::new("git").arg("-C").arg(root).args([
+                "diff",
+                "--quiet",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                &common,
+                source,
+                "--",
+                ".",
+                ":(exclude)cas-cli/docs",
+                ":(exclude).claude/CODEMAP.md",
+                ":(exclude).codex/CODEMAP.md",
+                ":(exclude).Codex/CODEMAP.md",
+                ":(exclude)README.md",
+                ":(exclude)CHANGELOG.md",
+            ]),
+            deadline,
+            GIT_PROBE_TIMEOUT,
+        )
+        .map_err(|error| match error {
+            BoundedCommandError::TimedOut => BoundedRepoError::TimedOut,
+            BoundedCommandError::Io => BoundedRepoError::Unavailable,
+        })?;
+        let relation = match output.status.code() {
+            Some(0) => DeploymentRelation::DivergedDocumentation,
+            Some(1) => DeploymentRelation::DivergedRuntime,
+            _ => return Err(BoundedRepoError::Unavailable),
+        };
+        Ok(DeploymentProvenance { relation, released })
+    };
+    collect().unwrap_or_else(|error| DeploymentProvenance {
+        relation: if matches!(error, BoundedRepoError::TimedOut) {
+            DeploymentRelation::TimedOut
+        } else {
+            DeploymentRelation::Unavailable
+        },
+        released: false,
+    })
 }
 
 fn valid_sha(value: &str) -> bool {
@@ -1639,6 +1809,7 @@ mod tests {
                 configured_sha: None,
                 configured_sha_invalid: false,
                 source_probe_timed_out: false,
+                provenance: DeploymentProvenance::default(),
                 build_date: "2026-07-30".to_string(),
             },
             repository: Ok(RepositoryFacts {
@@ -1766,6 +1937,325 @@ mod tests {
         assert_eq!(report.binary.state, ComponentState::Stale);
         assert_eq!(report.overall, PreflightOverall::Warn);
         assert!(!report.factory_blocked);
+    }
+
+    #[test]
+    fn cas_b0c5_classifies_history_without_overriding_explicit_or_untrusted_identity() {
+        for (relation, released, state, code) in [
+            (
+                DeploymentRelation::Ahead,
+                false,
+                ComponentState::Ready,
+                "binary.checkout_behind",
+            ),
+            (
+                DeploymentRelation::Behind,
+                true,
+                ComponentState::Stale,
+                "binary.deployment_stale",
+            ),
+            (
+                DeploymentRelation::DivergedDocumentation,
+                true,
+                ComponentState::Ready,
+                "binary.checkout_diverged",
+            ),
+            (
+                DeploymentRelation::DivergedDocumentation,
+                false,
+                ComponentState::Stale,
+                "binary.deployment_diverged",
+            ),
+            (
+                DeploymentRelation::DivergedRuntime,
+                true,
+                ComponentState::Stale,
+                "binary.deployment_diverged",
+            ),
+            (
+                DeploymentRelation::Unavailable,
+                true,
+                ComponentState::Stale,
+                "binary.deployment_unverified",
+            ),
+            (
+                DeploymentRelation::TimedOut,
+                true,
+                ComponentState::Stale,
+                "binary.deployment_unverified",
+            ),
+        ] {
+            let mut facts = healthy_facts();
+            facts.binary.source_sha = Some("1234567".to_string());
+            facts.binary.provenance = DeploymentProvenance { relation, released };
+            let report = build_report(facts.clone());
+            assert_eq!(report.binary.state, state);
+            assert!(report.findings.iter().any(|finding| finding.code == code));
+            assert!(!report.factory_blocked);
+            if state == ComponentState::Ready {
+                assert!(
+                    report
+                        .binary
+                        .remediation
+                        .as_deref()
+                        .unwrap()
+                        .contains("no runtime rebuild or downgrade")
+                );
+            }
+
+            facts.binary.configured_sha = Some("7654321".to_string());
+            let pinned = build_report(facts.clone());
+            assert_eq!(pinned.binary.state, ComponentState::Stale);
+            assert!(
+                pinned
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "binary.deployment_stale"
+                        && finding.message.contains("explicitly configured"))
+            );
+            facts.binary.configured_sha = Some(facts.binary.running_sha.clone());
+            assert_eq!(
+                build_report(facts.clone()).binary.state,
+                ComponentState::Ready
+            );
+
+            facts.binary.configured_sha = None;
+            for untrusted in ["unknown", "abcdef0-dirty"] {
+                facts.binary.running_sha = untrusted.to_string();
+                let report = build_report(facts.clone());
+                assert_eq!(report.binary.state, ComponentState::Stale);
+                assert!(
+                    report
+                        .findings
+                        .iter()
+                        .any(|finding| finding.code == "binary.identity_untrusted")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cas_b0c5_tagged_runtime_vs_docs_and_required_code_uses_real_git_evidence() {
+        let fixture_version = "9.99.7";
+        let fixture_tag = format!("v{fixture_version}");
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args([
+                    "-c",
+                    "user.name=Preflight Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(repo.path().join("cas-cli/src")).unwrap();
+        std::fs::write(repo.path().join("cas-cli/src/runtime.rs"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(
+            repo.path().join("cas-cli/src/runtime.rs"),
+            "released change",
+        )
+        .unwrap();
+        git(&["commit", "-qam", "release"]);
+        let running = git(&["rev-parse", "HEAD"]);
+        git(&["tag", "-a", &fixture_tag, "-m", "release"]);
+        git(&["checkout", "-qb", "docs", &base]);
+        std::fs::create_dir(repo.path().join(".claude")).unwrap();
+        std::fs::write(repo.path().join(".claude/CODEMAP.md"), "updated map").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "documentation"]);
+        let source = git(&["rev-parse", "HEAD"]);
+        let docs_source = source.clone();
+        let deadline = Deadline::after(Duration::from_secs(3));
+        let probe = crate::mcp::tools::core::task::repo_context::BoundedRepoProbe::new(
+            deadline,
+            GIT_PROBE_TIMEOUT,
+            8,
+        );
+        let provenance = probe_deployment_provenance(
+            repo.path(),
+            &source,
+            &running[..7],
+            fixture_version,
+            &probe,
+            deadline,
+        );
+        assert_eq!(
+            provenance.relation,
+            DeploymentRelation::DivergedDocumentation
+        );
+        assert!(
+            provenance.released,
+            "annotated release tag must resolve to the runtime commit"
+        );
+        let mut facts = healthy_facts();
+        facts.binary.running_sha = running.clone();
+        facts.binary.source_sha = Some(source.clone());
+        facts.binary.provenance = provenance;
+        let report = build_report(facts);
+        assert_eq!(report.binary.state, ComponentState::Ready);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "binary.checkout_diverged")
+        );
+        assert_eq!(
+            probe_deployment_provenance(
+                repo.path(),
+                &base,
+                &running,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .relation,
+            DeploymentRelation::Ahead
+        );
+        assert_eq!(
+            probe_deployment_provenance(
+                repo.path(),
+                &running,
+                &base,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .relation,
+            DeploymentRelation::Behind
+        );
+
+        git(&["tag", "-d", &fixture_tag]);
+        assert!(
+            !probe_deployment_provenance(
+                repo.path(),
+                &source,
+                &running,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .released
+        );
+        git(&["tag", &fixture_tag, &base]);
+        assert!(
+            !probe_deployment_provenance(
+                repo.path(),
+                &source,
+                &running,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .released
+        );
+        git(&["tag", "-d", &fixture_tag]);
+        git(&["tag", &fixture_tag, &running]);
+        // Builtin guidance is embedded runtime input, not ordinary docs.
+        std::fs::write(
+            repo.path().join("cas-cli/src/skill.md"),
+            "required guidance",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "required runtime input"]);
+        let source = git(&["rev-parse", "HEAD"]);
+        let provenance = probe_deployment_provenance(
+            repo.path(),
+            &source,
+            &running,
+            fixture_version,
+            &probe,
+            deadline,
+        );
+        assert_eq!(provenance.relation, DeploymentRelation::DivergedRuntime);
+        assert!(provenance.released);
+        let mut facts = healthy_facts();
+        facts.binary.source_sha = Some(source);
+        facts.binary.running_sha = running.clone();
+        facts.binary.provenance = provenance;
+        assert_eq!(build_report(facts).binary.state, ComponentState::Stale);
+
+        git(&["checkout", "-q", "--detach", &docs_source]);
+        std::fs::create_dir_all(repo.path().join("docs/review")).unwrap();
+        std::fs::write(
+            repo.path().join("docs/review/pr-body.md"),
+            "embedded template",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "required embedded template"]);
+        let source = git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            probe_deployment_provenance(
+                repo.path(),
+                &source,
+                &running,
+                fixture_version,
+                &probe,
+                deadline
+            )
+            .relation,
+            DeploymentRelation::DivergedRuntime,
+            "documentation embedded by production code must not be exempted"
+        );
+    }
+
+    #[test]
+    fn cas_b0c5_provenance_deadline_preserves_unverified_warning() {
+        let repo = tempfile::tempdir().unwrap();
+        let deadline = Deadline::after(Duration::ZERO);
+        let probe = crate::mcp::tools::core::task::repo_context::BoundedRepoProbe::new(
+            deadline,
+            GIT_PROBE_TIMEOUT,
+            8,
+        );
+        let started = Instant::now();
+        let provenance = probe_deployment_provenance(
+            repo.path(),
+            "1234567",
+            "abcdef0",
+            env!("CARGO_PKG_VERSION"),
+            &probe,
+            deadline,
+        );
+        assert_eq!(provenance.relation, DeploymentRelation::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let mut facts = healthy_facts();
+        facts.binary.source_sha = Some("1234567".to_string());
+        facts.binary.provenance = provenance;
+        let report = build_report(facts);
+        assert_eq!(report.binary.state, ComponentState::Stale);
+        assert!(
+            report
+                .timed_out_components
+                .iter()
+                .any(|component| component == "binary.provenance")
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "binary.deployment_unverified")
+        );
     }
 
     #[test]
@@ -2273,7 +2763,8 @@ mod tests {
             Duration::from_millis(200),
             8,
         );
-        let facts = collect_binary_facts(temp.path(), &probe);
+        let facts =
+            collect_binary_facts(temp.path(), &probe, Deadline::after(Duration::from_secs(1)));
         assert_eq!(facts.source_sha, None);
     }
 

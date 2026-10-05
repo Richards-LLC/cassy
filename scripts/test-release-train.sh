@@ -10,6 +10,9 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/release-portable.sh
+source "$script_dir/release-portable.sh"
+release_portable_define_sha256sum
 train="$script_dir/release-train.sh"
 repo_root="$(cd "$script_dir/.." && pwd)"
 tmp="$(mktemp -d)"
@@ -364,6 +367,34 @@ if grep -qF -- '--only hub-web-dist-drift,hub-web-visual-qa' "$web_log"; then
     ok 'train accepts the same web diagnostic rows as the gate'
 else
     bad 'train rejected or lost web diagnostic selection'
+fi
+
+# cas-704a: the train's --only allowlist is exactly the gate's row list, so a
+# row the gate grows (hub-web-tests was refused) is never refused by the train.
+row_list() {
+    awk -v start="readonly -a $2=(" '
+        index($0, start) == 1 { inside = 1; next }
+        inside && /^\)/ { exit }
+        inside { for (i = 1; i <= NF; i++) print $i }
+    ' "$1"
+}
+train_rows="$(row_list "$script_dir/release-train.sh" gate_rows)"
+gate_rows_list="$(row_list "$script_dir/release-gate.sh" gate_check_ids)"
+if [[ -n "$gate_rows_list" && "$train_rows" == "$gate_rows_list" ]]; then
+    ok 'train --only allowlist equals the release-gate row list'
+else
+    bad "train and gate row lists differ: $(diff <(printf '%s\n' "$train_rows") <(printf '%s\n' "$gate_rows_list") | tr '\n' ' ')"
+fi
+wt_hub_tests="$(new_worktree epic-hub-web-tests-row)"
+dir_hub_tests="$("$train" 9.99.2 "$wt_hub_tests" --print-run-dir)"
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_hub_tests" \
+    --gate --only hub-web-tests >/dev/null 2>&1 || true
+wait_for_file "$dir_hub_tests/diagnostics/*/gate.done" || true
+hub_tests_log="$(find "$dir_hub_tests/diagnostics" -name gate.log -print -quit 2>/dev/null || true)"
+if [[ -n "$hub_tests_log" ]] && grep -qF 'args=9.99.2 --only hub-web-tests' "$hub_tests_log"; then
+    ok 'train accepts --gate --only hub-web-tests and forwards the row'
+else
+    bad "train refused or lost --only hub-web-tests: ${hub_tests_log:-no diagnostic receipt}"
 fi
 
 # A targeted rerun forwards only known non-empty rows to the gate, writes a
@@ -1468,6 +1499,11 @@ new_gh_stub() {
 #!/usr/bin/env bash
 state="$GH_STUB_STATE"
 printf '%s\n' "$*" >> "$state/calls.log"
+# PR-run visibility is independent of the scripted merge-queue poll sequence.
+if [[ "$1 $2" == 'run list' && "$*" == *'--event pull_request'* ]]; then
+    printf '[{"headSha":"%s"}]\n' "$GH_STUB_HEAD"
+    exit 0
+fi
 step="$(cat "$state/step.txt" 2>/dev/null || echo 1)"
 printf '%s\n' "$((step + 1))" > "$state/step.txt"
 case "$1 $2" in
@@ -1909,6 +1945,11 @@ else
     bad "pipeline.log is missing, unstamped, or truncated: $(head -3 "$run_stale_dir/pipeline.log" 2>/dev/null || echo absent)"
 fi
 
+if python3 "$script_dir/test-release-train-pipeline.py"; then
+    ok 'owned-PR resume and exact-pushed-head PR-run regressions'
+else
+    bad 'owned-PR resume or exact-pushed-head PR-run regression'
+fi
 
 # ===========================================================================
 # `publish` — the port of publish-wrapper.sh (cas-c1cd).
@@ -2922,7 +2963,10 @@ mkdir -p "$portable_dir"
 cat >"$portable_dir/bsd-stat" <<'EOF'
 #!/usr/bin/env bash
 [[ "$1" == -c ]] && { printf 'stat: illegal option -- c\n' >&2; exit 1; }
-[[ "$1" == -f && "$2" == %d ]] && exec stat -c %d "$3"
+if [[ "$1" == -f && "$2" == %d ]]; then
+    stat -c %d "$3" 2>/dev/null || stat -f %d "$3"
+    exit $?
+fi
 exit 1
 EOF
 chmod +x "$portable_dir/bsd-stat"
@@ -2932,7 +2976,7 @@ portable_out="$(
     gnu="$(release_portable_stat_device "$tmp")"
     bsd="$(CAS_RELEASE_PORTABLE_STAT="$portable_dir/bsd-stat" release_portable_stat_device "$tmp")"
     none="$(CAS_RELEASE_PORTABLE_STAT=false release_portable_stat_device "$tmp" && printf found || printf none)"
-    printf '%s %s %s %s\n' "$gnu" "$bsd" "$none" "$(stat -c %d "$tmp")"
+    printf '%s %s %s %s\n' "$gnu" "$bsd" "$none" "$(release_portable_stat_device "$tmp")"
 )"
 read -r portable_gnu portable_bsd portable_none portable_real <<<"$portable_out"
 if [[ "$portable_gnu" == "$portable_real" && "$portable_bsd" == "$portable_real" && "$portable_none" == none ]]; then

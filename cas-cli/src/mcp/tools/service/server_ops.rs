@@ -10,6 +10,29 @@ use crate::ui::factory::server_registry::{
     self, RegisteredServer, ServerLiveness, ServerSpec, ServerState, StopOutcome,
 };
 
+const DEFAULT_SERVER_LIST_LIMIT: usize = 20;
+const MAX_SERVER_LIST_LIMIT: usize = 50;
+const SERVER_LINE_BYTES: usize = 512;
+
+/// Bound bytes (including UTF-8) and collapse control characters before a
+/// registry field reaches the single-line MCP listing.
+fn compact_server_text(value: &str, max_bytes: usize) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        let c = if c.is_control() || c.is_whitespace() {
+            ' '
+        } else {
+            c
+        };
+        if out.len() + c.len_utf8() > max_bytes.saturating_sub(3) {
+            out.push_str("...");
+            return out;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// How a registry entry reads in `server_list`.
 ///
 /// Kept separate from the handler so the rendering rules — including "a
@@ -34,9 +57,11 @@ pub(super) fn render_server_line(
             " listening on {}",
             observed_ports
                 .iter()
+                .take(8)
                 .map(u16::to_string)
                 .collect::<Vec<_>>()
                 .join(",")
+                + if observed_ports.len() > 8 { ",..." } else { "" }
         )
     } else if let Some(port) = record.expected_port {
         format!(" expected port {port} (not bound)")
@@ -45,9 +70,13 @@ pub(super) fn render_server_line(
     };
 
     let owner = match (record.owner_task.as_deref(), record.owner_worker.as_deref()) {
-        (Some(task), Some(worker)) => format!(" — started by {worker} for {task}"),
-        (Some(task), None) => format!(" — for {task}"),
-        (None, Some(worker)) => format!(" — started by {worker}"),
+        (Some(task), Some(worker)) => format!(
+            " — started by {} for {}",
+            compact_server_text(worker, 64),
+            compact_server_text(task, 64)
+        ),
+        (Some(task), None) => format!(" — for {}", compact_server_text(task, 64)),
+        (None, Some(worker)) => format!(" — started by {}", compact_server_text(worker, 64)),
         (None, None) => String::new(),
     };
 
@@ -56,16 +85,21 @@ pub(super) fn render_server_line(
     } else {
         " [private: dies with its worker]"
     };
-    let descendant_count = server_registry::live_descendant_count(record);
+    let descendant_count =
+        if record.state == ServerState::Running && liveness == ServerLiveness::Live {
+            server_registry::live_descendant_count(record)
+        } else {
+            0
+        };
     let process_group = record
         .pgid
         .map(|pgid| pgid.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    format!(
-        "  {} ({}) pid {} pgid {} live descendants {}{} — {}{}{}\n     cmd: {}\n     cwd: {}",
-        record.name,
-        record.id,
+    let line = format!(
+        "  {} ({}) pid {} pgid {} live descendants {}{} — {}{}{}; cmd: {}; cwd: {}",
+        compact_server_text(&record.name, 64),
+        compact_server_text(&record.id, 64),
         record.pid,
         process_group,
         descendant_count,
@@ -73,12 +107,28 @@ pub(super) fn render_server_line(
         state,
         owner,
         survival,
-        record.command,
-        record.cwd.display(),
-    )
+        compact_server_text(&record.command, 64),
+        compact_server_text(&record.cwd.to_string_lossy(), 64),
+    );
+    compact_server_text(&line, SERVER_LINE_BYTES)
+}
+
+/// New entries bind registered identity; legacy entries use name + session.
+fn owns_server(record: &RegisteredServer, caller: &crate::types::Agent) -> bool {
+    if let Some(owner) = &record.owner_agent_id {
+        return owner == &caller.id && record.factory_session == caller.factory_session;
+    }
+    record.owner_worker.as_deref() == Some(caller.name.as_str())
+        && caller.factory_session.is_some()
+        && record.factory_session == caller.factory_session
 }
 
 impl CasService {
+    fn server_caller(&self) -> Option<crate::types::Agent> {
+        let id = self.inner.get_registered_agent_id_read_only().ok()?;
+        self.inner.open_agent_store().ok()?.get(&id).ok()
+    }
+
     /// Launch a long-running server under Cassy supervision.
     pub(super) async fn factory_server_start(
         &self,
@@ -117,11 +167,20 @@ impl CasService {
             None => None,
         };
 
-        let name = req
-            .id
+        if req
+            .name
             .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "server_start name must not be blank",
+            ));
+        }
+        let name = req
+            .name
+            .as_deref()
+            .or_else(|| req.id.as_deref().map(str::trim).filter(|n| !n.is_empty()))
             .map(str::to_string)
             .unwrap_or_else(|| default_server_name(command));
 
@@ -143,6 +202,13 @@ impl CasService {
             ));
         }
 
+        let caller = self.server_caller();
+        if caller.is_none() && crate::harness_policy::is_worker_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "server_start requires a registered worker identity to record server ownership",
+            ));
+        }
         let shared = req.shared.unwrap_or(false);
         let spec = ServerSpec {
             name,
@@ -150,8 +216,15 @@ impl CasService {
             cwd,
             expected_port: port,
             owner_task: req.task_id.clone(),
-            owner_worker: std::env::var("CAS_AGENT_NAME").ok(),
-            factory_session: std::env::var("CAS_FACTORY_SESSION").ok(),
+            owner_worker: caller
+                .as_ref()
+                .map(|a| a.name.clone())
+                .or_else(|| std::env::var("CAS_AGENT_NAME").ok()),
+            factory_session: caller
+                .as_ref()
+                .map(|a| a.factory_session.clone())
+                .unwrap_or_else(|| std::env::var("CAS_FACTORY_SESSION").ok()),
+            owner_agent_id: caller.as_ref().map(|a| a.id.clone()),
             shared,
         };
 
@@ -227,6 +300,18 @@ impl CasService {
                 )
             })?;
 
+        let caller = self.server_caller();
+        let worker = caller
+            .as_ref()
+            .map(|a| a.role == crate::types::AgentRole::Worker)
+            .unwrap_or_else(crate::harness_policy::is_worker_from_env);
+        if worker && !caller.as_ref().is_some_and(|a| owns_server(&record, a)) {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "server_stop: workers may stop only servers they started; ask the supervisor to stop another owner's server",
+            ));
+        }
+
         let outcome = server_registry::stop(&self.inner.cas_root, &record).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -259,7 +344,7 @@ impl CasService {
             ),
             StopOutcome::RefusedUnverified(liveness) => format!(
                 "Refused to signal server '{}' (id {}): pid {} {}.\n\n\
-                 Nothing was killed. The entry is marked dead — Cassy never signals a pid it \
+                 {} The entry is marked dead — Cassy never signals a pid it \
                  cannot prove is still the process it started, because the pid may now belong \
                  to something else entirely.",
                 record.name,
@@ -268,6 +353,11 @@ impl CasService {
                 match liveness {
                     ServerLiveness::Replaced => "now belongs to a different process",
                     _ => "could not be verified",
+                },
+                if record.docker.is_some() {
+                    "The Docker container was stopped; the client pid was not signalled."
+                } else {
+                    "Nothing was killed."
                 }
             ),
         };
@@ -280,6 +370,31 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        let status = req
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("running");
+        if !matches!(
+            status,
+            "running" | "stopped" | "dead" | "unverified" | "all"
+        ) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "server_list status must be 'running', 'stopped', 'dead', 'unverified', or 'all'",
+            ));
+        }
+        if req.limit == Some(0) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "server_list limit must be greater than zero",
+            ));
+        }
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_SERVER_LIST_LIMIT)
+            .min(MAX_SERVER_LIST_LIMIT);
         // Reconcile before reporting: a listing that shows a long-dead pid as
         // running is worse than no listing at all.
         let records = server_registry::refresh(&self.inner.cas_root).map_err(|e| {
@@ -298,53 +413,76 @@ impl CasService {
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty());
-        let records: Vec<_> = records
-            .into_iter()
-            .filter(|record| match task_filter {
-                Some(task) => record.owner_task.as_deref() == Some(task),
-                None => true,
-            })
-            .collect();
+        let owner_filter = req
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let mut lines = Vec::new();
+        let mut matching = 0;
+        for record in &records {
+            if task_filter.is_some_and(|task| record.owner_task.as_deref() != Some(task))
+                || owner_filter.is_some_and(|owner| {
+                    record.owner_worker.as_deref() != Some(owner)
+                        && record.owner_agent_id.as_deref() != Some(owner)
+                })
+            {
+                continue;
+            }
+            let liveness = if record.state == ServerState::Running {
+                server_registry::liveness(record)
+            } else {
+                ServerLiveness::Gone
+            };
+            let effective_status = if record.state != ServerState::Running {
+                record.state.label()
+            } else {
+                match liveness {
+                    ServerLiveness::Live => "running",
+                    ServerLiveness::Unverifiable => "unverified",
+                    ServerLiveness::Gone | ServerLiveness::Replaced => "dead",
+                }
+            };
+            if status != "all" && status != effective_status {
+                continue;
+            }
+            matching += 1;
+            if lines.len() < limit {
+                let ports =
+                    if record.state == ServerState::Running && liveness == ServerLiveness::Live {
+                        server_registry::listening_ports(record)
+                    } else {
+                        Vec::new()
+                    };
+                lines.push(render_server_line(record, liveness, &ports));
+            }
+        }
 
-        if records.is_empty() {
+        if lines.is_empty() {
             return Ok(Self::success(format!(
-                "No registered servers{}.\n\n\
+                "{}No registered servers{} matching filters. Use status=all to include history.\n\n\
                  Long-running servers belong in the registry: \
                  `factory action=server_start command=\"npm run dev\" port=5173` \
                  (add shared=true when it must outlive the task). A raw `npm run dev &` is \
                  killed at worker teardown and is invisible here.",
-                task_filter.map(|t| format!(" for {t}")).unwrap_or_default()
+                if status == "running" {
+                    "No servers currently running.\n"
+                } else {
+                    ""
+                },
+                task_filter
+                    .map(|t| format!(" for {}", compact_server_text(t, 64)))
+                    .unwrap_or_default()
             )));
         }
-
-        let (mut live, mut history) = (Vec::new(), Vec::new());
-        for record in &records {
-            let liveness = server_registry::liveness(record);
-            let ports = if matches!(liveness, ServerLiveness::Live) {
-                server_registry::listening_ports(record)
-            } else {
-                Vec::new()
-            };
-            let line = render_server_line(record, liveness, &ports);
-            if record.state == ServerState::Running && matches!(liveness, ServerLiveness::Live) {
-                live.push(line);
-            } else {
-                history.push(line);
-            }
-        }
-
-        let mut out = String::new();
-        if live.is_empty() {
-            out.push_str("No servers currently running.\n");
+        let heading = if status == "running" {
+            "Running servers"
         } else {
-            out.push_str(&format!("Running servers ({}):\n", live.len()));
-            out.push_str(&live.join("\n"));
-            out.push('\n');
-        }
-        if !history.is_empty() {
-            out.push_str(&format!("\nRecent history ({}):\n", history.len()));
-            out.push_str(&history.join("\n"));
-            out.push('\n');
+            "Registered servers"
+        };
+        let mut out = format!("{heading} ({}):\n{}\n", lines.len(), lines.join("\n"));
+        if matching > lines.len() {
+            out.push_str(&format!("Showing {} of {matching} matches; refine status/task_id/owner or increase limit (max {MAX_SERVER_LIST_LIMIT}).\n", lines.len()));
         }
         Ok(Self::success(out))
     }
@@ -353,9 +491,48 @@ impl CasService {
 /// Name a server after its command when the caller did not name it, so
 /// `server_list` reads as something other than a wall of ids.
 pub(super) fn default_server_name(command: &str) -> String {
-    let stem: String = command
-        .split_whitespace()
+    let words = shell_words::split(command)
+        .unwrap_or_else(|_| command.split_whitespace().map(str::to_string).collect());
+    let assignment = |word: &str| {
+        let Some((key, _)) = word.split_once('=') else {
+            return false;
+        };
+        !key.is_empty()
+            && key
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+    };
+    let mut index = 0;
+    while words.get(index).is_some_and(|w| assignment(w)) {
+        index += 1;
+    }
+    if words.get(index).is_some_and(|w| {
+        std::path::Path::new(w)
+            .file_name()
+            .is_some_and(|n| n == "env")
+    }) {
+        index += 1;
+        while let Some(word) = words.get(index) {
+            match word.as_str() {
+                "--" => {
+                    index += 1;
+                    break;
+                }
+                "-u" | "--unset" | "-C" | "--chdir" => index += 2,
+                _ if word.starts_with('-') || assignment(word) => index += 1,
+                _ => break,
+            }
+        }
+    }
+    while words.get(index).is_some_and(|w| assignment(w)) {
+        index += 1;
+    }
+    let stem = words
+        .iter()
+        .skip(index)
         .take(2)
+        .cloned()
         .collect::<Vec<_>>()
         .join("-");
     let cleaned: String = stem

@@ -37,11 +37,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod docker;
+use docker::DockerRun;
+
 const SERVER_DIR: &str = "factory-servers";
 const LOG_DIR: &str = "logs";
 
 /// How long to wait for the launcher shell to publish the server's pid.
 const PID_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Grace before checking that the launched workload survived startup.
+const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Grace between SIGTERM and SIGKILL on [`stop`].
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -122,6 +128,9 @@ pub(crate) struct RegisteredServer {
     pub owner_task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_worker: Option<String>,
+    /// Immutable registered caller identity; legacy entries use name + session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_session: Option<String>,
     /// Whether this server was placed outside worker containment.
@@ -136,6 +145,9 @@ pub(crate) struct RegisteredServer {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_path: Option<PathBuf>,
+    /// Daemon-owned Docker workload, independent of the client process group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<DockerRun>,
     pub started_at: DateTime<Utc>,
     pub state: ServerState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +167,7 @@ pub(crate) struct ServerSpec {
     pub owner_task: Option<String>,
     pub owner_worker: Option<String>,
     pub factory_session: Option<String>,
+    pub owner_agent_id: Option<String>,
     pub shared: bool,
 }
 
@@ -408,6 +421,8 @@ fn start_inner(
         }
     }));
 
+    let (command, docker) = docker::prepare(&spec.command, &spec.cwd, &registry_dir(cas_root))?;
+
     // The pid handshake file lives in the registry's own directory rather than
     // the system temp dir: `/tmp` is tmpfs on many hosts, and the registry
     // directory is already guaranteed writable here.
@@ -431,7 +446,7 @@ fn start_inner(
          while [ ! -f '{launch_file}' ]; do sleep 0.01; done; \
          {command} & printf '%s' \"$!\" > '{pid_file}'",
         log = log_path.display(),
-        command = spec.command,
+        command = command,
         pid_file = pid_file.display(),
         launcher_pid_file = launcher_pid_file.display(),
         launch_file = launch_file.display(),
@@ -564,17 +579,69 @@ fn start_inner(
         expected_port: spec.expected_port,
         owner_task: spec.owner_task.clone(),
         owner_worker: spec.owner_worker.clone(),
+        owner_agent_id: spec.owner_agent_id.clone(),
         factory_session: spec.factory_session.clone(),
         shared: spec.shared,
         cgroup,
         log_path: Some(log_path),
+        docker,
         started_at: Utc::now(),
         state: ServerState::Running,
         ended_at: None,
         ended_detail: None,
     };
     write_record(cas_root, &record)?;
+    // The launcher publishing $! proves only that a process was forked.
+    // Wait briefly before promising that the workload is actually alive.
+    std::thread::sleep(STARTUP_GRACE);
+    let alive = match &record.docker {
+        Some(docker) => docker.is_running(&record.cwd),
+        None => Ok(liveness(&record) == ServerLiveness::Live),
+    };
+    if !matches!(alive, Ok(true)) {
+        let cleanup = stop_with_scope_ops(cas_root, &record, scope_ops).err();
+        let mut record = record;
+        record.state = ServerState::Dead;
+        record.ended_at = Some(Utc::now());
+        record.ended_detail = Some("failed during startup grace".to_string());
+        write_record(cas_root, &record)?;
+        let log = record.log_path.as_ref().unwrap();
+        let detail = log_tail(log).unwrap_or_else(|error| format!("could not read log: {error}"));
+        return Err(io::Error::other(format!(
+            "server '{}' failed during startup grace; see {}\n{}{}{}",
+            record.name,
+            log.display(),
+            detail,
+            alive
+                .err()
+                .map(|error| format!("\nworkload liveness could not be confirmed: {error}"))
+                .unwrap_or_default(),
+            cleanup
+                .map(|error| format!("\ncleanup could not be confirmed: {error}"))
+                .unwrap_or_default(),
+        )));
+    }
     Ok(record)
+}
+
+/// Bound diagnostics even if a failed server flooded its log.
+fn log_tail(path: &Path) -> io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(4096)))?;
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(text
+        .lines()
+        .rev()
+        .take(10)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// Removes the pid handshake file when `start` returns, by any path.
@@ -644,6 +711,11 @@ fn stop_inner(
     scope_ops: &dyn super::cgroup::ScopeOps,
 ) -> io::Result<StopOutcome> {
     let mut record = record.clone();
+    // Containers are owned by the Docker daemon, even if their client exited
+    // or its pid was reused. Target only the immutable ID written by this run.
+    if let Some(ref docker) = record.docker {
+        docker.stop(&record.cwd)?;
+    }
     let outcome = match liveness(&record) {
         ServerLiveness::Live => {
             let ports = listening_ports(&record);
@@ -660,6 +732,10 @@ fn stop_inner(
             terminate_server(&record, scope_ops)?;
             StopOutcome::AlreadyGone
         }
+        ServerLiveness::Gone if record.docker.is_some() => StopOutcome::Stopped {
+            pid: record.pid,
+            ports: Vec::new(),
+        },
         ServerLiveness::Gone => {
             return Err(io::Error::other(format!(
                 "registered pid {} for server '{}' is gone, but this legacy record has no \

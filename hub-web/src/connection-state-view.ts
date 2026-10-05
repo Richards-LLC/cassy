@@ -327,8 +327,8 @@ export function shouldRetainDisconnectedFrame(snapshot: ConnectionSnapshotView):
  * transport terms with counts that disagreed (cas-90d4). A pairing loss has its
  * own machine card. Only a failure that will not retry needs the rail.
  */
-export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | undefined): boolean {
-  return attach?.fatal === true && !attach.authFailure;
+export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | undefined, machine?: ConnectionSnapshotView): boolean {
+  return attach?.fatal === true && !attach.authFailure && (!machine || machine.phase === "live");
 }
 
 /**
@@ -336,8 +336,16 @@ export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | 
  * outage refused and the controls it disabled all name the machine the way
  * the banner does, so the operator never reads two descriptions of one drop.
  */
-export function lostConnectionBanner(machineLabel: string, fatal: boolean): string {
-  return fatal ? `Lost connection to ${machineLabel}. Not retrying.` : `Lost connection to ${machineLabel}. Reconnecting…`;
+/** Fatal transport failures are unsupported-browser errors, never network guesses. */
+export function fatalConnectionRecovery(reason?: string): string {
+  if (!reason) return "This browser cannot make this connection. Update your browser, then reload this page.";
+  // Keep the supported browser versions in the actual reason, but explain the
+  // missing API in human terms; the full diagnostic remains in Details.
+  return `${reason.replace(/^This browser is missing .+, which Cassy Cloud needs\./, "This browser is missing a feature Cassy Cloud needs.")} Then reload this page.`;
+}
+
+export function lostConnectionBanner(machineLabel: string, fatal: boolean, reason?: string): string {
+  return fatal ? `Lost connection to ${machineLabel}. ${fatalConnectionRecovery(reason)}` : `Lost connection to ${machineLabel}. Reconnecting…`;
 }
 
 /**
@@ -377,9 +385,12 @@ export function sessionReconnectingBanner(sessionLabel: string, machineLabel: st
     : `Reconnecting to ${sessionLabel}… ${machineLabel} is still connected.`;
 }
 
+/** What a session-only drop means for the controls, without restating the drop. */
+export const SESSION_OUTAGE_CONTROLS_RETURN = "Control and interrupts return when it's back.";
+
 /** Why the session's controls wait while only its own link reconnects (cas-d15c). */
 export function sessionOutageControlsReason(sessionLabel: string): string {
-  return `Reconnecting to ${sessionLabel}. Control and interrupts return when it's back.`;
+  return `Reconnecting to ${sessionLabel}. ${SESSION_OUTAGE_CONTROLS_RETURN}`;
 }
 
 /** A message the outage refused. The composer keeps the draft, so it says so. */
@@ -391,11 +402,27 @@ export function outageRefusal(machineLabel: string): string {
  * cas-7b31 (journey F2): why the controls wait while the pairing is refused.
  * Nothing reconnects or comes back by itself; re-pairing is the step.
  */
+export const PAIRING_CONTROLS_RETURN = "Re-pair it to take control and interrupt.";
+
 export function pairingControlsReason(machineLabel: string): string {
-  return `${machineLabel} needs pairing again. Re-pair it to take control and interrupt.`;
+  return `${pairingLostBanner(machineLabel)} ${PAIRING_CONTROLS_RETURN}`;
 }
+
+/** What a machine outage means for the controls, without restating the outage. */
+export const OUTAGE_CONTROLS_RETURN = "Control and interrupts return when it reconnects.";
 
 /** Why Take control, Release control and Interrupt are unavailable during an outage. */
 export function outageControlsReason(machineLabel: string): string {
-  return `Lost connection to ${machineLabel}. Control and interrupts return when it reconnects.`;
+  return `Lost connection to ${machineLabel}. ${OUTAGE_CONTROLS_RETURN}`;
+}
+
+/**
+ * The visible line under the header while an outage disables its controls
+ * (journey F42). The banner already says what was lost, in one live
+ * announcement, so the line says only what it means for the controls. The
+ * controls' own descriptions keep the whole sentence, since they are read
+ * on their own.
+ */
+export function outageControlsNotice(kind: "machine" | "session" | "pairing"): string {
+  return kind === "pairing" ? PAIRING_CONTROLS_RETURN : kind === "session" ? SESSION_OUTAGE_CONTROLS_RETURN : OUTAGE_CONTROLS_RETURN;
 }

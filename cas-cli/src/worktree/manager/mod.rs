@@ -581,31 +581,105 @@ impl WorktreeManager {
 
     fn check_lane_fast_rows(&self, worktree: &Worktree) -> WorktreeResult<()> {
         let relative = "scripts/check-lane-fast-rows.py";
-        let target_runner = self.repo_root.join(relative);
-        let source_runner = worktree.path.join(relative);
-        let runner = if target_runner.is_file() {
-            target_runner
-        } else if source_runner.is_file() {
-            source_runner
+        let target_sha = self
+            .git
+            .resolve_commit(&worktree.parent_branch)
+            .ok_or_else(|| WorktreeError::Git(GitError::BranchNotFound(worktree.parent_branch.clone())))?;
+        let source_sha = self
+            .git
+            .resolve_commit(&worktree.branch)
+            .ok_or_else(|| WorktreeError::Git(GitError::BranchNotFound(worktree.branch.clone())))?;
+        // The shared checkout can be on an older, unrelated branch with
+        // operator WIP. Its scripts are never merge-admission authority.
+        let target_script = self.committed_lane_script(&target_sha, relative)?;
+        let (policy_sha, policy_origin, script) = if let Some(script) = target_script {
+            (&target_sha, "target", script)
+        } else if let Some(script) = self.committed_lane_script(&source_sha, relative)? {
+            // A project adding lane admission in this delivery still gets its
+            // existing source-runner policy when the target has none.
+            (&source_sha, "source", script)
         } else {
             // Other projects retain their existing merge policy.
             return Ok(());
         };
+        let scope = tempfile::Builder::new()
+            .prefix("cas-lane-runner-")
+            .tempdir()?;
+        let runner = scope.path().join("check-lane-fast-rows.py");
+        std::fs::write(&runner, script)?;
+        // check-lane-fast-rows.py loads the compile verifier beside __file__.
+        // Give it the helper from the SAME approved commit, never a mixture
+        // of old-root and target/source policy.
+        if let Some(compiler) =
+            self.committed_lane_script(policy_sha, "scripts/check-lane-compile.py")?
+        {
+            std::fs::write(scope.path().join("check-lane-compile.py"), compiler)?;
+        }
+        self.require_lane_refs(worktree, &target_sha, &source_sha)?;
         let output = std::process::Command::new("python3")
-            .arg(runner)
+            .arg(&runner)
             .arg(&self.repo_root)
             .arg(&worktree.parent_branch)
             .arg(&worktree.branch)
             .output()?;
+        self.require_lane_refs(worktree, &target_sha, &source_sha)?;
         if !output.status.success() {
             return Err(WorktreeError::Git(GitError::CommandFailed(format!(
-                "LANE FAST ROWS FAILED (merge refused):\n{}{}",
+                "LANE FAST ROWS FAILED (merge refused; {policy_origin} policy {policy_sha}):\n{}{}\n\
+                 The runner copy is temporary. Correct the named row, then retry the authenticated \
+                 worktree_merge action; a manual preflight does not merge or waive admission.",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             ))));
         }
-        tracing::info!(receipt = %String::from_utf8_lossy(&output.stdout), "lane fast rows passed");
+        tracing::info!(policy_origin, policy_sha, receipt = %String::from_utf8_lossy(&output.stdout), "lane fast rows passed");
         Ok(())
+    }
+
+    fn require_lane_refs(
+        &self,
+        worktree: &Worktree,
+        target_sha: &str,
+        source_sha: &str,
+    ) -> WorktreeResult<()> {
+        if self.git.resolve_commit(&worktree.parent_branch).as_deref() != Some(target_sha)
+            || self.git.resolve_commit(&worktree.branch).as_deref() != Some(source_sha)
+        {
+            return Err(WorktreeError::Git(GitError::CommandFailed(
+                "source or target moved during lane fast rows; merge refused".to_string(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn committed_lane_script(&self, sha: &str, relative: &str) -> WorktreeResult<Option<Vec<u8>>> {
+        let listing = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_root)
+            .args(["ls-tree", "-z", sha, "--", relative])
+            .output()?;
+        if !listing.status.success() {
+            return Err(WorktreeError::Git(GitError::CommandFailed(format!(
+                "cannot inspect committed lane policy {sha}:{relative}: {}",
+                String::from_utf8_lossy(&listing.stderr)
+            ))));
+        }
+        if listing.stdout.is_empty() {
+            return Ok(None);
+        }
+        let object = format!("{sha}:{relative}");
+        let blob = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_root)
+            .args(["show", &object])
+            .output()?;
+        if !blob.status.success() {
+            return Err(WorktreeError::Git(GitError::CommandFailed(format!(
+                "cannot load committed lane policy {object}: {}",
+                String::from_utf8_lossy(&blob.stderr)
+            ))));
+        }
+        Ok(Some(blob.stdout))
     }
 
     /// Remove a successfully merged worktree after any caller-owned durable
@@ -715,6 +789,17 @@ impl WorktreeManager {
 /// Safe to call on worktrees where the files are already present (tracked in git):
 /// existing paths are silently skipped.
 pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
+    project_support_config(repo_root, worktree_path, None);
+}
+
+/// Provision worker support files with a private MCP configuration when the
+/// project declares supervisor-only resources. Epic/supervisor worktrees retain
+/// the full project configuration through `symlink_project_config`.
+pub fn provision_worker_project_config(repo_root: &Path, worktree_path: &Path, worker_name: &str) {
+    project_support_config(repo_root, worktree_path, Some(worker_name));
+}
+
+fn project_support_config(repo_root: &Path, worktree_path: &Path, worker: Option<&str>) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
@@ -722,8 +807,14 @@ pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
         // .mcp.json — MCP server definitions (Cassy, Context7, etc.)
         let mcp_src = repo_root.join(".mcp.json");
         let mcp_dst = worktree_path.join(".mcp.json");
-        if mcp_src.exists() && !mcp_dst.exists() {
-            let _ = symlink(&mcp_src, &mcp_dst);
+        let provisioned = if let Some(worker_name) = worker {
+            cas_mux::worker_resources::provision_project_mcp(repo_root, worker_name)
+        } else { Ok(false) };
+        match provisioned {
+            Ok(true) => {}
+            Ok(false) if mcp_src.exists() && !mcp_dst.exists() => { let _ = symlink(&mcp_src, &mcp_dst); }
+            Ok(false) => {}
+            Err(_) => tracing::warn!("worker MCP configuration isolation failed; worker launch will refuse until it is repaired"),
         }
 
         // .claude/ — settings, permissions, skills, agents, hooks

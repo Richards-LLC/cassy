@@ -3,6 +3,9 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/release-portable.sh
+source "$script_dir/release-portable.sh"
+release_portable_define_sha256sum
 receipt="$script_dir/release-published-receipt.sh"
 template="$script_dir/../docs/release-notes/runtime-release-template.md"
 tmpdir="$(mktemp -d)"

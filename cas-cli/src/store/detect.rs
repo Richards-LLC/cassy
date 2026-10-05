@@ -50,7 +50,7 @@ pub fn has_project_cas() -> bool {
 pub fn find_cas_root() -> Result<PathBuf> {
     // 1. Check CAS_ROOT env var first (highest priority)
     // This enables workers in clones to use the main repo's .cas
-    if let Ok(cas_root) = std::env::var("CAS_ROOT") {
+    if let Ok(cas_root) = cas_core::env_overlay::var("CAS_ROOT") {
         let path = PathBuf::from(&cas_root);
         if path.exists() && path.is_dir() {
             // cas-b69a (GH #157): the override is legitimate but must never be
@@ -104,6 +104,40 @@ pub(crate) fn root_override_notice(env_root: &Path, cwd_root: &Path) -> Option<S
     ))
 }
 
+/// cas-e1c7: `CAS_ROOT` and the working directory resolve two different stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootConflict {
+    /// The store `CAS_ROOT` names (what every command uses by default).
+    pub env_root: PathBuf,
+    /// The store the working directory resolves to on its own.
+    pub cwd_root: PathBuf,
+}
+
+/// cas-e1c7: whether `CAS_ROOT` overrides a different working-directory store
+/// for this process. `None` when `CAS_ROOT` is unset or invalid, when the
+/// working directory has no store, or when both name the same store.
+pub fn root_conflict() -> Option<RootConflict> {
+    let env_root = cas_core::env_overlay::var_os("CAS_ROOT")?;
+    let cwd = std::env::current_dir().ok()?;
+    root_conflict_for(Path::new(&env_root), &cwd)
+}
+
+/// [`root_conflict`] for explicit inputs, so it is testable without touching
+/// the process environment.
+pub fn root_conflict_for(env_root: &Path, start: &Path) -> Option<RootConflict> {
+    if !env_root.is_dir() {
+        return None;
+    }
+    let cwd_root = find_cas_root_ignoring_env(start).ok()?;
+    if canonical_or_owned(env_root) == canonical_or_owned(&cwd_root) {
+        return None;
+    }
+    Some(RootConflict {
+        env_root: env_root.to_path_buf(),
+        cwd_root,
+    })
+}
+
 /// `canonicalize` when the path resolves, otherwise the path as given. Used only
 /// for equality comparison, never for anything the user sees.
 fn canonical_or_owned(path: &Path) -> PathBuf {
@@ -148,7 +182,7 @@ fn announce_root_override_once(env_root: &Path, start: &Path) {
 pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
     // Respect CAS_ROOT for explicit overrides (useful for workers in clones and external tooling).
     // This mirrors `find_cas_root()` behavior but applies when callers start from an explicit path.
-    if let Ok(cas_root) = std::env::var("CAS_ROOT") {
+    if let Ok(cas_root) = cas_core::env_overlay::var("CAS_ROOT") {
         let path = PathBuf::from(&cas_root);
         if path.exists() && path.is_dir() {
             // cas-b69a (GH #157): name the root that lost, before any I/O.
@@ -183,7 +217,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // This is the most reliable detection for factory workers because it
     // doesn't depend on git state or .git file parsing.
     if let Some(cas_dir) = find_cas_root_from_cas_worktree(start) {
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
     }
@@ -192,7 +226,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // This takes priority because worktrees should share the main repo's .cas.
     if let Some(main_repo) = find_main_repo_from_worktree(start) {
         let cas_dir = main_repo.join(".cas");
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
     }
@@ -202,7 +236,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // This also keeps a nested `.cas/` from shadowing the project store.
     if let Ok(repo_root) = find_git_toplevel(start) {
         let cas_dir = repo_root.join(".cas");
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
         return Err(CasError::NotInitialized);
@@ -213,7 +247,7 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
 
     loop {
         let cas_dir = current.join(".cas");
-        if cas_dir.exists() && cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
         }
 
@@ -223,6 +257,16 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     }
 
     Err(CasError::NotInitialized)
+}
+
+/// A `.cas` directory can be only a factory IPC rendezvous. Automatic
+/// discovery requires a SQLite/config file or the legacy markdown store;
+/// an explicit CAS_ROOT remains authoritative without these markers.
+fn has_project_store_marker(cas_dir: &Path) -> bool {
+    cas_dir.is_dir()
+        && (cas_dir.join("cas.db").is_file()
+            || cas_dir.join("config.toml").is_file()
+            || cas_dir.join("entries").is_dir())
 }
 
 /// Detect if `start` is inside a Cassy factory worktree (.cas/worktrees/<name>/)
@@ -248,7 +292,7 @@ fn find_cas_root_from_cas_worktree(start: &Path) -> Option<PathBuf> {
                 return None;
             }
         }
-        if cas_dir.join("cas.db").exists() || cas_dir.is_dir() {
+        if has_project_store_marker(&cas_dir) {
             return Some(cas_dir);
         }
     }
@@ -716,11 +760,27 @@ pub fn open_rule_store_local(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
     open_rule_store_base(cas_dir, false)
 }
 
-/// Initialize a new .cas directory
+/// Whether `cas_dir` already holds the Cassy store (its `cas.db`).
+pub fn cas_store_present(cas_dir: &Path) -> bool {
+    cas_dir.join("cas.db").exists()
+}
+
+/// Whether `cas_dir` already holds a project configuration file.
+pub fn cas_config_present(cas_dir: &Path) -> bool {
+    cas_dir.join("config.toml").exists() || cas_dir.join("config.yaml").exists()
+}
+
+/// Initialize a .cas directory: create and migrate its store.
+///
+/// An already-initialized directory (one with `cas.db`) is returned as is. A
+/// `.cas` that exists without a store, for example one holding only a
+/// committed `config.toml`, gets its store created and migrated; an existing
+/// configuration is kept as written (cas-563f). Only a directory with no
+/// configuration at all gets the default one.
 pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
     let cas_dir = path.join(".cas");
 
-    if cas_dir.exists() {
+    if cas_store_present(&cas_dir) {
         return Ok(cas_dir);
     }
 
@@ -756,9 +816,11 @@ pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
     // Create verification store for task quality gates (auto-inits on open)
     let _verification_store = SqliteVerificationStore::open(&cas_dir)?;
 
-    // Create default config
-    let config = Config::default();
-    config.save(&cas_dir)?;
+    // Create the default config, unless the directory already carries one.
+    if !cas_config_present(&cas_dir) {
+        let config = Config::default();
+        config.save(&cas_dir)?;
+    }
 
     // Run migrations to create any additional tables (e.g., worktrees)
     // Fail init if migrations fail to avoid partial/unsafe schema state.
@@ -786,6 +848,52 @@ mod tests {
         assert!(cas_dir.join("cas.db").exists());
         // Config is now saved as TOML (preferred format)
         assert!(cas_dir.join("config.toml").exists());
+    }
+
+    #[test]
+    fn init_cas_dir_creates_the_store_in_a_config_only_cas_and_keeps_its_config() {
+        // cas-563f: a .cas holding only an intentional config.toml (no
+        // cas.db) used to be returned untouched, so `cas init --force`
+        // reported success with no store.
+        let temp = TempDir::new().unwrap();
+        let cas = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let config = "[sync]\nenabled = false\ntarget = \".claude/rules/custom\"\n";
+        std::fs::write(cas.join("config.toml"), config).unwrap();
+
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+
+        assert!(cas_dir.join("cas.db").exists(), "the store must be created");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('entries', 'tasks', 'rules')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 3, "the store must be initialized, not just touched");
+        assert_eq!(
+            std::fs::read_to_string(cas_dir.join("config.toml")).unwrap(),
+            config,
+            "an intentional config.toml must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn init_cas_dir_leaves_an_initialized_cas_alone() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "# operator edits\n").unwrap();
+        let db_before = std::fs::read(cas_dir.join("cas.db")).unwrap();
+
+        init_cas_dir(temp.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cas_dir.join("config.toml")).unwrap(),
+            "# operator edits\n"
+        );
+        assert_eq!(std::fs::read(cas_dir.join("cas.db")).unwrap(), db_before);
     }
 
     #[test]
@@ -899,6 +1007,133 @@ mod tests {
         // Should find .cas from subdirectory
         let found = find_cas_root_from(&subdir).unwrap();
         assert_eq!(found, temp.path().join(".cas"));
+    }
+
+    #[test]
+    fn cas_0f22_socket_only_directory_is_skipped_during_walk() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let ipc = home.join(".cas");
+        let project = home.join("uninitialized-project/src");
+        std::fs::create_dir_all(&ipc).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        #[cfg(unix)]
+        let _socket = std::os::unix::net::UnixListener::bind(ipc.join("factory.sock")).unwrap();
+        #[cfg(not(unix))]
+        std::fs::write(ipc.join("factory.sock"), "IPC fixture").unwrap();
+        assert!(matches!(
+            find_cas_root_from(&project),
+            Err(CasError::NotInitialized)
+        ));
+
+        // A rejected rendezvous must not stop the non-Git ancestor walk.
+        let outer = temp.path().join(".cas");
+        std::fs::create_dir(&outer).unwrap();
+        std::fs::write(outer.join("config.toml"), "").unwrap();
+        assert_eq!(find_cas_root_from(&project).unwrap(), outer);
+    }
+
+    #[test]
+    fn cas_0f22_each_store_marker_is_sufficient_and_wrong_types_are_not() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        for marker in ["cas.db", "config.toml", "entries"] {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path().join(".cas");
+            std::fs::create_dir(&root).unwrap();
+            if marker == "entries" {
+                std::fs::create_dir(root.join(marker)).unwrap();
+            } else {
+                std::fs::write(root.join(marker), "").unwrap();
+            }
+            assert_eq!(find_cas_root_from(temp.path()).unwrap(), root);
+        }
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(root.join("cas.db")).unwrap();
+        std::fs::create_dir(root.join("config.toml")).unwrap();
+        std::fs::write(root.join("entries"), "not a directory").unwrap();
+        assert!(matches!(
+            find_cas_root_from(temp.path()),
+            Err(CasError::NotInitialized)
+        ));
+    }
+
+    #[test]
+    fn cas_0f22_factory_worktree_requires_parent_marker() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        let worker = root.join("worktrees/worker/src");
+        std::fs::create_dir_all(&worker).unwrap();
+        assert!(find_cas_root_from_cas_worktree(&worker).is_none());
+        assert!(matches!(
+            find_cas_root_from(&worker),
+            Err(CasError::NotInitialized)
+        ));
+        std::fs::write(root.join("cas.db"), "").unwrap();
+        assert_eq!(find_cas_root_from_cas_worktree(&worker), Some(root.clone()));
+        assert_eq!(find_cas_root_from(&worker).unwrap(), root);
+    }
+
+    #[test]
+    fn cas_0f22_real_git_worktree_requires_main_repo_marker() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let main = temp.path().join("main");
+        let worker = temp.path().join("worker");
+        std::fs::create_dir(&main).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "fixture git failed: {output:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+        git(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "fixture-worker",
+            worker.to_str().unwrap(),
+        ]);
+        let root = main.canonicalize().unwrap().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("factory.sock"), "IPC fixture").unwrap();
+        assert!(matches!(
+            find_cas_root_from(&worker),
+            Err(CasError::NotInitialized)
+        ));
+        std::fs::write(root.join("config.toml"), "").unwrap();
+        assert_eq!(find_cas_root_from(&worker).unwrap(), root);
+    }
+
+    #[test]
+    fn cas_0f22_explicit_unmarked_root_still_wins() {
+        let temp = TempDir::new().unwrap();
+        let explicit = temp.path().join("unmarked");
+        std::fs::create_dir(&explicit).unwrap();
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_ROOT", Some(explicit.to_str().unwrap()))]);
+        assert_eq!(find_cas_root_from(temp.path()).unwrap(), explicit);
+        assert_eq!(find_cas_root().unwrap(), explicit);
     }
 
     #[test]

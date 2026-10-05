@@ -213,6 +213,132 @@ fn valid_bundle_passes() {
     assert_eq!(receipt.passed_expects, 1);
 }
 
+fn scoped_factory_fixture() -> (Fixture, PathBuf, PathBuf) {
+    let mut fx = Fixture::new();
+    let cas_root = fx.repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let base = fx.task_dir.parent().unwrap().to_path_buf();
+    std::fs::write(cas_root.join("config.toml"), format!(
+        "[factory]\nartifacts_root = {:?}\n[qa]\nuser_facing_paths = [\"web/**\"]\n",
+        base.display().to_string()
+    )).unwrap();
+    let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, TASK);
+    std::fs::remove_dir(&fx.task_dir).unwrap();
+    fx.task_dir = scoped.clone();
+    (fx, cas_root, legacy)
+}
+
+fn hook_bundle_write(fx: &Fixture, cas_root: &Path, bundle: &Path) -> serde_json::Value {
+    let input = cas_core::hooks::types::HookInput {
+        session_id: "qa-path-contract".into(),
+        cwd: fx.repo.display().to_string(),
+        hook_event_name: "PreToolUse".into(),
+        tool_name: Some("Write".into()),
+        tool_input: Some(serde_json::json!({"file_path": bundle, "content": "bundle"})),
+        ..Default::default()
+    };
+    let out = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
+    serde_json::to_value(out.hook_specific_output.unwrap()).unwrap()
+}
+
+fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String>, String> {
+    let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
+    task.notes = notes.into();
+    crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()])
+    )
+}
+
+/// GH #1061: a long-running close service can retain a flat-path citation
+/// after PreToolUse has switched new writes to the project namespace.
+#[test]
+fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let (fx, cas_root, legacy) = scoped_factory_fixture();
+    let bundle = fx.task_dir.join("qa/bundle.json");
+    let decision = hook_bundle_write(&fx, &cas_root, &bundle);
+    assert_eq!(decision["permissionDecision"], "allow", "{decision}");
+    fx.write_bundle(|_| {});
+    assert!(!legacy.exists(), "no flat directory exists in the reported incident");
+    for legacy_directory_exists in [false, true] {
+        if legacy_directory_exists {
+            std::fs::create_dir_all(&legacy).unwrap();
+            std::fs::write(legacy.join("LEDGER.md"), "historical ledger").unwrap();
+        }
+        for citation in [bundle.clone(), legacy.join("qa/bundle.json")] {
+            let notes = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display()))
+                .unwrap_or_else(|error| panic!("citation {}: {error}", citation.display()));
+            assert!(notes.iter().any(|note| note.contains(bundle.to_str().unwrap())
+                && note.contains("1 passing Expect")), "{notes:?}");
+        }
+    }
+}
+
+#[test]
+fn missing_bundle_refusal_requests_hook_writable_path_gh_1061() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let (fx, cas_root, legacy) = scoped_factory_fixture();
+    let bundle = fx.task_dir.join("qa/bundle.json");
+    for notes in [String::new(), format!("qa-bundle: {}", legacy.join("qa/bundle.json").display())] {
+        let error = scoped_close(&fx, &cas_root, &notes).unwrap_err();
+        let (_, next) = error.split_once("Next: ").unwrap();
+        assert!(next.contains(bundle.to_str().unwrap()), "{error}");
+        assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
+        assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
+    }
+    let denied = hook_bundle_write(&fx, &cas_root, &legacy.join("qa/bundle.json"));
+    assert_eq!(denied["permissionDecision"], "deny", "{denied}");
+    assert!(denied["permissionDecisionReason"].as_str().unwrap()
+        .contains(fx.task_dir.parent().unwrap().to_str().unwrap()), "{denied}");
+}
+
+#[test]
+fn citation_migration_preserves_validation_boundaries_gh_1061() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let (fx, cas_root, legacy) = scoped_factory_fixture();
+    let bundle = fx.write_bundle(|_| {});
+    let historical = legacy.join("qa/bundle.json");
+    std::fs::create_dir_all(historical.parent().unwrap()).unwrap();
+    std::fs::write(&historical, "invalid historical manifest").unwrap();
+    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+    assert!(error.contains("malformed") && error.contains(historical.to_str().unwrap()), "{error}");
+    assert!(error.split_once("Next: ").unwrap().1.contains("rewrite bundle.json"), "{error}");
+    let next = error.split_once("Next: ").unwrap().1;
+    assert!(next.contains(bundle.to_str().unwrap()), "{error}");
+    assert!(!next.contains(historical.to_str().unwrap()), "{error}");
+    assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
+
+    // A valid bundle elsewhere cannot be substituted for a cited task file.
+    let unrelated = legacy.parent().unwrap().join("other-project/qa/bundle.json");
+    std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    std::fs::copy(&bundle, &unrelated).unwrap();
+    for citation in [unrelated.clone(), legacy.join("../other-project/qa/bundle.json")] {
+        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display())).unwrap_err();
+        assert!(error.contains("outside the task"), "{error}");
+    }
+    // Remapping still enforces the delivered commit, rather than trusting the
+    // presence of a scoped manifest alone.
+    std::fs::remove_file(&historical).unwrap();
+    fx.write_bundle(|manifest| manifest["head_sha"] = serde_json::json!("0".repeat(40)));
+    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+    assert!(error.contains("stale"), "{error}");
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(&bundle).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &bundle).unwrap();
+        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+        assert!(error.contains("outside the task"), "{error}");
+        // A dangling historical symlink is an existing unsafe citation,
+        // never permission to switch to a different bundle.
+        std::os::unix::fs::symlink(legacy.join("absent.json"), &historical).unwrap();
+        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+        assert!(error.contains("does not exist") && error.contains(historical.to_str().unwrap()), "{error}");
+    }
+}
+
 #[test]
 fn missing_citation_names_the_note_command() {
     let fx = Fixture::new();
@@ -1427,6 +1553,107 @@ fn deployed_bundle_for_another_commit_or_without_proof_is_refused() {
 }
 
 #[test]
+fn secret_scan_accepts_exact_redaction_placeholders_in_each_shape() {
+    for value in ["REDACTED", "[REDACTED]", "<redacted>", "***", ""] {
+        let json_value = serde_json::to_string(value).unwrap();
+        for text in [
+            format!(r#"{{"name":"Authorization","value":{json_value}}}"#),
+            format!("Cookie: {value}\n"),
+            format!(r#"{{"cookies":[{{"name":"session","value":{json_value}}}]}}"#),
+        ] {
+            assert_eq!(first_secret(&text), None, "placeholder in {text}");
+        }
+    }
+}
+
+#[test]
+fn secret_scan_refuses_real_values_in_each_shape() {
+    for value in [
+        "12345678",
+        "REDACTED-real",
+        "[REDACTED]suffix",
+        "REDACTED real",
+    ] {
+        let json_value = serde_json::to_string(value).unwrap();
+        for text in [
+            format!(r#"{{"name":"Set-Cookie","value":{json_value}}}"#),
+            format!("Authorization: {value}\n"),
+            format!(r#"{{"cookies":[{{"value":{json_value}}}]}}"#),
+        ] {
+            assert!(first_secret(&text).is_some(), "real value in {text}");
+        }
+    }
+}
+
+#[test]
+fn secret_scan_checks_every_value_next_to_redactions() {
+    for text in [
+        r#"[{"name":"Cookie","value":"REDACTED"},{"name":"Authorization","value":"12345678"}]"#,
+        "Cookie: REDACTED\nAuthorization: 12345678\n",
+        r#"{"cookies":[{"value":"12345678"},{"value":"[REDACTED]"}]}"#,
+        r#"{"cookies":[{"value":"[REDACTED]"},{"value":"12345678"}]}"#,
+    ] {
+        assert!(first_secret(text).is_some(), "mixed values in {text}");
+    }
+}
+
+#[test]
+fn secret_scan_decodes_json_values_without_exempting_partial_redactions() {
+    for text in [
+        r#"{"name":"Cookie","value":"\u005bREDACTED\u005d"}"#,
+        r#"{"cookies":[{"value":"\u005bREDACTED\u005d"}]}"#,
+        "Cookie: \tREDACTED\t \r\n",
+    ] {
+        assert_eq!(first_secret(text), None, "exact value in {text}");
+    }
+    for text in [
+        r#"{"name":"Cookie","value":" REDACTED "}"#,
+        r#"{"cookies":[{"value":"escaped\"real-value"},{"value":"[REDACTED]"}]}"#,
+    ] {
+        assert!(first_secret(text).is_some(), "real value in {text}");
+    }
+}
+
+#[test]
+fn secret_scan_applies_redaction_rule_to_text_and_trace_without_echoing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let text_path = dir.path().join("actions.txt");
+    let trace_path = dir.path().join("trace.zip");
+    let listed = [
+        ("trace_actions".to_string(), text_path.clone()),
+        ("trace".to_string(), trace_path.clone()),
+    ];
+    for value in ["REDACTED", "[REDACTED]", "<redacted>", "***", ""] {
+        let event = format!(r#"{{"name":"Authorization","value":"{value}"}}"#);
+        std::fs::write(&text_path, format!("Cookie: {value}\n")).unwrap();
+        trace_zip(&trace_path, &[&event]);
+        assert!(check_no_secrets(dir.path(), &listed).is_ok());
+    }
+    for key in ["trace_actions", "trace"] {
+        std::fs::write(&text_path, "Cookie: REDACTED\n").unwrap();
+        trace_zip(&trace_path, &[r#"{"name":"Cookie","value":"REDACTED"}"#]);
+        let real_value = "real-secret-123";
+        if key == "trace_actions" {
+            std::fs::write(&text_path, format!("Cookie: {real_value}\n")).unwrap();
+        } else {
+            let event = format!(r#"{{"name":"Cookie","value":"{real_value}"}}"#);
+            trace_zip(&trace_path, &[&event]);
+        }
+        let refusal = check_no_secrets(dir.path(), &listed).unwrap_err();
+        let message = format!("{refusal:?}");
+        assert!(refusal.problem.contains(key), "{message}");
+        assert!(message.contains("8 or more characters"), "{message}");
+        for placeholder in ["REDACTED", "[REDACTED]", "<redacted>", "***", "empty"] {
+            assert!(message.contains(placeholder), "{message}");
+        }
+        assert!(
+            !message.contains(real_value),
+            "the value must not be echoed"
+        );
+    }
+}
+
+#[test]
 fn deployed_bundle_carrying_credentials_is_refused_without_echoing_them() {
     // A session cookie copied into a text artifact.
     let fx = Fixture::new();
@@ -1510,4 +1737,110 @@ fn deployed_origins_config_accepts_remote_origins_only() {
             .is_err()
     );
     assert!(config.set("qa.deployed_origins", "not a url").is_err());
+}
+
+/// cas-7c15 (GH #1078): a Quasar focus input, whose `f_<uuid>` id is minted
+/// on every render.
+fn quasar_focus_finding(origin: &str, uuid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "tiny-target",
+        "selector": format!("#f_{uuid}"),
+        "elementPath": format!("div.q-field > input#f_{uuid}"),
+        "otherElementPath": format!("label[for=f_{uuid}]"),
+        "url": format!("{origin}/?fixture=home"),
+        "scheme": "dark",
+        "viewport": {"name": "desktop", "width": 1280, "height": 800}
+    })
+}
+
+#[test]
+fn normalize_random_ids_replaces_only_uuid_shaped_fragments_cas_7c15() {
+    assert_eq!(
+        normalize_random_ids("#f_4cedc84f-1b2a-4c3d-9e8f-0123456789ab"),
+        "#f_<uuid>"
+    );
+    assert_eq!(
+        normalize_random_ids("label[for=f_4CEDC84F-1B2A-4C3D-9E8F-0123456789AB] > x"),
+        "label[for=f_<uuid>] > x"
+    );
+    assert_eq!(
+        normalize_random_ids(
+            "a#00000000-0000-0000-0000-000000000000 b#ffffffff-ffff-ffff-ffff-ffffffffffff"
+        ),
+        "a#<uuid> b#<uuid>"
+    );
+    // Not UUID-shaped: stable ids, short hex, glued hex, wrong grouping.
+    for stable in [
+        "#send",
+        "#f_4cedc84f",
+        "#f_a4cedc84f-1b2a-4c3d-9e8f-0123456789ab",
+        "#f_4cedc84f-1b2a-4c3d-9e8f-0123456789abc",
+        "#f_4cedc84f1b2a-4c3d-9e8f-0123456789ab",
+        "#f_4cedc84g-1b2a-4c3d-9e8f-0123456789ab",
+        "",
+    ] {
+        assert_eq!(normalize_random_ids(stable), stable, "{stable}");
+    }
+}
+
+#[test]
+fn scoped_visual_qa_ignores_per_render_random_ids_but_still_reports_new_findings_cas_7c15() {
+    let fx = scoped_fixture();
+    let dir = fx.bundle_dir();
+    let tip_ids = [
+        "4cedc84f-1b2a-4c3d-9e8f-0123456789ab",
+        "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+    ];
+    let base_ids = [
+        "0f1e2d3c-4b5a-4968-8776-655443322110",
+        "AABBCCDD-EEFF-4011-8233-445566778899",
+    ];
+    scoped_report(
+        &dir.join("visual-qa-baseline/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now() - chrono::Duration::days(3),
+        &[&format!("{BASE}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(BASE, "footer a"),
+            quasar_focus_finding(BASE, base_ids[0]),
+            quasar_focus_finding(BASE, base_ids[1]),
+        ]),
+    );
+    // Same findings, only the random ids differ: nothing is new.
+    scoped_report(
+        &dir.join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(TIP, "footer a"),
+            quasar_focus_finding(TIP, tip_ids[0]),
+            quasar_focus_finding(TIP, tip_ids[1]),
+        ]),
+    );
+    fx.validate(&fx.notes())
+        .expect("findings that differ only in per-render random ids are the base's backlog");
+
+    // A genuinely new finding, and a third random-id input the base has only
+    // two of, are still reported.
+    scoped_report(
+        &dir.join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(TIP, "footer a"),
+            backlog_finding(TIP, "#send"),
+            quasar_focus_finding(TIP, tip_ids[0]),
+            quasar_focus_finding(TIP, tip_ids[1]),
+            quasar_focus_finding(TIP, "11111111-2222-4333-8444-555555555555"),
+        ]),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("introduced 2 visual-QA finding")
+            && refusal.problem.contains("#send")
+            && refusal.problem.contains("#f_<uuid>"),
+        "{refusal:?}"
+    );
 }

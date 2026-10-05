@@ -2,8 +2,8 @@ use crate::store::{open_agent_store, open_task_store};
 use crate::ui::factory::app::imports::*;
 use crate::worktree::RemoveOutcome;
 
-fn validate_live_spawn_repo_context(
-    manager: &WorktreeManager,
+fn validate_live_spawn_repo_root(
+    repo_root: &std::path::Path,
     project_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     use crate::worktree::GitOperations;
@@ -14,11 +14,11 @@ fn validate_live_spawn_repo_context(
              the factory started, restart the factory daemon before spawning isolated workers."
         )
     })?;
-    if live_root != manager.repo_root() {
+    if live_root != repo_root {
         anyhow::bail!(
             "Repository context changed after the factory daemon started (cached root: {}, \
              live root: {}). Restart the factory daemon so worker isolation uses the new repository.",
-            manager.repo_root().display(),
+            repo_root.display(),
             live_root.display(),
         );
     }
@@ -1243,6 +1243,7 @@ fn recorded_epic_parent_branch_for_resolved_base(
         })
 }
 
+#[cfg(test)]
 fn cleanup_cancelled_spawn_worktree_with_manager(
     manager: Option<&mut WorktreeManager>,
     result: &mut WorkerSpawnResult,
@@ -1460,6 +1461,8 @@ fn reset_stale_preassign_holder(
             "task assignee changed from stale holder '{holder}' while preparing reset"
         ));
     }
+    cas_store::release_qa_claim_for_reviewer(cas_dir, &task.id, holder)
+        .map_err(|e| format!("could not release stale QA reviewer '{holder}' claim: {e}"))?;
     let prior_status = reset.status;
     reset.status = cas_types::TaskStatus::Open;
     reset.assignee = None;
@@ -1477,6 +1480,146 @@ fn reset_stale_preassign_holder(
         .update(&reset)
         .map(|_| ())
         .map_err(|e| format!("could not persist stale-holder reset: {e}"))
+}
+
+/// Why a worker's process was retired, which decides what happens to the
+/// tasks it was bound to (cas-a622).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkerRetirement {
+    /// The worker is gone for good: park what it held and release its
+    /// bindings so another worker can take them.
+    Shutdown,
+    /// The same name is respawned at once in the same worktree to reset its
+    /// context. Assignees are display names (cas-dbbb), so every binding
+    /// already belongs to the replacement process.
+    Recycle,
+}
+
+/// Settle the task bindings of a worker whose process has just been retired.
+/// Returns how many bindings were released.
+pub(crate) fn settle_retired_worker_bindings(
+    cas_dir: &std::path::Path,
+    agent_store: &dyn cas_store::AgentStore,
+    agent: &cas_types::Agent,
+    held_task_ids: &[String],
+    retirement: WorkerRetirement,
+) -> usize {
+    if retirement == WorkerRetirement::Recycle {
+        // cas-a622: parking or releasing here is what cost proud-newt-45 its
+        // assignment. The replacement is the same name in the same worktree,
+        // so it already owns every binding; graceful_shutdown released only
+        // the old process's leases, which `task action=start` re-takes from
+        // the resume brief (`enqueue_recycle_resume_brief`).
+        tracing::info!(
+            worker = %agent.name,
+            held = held_task_ids.len(),
+            "cas-a622: recycle keeps the worker's task bindings"
+        );
+        return 0;
+    }
+    // Emit the same durable supervisor lifecycle relay used for unexpected
+    // PTY exits. The process is already gone, and this runs before the legacy
+    // binding cleanup, so the relay records and parks any task that was held
+    // at termination instead of reporting a misleading empty task set.
+    crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+        cas_dir,
+        agent_store,
+        agent,
+        held_task_ids,
+        "worker terminated by shutdown request",
+    );
+
+    // cas-7a94: clear pure Open pre-assigns and any binding the recovery
+    // path could not inspect. Assignees are display names (cas-dbbb), so
+    // match on `name` rather than the registration UUID.
+    let released = release_worker_task_bindings(cas_dir, &agent.name);
+    if released > 0 {
+        tracing::info!(
+            worker = %agent.name,
+            released,
+            "cas-7a94: released remaining task bindings on shutdown_worker"
+        );
+    }
+    released
+}
+
+/// The brief a recycled worker receives so its fresh conversation resumes its
+/// assigned work (cas-a622). `None` when it holds no nonterminal task.
+pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str) -> Option<String> {
+    let task_store = open_task_store(cas_dir).ok()?;
+    let mut held: Vec<cas_types::Task> = task_store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|task| task.assignee.as_deref() == Some(worker_name) && !task.is_terminal())
+        .collect();
+    if held.is_empty() {
+        return None;
+    }
+    held.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut brief =
+        "Your context was reset by a recycle; your worktree and every task binding were kept.\n"
+            .to_string();
+    let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
+    for task in held.iter().filter(|task| task.status == cas_types::TaskStatus::InProgress) {
+        brief.push_str(&format!(
+            "{}\n  Resume it: run `task action=start id={}` to re-take its lease, read its notes with \
+             `task action=notes id={}`, then continue from the last checkpoint.\n",
+            line(task),
+            task.id,
+            task.id
+        ));
+    }
+    let parked: Vec<String> = held
+        .iter()
+        .filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
+        .map(line)
+        .collect();
+    if !parked.is_empty() {
+        brief.push_str(&format!(
+            "Awaiting merge (re-close each after its merge lands; do not start it):\n{}\n",
+            parked.join("\n")
+        ));
+    }
+    let other: Vec<String> = held
+        .iter()
+        .filter(|task| {
+            !matches!(
+                task.status,
+                cas_types::TaskStatus::InProgress | cas_types::TaskStatus::AwaitingMerge
+            )
+        })
+        .map(line)
+        .collect();
+    if !other.is_empty() {
+        brief.push_str(&format!(
+            "Also assigned to you (start only when the supervisor directs):\n{}\n",
+            other.join("\n")
+        ));
+    }
+    Some(brief)
+}
+
+/// Queue [`recycle_resume_brief`] to the recycled worker. Returns the prompt
+/// id, or `None` when there was nothing to resume.
+pub(crate) fn enqueue_recycle_resume_brief(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    worker_name: &str,
+) -> anyhow::Result<Option<i64>> {
+    let Some(brief) = recycle_resume_brief(cas_dir, worker_name) else {
+        return Ok(None);
+    };
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = queue.enqueue_with_summary(
+        supervisor_name,
+        worker_name,
+        &brief,
+        Some(factory_session),
+        Some("Recycled: resume your assigned work"),
+    )?;
+    Ok(Some(id))
 }
 
 /// cas-7a94: release tasks bound to a dead/shutting-down worker so they are
@@ -1511,14 +1654,20 @@ pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_nam
             // Continue without lease release — clearing assignee is still useful.
             // agent_store calls below are skipped when this is None-equivalent by
             // using a local flag.
-            return release_worker_task_bindings_tasks_only(&*task_store, worker_name, None);
+            return release_worker_task_bindings_tasks_only(
+                cas_dir,
+                &*task_store,
+                worker_name,
+                None,
+            );
         }
     };
 
-    release_worker_task_bindings_tasks_only(&*task_store, worker_name, Some(&*agent_store))
+    release_worker_task_bindings_tasks_only(cas_dir, &*task_store, worker_name, Some(&*agent_store))
 }
 
 fn release_worker_task_bindings_tasks_only(
+    cas_dir: &std::path::Path,
     task_store: &dyn cas_store::TaskStore,
     worker_name: &str,
     agent_store: Option<&dyn cas_store::AgentStore>,
@@ -1547,6 +1696,11 @@ fn release_worker_task_bindings_tasks_only(
 
     let mut released = 0usize;
     for mut t in assigned {
+        if let Err(e) = cas_store::release_qa_claim_for_reviewer(cas_dir, &t.id, worker_name) {
+            tracing::error!(task_id = %t.id, worker_name, error = %e,
+                "cas-3172: QA claim release failed; retaining shutdown task binding for retry");
+            continue;
+        }
         if let Some(agents) = agent_store {
             let _ = agents.release_lease_for_task(&t.id, "Worker shutdown/cancel cleanup");
         }
@@ -1605,6 +1759,11 @@ pub(crate) fn release_preassign_if_bound(
     ) {
         return;
     }
+    if let Err(e) = cas_store::release_qa_claim_for_reviewer(cas_dir, task_id, worker_name) {
+        tracing::error!(task_id, worker_name, error = %e,
+            "cas-3172: QA claim release failed; retaining aborted preassignment for retry");
+        return;
+    }
     if let Ok(agents) = open_agent_store(cas_dir) {
         let _ = agents.release_lease_for_task(task_id, "Preassigned worker startup aborted");
     }
@@ -1632,6 +1791,234 @@ fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
         "all"
     } else {
         "count"
+    }
+}
+
+
+impl WorkerSpawnContext {
+    pub(crate) fn resolve(mut self) -> anyhow::Result<WorkerSpawnPrep> {
+        if self.isolate {
+            match DirectorData::load_fast(&self.cas_dir) {
+                Ok(data) => {
+                    let focus = self.factory_session.as_deref()
+                        .map(crate::ui::factory::app::preferred_epic_focus_from_session_metadata_named)
+                        .unwrap_or_default();
+                    let state =
+                        crate::ui::factory::app::resolve_epic_state_for_focus(&data, &focus);
+                    self.current_epic_id = state.epic_id().map(str::to_string);
+                    self.epic_branch =
+                        crate::ui::factory::app::epic_branch_for_state(&data, &state);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to refresh spawn focus; using captured focus")
+                }
+            }
+        }
+        let worker_name = self.worker_name.clone();
+        let task_id = self.task_id.as_deref();
+        let isolate = self.isolate;
+        let (worktree_info, base_warnings, base_provenance) = if isolate {
+            if let Some(session_repo_root) = &self.worktree_repo_root {
+                // Re-resolve the repository on every request. A daemon started
+                // before `git init` may have latched an ancestor repository;
+                // continuing with that stale root would create worker branches
+                // in the wrong project. The verified-spawn lifecycle surfaces
+                // this per-request failure to the supervisor.
+                validate_live_spawn_repo_root(session_repo_root, &self.project_path)?;
+                // Verify repo has commits before trying to create worktrees
+                if !crate::worktree::GitOperations::new(session_repo_root.clone())
+                    .has_commits()
+                    .unwrap_or(false)
+                {
+                    crate::telemetry::track(
+                        "factory_worker_spawn_result",
+                        vec![("success", "false"), ("reason", "repo_has_no_commits")],
+                    );
+                    anyhow::bail!(
+                        "Repository has no commits. Please make an initial commit before spawning workers."
+                    );
+                }
+
+                let session_repo_root = session_repo_root.clone();
+                let task_base = task_id
+                    .map(|tid| task_epic_base(&self.cas_dir, &session_repo_root, tid))
+                    .unwrap_or(TaskBase::Unresolved);
+                if let Some(epic) = task_base.epic()
+                    && epic.work_target.is_none()
+                    && (epic.branch.is_empty() || !epic.branch_exists)
+                {
+                    anyhow::bail!(
+                        "spawn refused: task {} belongs to epic {} but the epic has no recorded WorkTarget or resolvable branch; refusing to recompute a title-derived base",
+                        epic.task_id,
+                        epic.epic_id,
+                    );
+                }
+                let repo_root = resolve_spawn_worktree_repo(
+                    &self.cas_dir,
+                    &session_repo_root,
+                    task_base.work_target(),
+                )?;
+                let cross_repo = repo_root != session_repo_root;
+                let spawn_git = crate::worktree::GitOperations::new(repo_root.clone());
+                let worktree_path = if cross_repo {
+                    repo_root.join(".cas/worktrees").join(&worker_name)
+                } else {
+                    self.worktree_root
+                        .as_ref()
+                        .expect("worktree root snapshot")
+                        .join(&worker_name)
+                };
+                let branch_name = format!("factory/{worker_name}");
+                // Dynamic spawns must match startup spawns: never the
+                // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
+                // is the pre-assigned task's epic branch first, pinned epic
+                // focus second, trunk last.
+                let configured_trunk = Config::configured_epic_base_branch(&repo_root)
+                    .unwrap_or_else(|| spawn_git.detect_default_branch());
+                // An epic's declared delivery target is authoritative for both
+                // a no-epic child fallback and stale-base comparison. Falling
+                // back to factory configuration keeps legacy/taskless spawns.
+                let trunk = task_base
+                    .target_branch()
+                    .unwrap_or(&configured_trunk)
+                    .to_string();
+                let task_epic = task_base.epic().cloned();
+                let (parent_branch, base_source) =
+                    resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
+                let mut notices: Vec<String> = Vec::new();
+                if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+                {
+                    notices.push(notice);
+                }
+                let base_epic_id = match &base_source {
+                    SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
+                    SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
+                    SpawnBaseSource::WorkTarget { .. }
+                    | SpawnBaseSource::TaskWithoutEpic { .. }
+                    | SpawnBaseSource::Trunk => None,
+                };
+                // cas-b6f5 (GH #434): a task-level WorkTarget may point at
+                // an outer epic branch, so the winning SpawnBaseSource has no
+                // task-epic id even though the resolved base itself records a
+                // parent. Look up that base as an epic after retaining the
+                // direct child-epic path used by cas-83f6.
+                let recorded_base_parent = base_epic_id
+                    .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
+                    .filter(|(epic_branch, _)| epic_branch == &parent_branch)
+                    .or_else(|| {
+                        recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
+                    });
+                if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
+                    let refresh = fast_forward_epic_base_from_parent(
+                        &repo_root,
+                        &epic_branch,
+                        &recorded_parent,
+                    )
+                    .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
+                    if let Some(notice) = refresh {
+                        notices.push(notice);
+                    }
+                }
+                // cas-d897 (GH #146): the winning branch name still has to be
+                // resolved to the fresher of its local and origin refs — a
+                // stale local ref silently backdates every worker cut from it.
+                let (base_ref, freshness_notice, checkout_ref) =
+                    checkout_ref_for_spawn_base(&repo_root, &parent_branch, &base_source);
+                if let Some(notice) = freshness_notice {
+                    notices.push(notice);
+                }
+                // `parent_branch` remains the local merge-back target, but a
+                // refreshed spawn is actually cut from `base_ref`. Warnings
+                // must assess that effective checkout ref or they contradict
+                // the successful origin-based refresh they just announced.
+                let effective_base = base_ref.as_deref().unwrap_or(&parent_branch);
+                let mut provenance = spawn_base_provenance_notice(
+                    &parent_branch,
+                    &base_source,
+                    self.epic_branch.as_deref(),
+                );
+                let checkout_sha = short_sha(&repo_root, effective_base);
+                provenance.push_str(&format!(
+                    " CHECKOUT BASE: '{checkout_ref}' @ {checkout_sha}."
+                ));
+                if base_diverges_from_focus(
+                    &parent_branch,
+                    &base_source,
+                    self.epic_branch.as_deref(),
+                ) {
+                    notices.push(provenance.clone());
+                }
+                // The base must contain the epic it is meant to serve — the
+                // task's epic when that decided the base, otherwise the focus.
+                let epic_to_contain = match &base_source {
+                    SpawnBaseSource::TaskEpic { .. } => {
+                        task_epic.as_ref().map(|t| t.branch.clone())
+                    }
+                    SpawnBaseSource::WorkTarget { .. } => None,
+                    _ => self.epic_branch.clone(),
+                };
+                if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
+                    worker_base_mismatch_notice(&repo_root, effective_base, epic_branch)
+                }) {
+                    notices.push(notice);
+                }
+                // cas-7587: a task whose epic branch does not exist locally
+                // still lands on the focus base — say so instead of letting it
+                // look like the task's epic was honoured.
+                if !matches!(base_source, SpawnBaseSource::WorkTarget { .. })
+                    && let Some(unresolved) = task_epic.as_ref().filter(|t| !t.branch_exists)
+                {
+                    notices.push(format!(
+                        "SPAWN BASE FALLBACK: task {} belongs to epic {} whose branch '{}' does \
+                         not exist in this repository; the worker was cut from '{parent_branch}' \
+                         instead. Create the epic branch (or fix the epic's branch field) before \
+                         relying on this worker's base.",
+                        unresolved.task_id, unresolved.epic_id, unresolved.branch
+                    ));
+                }
+                if let Some(notice) =
+                    stale_legacy_slug_notice(task_epic.as_ref(), &parent_branch, &base_source)
+                {
+                    notices.push(notice);
+                }
+                // cas-ecf7 (GH #118): the base ref is resolved live, but the
+                // branch it names can be far behind trunk. Surface that at
+                // spawn time instead of leaving it to whoever happens to read
+                // `behind:` in worker_status.
+                if let Some(notice) =
+                    stale_spawn_base_notice(&repo_root, effective_base, &trunk)
+                {
+                    notices.push(notice);
+                }
+                (
+                    Some(WorktreePrep {
+                        worktree_path,
+                        branch_name,
+                        parent_branch,
+                        base_ref,
+                        repo_root,
+                        cas_dir: self.cas_dir.clone(),
+                    }),
+                    notices,
+                    Some(provenance),
+                )
+            } else {
+                anyhow::bail!(
+                    "Worker isolation requested but worktrees are not enabled. \
+                     Start the factory with --worktrees to enable isolation."
+                );
+            }
+        } else {
+            (None, Vec::new(), None)
+        };
+
+        Ok(WorkerSpawnPrep {
+            worker_name,
+            worktree_info,
+            warnings: base_warnings,
+            base_provenance,
+        })
     }
 }
 
@@ -1777,16 +2164,6 @@ impl FactoryApp {
         self.finish_worker_spawn(result, None, None, None)
     }
 
-    /// Remove a worktree created by a spawn generation that was cancelled
-    /// before its pane was registered. Reused worktrees predate this spawn and
-    /// are deliberately preserved.
-    pub(crate) fn cleanup_cancelled_spawn_worktree(
-        &mut self,
-        result: &mut WorkerSpawnResult,
-    ) -> anyhow::Result<bool> {
-        cleanup_cancelled_spawn_worktree_with_manager(self.worktree_manager.as_mut(), result)
-    }
-
     /// Phase 1: Prepare spawn data (fast, runs on main thread).
     ///
     /// Resolves the worker name, computes paths, and returns a `WorkerSpawnPrep`
@@ -1799,22 +2176,14 @@ impl FactoryApp {
     /// task_id=...`). cas-7587 (GH #122): when present, the worktree base is
     /// resolved from *that task's* epic branch, not from the session's pinned
     /// epic focus — the two can name different epics, and the task is right.
-    pub fn prepare_worker_spawn(
-        &mut self,
+    /// Capture only in-memory spawn state. All store, config and Git work is
+    /// resolved by the cancellable provisioner, never on the daemon loop.
+    pub(crate) fn snapshot_worker_spawn(
+        &self,
         name: Option<&str>,
         isolate: bool,
         task_id: Option<&str>,
-    ) -> anyhow::Result<WorkerSpawnPrep> {
-        // focus_epic is persisted outside cas.db, so reconcile the task
-        // snapshot and session metadata synchronously at spawn time.
-        if let Err(error) = self.refresh_data() {
-            tracing::warn!(
-                error = %error,
-                "failed to refresh factory data before worker spawn; using cached task data"
-            );
-        }
-        self.apply_session_metadata_focus();
-
+    ) -> anyhow::Result<WorkerSpawnContext> {
         let spawn_type = if name.is_some() { "named" } else { "anonymous" };
         crate::telemetry::track(
             "factory_worker_spawn_requested",
@@ -1824,13 +2193,11 @@ impl FactoryApp {
                 ("isolate", bool_prop(isolate)),
             ],
         );
-
-        // Generate a unique name if not provided
         let worker_name = match name {
-            Some(n) => n.to_string(),
+            Some(name) => name.to_string(),
             None => {
                 let existing: std::collections::HashSet<&str> =
-                    self.worker_names.iter().map(|s| s.as_str()).collect();
+                    self.worker_names.iter().map(String::as_str).collect();
                 let mut candidate = generate_unique(1)[0].clone();
                 let mut attempts = 0;
                 while existing.contains(candidate.as_str()) && attempts < 100 {
@@ -1840,7 +2207,6 @@ impl FactoryApp {
                 candidate
             }
         };
-
         if self.worker_names.contains(&worker_name) {
             crate::telemetry::track(
                 "factory_worker_spawn_result",
@@ -1848,220 +2214,50 @@ impl FactoryApp {
             );
             anyhow::bail!("Worker '{worker_name}' already exists");
         }
+        Ok(WorkerSpawnContext {
+            worker_name,
+            spawn_type: spawn_type.into(),
+            isolate,
+            task_id: task_id.map(str::to_string),
+            project_path: self.project_path().to_path_buf(),
+            cas_dir: self.cas_dir.clone(),
+            worktree_repo_root: self
+                .worktree_manager
+                .as_ref()
+                .map(|m| m.repo_root().to_path_buf()),
+            worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
+            epic_branch: self.epic_branch.clone(),
+            current_epic_id: self.current_epic_id.clone(),
+            factory_session: self
+                .factory_session
+                .clone()
+                .or_else(|| std::env::var("CAS_FACTORY_SESSION").ok()),
+        })
+    }
 
-        let (worktree_info, base_warnings, base_provenance) = if isolate {
-            if let Some(manager) = &self.worktree_manager {
-                // Re-resolve the repository on every request. A daemon started
-                // before `git init` may have latched an ancestor repository;
-                // continuing with that stale root would create worker branches
-                // in the wrong project. The verified-spawn lifecycle surfaces
-                // this per-request failure to the supervisor.
-                validate_live_spawn_repo_context(manager, self.project_path())?;
-                // Verify repo has commits before trying to create worktrees
-                if !manager.git().has_commits().unwrap_or(false) {
-                    crate::telemetry::track(
-                        "factory_worker_spawn_result",
-                        vec![("success", "false"), ("reason", "repo_has_no_commits")],
-                    );
-                    anyhow::bail!(
-                        "Repository has no commits. Please make an initial commit before spawning workers."
-                    );
-                }
-
-                let session_repo_root = manager.repo_root().to_path_buf();
-                let task_base = task_id
-                    .map(|tid| task_epic_base(&self.cas_dir, &session_repo_root, tid))
-                    .unwrap_or(TaskBase::Unresolved);
-                if let Some(epic) = task_base.epic()
-                    && epic.work_target.is_none()
-                    && (epic.branch.is_empty() || !epic.branch_exists)
-                {
-                    anyhow::bail!(
-                        "spawn refused: task {} belongs to epic {} but the epic has no recorded WorkTarget or resolvable branch; refusing to recompute a title-derived base",
-                        epic.task_id,
-                        epic.epic_id,
-                    );
-                }
-                let repo_root = resolve_spawn_worktree_repo(
-                    &self.cas_dir,
-                    &session_repo_root,
-                    task_base.work_target(),
-                )?;
-                let cross_repo = repo_root != session_repo_root;
-                let spawn_git = crate::worktree::GitOperations::new(repo_root.clone());
-                let worktree_path = if cross_repo {
-                    repo_root.join(".cas/worktrees").join(&worker_name)
-                } else {
-                    manager.worktree_path_for_worker(&worker_name)
-                };
-                let branch_name = manager.branch_name_for_worker(&worker_name);
-                // Dynamic spawns must match startup spawns: never the
-                // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
-                // is the pre-assigned task's epic branch first, pinned epic
-                // focus second, trunk last.
-                let configured_trunk = Config::configured_epic_base_branch(&repo_root)
-                    .unwrap_or_else(|| spawn_git.detect_default_branch());
-                // An epic's declared delivery target is authoritative for both
-                // a no-epic child fallback and stale-base comparison. Falling
-                // back to factory configuration keeps legacy/taskless spawns.
-                let trunk = task_base
-                    .target_branch()
-                    .unwrap_or(&configured_trunk)
-                    .to_string();
-                let task_epic = task_base.epic().cloned();
-                let (parent_branch, base_source) =
-                    resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
-                let mut notices: Vec<String> = Vec::new();
-                if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?
-                {
-                    notices.push(notice);
-                }
-                let base_epic_id = match &base_source {
-                    SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
-                    SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
-                    SpawnBaseSource::WorkTarget { .. }
-                    | SpawnBaseSource::TaskWithoutEpic { .. }
-                    | SpawnBaseSource::Trunk => None,
-                };
-                // cas-b6f5 (GH #434): a task-level WorkTarget may point at
-                // an outer epic branch, so the winning SpawnBaseSource has no
-                // task-epic id even though the resolved base itself records a
-                // parent. Look up that base as an epic after retaining the
-                // direct child-epic path used by cas-83f6.
-                let recorded_base_parent = base_epic_id
-                    .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
-                    .filter(|(epic_branch, _)| epic_branch == &parent_branch)
-                    .or_else(|| {
-                        recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
-                    });
-                if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
-                    let refresh = fast_forward_epic_base_from_parent(
-                        &repo_root,
-                        &epic_branch,
-                        &recorded_parent,
-                    )
-                    .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
-                    if let Some(notice) = refresh {
-                        notices.push(notice);
-                    }
-                }
-                // cas-d897 (GH #146): the winning branch name still has to be
-                // resolved to the fresher of its local and origin refs — a
-                // stale local ref silently backdates every worker cut from it.
-                let (base_ref, freshness_notice, checkout_ref) =
-                    checkout_ref_for_spawn_base(&repo_root, &parent_branch, &base_source);
-                if let Some(notice) = freshness_notice {
-                    notices.push(notice);
-                }
-                // `parent_branch` remains the local merge-back target, but a
-                // refreshed spawn is actually cut from `base_ref`. Warnings
-                // must assess that effective checkout ref or they contradict
-                // the successful origin-based refresh they just announced.
-                let effective_base = base_ref.as_deref().unwrap_or(&parent_branch);
-                let mut provenance = spawn_base_provenance_notice(
-                    &parent_branch,
-                    &base_source,
-                    self.epic_branch.as_deref(),
-                );
-                let checkout_sha = short_sha(&repo_root, effective_base);
-                provenance.push_str(&format!(
-                    " CHECKOUT BASE: '{checkout_ref}' @ {checkout_sha}."
-                ));
-                if base_diverges_from_focus(
-                    &parent_branch,
-                    &base_source,
-                    self.epic_branch.as_deref(),
-                ) {
-                    notices.push(provenance.clone());
-                }
-                // The base must contain the epic it is meant to serve — the
-                // task's epic when that decided the base, otherwise the focus.
-                let epic_to_contain = match &base_source {
-                    SpawnBaseSource::TaskEpic { .. } => {
-                        task_epic.as_ref().map(|t| t.branch.clone())
-                    }
-                    SpawnBaseSource::WorkTarget { .. } => None,
-                    _ => self.epic_branch.clone(),
-                };
-                if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
-                    worker_base_mismatch_notice(&repo_root, effective_base, epic_branch)
-                }) {
-                    notices.push(notice);
-                }
-                // cas-7587: a task whose epic branch does not exist locally
-                // still lands on the focus base — say so instead of letting it
-                // look like the task's epic was honoured.
-                if !matches!(base_source, SpawnBaseSource::WorkTarget { .. })
-                    && let Some(unresolved) = task_epic.as_ref().filter(|t| !t.branch_exists)
-                {
-                    notices.push(format!(
-                        "SPAWN BASE FALLBACK: task {} belongs to epic {} whose branch '{}' does \
-                         not exist in this repository; the worker was cut from '{parent_branch}' \
-                         instead. Create the epic branch (or fix the epic's branch field) before \
-                         relying on this worker's base.",
-                        unresolved.task_id, unresolved.epic_id, unresolved.branch
-                    ));
-                }
-                if let Some(notice) =
-                    stale_legacy_slug_notice(task_epic.as_ref(), &parent_branch, &base_source)
-                {
-                    notices.push(notice);
-                }
-                // cas-ecf7 (GH #118): the base ref is resolved live, but the
-                // branch it names can be far behind trunk. Surface that at
-                // spawn time instead of leaving it to whoever happens to read
-                // `behind:` in worker_status.
-                if let Some(notice) =
-                    stale_spawn_base_notice(&repo_root, effective_base, &trunk)
-                {
-                    notices.push(notice);
-                }
-                (
-                    Some(WorktreePrep {
-                        worktree_path,
-                        branch_name,
-                        parent_branch,
-                        base_ref,
-                        repo_root,
-                        cas_dir: self.cas_dir.clone(),
-                    }),
-                    notices,
-                    Some(provenance),
-                )
-            } else {
-                anyhow::bail!(
-                    "Worker isolation requested but worktrees are not enabled. \
-                     Start the factory with --worktrees to enable isolation."
-                );
-            }
-        } else {
-            (None, Vec::new(), None)
-        };
-
-        if let Some(provenance) = &base_provenance {
-            tracing::info!("{provenance}");
-        }
-
-        for notice in &base_warnings {
-            tracing::warn!("{notice}");
-            self.set_error(notice.clone());
-        }
-
+    pub fn prepare_worker_spawn(
+        &mut self,
+        name: Option<&str>,
+        isolate: bool,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<WorkerSpawnPrep> {
+        let prep = self
+            .snapshot_worker_spawn(name, isolate, task_id)?
+            .resolve()?;
         crate::telemetry::track(
             "factory_worker_spawn_prepared",
             vec![
-                ("spawn_type", spawn_type),
-                ("worktrees_enabled", bool_prop(worktree_info.is_some())),
+                (
+                    "spawn_type",
+                    if name.is_some() { "named" } else { "anonymous" },
+                ),
+                ("worktrees_enabled", bool_prop(prep.worktree_info.is_some())),
             ],
         );
-
-        Ok(WorkerSpawnPrep {
-            worker_name,
-            worktree_info,
-            warnings: base_warnings,
-            base_provenance,
-        })
+        for notice in &prep.warnings {
+            self.set_error(notice.clone());
+        }
+        Ok(prep)
     }
 
     /// Phase 3: Finish spawn on main thread (fast - adds pane to mux, updates tracking).
@@ -2254,8 +2450,20 @@ impl FactoryApp {
         force: bool,
         preserve_worktree: bool,
     ) -> anyhow::Result<()> {
-        // Check if worker exists
+        // Crash/recycle handling can remove the pane before shutdown arrives.
+        // A dead registration in our session is still a valid cleanup target.
         if !self.worker_names.contains(&name.to_string()) {
+            if crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(
+                self.cas_dir(),
+                name,
+                self.factory_session.as_deref(),
+            )?
+            .is_some()
+            {
+                self.last_db_fingerprint = None;
+                let _ = self.refresh_data();
+                return Ok(());
+            }
             anyhow::bail!("Worker '{name}' not found");
         }
 
@@ -2342,30 +2550,19 @@ impl FactoryApp {
             self.untrack_worker_process_group_if_gone(pgid).await;
         }
 
-        // Emit the same durable supervisor lifecycle relay used for unexpected
-        // PTY exits. Do this only after the process is actually gone, but
-        // before the legacy binding cleanup, so the relay records and parks
-        // any task that was held at termination instead of reporting a
-        // misleading empty task set.
-        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+        // Only after the process is actually gone: a shutdown parks and
+        // releases what the worker held; a recycle keeps it (cas-a622).
+        settle_retired_worker_bindings(
             &cas_dir,
             agent_store.as_ref(),
             agent,
             &held_task_ids,
-            "worker terminated by shutdown request",
+            if preserve_worktree {
+                WorkerRetirement::Recycle
+            } else {
+                WorkerRetirement::Shutdown
+            },
         );
-
-        // cas-7a94: clear pure Open pre-assigns and any binding the recovery
-        // path could not inspect. Assignees are display names (cas-dbbb), so
-        // match on `name` rather than the registration UUID.
-        let released = release_worker_task_bindings(&cas_dir, name);
-        if released > 0 {
-            tracing::info!(
-                worker = %name,
-                released,
-                "cas-7a94: released remaining task bindings on shutdown_worker"
-            );
-        }
 
         // Remove from tracking
         self.worker_names.retain(|n| n != name);
@@ -4118,7 +4315,7 @@ mod spawn_base_tests {
         // Simulate `git init` after daemon construction. The next spawn must
         // not silently keep using the ancestor root cached at startup.
         init_repo(&project);
-        let error = validate_live_spawn_repo_context(&manager, &project)
+        let error = validate_live_spawn_repo_root(manager.repo_root(), &project)
             .expect_err("changed repository context must fail this spawn loudly");
         assert!(error.to_string().contains("Repository context changed"));
         assert!(error.to_string().contains("Restart the factory daemon"));
@@ -5336,7 +5533,203 @@ mod tests {
         assert!(!worker_has_open_tasks(&cas_dir, "agent-d"));
     }
 
+    fn claimed_qa_fixture(cas_dir: &std::path::Path) -> cas_types::QaPass {
+        let store = open_task_store(cas_dir).unwrap();
+        let mut task = task_with("cas-qa3172", Some("dead-reviewer"), TaskStatus::InProgress);
+        task.labels.push("qa-pass".to_string());
+        task.notes = "prior review evidence".into();
+        task.branch = Some("factory/prior-review".into());
+        store.add(&task).unwrap();
+        let now = chrono::Utc::now();
+        let opened = cas_store::open_qa_pass(
+            cas_dir,
+            &cas_store::NewQaPass {
+                task_id: "cas-delivery3172",
+                implementer_agent_id: "implementer",
+                branch: "factory/implementer",
+                bound_head: "aaaa1111",
+                deadline_at: now + chrono::Duration::minutes(45),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap();
+        let cas_store::QaPassOpen::Dispatched(pass) = opened else {
+            panic!("new round");
+        };
+        cas_store::set_qa_task(cas_dir, &pass.id, "cas-qa3172").unwrap();
+        cas_store::claim_qa_pass(cas_dir, "cas-delivery3172", "dead-reviewer", now).unwrap()
+    }
+
+    fn assert_pending_qa(cas_dir: &std::path::Path, before: &cas_types::QaPass) {
+        let pass = cas_store::latest_qa_pass(cas_dir, &before.task_id, chrono::Utc::now()).unwrap().unwrap();
+        assert_eq!(pass.id, before.id);
+        assert_eq!(pass.round, before.round);
+        assert_eq!(pass.deadline_at, before.deadline_at);
+        assert_eq!(pass.state, cas_types::QaPassState::Pending);
+        assert!(pass.reviewer_agent_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_workers_replaces_dead_qa_reviewer_same_round_cas_3172() {
+        use cas_store::SpawnQueueStore;
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut guard = crate::test_env_guard::TestEnvGuard::temp_home();
+        let bin = guard.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::test_paths::warm_stub(
+            &bin.join("codex"),
+            "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n",
+        );
+        let auth = guard.home().join(".codex/auth.json");
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(auth, "{}").unwrap();
+        guard.set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let before = claimed_qa_fixture(&cas_dir);
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents
+            .register(&cas_types::Agent::new_with_role(
+                "supervisor-id".into(),
+                "supervisor".into(),
+                cas_types::AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let service = crate::mcp::CasService::new(core, None);
+        let req = serde_json::from_value(serde_json::json!({"action":"spawn_workers", "task_id":"cas-qa3172", "count":1, "cli":"codex"})).unwrap();
+        service.factory_request(Parameters(req)).await.expect("MCP accepts replacement spawn");
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let queued = queue.peek(1).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].task_id.as_deref(), Some("cas-qa3172"));
+        // The PTY boot is omitted; invoke exactly the preassignment seam that
+        // early registration and finish_worker_spawn call with the queued id.
+        assert!(assign_task_to_new_worker(&cas_dir, queued[0].task_id.as_deref().unwrap(), "replacement-reviewer"));
+        assert_pending_qa(&cas_dir, &before);
+        let task = open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap();
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.assignee.as_deref(), Some("replacement-reviewer"));
+        assert!(task.notes.contains("prior review evidence"));
+        assert!(task.notes.contains("force-released"));
+        assert_eq!(task.branch.as_deref(), Some("factory/prior-review"));
+        agents
+            .register(&cas_types::Agent::new_with_role(
+                "replacement-id".into(),
+                "replacement-reviewer".into(),
+                cas_types::AgentRole::Worker,
+            ))
+            .unwrap();
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("replacement-id".into());
+        core.cas_task_start(Parameters(crate::mcp::tools::IdRequest {
+            id: "cas-qa3172".into(),
+        }))
+        .await
+        .expect("replacement starts same round now, not at deadline");
+        let pass = cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(pass.id, before.id);
+        assert_eq!(pass.deadline_at, before.deadline_at);
+        assert_eq!(pass.reviewer_agent_id.as_deref(), Some("replacement-reviewer"));
+    }
+
+    #[test]
+    fn qa_claim_tracks_shutdown_and_aborted_preassignment_cas_3172() {
+        for aborted in [false, true] {
+            let (_temp, cas_dir) = seeded_cas_dir();
+            let before = claimed_qa_fixture(&cas_dir);
+            if aborted { release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"); }
+            else { assert_eq!(release_worker_task_bindings(&cas_dir, "dead-reviewer"), 1); }
+            assert_pending_qa(&cas_dir, &before);
+            assert_eq!(open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap().assignee, None);
+        }
+    }
+
+    #[test]
+    fn qa_claim_survives_live_holder_and_mismatched_cleanup_cas_3172() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let before = claimed_qa_fixture(&cas_dir);
+        open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&cas_types::Agent::new_with_role(
+                "live-id".into(),
+                "dead-reviewer".into(),
+                cas_types::AgentRole::Worker,
+            ))
+            .unwrap();
+        assert!(!assign_task_to_new_worker(
+            &cas_dir,
+            "cas-qa3172",
+            "replacement"
+        ));
+        release_preassign_if_bound(&cas_dir, "cas-qa3172", "other-worker");
+        let pass = cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now()).unwrap().unwrap();
+        assert_eq!(pass.state, cas_types::QaPassState::Claimed);
+        assert_eq!(pass.reviewer_agent_id.as_deref(), Some("dead-reviewer"));
+    }
+
     // --- cas-6913 / cas-7a94: spawn-time task pre-assignment ------------
+
+    #[test]
+    fn failed_qa_release_keeps_binding_for_retry_cas_3172() {
+        for recovery in ["spawn", "shutdown", "abort"] {
+            let (_temp, cas_dir) = seeded_cas_dir();
+            let before = claimed_qa_fixture(&cas_dir);
+            let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_qa_release BEFORE UPDATE ON qa_passes
+                WHEN OLD.state = 'claimed' AND NEW.state = 'pending'
+                BEGIN SELECT RAISE(ABORT, 'injected QA release failure'); END;",
+            )
+            .unwrap();
+            let recover = || match recovery {
+                "spawn" => {
+                    assign_task_to_new_worker(&cas_dir, "cas-qa3172", "replacement");
+                }
+                "shutdown" => {
+                    release_worker_task_bindings(&cas_dir, "dead-reviewer");
+                }
+                _ => release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"),
+            };
+            recover();
+            let task = open_task_store(&cas_dir)
+                .unwrap()
+                .get("cas-qa3172")
+                .unwrap();
+            assert_eq!(
+                task.assignee.as_deref(),
+                Some("dead-reviewer"),
+                "{recovery}"
+            );
+            assert_eq!(task.status, TaskStatus::InProgress, "{recovery}");
+            assert_eq!(
+                cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now())
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            conn.execute_batch("DROP TRIGGER reject_qa_release;")
+                .unwrap();
+            recover();
+            assert_pending_qa(&cas_dir, &before);
+            let task = open_task_store(&cas_dir)
+                .unwrap()
+                .get("cas-qa3172")
+                .unwrap();
+            assert_eq!(task.status, TaskStatus::Open);
+            assert_ne!(task.assignee.as_deref(), Some("dead-reviewer"));
+        }
+    }
 
     /// AC3: `spawn_workers task_id=<id>` must result in the task's assignee
     /// being the newly spawned worker's display name — the same field
@@ -5452,6 +5845,169 @@ mod tests {
             assert_eq!(task.status, status);
             assert_eq!(task.assignee, None);
         }
+    }
+
+    // --- cas-a622: a recycle keeps bindings and re-delivers the brief ----
+
+    /// The binding set wise-raven-87 held when its refresh was refused.
+    fn seed_wise_raven_tasks(cas_dir: &std::path::Path) -> Vec<(&'static str, TaskStatus)> {
+        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let held = vec![
+            ("cas-e0be", TaskStatus::InProgress),
+            ("cas-7cb3", TaskStatus::AwaitingMerge),
+            ("cas-ed87", TaskStatus::Open),
+            ("cas-96c0", TaskStatus::Blocked),
+        ];
+        for (id, status) in &held {
+            store.add(&task_with(id, Some("wise-raven"), *status)).unwrap();
+        }
+        store
+            .add(&task_with("cas-done", Some("wise-raven"), TaskStatus::Closed))
+            .unwrap();
+        store
+            .add(&task_with("cas-peer", Some("other-worker"), TaskStatus::InProgress))
+            .unwrap();
+        held
+    }
+
+    fn retired_worker(cas_dir: &std::path::Path) -> cas_types::Agent {
+        let mut agent = cas_types::Agent::new("raven-old-session".into(), "wise-raven".into());
+        agent.role = cas_types::AgentRole::Worker;
+        // A pid that cannot be alive, so the worker reads as retired. Stamped
+        // like every pid assignment (cas-389c); a dead pid has no starttime,
+        // so the stamp records nothing and the row stays unfingerprinted.
+        agent.pid = Some(u32::MAX - 1);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, u32::MAX - 1);
+        crate::store::open_agent_store(cas_dir).unwrap().register(&agent).unwrap();
+        agent
+    }
+
+    /// cas-a622 (and the proud-newt-45 loss it cites): retiring a worker for
+    /// an in-place recycle must not park or release a single binding — the
+    /// same name is respawned in the same worktree at once.
+    #[test]
+    fn recycle_retirement_keeps_every_task_binding_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let held = seed_wise_raven_tasks(&cas_dir);
+        let agent = retired_worker(&cas_dir);
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+
+        let released = settle_retired_worker_bindings(
+            &cas_dir,
+            agent_store.as_ref(),
+            &agent,
+            &["cas-e0be".to_string()],
+            WorkerRetirement::Recycle,
+        );
+
+        assert_eq!(released, 0, "a recycle releases nothing");
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        for (id, status) in held {
+            let task = store.get(id).unwrap();
+            assert_eq!(task.assignee.as_deref(), Some("wise-raven"), "{id} keeps its assignee");
+            assert_eq!(task.status, status, "{id} keeps its status");
+        }
+    }
+
+    #[test]
+    fn recycle_retirement_preserves_reassigned_snapshot_cas_35af() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        seed_wise_raven_tasks(&cas_dir);
+        let agent = retired_worker(&cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        // The task was held when recycling began, then reassigned before
+        // retirement/death cleanup observed that old snapshot.
+        let snapshot = vec!["cas-e0be".to_string()];
+        let mut reassigned = tasks.get("cas-e0be").unwrap();
+        reassigned.assignee = Some("replacement-worker".into());
+        tasks.update(&reassigned).unwrap();
+        assert_eq!(settle_retired_worker_bindings(
+            &cas_dir, agents.as_ref(), &agent, &snapshot, WorkerRetirement::Recycle,
+        ), 0);
+        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+            &cas_dir, agents.as_ref(), &agent, &snapshot, "late exit after recycle",
+        );
+        let after = tasks.get("cas-e0be").unwrap();
+        assert_eq!(after.assignee, reassigned.assignee);
+        assert_eq!(after.status, reassigned.status);
+    }
+
+    /// The contrast that keeps the shutdown contract honest: a real shutdown
+    /// still frees the worker's Open/InProgress/Blocked bindings.
+    #[test]
+    fn shutdown_retirement_still_releases_bindings_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        seed_wise_raven_tasks(&cas_dir);
+        let agent = retired_worker(&cas_dir);
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+
+        settle_retired_worker_bindings(
+            &cas_dir,
+            agent_store.as_ref(),
+            &agent,
+            &[],
+            WorkerRetirement::Shutdown,
+        );
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        assert_eq!(store.get("cas-ed87").unwrap().assignee, None, "Open pre-assign released");
+        assert_eq!(
+            store.get("cas-7cb3").unwrap().assignee.as_deref(),
+            Some("wise-raven"),
+            "AwaitingMerge parking is never clobbered"
+        );
+    }
+
+    /// cas-a622: the recycled worker's fresh conversation is told what it
+    /// holds and how to resume, and only its own nonterminal tasks are named.
+    #[test]
+    fn recycle_resume_brief_is_queued_to_the_worker_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        seed_wise_raven_tasks(&cas_dir);
+
+        let id = enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "wise-raven")
+            .unwrap()
+            .expect("a worker holding tasks gets a resume brief");
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let queued = queue
+            .peek_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("brief row");
+        assert_eq!(queued.target, "wise-raven");
+        assert_eq!(queued.source, "zen-condor");
+        assert_eq!(queued.factory_session.as_deref(), Some("session-a622"));
+        let brief = &queued.prompt;
+        assert!(
+            brief.contains("task action=start id=cas-e0be"),
+            "the in-progress task is resumed by re-taking its lease: {brief}"
+        );
+        for id in ["cas-e0be", "cas-7cb3", "cas-ed87", "cas-96c0"] {
+            assert!(brief.contains(id), "{id} is named: {brief}");
+        }
+        for id in ["cas-done", "cas-peer"] {
+            assert!(!brief.contains(id), "{id} is not this worker's open work: {brief}");
+        }
+    }
+
+    #[test]
+    fn a_worker_with_no_open_work_gets_no_resume_brief_cas_a622() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        assert_eq!(
+            enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "idle-worker")
+                .unwrap(),
+            None
+        );
+        assert!(
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // --- cas-7a94: shutdown / cancel must release pre-assigns -----------

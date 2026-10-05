@@ -3,6 +3,9 @@
 # contains both CI assets and locally downloaded bytes match GitHub metadata.
 set -euo pipefail
 
+# shellcheck source=scripts/release-portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-portable.sh"
+
 usage() {
     echo "Usage: scripts/release-published-receipt.sh <vX.Y.Z> [--write-draft <path>]" >&2
 }
@@ -60,7 +63,7 @@ done
 
 for asset in "$linux_asset" "$macos_asset"; do
     "$gh_bin" release download "$tag" --repo "$repo" --dir "$workdir" --pattern "$asset"
-    local_digest="$(sha256sum "$workdir/$asset" | awk '{print $1}')"
+    local_digest="$(release_portable_sha256sum "$workdir/$asset" | awk '{print $1}')"
     github_digest="$(digest_for "$asset" | sed 's/^sha256://')"
     if [[ "$local_digest" != "$github_digest" ]]; then
         echo "error: downloaded $asset digest $local_digest does not match GitHub digest $github_digest" >&2
@@ -68,8 +71,8 @@ for asset in "$linux_asset" "$macos_asset"; do
     fi
 done
 
-linux_sha="$(sha256sum "$workdir/$linux_asset" | awk '{print $1}')"
-macos_sha="$(sha256sum "$workdir/$macos_asset" | awk '{print $1}')"
+linux_sha="$(release_portable_sha256sum "$workdir/$linux_asset" | awk '{print $1}')"
+macos_sha="$(release_portable_sha256sum "$workdir/$macos_asset" | awk '{print $1}')"
 
 replace_draft_token() {
     local token="$1" value="$2" replacement

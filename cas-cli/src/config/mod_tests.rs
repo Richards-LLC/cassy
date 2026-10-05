@@ -46,6 +46,25 @@ fn test_config_defaults() {
 }
 
 #[test]
+fn terminal_interaction_config_round_trips_and_resets_cas_266e() {
+    let temp = TempDir::new().unwrap();
+    let mut config: Config = toml::from_str("[qa]\nevidence_gate = true\n").unwrap();
+    let key = "qa.terminal_interaction_paths";
+    let default = config.get(key).unwrap();
+    assert!(default.contains("**/ui/factory/**"));
+    assert_eq!(meta::registry().get(key).unwrap().default, default);
+    config.set(key, "src/tui/**, src/pty/**").unwrap();
+    config.save(temp.path()).unwrap();
+    let mut loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.get(key).as_deref(), Some("src/tui/**,src/pty/**"));
+    assert!(loaded.list().contains(&(key.into(), "src/tui/**,src/pty/**".into())));
+    loaded.set(key, "").unwrap();
+    assert!(loaded.qa().terminal_interaction_paths.is_empty());
+    loaded.set(key, meta::registry().get(key).unwrap().default).unwrap();
+    assert_eq!(loaded.get(key), Some(default));
+}
+
+#[test]
 fn qa_user_facing_labels_default_and_round_trip() {
     let temp = TempDir::new().unwrap();
     let mut config = Config::default();
@@ -912,13 +931,23 @@ fn factory_epic_base_branch_is_registered_and_round_trips_cas_8d54() {
 /// registry or to `set` without `get`/`list` fails here.
 #[test]
 fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
+    assert_eq!(Config::default().factory().spawn_min_free_gib, 25);
+    assert_eq!(
+        Config::default().get("factory.spawn_min_free_gib"),
+        Some("25".into())
+    );
     // (key, value to set, value get returns)
     let table: &[(&str, &str, &str)] = &[
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
+        ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
+        ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
+        ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),
         ("factory.message_max_chars", "3000", "3000"),
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),
         ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.spawn_min_free_gib", "30", "30"),
+        ("factory.prompt_retention_days", "14", "14"),
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),
         ("factory.merge_sweep", "false", "false"),
@@ -1008,6 +1037,10 @@ fn artifact_namespaces_distinguish_same_named_projects_and_share_store_aliases_c
     let b_dir = project_factory_artifacts_root(&b, &base);
     assert_ne!(a_dir, b_dir);
     assert_eq!(a_dir.parent().unwrap(), base);
+    let resolved = resolved_factory_artifact_paths(&a, base.to_str());
+    assert_eq!(resolved.base, base);
+    assert_eq!(resolved.project_root, a_dir);
+    assert_eq!(resolved.task_dirs("cas-a4b1"), factory_task_artifact_dirs(&a, &base, "cas-a4b1"));
     assert_eq!(
         factory_task_artifact_dirs(&a, &base, "cas-a4b1")[0],
         a_dir.join("cas-a4b1")
@@ -1022,4 +1055,44 @@ fn artifact_namespaces_distinguish_same_named_projects_and_share_store_aliases_c
         std::os::unix::fs::symlink(&a, &alias).unwrap();
         assert_eq!(project_factory_artifacts_root(&alias, &base), a_dir);
     }
+}
+
+#[test]
+fn factory_supervisor_only_resource_settings_round_trip_and_list_gh_1047() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    for (key, value) in [
+        ("factory.supervisor_only_mcp", "vercel,neon"),
+        ("factory.supervisor_only_env", "VERCEL_TOKEN,NEON_API_KEY"),
+    ] {
+        assert!(registry().get(key).is_some(), "cas config list needs registered metadata");
+        config.set(key, value).unwrap();
+        assert_eq!(config.get(key).as_deref(), Some(value));
+        assert!(config.list().contains(&(key.into(), value.into())));
+    }
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.factory().worker_policy.supervisor_only_mcp, ["vercel", "neon"]);
+    let shared = cas_mux::worker_resources::load_worker_policy(Some(temp.path())).unwrap();
+    assert!(shared.denies_env("VERCEL_TOKEN") && shared.denies_server("neon"));
+    assert!(!FactoryConfig::default().worker_policy.denies_server("vercel"));
+}
+
+#[test]
+fn worker_credential_env_round_trip_and_shared_policy_cas_82bc() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    let key = "factory.worker_credential_env";
+    assert!(registry().get(key).is_some());
+    config.set(key, " GITHUB_TOKEN, VERCEL_TOKEN ").unwrap();
+    assert_eq!(config.get(key).as_deref(), Some("GITHUB_TOKEN,VERCEL_TOKEN"));
+    assert!(config.list().contains(&(key.into(), "GITHUB_TOKEN,VERCEL_TOKEN".into())));
+    config.save(temp.path()).unwrap();
+    let shared = cas_mux::worker_resources::load_worker_policy(Some(temp.path())).unwrap();
+    assert_eq!(shared.worker_credential_env, ["GITHUB_TOKEN", "VERCEL_TOKEN"]);
+    assert!(shared.is_empty(), "credential grants alone must not require strict MCP scope");
+    config.set(key, "").unwrap();
+    config.save(temp.path()).unwrap();
+    assert!(cas_mux::worker_resources::load_worker_policy(Some(temp.path()))
+        .unwrap().worker_credential_env.is_empty());
 }

@@ -106,6 +106,11 @@ Useful flags:
 - `--dry-run` — report every planned change, write nothing.
 - `--skip-verify` — skip the hub round-trip when setting up offline. The
   doctor row then stays amber until something has actually verified.
+- `--json` — print exactly one `VioletReport` JSON document on stdout instead
+  of the human summary. The report includes the hub URL, credential variable
+  names and states, planned or completed writes, probe result and remedy.
+  A rejected probe still emits its report, exits nonzero and explains the
+  refusal on stderr. Failures before report creation emit no report.
 
 ---
 

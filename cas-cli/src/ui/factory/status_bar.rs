@@ -1117,6 +1117,70 @@ mod tests {
     }
 
     #[test]
+    fn render_status_bar_tracks_requester_supervisor_and_non_claude_focus_cas_fa64() {
+        let _env = crate::test_support::TestEnvGuard::new();
+        let mut app = crate::ui::factory::app::FactoryApp::for_test();
+        for (name, kind, harness) in [
+            ("inherited-worker", PaneKind::Worker, SupervisorCli::Claude),
+            (
+                "main-supervisor",
+                PaneKind::Supervisor,
+                SupervisorCli::Claude,
+            ),
+            ("codex-worker", PaneKind::Worker, SupervisorCli::Codex),
+        ] {
+            let pty = Pty::spawn(
+                name,
+                PtyConfig {
+                    command: "cat".into(),
+                    args: vec![],
+                    ..PtyConfig::default()
+                },
+            )
+            .expect("spawn focused-pane fixture");
+            let pane = Pane::with_pty(name, kind, pty, 24, 80, harness).unwrap();
+            app.mux.add_pane(pane);
+        }
+        app.mux.set_worker_spec(
+            "inherited-worker",
+            WorkerSpec {
+                name: Some("inherited-worker".into()),
+                cli: SupervisorCli::Claude,
+                model: None,
+                effort: None,
+                config_dir: None,
+                requester_config_dir: Some("~/.claude-requester".into()),
+                requester_secure_storage_dir: None,
+            },
+        );
+        for (name, expected) in [
+            ("inherited-worker", Some("CLAUDE requester")),
+            ("main-supervisor", Some("CLAUDE main")),
+            ("codex-worker", None),
+        ] {
+            assert!(app.mux.focus(name));
+            let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+            terminal
+                .draw(|frame| StatusBar::render_with_update_badge(frame, frame.area(), &app, None))
+                .unwrap();
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            match expected {
+                Some(label) => assert!(rendered.contains(label), "{name}: {rendered}"),
+                None => assert!(
+                    !rendered.contains("CLAUDE "),
+                    "non-Claude focus retained an account badge: {rendered}"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn render_status_bar_shows_and_emphasizes_focused_worker_alt_profile() {
         let Some(worker_pane) = spawn_claude_worker("alt-worker") else {
             eprintln!("skipping: `cat`/PTY-backed pane unavailable in this environment");

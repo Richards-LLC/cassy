@@ -16,12 +16,34 @@ export function sessionJumpCommandMarkup(
   machine: { readonly id: string; readonly label: string },
   session: Pick<HubSession, "name" | "project_dir" | "supervisor">,
   summary?: Pick<SessionCardSummary, "title" | "description" | "phase">,
+  state: { readonly current?: boolean; readonly needsYou?: boolean } = {},
 ): string {
   const project = projectTitle(session.project_dir);
   const codename = session.supervisor || session.name;
   const secondary = [project ? codename : undefined, machine.label, summary?.title, summary?.phase].filter(Boolean).join(" · ");
   const searchText = [project, session.supervisor, summary?.title, summary?.description, summary?.phase].filter(Boolean).join(" ");
-  return `<button type="button" class="palette-command" data-palette-machine="${escapeHtml(machine.id)}" data-palette-session="${escapeHtml(session.name)}" data-search-text="${escapeHtml(searchText)}"><span>Jump to ${escapeHtml(project ?? session.name)}</span><small${summary ? ` title="${escapeHtml(summary.description)}"` : ""}>${escapeHtml(secondary)}</small></button>`;
+  // cas-786a (journey F30): the conversation already open is the palette's
+  // current item, so a jump that would go nowhere is never mistaken for one
+  // that moves. It reads "Open now" ahead of its description (styles.css).
+  const flags = `${state.current ? ' data-palette-current="true" aria-current="true"' : ""}${state.needsYou ? ' data-palette-needs-you="true"' : ""}`;
+  return `<button type="button" class="palette-command" data-palette-machine="${escapeHtml(machine.id)}" data-palette-session="${escapeHtml(session.name)}"${flags} data-search-text="${escapeHtml(searchText)}"><span>Jump to ${escapeHtml(project ?? session.name)}</span><small${summary ? ` title="${escapeHtml(summary.description)}"` : ""}>${escapeHtml(secondary)}</small></button>`;
+}
+
+/**
+ * The command Enter runs in the palette filter (cas-537f, cas-786a). With a
+ * query it is the first row on screen, unless that row only jumps to the
+ * conversation already open and another row is on screen. With no query it
+ * is the first other conversation that needs the operator (unread or
+ * waiting), else the first other conversation, else the first command.
+ */
+export function paletteEnterTarget<T extends { readonly dataset: DOMStringMap }>(shown: readonly T[], query: string): T | undefined {
+  const jumpsElsewhere = (command: T) => command.dataset.paletteSession !== undefined && command.dataset.paletteCurrent !== "true";
+  if (!query.trim()) {
+    return shown.find((command) => jumpsElsewhere(command) && command.dataset.paletteNeedsYou === "true")
+      ?? shown.find(jumpsElsewhere)
+      ?? shown[0];
+  }
+  return shown.find((command) => command.dataset.paletteCurrent !== "true") ?? shown[0];
 }
 
 /**

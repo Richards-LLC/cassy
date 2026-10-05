@@ -28,9 +28,9 @@ pub use events::{
 // idle-nudge decision (queue_and_events.rs) so the "is this worker really
 // idle, not just between turns" heuristic has one definition.
 pub(crate) use events::{
-    blocker_note_after_park, effective_stall_threshold_secs,
-    supervisor_actionable_state_with_classifiers, DeliveryHold, FRESH_HEARTBEAT_SECS,
-    RECENT_ACTIVITY_SECS,
+    blocker_note_after_park, effective_stall_threshold_secs, hold_decision_after_park,
+    supervisor_actionable_state_with_classifiers, task_delivery_ref, DeliveryHold,
+    FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS,
 };
 pub(crate) use events::MergedCloseBlockedTask;
 pub use panel::PanelRegistry;

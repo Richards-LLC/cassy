@@ -590,11 +590,16 @@ pub(crate) fn default_child_work_target_from_epic(
 /// distinct target is an explicit pin and stays authoritative. A standalone
 /// creation default also follows an epic whose own target is already its
 /// lane, provided both bindings resolve to the same Git repository.
+///
+/// cas-6fb6: a target that is any other epic's lane also follows, even when
+/// the old parent edge is already gone (dep_remove first) or that epic carries
+/// only a `branch`. `known_epics` is called only when the cheaper checks fail.
 pub(crate) fn work_target_for_task_moved_into_epic(
     cas_root: &Path,
     task: &cas_types::Task,
     epic: &cas_types::Task,
     previous_parents: &[cas_types::Task],
+    known_epics: impl FnOnce() -> Vec<cas_types::Task>,
 ) -> Option<WorkTarget> {
     if let Some(target) = default_child_work_target_from_epic(task, epic) {
         return Some(target);
@@ -623,7 +628,35 @@ pub(crate) fn work_target_for_task_moved_into_epic(
             && (parent.deliverables.work_target.as_ref() == Some(task_target)
                 || inherited_work_target_from_epic(parent).as_ref() == Some(task_target))
     });
-    inherited_from_previous_parent.then_some(inherited)
+    if inherited_from_previous_parent {
+        return Some(inherited);
+    }
+    let same_repository = task_target.repo_selector == inherited.repo_selector
+        || matches!(
+            (resolve_repo_context(cas_root, task_target), resolve_repo_context(cas_root, &inherited)),
+            (Ok(task_repo), Ok(epic_repo)) if task_repo.git_common_dir == epic_repo.git_common_dir
+        );
+    (same_repository && is_other_epic_lane(task_target, epic, &known_epics()))
+        .then_some(inherited)
+}
+
+/// cas-6fb6: whether `target` is the lane of an epic other than `epic`. An
+/// epic's lane is its `branch` (or, without one, its own target branch); an
+/// epic with a WorkTarget must also name the same repository. A lane is
+/// inherited, never an operator pin: a release or hotfix branch that no epic
+/// owns stays authoritative.
+fn is_other_epic_lane(target: &WorkTarget, epic: &cas_types::Task, known_epics: &[cas_types::Task]) -> bool {
+    known_epics
+        .iter()
+        .filter(|other| other.id != epic.id && other.task_type == cas_types::TaskType::Epic)
+        .any(|other| match inherited_work_target_from_epic(other) {
+            Some(lane) => lane == *target,
+            None => other
+                .branch
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|branch| !branch.is_empty() && branch == target.target_branch),
+        })
 }
 
 /// Local evidence about whether a task is anchored in the current project.

@@ -4,6 +4,25 @@ import { firstEmptyField, pairDialogMarkup } from "./pair-dialog-markup";
 import { createPairingDraft } from "./pairing-draft";
 
 describe("invitation scope ceiling in the actual pairing form", () => {
+  it("names factory:manage in plain words and requests it when a link grants it (cas-d382)", () => {
+    const origin = "https://commander.example";
+    const granted = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt", "factory-manage"] as const;
+    const html = pairDialogMarkup({
+      cleanupFailed: false, cleanupContext: { cause: "cancel", storeOpen: false, rollbackPending: false },
+      pendingPairing: { kind: "invitation", token: "A".repeat(43), hubId: "studio", scopes: [...granted] },
+      draft: createPairingDraft(origin, [...granted]), status: "", createInFlight: false, exchangeInFlight: false,
+      relayOrigin: origin, pageOrigin: origin,
+    });
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector(".pair-lead")?.textContent).toBe("This browser will be able to: Read sessions and terminals · Type, send messages and interrupt · Stop and restart workers and sessions");
+    const manage = doc.querySelector<HTMLInputElement>('input[name="scope"][value="factory-manage"]');
+    expect(manage?.checked).toBe(true);
+    expect(manage?.disabled).toBe(false);
+    expect(new FormData(doc.querySelector("form")!).getAll("scope")).toEqual([...granted]);
+    // A full-control link with factory:manage withholds nothing.
+    expect(doc.querySelector(".pair-withheld")).toBeNull();
+  });
+
   it("disables and excludes ungranted control scopes even when the draft selects them", () => {
     const origin = "https://commander.example";
     const html = pairDialogMarkup({
@@ -24,6 +43,29 @@ describe("invitation scope ceiling in the actual pairing form", () => {
     expect(new FormData(doc.querySelector("form")!).getAll("scope")).toEqual(["machine-read", "session-read", "pane-read"]);
     const command = doc.querySelector<HTMLButtonElement>("#pair-copy")?.dataset.pairCommand;
     expect(command).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt");
+  });
+
+  it("names what a read-only link withholds, and the command, beside what it grants rather than inside Technical details (cas-b52d, journey F26)", () => {
+    const origin = "https://commander.example";
+    const render = (scopes?: ("machine-read" | "session-read" | "pane-read" | "pane-input" | "message-send" | "pane-interrupt")[]) => new DOMParser().parseFromString(pairDialogMarkup({
+      cleanupFailed: false, cleanupContext: { cause: "cancel", storeOpen: false, rollbackPending: false },
+      pendingPairing: { kind: "invitation", token: "A".repeat(43), hubId: "studio", scopes },
+      draft: createPairingDraft(origin), status: "", createInFlight: false, exchangeInFlight: false,
+      relayOrigin: origin, pageOrigin: origin,
+    }), "text/html");
+    const doc = render(["machine-read", "session-read", "pane-read"]);
+    const withheld = doc.querySelector(".pair-withheld")!;
+    expect(withheld.querySelector(".pair-lead")?.textContent).toBe("This link does not let it: Type, send messages and interrupt");
+    // Straight after "This browser will be able to…", before any field, and not in the disclosure.
+    expect(withheld.previousElementSibling?.textContent).toBe("This browser will be able to: Read sessions and terminals");
+    expect(withheld.closest("details")).toBeNull();
+    expect(withheld.compareDocumentPosition(doc.querySelector('input[name="url"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(withheld.querySelector("code")?.textContent).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt");
+    expect(withheld.querySelector("#pair-copy")?.textContent).toBe("Copy command");
+    expect(doc.querySelectorAll("#pair-copy")).toHaveLength(1);
+    // A link that grants everything, or one that declares no ceiling, withholds nothing.
+    expect(render(["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"]).querySelector(".pair-withheld")).toBeNull();
+    expect(render(undefined).querySelector(".pair-withheld")).toBeNull();
   });
 });
 

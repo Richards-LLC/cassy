@@ -380,7 +380,7 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
     // Context recovery must reach the first tool result of a turn. Async
     // hooks defer additionalContext and can lose the only working channel.
     if config.post_tool_use.enabled {
-        let matcher = config.post_tool_use.matcher.join("|");
+        let matcher = config.post_tool_use.claude_matcher();
         hooks.insert(
             "PostToolUse".to_string(),
             serde_json::json!([
@@ -399,18 +399,7 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
     }
 
     {
-        // Slack policy is independent of ordinary rule auto-approval. Preserve
-        // it with custom/old matchers and when other pre-tool features are off.
-        let policy = crate::config::hooks::SLACK_POLICY_MATCHER;
-        let mut matchers = if config.pre_tool_use.enabled {
-            config.pre_tool_use.matcher.clone()
-        } else {
-            Vec::new()
-        };
-        if !matchers.iter().any(|matcher| matcher == policy) {
-            matchers.push(policy.into());
-        }
-        let matcher = matchers.join("|");
+        let matcher = config.pre_tool_use.claude_matcher();
         hooks.insert(
             "PreToolUse".to_string(),
             serde_json::json!([
@@ -930,7 +919,7 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
                 })
         });
         groups.push(serde_json::json!({
-            "matcher": "^Bash$",
+            "matcher": codex_hook_matcher(event),
             "hooks": [{
                 "type": "command",
                 "command": command,
@@ -947,10 +936,28 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// cas-49c0: the Codex hook matcher for `event`. PreToolUse must also see
+/// `apply_patch`, Codex's file-edit tool, so the worker write guard covers
+/// edits and not only shell commands. Codex reports those calls with
+/// `tool_name: "apply_patch"` whichever matcher selects them.
+fn codex_hook_matcher(event: &str) -> &'static str {
+    if event == "PreToolUse" {
+        "^(Bash|apply_patch)$"
+    } else {
+        "^Bash$"
+    }
+}
+
 #[cfg(test)]
 mod codex_provision_tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn codex_pre_tool_hook_also_guards_apply_patch_cas_49c0() {
+        assert_eq!(codex_hook_matcher("PreToolUse"), "^(Bash|apply_patch)$");
+        assert_eq!(codex_hook_matcher("PostToolUse"), "^Bash$");
+    }
 
     #[test]
     fn project_provisioning_writes_both_trust_layers_idempotently() {

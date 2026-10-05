@@ -379,6 +379,18 @@ fn process_age(pid: u32) -> Option<Duration> {
     }
 }
 
+/// Processes other than this one that have `path` open, with their commands
+/// (cas-91a3). The same OS scan that names hub machine-lock holders; callers
+/// use it to say who is holding a SQLite store when a write lock is refused.
+pub fn processes_holding_file(path: &Path) -> Vec<HubLockHolder> {
+    let own = std::process::id();
+    let mut holders = os_lock_holders(path);
+    holders.retain(|holder| holder.pid != own);
+    holders.sort_by_key(|holder| holder.pid);
+    holders.dedup_by_key(|holder| holder.pid);
+    holders
+}
+
 #[cfg(target_os = "linux")]
 fn os_lock_holders(path: &Path) -> Vec<HubLockHolder> {
     let mut holders = Vec::new();

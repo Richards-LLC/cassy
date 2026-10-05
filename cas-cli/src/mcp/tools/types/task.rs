@@ -343,10 +343,13 @@ pub struct TaskCloseRequest {
 }
 
 #[derive(Debug)]
-pub struct NegativeResultCloseRequest {
+pub struct NonIntegrationCloseRequest {
     pub artifact_path: Option<String>,
     pub reference: Option<String>,
 }
+
+pub type NegativeResultCloseRequest = NonIntegrationCloseRequest;
+pub type EvidenceOnlyCloseRequest = NonIntegrationCloseRequest;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskCancelRequest {

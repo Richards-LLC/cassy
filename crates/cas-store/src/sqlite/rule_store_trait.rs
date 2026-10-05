@@ -7,11 +7,69 @@ use crate::version_store::{
 use crate::{Result, RuleStore};
 use cas_types::{Rule, RuleStatus, Scope};
 use chrono::Utc;
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 impl SqliteRuleStore {
+    /// Read one rule on an already-locked connection or open transaction
+    /// (cas-1502: update reads the prior snapshot inside its write lock).
+    fn get_on(conn: &Connection, id: &str) -> Result<Rule> {
+        let rule = conn
+            .query_row(
+                "SELECT id, created, source_ids, helpful_count, harmful_count,
+                 tags, paths, content, status, last_accessed, review_after,
+                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
+                 FROM rules WHERE id = ?",
+                params![id],
+                |row| {
+                    Ok(Rule {
+                        id: row.get(0)?,
+                        scope: Self::parse_scope(row.get(14)?),
+                        created: Self::parse_datetime(&row.get::<_, String>(1)?)
+                            .unwrap_or_else(Utc::now),
+                        source_ids: Self::parse_source_ids(row.get(2)?),
+                        helpful_count: row.get(3)?,
+                        harmful_count: row.get(4)?,
+                        tags: Self::parse_tags(row.get(5)?),
+                        paths: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                        content: row.get(7)?,
+                        status: row
+                            .get::<_, String>(8)?
+                            .parse()
+                            .unwrap_or(RuleStatus::Draft),
+                        last_accessed: row
+                            .get::<_, Option<String>>(9)?
+                            .and_then(|s| Self::parse_datetime(&s)),
+                        review_after: row
+                            .get::<_, Option<String>>(10)?
+                            .and_then(|s| Self::parse_datetime(&s)),
+                        category: row
+                            .get::<_, Option<String>>(11)?
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or_default(),
+                        priority: row.get::<_, Option<u8>>(12)?.unwrap_or(2),
+                        surface_count: row.get::<_, Option<i32>>(13)?.unwrap_or(0),
+                        auto_approve_tools: row.get(15)?,
+                        auto_approve_paths: row.get(16)?,
+                        team_id: row.get(17)?,
+                        share: row
+                            .get::<_, Option<String>>(18)?
+                            .as_deref()
+                            .and_then(|s| s.parse().ok()),
+                        origin_project: row.get(20)?,
+                    operator_authority: row
+                            .get::<_, Option<String>>(19)?
+                            .as_deref()
+                            .and_then(cas_types::OperatorRuleAuthority::from_stored),
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RuleNotFound(id.to_string()))?;
+        Ok(rule)
+    }
+
     fn insert_version(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         rule_id: &str,
         snapshot_json: &str,
         content: &str,
@@ -53,19 +111,27 @@ impl SqliteRuleStore {
         operation: &str,
     ) -> Result<()> {
         let timer = TraceTimer::new();
-        let previous = self.get(&rule.id)?;
-        let snapshot_json = serde_json::to_string(&previous).map_err(|error| {
-            StoreError::Parse(format!("failed to serialize rule history: {error}"))
-        })?;
         let changed_by = changed_by
             .map(ToOwned::to_owned)
             .or_else(default_changed_by);
         let change_note = change_note.unwrap_or("update");
         let changed_at = Utc::now().to_rfc3339();
 
+        // cas-1502: the history row reads (the prior snapshot, the next version
+        // number) before it writes. In a DEFERRED transaction that read takes a
+        // snapshot that must later be upgraded to a writer, and SQLite answers
+        // an upgrade over a foreign commit with SQLITE_BUSY without consulting
+        // the busy handler: rule update/promote/delete failed "database is
+        // locked" in milliseconds. BEGIN IMMEDIATE takes the write lock first,
+        // with bounded retry (as cas-d5c8 did for task writes), and the prior
+        // snapshot is read inside it, so the history row is never stale.
         let result = (|| -> Result<()> {
-            let mut conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = conn.transaction()?;
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+            let previous = Self::get_on(&tx, &rule.id)?;
+            let snapshot_json = serde_json::to_string(&previous).map_err(|error| {
+                StoreError::Parse(format!("failed to serialize rule history: {error}"))
+            })?;
             Self::insert_version(
                 &tx,
                 &rule.id,
@@ -288,8 +354,9 @@ impl RuleStore for SqliteRuleStore {
         let result = snapshot_json.and_then(|snapshot_json| {
             let changed_by = default_changed_by();
             let changed_at = Utc::now().to_rfc3339();
-            let mut conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = conn.transaction()?;
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            // cas-1502: same write-lock-first discipline as update_recorded.
+            let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
             tx.execute(
                 "INSERT INTO rules (id, created, source_ids, helpful_count, harmful_count,
                  tags, paths, content, status, last_accessed, review_after,
@@ -359,59 +426,7 @@ impl RuleStore for SqliteRuleStore {
 
     fn get(&self, id: &str) -> Result<Rule> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let rule = conn
-            .query_row(
-                "SELECT id, created, source_ids, helpful_count, harmful_count,
-                 tags, paths, content, status, last_accessed, review_after,
-                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
-                 FROM rules WHERE id = ?",
-                params![id],
-                |row| {
-                    Ok(Rule {
-                        id: row.get(0)?,
-                        scope: Self::parse_scope(row.get(14)?),
-                        created: Self::parse_datetime(&row.get::<_, String>(1)?)
-                            .unwrap_or_else(Utc::now),
-                        source_ids: Self::parse_source_ids(row.get(2)?),
-                        helpful_count: row.get(3)?,
-                        harmful_count: row.get(4)?,
-                        tags: Self::parse_tags(row.get(5)?),
-                        paths: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                        content: row.get(7)?,
-                        status: row
-                            .get::<_, String>(8)?
-                            .parse()
-                            .unwrap_or(RuleStatus::Draft),
-                        last_accessed: row
-                            .get::<_, Option<String>>(9)?
-                            .and_then(|s| Self::parse_datetime(&s)),
-                        review_after: row
-                            .get::<_, Option<String>>(10)?
-                            .and_then(|s| Self::parse_datetime(&s)),
-                        category: row
-                            .get::<_, Option<String>>(11)?
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or_default(),
-                        priority: row.get::<_, Option<u8>>(12)?.unwrap_or(2),
-                        surface_count: row.get::<_, Option<i32>>(13)?.unwrap_or(0),
-                        auto_approve_tools: row.get(15)?,
-                        auto_approve_paths: row.get(16)?,
-                        team_id: row.get(17)?,
-                        share: row
-                            .get::<_, Option<String>>(18)?
-                            .as_deref()
-                            .and_then(|s| s.parse().ok()),
-                        origin_project: row.get(20)?,
-                    operator_authority: row
-                            .get::<_, Option<String>>(19)?
-                            .as_deref()
-                            .and_then(cas_types::OperatorRuleAuthority::from_stored),
-                    })
-                },
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::RuleNotFound(id.to_string()))?;
-        Ok(rule)
+        Self::get_on(&conn, id)
     }
 
     fn update(&self, rule: &Rule) -> Result<()> {

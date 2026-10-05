@@ -274,6 +274,48 @@ fn clean_head(repo: &Path) -> Result<String> {
     git(repo, &["rev-parse", "HEAD"])
 }
 
+/// cas-f616: set by a caller continuing a multi-step proof at one commit
+/// (`scripts/check-lane-compile.py --prove` runs `--lib`, then `--tests`).
+pub(crate) const CONTINUATION_ENV: &str = "CAS_WORKER_CHECK_CONTINUES_PASS";
+/// How recent the preceding PASS must be to carry its load admission.
+const CONTINUATION_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// cas-f616: whether this check continues a proof whose previous capped step
+/// just passed, so it inherits that step's load admission instead of being
+/// refused for the load the step itself raised. Requires the caller's
+/// explicit [`CONTINUATION_ENV`] opt-in and a fresh PASS receipt for the
+/// same worktree, commit and packages; an independent check never qualifies.
+fn continuation_admits_load(
+    receipt: &Path,
+    repo: &Path,
+    head: &str,
+    packages: &[String],
+    now: std::time::SystemTime,
+) -> bool {
+    let Ok(metadata) = std::fs::metadata(receipt) else {
+        return false;
+    };
+    // A receipt stamped up to a minute ahead (filesystem/clock skew) is fresh.
+    let fresh = metadata
+        .modified()
+        .ok()
+        .is_some_and(|written| match now.duration_since(written) {
+            Ok(age) => age <= CONTINUATION_WINDOW,
+            Err(ahead) => ahead.duration() <= std::time::Duration::from_secs(60),
+        });
+    let Some(record) = std::fs::read(receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CheckReceipt>(&bytes).ok())
+    else {
+        return false;
+    };
+    fresh
+        && record.test.is_none()
+        && record.repo == repo
+        && record.head == head
+        && record.packages == packages
+}
+
 fn receipt_path(cas_root: &Path, repo: &Path, head: &str) -> PathBuf {
     let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
     cas_root
@@ -356,6 +398,71 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
     receipts
 }
 
+// Shared with parked-cache eviction: a cache cannot be evicted while its
+// capped builder owns the lane, even between process inspection and spawn.
+pub(crate) struct LaneLock(File);
+impl Drop for LaneLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Option<LaneLock>> {
+    let repo = repo.canonicalize()?;
+    let slots = cas_root.join("worker-check-slots");
+    std::fs::create_dir_all(&slots)?;
+    let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
+    let lock = lock_file(&slots.join(format!("lane-{key}.lock"))).map_err(std::io::Error::other)?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(Some(LaneLock(lock))),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn discard_shared_fingerprints(target: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !target.exists() {
+        return Ok(());
+    }
+    // Old seeders shared mutable freshness records. Their contents may already
+    // describe another lane's rebuild, so copying them now would preserve a
+    // poisoned cache. Drop only affected fingerprint directories; Cargo will
+    // rebuild those units and keep unrelated private metadata/artifacts.
+    // Profiles live under target/<profile> or target/<triple>/<profile>.
+    let mut roots = Vec::new();
+    for entry in walkdir::WalkDir::new(target)
+        .max_depth(3)
+        .follow_links(false)
+    {
+        let entry = entry?;
+        if entry.file_type().is_dir() && entry.file_name() == ".fingerprint" {
+            roots.push(entry.into_path());
+        }
+    }
+    for root in roots {
+        for unit in std::fs::read_dir(root)? {
+            let unit = unit?;
+            if !unit.file_type()?.is_dir() {
+                continue;
+            }
+            let mut shared = false;
+            for record in std::fs::read_dir(unit.path())? {
+                let record = record?;
+                if record.file_type()?.is_file() && record.metadata()?.nlink() > 1 {
+                    shared = true;
+                    break;
+                }
+            }
+            if shared {
+                std::fs::remove_dir_all(unit.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
     execute_at(
         cas_root,
@@ -390,13 +497,17 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
     // same commit from overwriting one another.
     let lane_key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
-    let lane = lock_file(&slots.join(format!("lane-{lane_key}.lock")))?;
-    lane.try_lock_exclusive()
+    let _lane = try_lock_lane(&cas_root, &repo)?
         .context("This worktree already has a worker check; retry later")?;
+    crate::factory_target_cache::parked::resume(&cas_root, &repo)?;
     let receipt = match &test {
         Some(test) => test_receipt_path(&cas_root, &repo, &head, test),
         None => receipt_path(&cas_root, &repo, &head),
     };
+    // cas-f616: decided before the earlier PASS is removed below.
+    let load_admitted = test.is_none()
+        && std::env::var_os(CONTINUATION_ENV).is_some_and(|value| value == "1")
+        && continuation_admits_load(&receipt, &repo, &head, &packages, std::time::SystemTime::now());
     // A failed retry must not leave an earlier PASS at this SHA.
     match std::fs::remove_file(&receipt) {
         Ok(()) => {}
@@ -411,15 +522,26 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
-    if !snapshot.violations().is_empty() {
-        bail!(
-            "Worker check refused: {}; retry later",
-            snapshot.violations().join("; ")
+    let violations = snapshot.admission_violations(load_admitted);
+    if !violations.is_empty() {
+        bail!("Worker check refused: {}; retry later", violations.join("; "));
+    }
+    if load_admitted && !snapshot.violations().is_empty() {
+        println!(
+            "Worker check: continuing the proof that just passed at {head}; its load admission carries over (load_1m={:?}, cpu_count={})",
+            snapshot.load_1m, snapshot.cpu_count
         );
     }
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
     let slot = acquire_slot(&slots, config.max_concurrent_builders)?;
+    // A parked target may contain proof logs but no debug artifacts. Seed only
+    // missing children from the published immutable baseline under the lane lock.
+    if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
+        tracing::warn!(%error, "worker target re-seed skipped; Cargo will rebuild privately");
+    }
+    #[cfg(unix)]
+    discard_shared_fingerprints(&repo.join("target"))?;
     let count_file = slots.join(format!("count-{lane_key}"));
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.
@@ -508,6 +630,63 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
 mod tests {
     use super::*;
 
+    /// cas-f616: a lane proof's `--tests` step continues its `--lib` PASS at
+    /// the same commit; anything else is an independent check and stays gated.
+    #[test]
+    fn continuation_carries_load_admission_only_for_the_same_fresh_pass_cas_f616() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("preview");
+        let receipt = dir.path().join("head.json");
+        let packages = vec!["cas".to_string()];
+        let write = |record: &CheckReceipt| std::fs::write(&receipt, serde_json::to_vec(record).unwrap()).unwrap();
+        let pass = |head: &str, packages: &[String], test: Option<TestReceipt>| CheckReceipt {
+            head: head.into(),
+            repo: repo.clone(),
+            packages: packages.to_vec(),
+            test,
+        };
+        let now = std::time::SystemTime::now();
+
+        assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "no earlier PASS");
+        write(&pass("abc", &packages, None));
+        assert!(continuation_admits_load(&receipt, &repo, "abc", &packages, now));
+        assert!(!continuation_admits_load(&receipt, &repo, "def", &packages, now), "other commit");
+        assert!(
+            !continuation_admits_load(&receipt, &repo, "abc", &["cas".into(), "cas-pty".into()], now),
+            "other packages"
+        );
+        assert!(
+            !continuation_admits_load(&receipt, &dir.path().join("other"), "abc", &packages, now),
+            "other worktree"
+        );
+        let later = now + CONTINUATION_WINDOW + std::time::Duration::from_secs(60);
+        assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, later), "stale PASS");
+        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1 })));
+        assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "a test receipt");
+    }
+
+    /// cas-f616: a load reading above the cap between the proof's steps does
+    /// not refuse the continuation, but the builder cap still does, and an
+    /// independent check is still refused on load.
+    #[test]
+    fn admitted_continuation_waives_only_the_load_reading_cas_f616() {
+        let snapshot = crate::factory_build_guard::BuildGuardSnapshot {
+            cpu_count: 32,
+            load_1m: Some(41.5),
+            live_cargo_workers: 0,
+            requested_workers: 1,
+            max_concurrent_builders: 2,
+            disabled: false,
+        };
+        assert_eq!(snapshot.admission_violations(false).len(), 1, "independent checks stay load-gated");
+        assert!(snapshot.violations()[0].contains("exceeds 32 CPUs"));
+        assert!(snapshot.admission_violations(true).is_empty(), "the continuation proceeds");
+        let crowded = crate::factory_build_guard::BuildGuardSnapshot { live_cargo_workers: 2, ..snapshot };
+        let violations = crowded.admission_violations(true);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("max_concurrent_builders"), "{violations:?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn cas_c0ec_documented_redirect_passes_clean_gate_without_compilation() {
@@ -559,7 +738,7 @@ mod tests {
             .unwrap();
         assert!(rewritten.contains("factory worker-check"));
         assert!(rewritten.ends_with("> target/worker-check.log 2>&1 &"));
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         // Execute the admitted shell suffix before invoking the real runner
         // boundary. The Cargo stand-in exits zero and compiles nothing.
         let suffix = rewritten.split_once('>').unwrap().1;
@@ -710,6 +889,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// cas-84b3: the fixture's HEAD, measured without the runner's own
+    /// `clean_head`. Expectations built with `clean_head` agreed with any
+    /// receipt it wrote, even one naming a short or wrong commit.
+    fn fixture_head(repo: &Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git rev-parse HEAD failed");
+        let head = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert!(
+            head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "fixture HEAD must be a full commit id: {head}"
+        );
+        head
+    }
+
     fn fixture_commit(repo: &Path) {
         std::fs::create_dir_all(repo).unwrap();
         git(repo, &["init", "-q"]).unwrap();
@@ -864,7 +1061,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
             "test(worker)".into(),
         ];
         execute_at(&root, &test_args, &repo, &fake).unwrap();
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         assert!(passing_receipt(&root, &repo, &head).is_some());
         std::fs::remove_file(zig).unwrap();
         let error = execute_at(&root, &args, &repo, &fake)
@@ -876,6 +1073,60 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
             std::fs::read_to_string(repo.join("target/called")).unwrap(),
             "called\ncalled\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_discards_legacy_shared_fingerprints_cas_a7cf() {
+        use std::os::unix::fs::MetadataExt;
+
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let snapshot = dir.path().join("snapshot");
+        std::fs::create_dir(&snapshot).unwrap();
+        let source = snapshot.join("invoked.timestamp");
+        std::fs::write(&source, b"another lane's freshness").unwrap();
+        for profile in ["debug", "aarch64-apple-darwin/debug"] {
+            let shared = repo
+                .join("target")
+                .join(profile)
+                .join(".fingerprint/cas-types-abc");
+            std::fs::create_dir_all(&shared).unwrap();
+            std::fs::hard_link(&source, shared.join("invoked.timestamp")).unwrap();
+            // Even records Cargo already replaced privately are suspect when
+            // this unit still has a shared invocation timestamp.
+            std::fs::write(shared.join("lib-cas_types"), b"possibly poisoned").unwrap();
+        }
+        let private = repo.join("target/debug/.fingerprint/warm-abc/lib-warm");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, b"private freshness").unwrap();
+        let artifact = repo.join("target/debug/deps/libwarm.rmeta");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::hard_link(&source, &artifact).unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            r#"
+[ ! -e target/debug/.fingerprint/cas-types-abc ] || exit 3
+[ ! -e target/aarch64-apple-darwin/debug/.fingerprint/cas-types-abc ] || exit 4
+[ -f target/debug/.fingerprint/warm-abc/lib-warm ] || exit 5
+[ -f target/debug/deps/libwarm.rmeta ] || exit 6
+"#,
+        );
+        let args = vec!["-p".into(), "cas".into(), "--lib".into()];
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        assert_eq!(std::fs::read(&private).unwrap(), b"private freshness");
+        assert_eq!(std::fs::read(&source).unwrap(), b"another lane's freshness");
+        assert_eq!(
+            std::fs::metadata(&artifact).unwrap().ino(),
+            std::fs::metadata(&source).unwrap().ino()
+        );
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
     }
 
     #[cfg(unix)]
@@ -902,7 +1153,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
             "-E".into(),
             "test(worker)".into(),
         ];
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         execute_at(&root, &args, &repo, &fake).unwrap();
         assert_eq!(
             passing_test_receipts(&root, &repo, &head),
@@ -1169,7 +1420,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         std::fs::write(&fake, "#!/bin/sh\ncase \"$*\" in 'check -p cas --tests'|'check -p cas --lib') ;; *) exit 2 ;; esac\n[ \"$CARGO_TARGET_DIR\" = \"$PWD/target\" ] || exit 3\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let args = vec!["-p".into(), "cas".into(), "--tests".into()];
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         for target in ["--lib", "--tests"] {
             let args = vec!["-p".into(), "cas".into(), target.into()];
             execute_at(&root, &args, &repo, &fake).unwrap();

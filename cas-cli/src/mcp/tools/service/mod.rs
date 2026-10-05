@@ -138,6 +138,9 @@ pub struct CasService {
     /// Tool router used internally by rmcp's #[tool_router] macro
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    /// Keep late context available for a later response instead of dropping mail.
+    factory_context: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
+    message_sweep_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CasService {
@@ -150,6 +153,8 @@ impl CasService {
             #[cfg(feature = "mcp-proxy")]
             proxy,
             tool_router: Self::tool_router(),
+            factory_context: Default::default(),
+            message_sweep_lock: Default::default(),
         }
     }
 
@@ -385,6 +390,7 @@ impl CasService {
                 "close" => {
                     let result = this.task_close(req).await;
                     if result.is_ok() {
+                        mutation_receipt::task_committed(&event_task_id);
                         this.db_branch_after_task_end(&event_task_id).await;
                     }
                     result
@@ -574,10 +580,12 @@ impl CasService {
         // cas-8563b (D2): agent actions only. The factory actions moved to the
         // `factory` tool and stay accepted here for one release.
         let result = match action.as_str() {
-            "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
-            | "session_end" | "inbox_poll" | "message" | "interrupt" | "message_ack"
-            | "message_status" | "remind" | "remind_list" | "remind_cancel"
-            | "my_context" => self.coordination_dispatch(req).await,
+            // cas-269ab: one action registry (`cas_mcp::actions`) drives the
+            // published enum, this routing and the invalid-action message.
+            // Aliases are canonicalized above.
+            agent if cas_mcp::actions::COORDINATION_ACTIONS.contains(&agent) => {
+                self.coordination_dispatch(req).await
+            }
             moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
                 let notice = moved_to_factory_notice(moved, self.inner.guidance_prefix());
                 Self::append_notice(self.coordination_dispatch(req).await, &notice)
@@ -595,7 +603,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, sweep_tasks, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_stop, server_list); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, sweep_tasks, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers may stop only their own servers); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
     )]
     pub async fn factory(
         &self,
@@ -603,15 +611,8 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let action = req.action.clone();
         let result = match action.as_str() {
-            "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker"
-            | "release_worker" | "worker_status" | "worker_activity" | "sweep_tasks"
-            | "clear_context" | "sync_all_workers" | "gc_report" | "gc_cleanup"
-            | "epic_status" | "focus_epic" | "restart_spawn_queue" | "agent_list"
-            | "agent_cleanup" | "lease_history" | "server_start" | "server_stop"
-            | "server_list" | "db_branch_create" | "db_branch_show" | "db_branch_delete"
-            | "worktree_create" | "worktree_list" | "worktree_show" | "worktree_cleanup"
-            | "worktree_merge" | "worktree_status" | "loop_start" | "loop_cancel"
-            | "loop_status" | "queue_notify" | "queue_poll" | "queue_peek" | "queue_ack" => {
+            // cas-269ab: routed from the same registry as the published enum.
+            fleet if cas_mcp::actions::FACTORY_ACTIONS.contains(&fleet) => {
                 self.coordination_dispatch(req).await
             }
             _ => Err(Self::error(
@@ -1508,7 +1509,19 @@ impl CasService {
             // cas-0033: the supervisor's calls retry queued branch deletions
             // and delete branches whose task ended or whose worktree is gone
             // (for example right after worktree_cleanup). A no-op otherwise.
-            if !action.starts_with("db_branch_") {
+            if matches!(action.as_str(), "message" | "interrupt") {
+                // A queued message must not wait for unrelated provider cleanup.
+                // The durable cleanup state is retried on subsequent calls.
+                if crate::harness_policy::is_supervisor_from_env()
+                    && let Ok(guard) = this.message_sweep_lock.clone().try_lock_owned()
+                {
+                    let sweep = this.clone();
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        sweep.db_branch_sweep().await;
+                    });
+                }
+            } else if !action.starts_with("db_branch_") {
                 this.db_branch_sweep().await;
             }
 
@@ -1627,6 +1640,7 @@ pub(crate) mod harness_observation;
 pub(crate) mod opencode_liveness;
 pub(crate) mod orphan_recovery;
 mod panic_catch;
+pub(crate) mod mutation_receipt;
 #[cfg(test)]
 mod panic_regression_test;
 

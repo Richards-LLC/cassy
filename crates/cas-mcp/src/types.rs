@@ -295,6 +295,12 @@ pub struct TaskRequest {
     #[serde(default)]
     pub state_patch: Option<serde_json::Value>,
 
+    /// For update: supervisor-only pinned batch receipt; empty clears staging.
+    #[schemars(description = "For update: registered-supervisor-only integration batch ref@SHA containing the parked delivery; empty clears staging. Ordinary close recognizes an exact batch squash on the target.")]
+    #[serde(default)]
+    pub merged_into: Option<String>,
+
+
     /// Note type (for notes action): progress, blocker, decision, discovery, question
     #[schemars(
         description = "Note type: 'progress', 'blocker', 'decision', 'discovery', 'question', 'platform_proof', 'loaded_proof'"
@@ -350,6 +356,17 @@ pub struct TaskRequest {
     )]
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
+
+    /// Successful docs/artifact delivery deliberately retained outside integration.
+    #[schemars(description = "Supervisor-only successful evidence close. Requires evidence_only_artifact_path, evidence_only_reference and a non-empty reason. CAS measures the immutable delivery history and permits only regular docs/artifacts files; records the supervisor, SHA and paths. Mutually exclusive with negative_result and completion/external verification receipts.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub evidence_only: Option<bool>,
+    #[schemars(description = "Existing durable evidence beneath configured [factory] artifacts_root/<project-key>/<task-id>/; required with evidence_only=true.")]
+    #[serde(default)]
+    pub evidence_only_artifact_path: Option<String>,
+    #[schemars(description = "Portable PR URL or branch:factory/name audit reference for intentionally unmerged evidence; required with evidence_only=true.")]
+    #[serde(default)]
+    pub evidence_only_reference: Option<String>,
 
     /// Supervisor-authorized close for a measured negative result whose
     /// experimental branch is deliberately not merged.
@@ -478,6 +495,11 @@ pub struct TaskRequest {
     #[serde(default)]
     pub to_agent: Option<String>,
 
+    /// Copy inherited task work to the receiver's own per-task branch.
+    #[schemars(description = "For transfer: fast-forward a clean registered receiver worktree to the task delivery tip on factory/<receiver>-<task>, and rebind its delivery anchor. Refuses dirty/divergent or foreign repositories; preserves the original branch.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub adopt_branch: Option<bool>,
+
     /// Limit for list operations
     #[schemars(description = "Maximum items to return")]
     #[serde(default, deserialize_with = "deser::option_usize")]
@@ -522,7 +544,7 @@ pub struct TaskRequest {
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED, strict widening of proof_targets, or correction of a mistaken risk declaration on a merged or close-ready delivery (including an authenticated worktree_merge observation on the task WorkTarget). Accepts AwaitingMerge and InProgress proof cycles. For a task already marked execution_note=no-code, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
+        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED, strict widening of proof_targets, correction of a mistaken risk declaration on a merged or close-ready delivery, or execution_note methodology correction (empty string clears it). Change one correction kind per call. Methodology corrections also support task-only investigation proofs; switching to no-code requires portable external_ref, supplied inline or already stored. Accepts AwaitingMerge, InProgress and Blocked proof cycles. Preserves immutable merged deliveries. For an already-no-code task, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics. Ordinary close proofs still apply."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,
@@ -603,7 +625,7 @@ pub struct TaskRequest {
     pub target_repo: Option<String>,
 
     /// Expected integration branch in the target repository.
-    #[schemars(description = "Expected integration branch in target_repo (create/update).")]
+    #[schemars(description = "Expected integration branch (create/update). When target_repo is omitted, update preserves an existing repository binding or defaults a targetless task to the current project repository.")]
     #[serde(default)]
     pub target_branch: Option<String>,
 
@@ -1326,6 +1348,10 @@ pub struct JevRequest {
     pub max_files: Option<usize>,
     /// Per-file content byte cap: 1–131072, default 24576.
     pub max_bytes: Option<usize>,
+    /// Matching-candidate offset for files; resume with next_offset, default 0.
+    pub offset: Option<usize>,
+    /// Optional Git revision for files; reads immutable blobs instead of checkout bytes.
+    pub rev: Option<String>,
     /// Map of question ids to typed noul, choice or score questions.
     pub questions: serde_json::Value,
     /// Return typed unavailable on transport failure; defaults to false.

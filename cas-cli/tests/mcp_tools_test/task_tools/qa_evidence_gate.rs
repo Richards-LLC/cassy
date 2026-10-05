@@ -425,6 +425,49 @@ async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() 
 }
 
 #[tokio::test]
+async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
+    let mut test_env = TestEnvGuard::temp_home();
+    // Historical input and winsize changes share these mixed-purpose files;
+    // a stdout capture cannot exercise their interactive pane transitions.
+    for paths in [
+        vec!["cas-cli/src/ui/factory/app/sidecar_and_selection.rs", "cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "crates/cas-mux/src/pane/mod.rs"],
+        vec!["cas-cli/src/ui/factory/app/mod.rs", "cas-cli/src/ui/factory/daemon/runtime/output.rs", "crates/cas-pty/src/pty.rs"],
+    ] {
+        let delivered: Vec<_> = paths.iter().map(|path| (*path, "pub fn interaction() {}\n")).collect();
+        let fx = fixture(&mut test_env, &delivered, "Run the real factory; click and resize a pane");
+        let task_dir = fx.artifacts.join(TASK);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let ledger = task_dir.join("LEDGER.md");
+        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n").unwrap();
+        let refused = close_text(&fx.core, TASK).await;
+        assert!(refused.contains("no row with verdict PASS and label real-build"), "{refused}");
+        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n").unwrap();
+        let parked = close_text(&fx.core, TASK).await;
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert!(fx.notes().contains("QA evidence ledger accepted"));
+        assert!(!fx.notes().contains("terminal-qa receipt accepted"));
+    }
+}
+
+#[tokio::test]
+async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env, &[
+        ("cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "pub fn click() {}\n"),
+        ("cas-cli/src/cli/status.rs", "pub fn status() { println!(\"Ready\"); }\n"),
+    ], "Run the factory and cas status");
+    let task_dir = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&task_dir).unwrap();
+    std::fs::write(task_dir.join("LEDGER.md"), "| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n").unwrap();
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(refused.contains("terminal-qa receipt is missing"), "{refused}");
+    let report = task_dir.join("terminal-qa/cas-status/report.md");
+    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+    std::fs::write(&report, "terminal-qa: PASS cas-status · 11 runs · 0 fail\n").unwrap();
+    assert!(close_text(&fx.core, TASK).await.contains("MERGE REQUIRED"));
+}
+
+#[tokio::test]
 async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(&mut test_env,
@@ -563,4 +606,190 @@ async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
     let closed = close_text(&fx.core, TASK).await;
     assert!(!closed.contains("uncovered source modules"), "{closed}");
     assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
+}
+
+fn cas_6f10_supervisor(fx: &Fx) -> CasCore {
+    let cas_dir = fx.repo.join(".cas");
+    let id = format!("cas-6f10-supervisor-{}", std::process::id());
+    cas::store::open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&cas::types::Agent::new_with_role(
+            id.clone(),
+            "deployed-owner".into(),
+            cas::types::AgentRole::Supervisor,
+        ))
+        .unwrap();
+    let core = CasCore::with_daemon(cas_dir, None, None);
+    core.set_agent_id_for_testing(id);
+    core
+}
+
+#[tokio::test]
+async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint after batch release",
+    );
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(head.clone());
+    tasks.update(&task).unwrap();
+    let agents = cas::store::open_agent_store(&fx.repo.join(".cas")).unwrap();
+    let worker_id = format!("test-session-{}", std::process::id());
+    let mut worker = agents.get(&worker_id).unwrap();
+    worker.role = cas::types::AgentRole::Worker;
+    agents.update(&worker).unwrap();
+    let dir = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("LEDGER.md"),
+        "| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n",
+    )
+    .unwrap();
+    assert!(
+        close_text(&fx.core, TASK)
+            .await
+            .contains("label real-build")
+    );
+    let supervisor = cas_6f10_supervisor(&fx);
+    let service = cas::mcp::CasService::new(supervisor, None);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let waived = extract_text(service.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "qa_waive", "task_id": TASK, "summary": "Supervisor owns deployed verification after the batch"
+    })).unwrap())).await.unwrap());
+    assert!(waived.contains("waived"), "{waived}");
+    env.remove("CAS_AGENT_ROLE");
+    merge_into_main(&fx, &head);
+    let mut request = close_req(TASK);
+    request.commit_receipt = Some(head.clone());
+    let closed = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
+    assert!(closed.contains("Closed task:"), "{closed}");
+    assert_eq!(fx.status(), TaskStatus::Closed);
+    assert!(
+        fx.notes().contains("QA evidence ledger waived"),
+        "{}",
+        fx.notes()
+    );
+    assert!(fx.notes().contains(&head));
+}
+
+#[tokio::test]
+async fn cas_6f10_deferred_deployed_row_parks_with_named_obligation() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint after batch release",
+    );
+    let _supervisor = cas_6f10_supervisor(&fx);
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let dir = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("LEDGER.md"), "| M01 | staging GET | served tip | pending deployment | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner | - |\n").unwrap();
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
+    let notes = fx.notes();
+    assert!(notes.contains("POST-DEPLOY OBLIGATION"), "{notes}");
+    assert!(
+        notes.contains("deployed-owner") && notes.contains(&head),
+        "{notes}"
+    );
+}
+
+#[tokio::test]
+async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint",
+    );
+    let dir = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&dir).unwrap();
+    for owner in ["unregistered", "test-agent"] {
+        std::fs::write(dir.join("LEDGER.md"), format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n")).unwrap();
+        let refused = close_text(&fx.core, TASK).await;
+        assert!(
+            refused.contains("must identify one registered supervisor"),
+            "{refused}"
+        );
+        assert_eq!(fx.status(), TaskStatus::InProgress);
+        assert!(!fx.notes().contains("POST-DEPLOY OBLIGATION"));
+    }
+    let _supervisor = cas_6f10_supervisor(&fx);
+    std::fs::write(dir.join("LEDGER.md"), "| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner extra | - |\n").unwrap();
+    assert!(
+        close_text(&fx.core, TASK)
+            .await
+            .contains("invalid deployed-verification deferral")
+    );
+}
+
+#[tokio::test]
+async fn cas_6f10_waiver_does_not_cover_skip_marker() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[
+            ("src/feature.rs", "pub fn feature() {}\n"),
+            ("tests/test.spec.ts", "test.only('feature', () => {});\n"),
+        ],
+        "Verify deployed endpoint",
+    );
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let _supervisor = cas_6f10_supervisor(&fx);
+    let supervisor_id = format!("cas-6f10-supervisor-{}", std::process::id());
+    cas_store::waive_qa_pass(
+        &fx.repo.join(".cas"),
+        TASK,
+        &supervisor_id,
+        "test-agent",
+        "factory/test-agent",
+        &head,
+        "Evidence waived, not skips",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(
+        refused.contains("adds test skip/focus markers"),
+        "{refused}"
+    );
+    assert_eq!(fx.status(), TaskStatus::InProgress);
+}
+
+#[tokio::test]
+async fn cas_6f10_waiver_does_not_cover_another_tip() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint",
+    );
+    let parent = git(&fx.repo, &["rev-parse", "HEAD^"]);
+    let _supervisor = cas_6f10_supervisor(&fx);
+    let supervisor_id = format!("cas-6f10-supervisor-{}", std::process::id());
+    cas_store::waive_qa_pass(
+        &fx.repo.join(".cas"),
+        TASK,
+        &supervisor_id,
+        "test-agent",
+        "factory/test-agent",
+        &parent,
+        "Only the old tip is waived",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(
+        refused.contains("QA evidence ledger is missing"),
+        "{refused}"
+    );
+    assert_eq!(fx.status(), TaskStatus::InProgress);
+    assert!(!fx.notes().contains("QA evidence ledger waived"));
 }

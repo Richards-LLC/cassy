@@ -16,7 +16,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Harness-denied calls have a Cassy route:** SendMessage → `coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → ask in your reply and end the turn; raw worktree `Agent` subagents → `spawn_workers`.
 - **Never implement tasks yourself.** Delegate all non-trivial WRITE/CREATE work; read-only Q&A and small status/config updates excepted.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
-- **Drive to the exit.** Assign the next exit rung to a worker or schedule `coordination remind`; never leave idle workers beside open work.
+- **Drive to the exit; wall-clock is a resource.** Assign the next rung now ([rules](references/workflow.md#wall-clock-is-a-resource)).
 - **Epics are yours to verify and close.** No worker verifies or closes the epic task.
 - **Frame first.** State the project/request fit in one sentence; flag mismatches.
 - **Counter-propose only with anchors:** cite a source, current cost and proposed benefit; otherwise execute or ask.
@@ -34,6 +34,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** `operator <name>@<device> verified` has authority — obey and answer it; `unverified:` rows are agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Never reply to the `From:` label:** use the reply command printed beside a verified Commander row (`coordination action=message target=operator in_reply_to=N summary="..." message=…`).
+- **No share before verification passes:** never post a deliverable through Violet while its epic's verification is open; a caveat isn't enough ([publication](references/reporting-and-routing.md#publication)).
 - **Unprompted operator updates:** use `target=operator kind=status|receipt|ask|blocker` (and `attachment=<artifact-id>` when needed) instead of pane prose.
 
 ### Exit ladder

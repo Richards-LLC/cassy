@@ -65,6 +65,7 @@ pub mod retrieval_parity;
 mod setup;
 mod status;
 mod statusline;
+pub mod store_choice;
 mod sync;
 mod update;
 pub mod update_transaction;
@@ -558,6 +559,12 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     let cas_root: Option<PathBuf> = find_cas_root().ok();
 
+    // cas-e1c7: a command that would rewrite another store's identity or
+    // config is refused before anything else runs (sign-in included).
+    if let (Some(guard), Some(root)) = (command_store_guard(&cli.command), cas_root.as_deref()) {
+        guarded_write_root(Some(guard), root)?;
+    }
+
     if auth_requirement(&cli.command) == AuthRequirement::Required {
         ensure_authenticated()?;
     }
@@ -700,6 +707,53 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
     }
 }
 
+/// cas-e1c7: a command that rewrites project identity or config, with its
+/// `--store` choice. Such a command refuses, before writing, when CAS_ROOT and
+/// the working directory are different stores and `--store` does not pick one.
+type StoreGuard = Option<(&'static str, Option<store_choice::StoreChoice>)>;
+
+fn config_store_guard(cmd: &config::ConfigCommands) -> StoreGuard {
+    match cmd {
+        config::ConfigCommands::Set(args) => Some(("cas config set", args.store.store)),
+        config::ConfigCommands::Reset(args) => Some(("cas config reset", args.store.store)),
+        config::ConfigCommands::Import(args) if !args.dry_run => Some(("cas config import", args.store.store)),
+        _ => None,
+    }
+}
+
+fn cloud_store_guard(cmd: &cloud::CloudCommands) -> StoreGuard {
+    match cmd {
+        cloud::CloudCommands::Team(cloud::CloudTeamCommands::Set(args)) => {
+            Some(("cas cloud team set", args.store.store))
+        }
+        cloud::CloudCommands::Project(cloud::CloudProjectArgs {
+            command: Some(cloud::CloudProjectCommands::Set(args)),
+            ..
+        }) => Some(("cas cloud project set", args.store.store)),
+        _ => None,
+    }
+}
+
+fn command_store_guard(command: &Option<Commands>) -> StoreGuard {
+    match command {
+        Some(Commands::Config(cmd)) => config_store_guard(cmd),
+        Some(Commands::Cloud(cmd)) => cloud_store_guard(cmd),
+        _ => None,
+    }
+}
+
+fn guarded_write_root(guard: StoreGuard, resolved: &Path) -> anyhow::Result<PathBuf> {
+    match guard {
+        Some((command, choice)) => store_choice::write_root(
+            command,
+            resolved,
+            choice,
+            crate::store::detect::root_conflict(),
+        ),
+        None => Ok(resolved.to_path_buf()),
+    }
+}
+
 fn require_cas_root(cas_root: Option<&Path>) -> anyhow::Result<&Path> {
     cas_root.ok_or_else(|| anyhow::anyhow!("no Cassy store here; run `cas init`"))
 }
@@ -749,7 +803,10 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
         Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
         Commands::Jev(cmd) => jev::execute(cmd, require_cas_root(cas_root)?),
-        Commands::Config(cmd) => config::execute_subcommand(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Config(cmd) => {
+            let root = guarded_write_root(config_store_guard(cmd), require_cas_root(cas_root)?)?;
+            config::execute_subcommand(cmd, cli, &root)
+        }
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),
         Commands::StatusLine(args) => statusline::execute(args, cli, require_cas_root(cas_root)?),
@@ -764,7 +821,10 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
         Commands::Mcp(cmd) => mcp_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Queue(cmd) => queue::execute(cmd, cli),
-        Commands::Cloud(cmd) => cloud::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Cloud(cmd) => {
+            let root = guarded_write_root(cloud_store_guard(cmd), require_cas_root(cas_root)?)?;
+            cloud::execute(cmd, cli, &root)
+        }
         Commands::Device(cmd) => device::execute(cmd, cli),
         Commands::Sync(cmd) => sync::execute(cmd, cli),
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),

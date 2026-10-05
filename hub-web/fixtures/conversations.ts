@@ -4,7 +4,7 @@ import type { Scope } from '../src/types';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
-import { applyActionAvailability, applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, ensureConversationStage, keyboardViewportHeight, rawOutputDrawerMarkup } from '../src/conversation-shell';
+import { applyActionAvailability, applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, ensureConversationStage, fitConversationHost, keyboardViewportHeight, rawOutputDrawerMarkup } from '../src/conversation-shell';
 import { CONVERSATION_OPENING, fatalConnectionRecovery, lostConnectionBanner, pairingControlsReason, renderConnectionSurfaceInto } from '../src/connection-state-view';
 import { TranscriptView, type TranscriptSource } from '../src/transcript-view';
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from '../src/terminal/ghostty/core';
@@ -355,6 +355,9 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   const reasons = fixtureActionReasons(state, machine.host);
   applyActionAvailability(app.querySelector<HTMLButtonElement>('#conversation-raw-output'), app.querySelector<HTMLElement>('#conversation-raw-output-reason'), reasons.rawOutput);
   applyActionAvailability(app.querySelector<HTMLButtonElement>('#conversation-interrupt'), app.querySelector<HTMLElement>('#conversation-interrupt-reason'), reasons.interrupt);
+  // The host line is fitted to the header's room exactly as main.ts does after every render and resize.
+  fitConversationHost(document);
+  window.addEventListener('resize', () => fitConversationHost(document), { passive: true });
   // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
   const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
   // Dictation writes interim words into the field while the mic listens.

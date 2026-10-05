@@ -171,9 +171,9 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         self.assertTrue(escape.exists())
         self.assertFalse(old.exists())
 
-    def idle_owner(self, path):
+    def idle_owner(self, path, cache=False):
         path.mkdir(mode=0o700, exist_ok=True)
-        owner = scratch.owner_record(path, path / scratch.LOCK)
+        owner = scratch.owner_record(path, path.with_name(path.name + ".lock") if cache else path / scratch.LOCK)
         owner.update(pid=0, start='idle')
         (path / scratch.OWNER).write_text(json.dumps(owner))
 
@@ -362,7 +362,7 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
 
     def test_gc_cli_reclaims_over_bound_managed_cache_without_self_argv_false_positive(self):
         target = self.parent / 'assembly-target'
-        self.idle_owner(target)
+        self.idle_owner(target, cache=True)
         (target / 'output').write_bytes(b'x' * 2048)
         env = dict(self.env, CAS_ASSEMBLY_TARGET_MAX_GIB='0.000001')
         result = subprocess.run([sys.executable, scratch.__file__, '--repo', str(self.repo),

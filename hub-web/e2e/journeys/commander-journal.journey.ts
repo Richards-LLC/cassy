@@ -15,6 +15,35 @@ async function send(page: Page, text: string) {
   await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
 }
 
+test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retry (cas-9dc6)", journeyPart, async ({ page, context, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  const peer = await context.newPage();
+  await peer.clock.install({ time: journeyNow() });
+  const other = new HubDouble(peer, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  await other.install();
+  await journey.stage("Both tabs keep the same offline message", async () => {
+    await journey.open(); await choose(page);
+    await peer.goto(page.url()); await choose(peer);
+    await Promise.all([hub.down("atlas", { sockets: "close" }), other.down("atlas", { sockets: "close" })]);
+    for (const tab of [page, peer]) await expect(tab.locator("#conversation-connection")).not.toHaveText(" · Live");
+    await send(page, "One instruction, one delivery");
+    for (const tab of [page, peer]) await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
+  });
+  await journey.stage("One tab sends; its confirmation is visible in both tabs", async () => {
+    await Promise.all([hub.up("atlas"), other.up("atlas")]);
+    await expect.poll(() => hub.sends.length + other.sends.length, { timeout: 20_000 }).toBe(1);
+    const owner = hub.sends.length ? hub : other;
+    owner.deliverLatest(PELICAN);
+    for (const tab of [page, peer]) {
+      await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
+    }
+    expect(hub.sends.length + other.sends.length).toBe(1);
+  });
+  await peer.close();
+});
+
 async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") {
   const qa = process.env.DELIVERY_QA;
   if (!qa) return;

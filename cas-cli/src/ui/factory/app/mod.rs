@@ -7051,7 +7051,39 @@ mod spawn_isolation_tests {
     #[cfg(unix)]
     #[test]
     fn spawn_disk_floor_refuses_before_staging_and_spawn_reports_reason() {
-        let _env = TestEnvGuard::temp_home();
+        // A synchronous fixture deadlock must fail before nextest's deadline.
+        // A child process also isolates the process-wide environment mutex:
+        // a timed-out thread would retain that lock and poison other tests.
+        const CHILD: &str = "CAS_2681_FLOOR_TEST_CHILD";
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            let logs = TempDir::new().unwrap();
+            let output = logs.path().join("floor.log");
+            let file = std::fs::File::create(&output).unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "ui::factory::app::spawn_isolation_tests::spawn_disk_floor_refuses_before_staging_and_spawn_reports_reason",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(file.try_clone().unwrap())
+                .stderr(file);
+            let result = super::provisioning::run_command(
+                command,
+                &super::provisioning::ProvisioningCancellation::default(),
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(15),
+            );
+            let output = std::fs::read_to_string(output).unwrap_or_default();
+            assert!(
+                result.is_ok() && output.contains("running 1 test") && output.contains("1 passed"),
+                "bounded disk-floor fixture failed or matched zero tests: {result:?}\n{output}",
+            );
+            return;
+        }
+        let mut env = TestEnvGuard::temp_home();
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -7101,8 +7133,8 @@ mod spawn_isolation_tests {
         assert!(!path.exists(), "admission must precede checkout creation");
         assert!(!git.branch_exists("factory/floor-refused").unwrap());
         // Seeding disabled still reserves disk for the worker's later builds.
-        let _seed_off =
-            crate::test_env_guard::AmbientEnvRestore::set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        // Reuse the guard that already owns the non-reentrant environment mutex.
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         assert_refused();
         assert!(!path.exists());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -7117,7 +7149,7 @@ mod spawn_isolation_tests {
         );
         assert!(path.exists(), "reuse refusal must preserve prior work");
         assert!(git.branch_exists("factory/floor-refused").unwrap());
-        drop(_seed_off);
+        env.remove("CAS_FACTORY_DISABLE_TARGET_SEED");
         std::fs::remove_dir_all(path.join("target")).unwrap();
         std::fs::write(
             cas_dir.join("config.toml"),

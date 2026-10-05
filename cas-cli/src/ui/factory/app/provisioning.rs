@@ -204,7 +204,9 @@ impl Drop for RetirementGuard {
             let _ = std::thread::Builder::new()
                 .name("factory-spawn-cleanup".into())
                 .spawn(move || {
-                    tracing::warn!(detail = %plan.cleanup(), "retired completed provisioner");
+                    // Event arguments are lazy: cleanup must run even when WARN is disabled.
+                    let detail = plan.cleanup();
+                    tracing::warn!(%detail, "retired completed provisioner");
                     drop(lease);
                 });
         }

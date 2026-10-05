@@ -125,6 +125,25 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.snapshot().networkAccessHelp).toBeUndefined();
     expect(hub.streams[0]!.credential).toContain("opaque-local-network");
   });
+  it("clears permission remediation when the hub explicitly refuses the pairing (cas-b85a)", async () => {
+    const hub = transport();
+    const machine = await storedMachine("needs-pairing");
+    machine.baseUrl = "https://soundwave-linux.tailf5a734.ts.net";
+    vi.stubGlobal("navigator", { permissions: { query: vi.fn().mockResolvedValue({ state: "denied" }) } });
+    const connection = supervisor(machine);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    hub.block(true);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("Allow Local network access"));
+    hub.block(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
+    expect(connection.snapshot().networkAccessHelp).toBeUndefined();
+    const requests = hub.requests.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(hub.requests).toHaveLength(requests);
+  });
   it("bounds an unanswered event catalog refresh to the probe deadline (cas-b85a)", async () => {
     const hub = transport();
     const connection = supervisor(await storedMachine("refresh-deadline"));

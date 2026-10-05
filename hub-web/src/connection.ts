@@ -340,7 +340,7 @@ export class HubConnectionSupervisor {
       attempt: this.attempt,
       missedHeartbeats: this.missedHeartbeats,
       degraded: this.missedHeartbeats >= DEGRADED_AFTER_MISSED_HEARTBEATS,
-      networkAccessHelp: phase === "live" || phase === "idle" ? undefined : this.lifecycle.networkAccessHelp,
+      networkAccessHelp: phase === "live" || phase === "idle" || update.authFailure ? undefined : this.lifecycle.networkAccessHelp,
       ...update,
     };
     this.callbacks.onState(this.lifecycle);
@@ -366,7 +366,7 @@ export class HubConnectionSupervisor {
       // A session-only drop stays one through its retry; another failure, or
       // being live again, ends it (cas-d15c).
       sessionOnly: phase === "failed" || phase === "live" || phase === "idle" ? undefined : prior?.sessionOnly,
-      networkAccessHelp: phase === "live" || phase === "idle" ? undefined : prior?.networkAccessHelp,
+      networkAccessHelp: phase === "live" || phase === "idle" || update.authFailure ? undefined : prior?.networkAccessHelp,
       ...update,
     };
     this.attachLifecycles.set(session, snapshot);

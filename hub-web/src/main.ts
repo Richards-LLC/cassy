@@ -3932,8 +3932,9 @@ interface RegionContext {
  */
 function renderRegions(context: RegionContext): void {
   const networkHelp = document.querySelector<HTMLElement>("#network-access-help");
-  const help = context.connectionSnapshot?.networkAccessHelp
-    ?? (context.selected ? connectionStates.get(context.selected.id)?.networkAccessHelp : undefined);
+  const machineState = context.selected ? connectionStates.get(context.selected.id) : undefined;
+  const help = machineState?.authFailure ? undefined
+    : context.connectionSnapshot?.networkAccessHelp ?? machineState?.networkAccessHelp;
   if (networkHelp) {
     networkHelp.hidden = !help;
     if (networkHelp.textContent !== (help ?? "")) networkHelp.textContent = help ?? "";

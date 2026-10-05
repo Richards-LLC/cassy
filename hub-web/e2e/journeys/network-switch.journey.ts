@@ -96,6 +96,13 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
     await expect(held).toHaveCount(0);
     await expect(header).toHaveText(" · Live");
     expect(hub.sends.map(m => m.text)).toEqual(["First on legacy", "Second before the refusal"]);
+    // cas-387e: the session's link never dropped, so nothing reattached; the
+    // composer's "will go out by itself" line still clears once the held
+    // messages went out, and stays clear once they are Delivered.
+    await expect(page.locator("#message-status")).toBeHidden();
+    hub.deliverLatest(PELICAN);
+    await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    await expect(page.locator("#message-status")).toBeHidden();
   });
 });
 

@@ -93,6 +93,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     const delivered = page.locator('.conversation-turn[data-state="acknowledged"]');
     await expect(delivered.getByRole("status")).toHaveText("Delivered");
     await expect(page.getByText(/Sending to /)).toHaveCount(0);
+    // cas-387e: a Delivered message never sits above "will go out by itself".
+    await expect(page.locator("#message-status")).toBeHidden();
   });
 
   await journey.stage("See it answered", async () => {
@@ -363,6 +365,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.locator(".conversation-turn").filter({ hasText: "Is the gate green yet?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Is the gate green yet?")).toHaveCount(1);
+    // cas-387e: Retry on a live session never says the message waits for the connection.
+    await expect(page.locator("#message-status")).toBeHidden();
   });
 
   await journey.stage("Not confirmed settles once the supervisor replies after it", async () => {
@@ -396,6 +400,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.locator(".conversation-turn").filter({ hasText: "Did the Mac tests start?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);
+    await expect(page.locator("#message-status")).toBeHidden();
   });
 
   await journey.stage("A long supervisor name leaves the message box usable", async () => {

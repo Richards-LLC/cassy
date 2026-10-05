@@ -144,6 +144,107 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
   await second.close();
 });
 
+test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line clears (cas-387e)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  const status = page.locator("#message-status");
+  await journey.stage("Send while the machine is away: the message waits, and the composer says so", async () => {
+    await journey.open(); await choose(page);
+    await hub.down("atlas", { sockets: "close" });
+    await expect(page.locator("#conversation-connection")).not.toHaveText(" · Live");
+    await send(page, "Send this when Atlas is back");
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
+    await expect(status).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
+  });
+  await journey.stage("Atlas comes back: the message goes out once and the waiting line clears", async () => {
+    await hub.up("atlas");
+    await choose(page);
+    await expect.poll(() => hub.sends.map((row) => row.text), { timeout: 20_000 }).toEqual(["Send this when Atlas is back"]);
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    await expect(status).toBeHidden();
+  });
+  await journey.stage("Delivered: nothing says it will go out by itself", async () => {
+    hub.deliverLatest(PELICAN);
+    await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    await expect(status).toBeHidden();
+    await expect(page.getByText(/go out by itself/)).toHaveCount(0);
+    expect(hub.sends.map((row) => row.text)).toEqual(["Send this when Atlas is back"]);
+  });
+  const qa = process.env.QA_ARTIFACTS;
+  if (qa) {
+    // cas-qa-craft polish evidence for cas-387e: the delivered thread and
+    // composer at 1280 and 390, light and dark; a standalone snapshot with
+    // the committed CSS; the three a11y modes proven by matchMedia.
+    await mkdir(qa, { recursive: true });
+    for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
+      for (const colorScheme of ["light", "dark"] as const) {
+        await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
+        await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+        await expect(status).toBeHidden();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
+        await page.screenshot({ path: join(qa, `delivered-${colorScheme}-${size}.png`) });
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 800 }); await page.emulateMedia({ colorScheme: "light" });
+    // The thread and its composer together: the composer's status line is the subject.
+    const html = await page.evaluate(() => {
+      const thread = document.querySelector(".conversation-reading")!;
+      let node: Element | null = document.querySelector("#message-status")!.parentElement;
+      while (node && !node.contains(thread)) node = node.parentElement;
+      return node!.outerHTML;
+    });
+    const css = await readFile("dist/app.css", "utf8");
+    await writeFile(join(qa, "delivered.html"), `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Delivered conversation</title><style>${css}</style></head><body>${html}</body></html>`);
+    for (const [name, query, media] of [["forced-colors", "(forced-colors: active)", { forcedColors: "active" }], ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }], ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }]] as const) {
+      await page.emulateMedia(Object.assign({ forcedColors: null, reducedMotion: null, contrast: null }, media));
+      expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
+      await expect(status).toBeHidden();
+      await page.screenshot({ path: join(qa, `a11y-${name}.png`) });
+    }
+    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, colorScheme: "light" });
+  }
+});
+
+test("HUB-J12 a held message another tab delivers clears this tab's waiting line (cas-387e)", journeyPart, async ({ page, context, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  const second = await context.newPage();
+  await second.clock.install({ time: journeyNow() });
+  const other = new HubDouble(second, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  await other.install();
+  const status = page.locator("#message-status");
+  await journey.stage("This tab holds a message while the machine is away", async () => {
+    await journey.open(); await choose(page);
+    await second.goto(page.url()); await choose(second);
+    await Promise.all([hub.down("atlas", { sockets: "close" }), other.down("atlas", { sockets: "close" })]);
+    await expect(page.locator("#conversation-connection")).not.toHaveText(" · Live");
+    await send(page, "Held in the first tab");
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
+    await expect(status).toContainText("will go out by itself");
+  });
+  await journey.stage("The other tab reconnects first and delivers it; this tab stops promising", async () => {
+    await other.up("atlas");
+    await choose(second);
+    await expect.poll(() => other.sends.map((row) => row.text), { timeout: 20_000 }).toEqual(["Held in the first tab"]);
+    other.deliverLatest(PELICAN);
+    await expect(second.getByRole("log").getByText("Delivered")).toBeVisible();
+    await expect(second.locator("#message-status")).toBeHidden();
+    // Nothing is held for this conversation any more, so the first tab no
+    // longer says the message will go out by itself, even while still offline.
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    await expect(status).toBeHidden();
+  });
+  await journey.stage("This tab comes back: no waiting line, sent once", async () => {
+    await hub.up("atlas");
+    await choose(page);
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+    // Never a second copy of it here; the composer stays clear.
+    expect(await page.getByRole("log").getByText("Held in the first tab").count()).toBeLessThanOrEqual(1);
+    await expect(status).toBeHidden();
+    expect([...hub.sends, ...other.sends].map((row) => row.text)).toEqual(["Held in the first tab"]);
+  });
+  await second.close();
+});
+
 test("HUB-J12 cancellation persists and cannot drain after reload", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
   await journey.stage("Cancel an explicitly waiting message", async () => {

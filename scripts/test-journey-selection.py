@@ -130,6 +130,13 @@ class SelectionTests(unittest.TestCase):
         self.write('hub-web/src/main.ts', 'import { reply as renderedReply } from "./reply";\nimport { fleet } from "./fleet";\nfunction renderReply() { return reply; }\nfunction renderFleet() { return fleet; }\n')
         self.assertEqual(self.ids('hub-web/src/main.ts', base=self.base), {'HUB-J1'})
 
+    def test_main_state_type_words_do_not_select_unrelated_handlers(self):
+        self.write('hub-web/src/main.ts', 'import { reply } from "./reply";\nimport { fleet } from "./fleet";\nconst kept: Map<string, string> = new Map();\nfunction renderReply() { return reply + kept.size; }\nfunction renderFleet(label: string) { return fleet + label; }\n')
+        base = self.commit()
+        p = self.root / 'hub-web/src/main.ts'
+        p.write_text(p.read_text().replace('Map<string, string>', 'Map<string, number>'))
+        self.assertEqual(self.ids('hub-web/src/main.ts', base=base), {'HUB-J1'})
+
     def test_main_bootstrap_or_unattributed_is_wide(self):
         self.write('hub-web/src/main.ts', (self.root / 'hub-web/src/main.ts').read_text() + '\nwindow.addEventListener("load", () => {});\n')
         self.assertEqual(self.ids('hub-web/src/main.ts', base=self.base), {'HUB-J1', 'HUB-J2', 'HUB-J3'})
@@ -182,6 +189,25 @@ class SelectionTests(unittest.TestCase):
         r = json.loads(self.run_selector('--paths', 'hub-web/e2e/fixture.ts', base=base).stdout)
         self.assertEqual(len(r['journeys']), 3)
         self.assertTrue(all('fixture-core' in j['reason'] for j in r['journeys']))
+
+    def test_additive_dispatch_recorder_only_selects_observers(self):
+        before = 'export class Double {\n handleSessionFrame(message: unknown) {\n this.ready = true;\n }\n}\n'
+        self.write('hub-web/e2e/fixture.ts', before)
+        spec = self.root / 'hub-web/e2e/reply.journey.ts'
+        spec.write_text(spec.read_text() + 'expect(double.receipts).toHaveLength(1);')
+        base = self.commit()
+        after = before.replace(' handleSessionFrame', ' readonly receipts: unknown[] = [];\n handleSessionFrame').replace(' this.ready = true;', ' this.ready = true;\n if (message.Persisted) this.receipts.push({ id: Number(message.Persisted.id) });')
+        self.write('hub-web/e2e/fixture.ts', after)
+        self.assertEqual(self.ids('hub-web/e2e/fixture.ts', base=base), {'HUB-J1'})
+        for unsafe in [after.replace('true;', 'false;'),
+                       after.replace('Number(message.Persisted.id)', 'await observe(message)'),
+                       after.replace('Number(message.Persisted.id)', 'observe(message)'),
+                       after.replace('if (message.Persisted)', 'if (this.ready)'),
+                       after.replace('this.receipts.push({ id: Number(message.Persisted.id) });', 'return;'),
+                       after.replace('this.receipts.push', 'this.ready.push')]:
+            with self.subTest(unsafe=unsafe):
+                self.write('hub-web/e2e/fixture.ts', unsafe)
+                self.assertEqual(self.ids('hub-web/e2e/fixture.ts', base=base), {'HUB-J1', 'HUB-J2', 'HUB-J3'})
 
     def test_shared_fixture_field_and_composition_provider(self):
         self.write('hub-web/e2e/fixture.ts', 'export class Double {\n readonly receipts: unknown[] = [];\n}\n')

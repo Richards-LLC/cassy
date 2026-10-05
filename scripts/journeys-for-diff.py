@@ -281,6 +281,53 @@ def selector_anchors(selector: str) -> set[str]:
     return anchors
 
 
+def additive_recorders(before: str, after: str, old_region: str, new_region: str) -> set[str]:
+    """Allow only new observation fields in an otherwise byte-preserved dispatch.
+
+    Unknown statement shapes stay wide. In particular, existing branch/method
+    lines cannot change, and arbitrary recorder calls are not assumed pure.
+    """
+    import difflib
+    added = []
+    for tag, _, _, start, end in difflib.SequenceMatcher(
+            None, old_region.splitlines(), new_region.splitlines(), autojunk=False).get_opcodes():
+        if tag not in ("equal", "insert"):
+            return set()
+        if tag == "insert":
+            added.extend(new_region.splitlines()[start:end])
+    names: set[str] = set()
+    for line in added:
+        code = mask_comments(line).strip()
+        if not code:
+            continue
+        match = re.fullmatch(
+            r"(?:if\s*\(\s*([\w$]+)\.([\w$]+)\s*\)\s*)?"
+            r"this\.([\w$]+)(?:\.push\((.*)\)|\s*=\s*(.*));", code)
+        if not match:
+            return set()
+        receiver, guard, field, pushed, assigned = match.groups()
+        if re.search(rf"\b{re.escape(field)}\b", mask_comments(before)):
+            return set()
+        if not re.search(rf"\b(?:readonly|private|public|protected)\s+{re.escape(field)}\s*[:=]", mask_comments(after)):
+            return set()
+        if guard and re.search(rf"\b{re.escape(receiver)}\s*\.\s*{re.escape(guard)}\b", mask_comments(old_region)):
+            return set()
+        raw_value = pushed if pushed is not None else assigned
+        if "`" in raw_value:
+            return set()
+        value = mask_comments(raw_value, strings=True)
+        if re.search(r"\b(?:await|return|throw|new|delete|yield|if|else)\b|[;=?!]|\+\+|--|`", value):
+            return set()
+        if any(call not in ("Number", "String", "Boolean") for call in re.findall(r"([\w$.]+)\s*\(", value)):
+            return set()
+        # Reject property accessors, spread, computed calls and other syntax
+        # outside inert record literals/properties plus primitive conversions.
+        if re.search(r"\.\.\.|[\[\]]|\b(?:get|set)\s+[\w$]+\s*\(", value):
+            return set()
+        names.add(field)
+    return names
+
+
 class MainModel:
     def __init__(self, tree: SourceTree, path: str):
         self.text = tree.read(path)
@@ -459,16 +506,27 @@ class Impact:
                 segment = model.text[lo:hi]
                 lo += len(segment) - len(segment.lstrip())
                 hi -= len(segment) - len(segment.rstrip())
+                recorder_names: set[str] = set()
                 for r in regions:
                     if r[0] < hi and r[1] > lo and re.search(r"^(constructor|route|routing|dispatch|received|socket|machineSocket|handleSessionFrame|install)$", r[2]):
-                        return set(), f"surface-wide:fixture-core:{path}:{r[2]}"
+                        old_text, new_text = self.before.read(path), self.after.read(path)
+                        # Only dispatch methods, never constructors or setup.
+                        if r[2] not in ("constructor", "install") and tree is self.after:
+                            old_model = MainModel(self.before, path)
+                            for match in re.finditer(rf"^\s*(?:(?:private|public|protected|async|static)\s+)*{re.escape(r[2])}\s*\([^;{{}}]*\)[^;{{}}]*\{{", old_model.clean, re.MULTILINE):
+                                stop = matching_brace(old_model.clean, match.end() - 1) + 1
+                                recorder_names = additive_recorders(old_text, new_text, old_text[match.start():stop], new_text[r[0]:r[1]])
+                        if not recorder_names:
+                            return set(), f"surface-wide:fixture-core:{path}:{r[2]}"
                 containing = [r for r in regions if r[0] <= lo and r[1] >= hi]
                 region = min(containing, key=lambda r: r[1] - r[0]) if containing else None
-                if region and re.search(r"^(constructor|route|routing|dispatch|received|socket|machineSocket|handleSessionFrame|install)$", region[2]):
+                if region and not recorder_names and re.search(r"^(constructor|route|routing|dispatch|received|socket|machineSocket|handleSessionFrame|install)$", region[2]):
                     return set(), f"surface-wide:fixture-core:{path}:{region[2]}"
                 names: set[str] = set()
                 keys: set[str] = set()
-                if region:
+                if recorder_names:
+                    names.update(recorder_names)
+                elif region:
                     names.add(region[2])
                     # A guarded optional world owns the operation. Generic
                     # machines/options elsewhere in that method do not broaden it.
@@ -562,7 +620,10 @@ class Impact:
                         body = mask_comments(excerpt, strings=True)
                         modules = model.modules(body)
                         if not modules:
-                            modules = model.usage_modules(set(re.findall(r"\b[A-Za-z_$][\w$]*\b", body)))
+                            # Attribute declared state by its consumers, never
+                            # ubiquitous type words such as Map/string/number.
+                            declared = set(re.findall(r"\b(?:const|let|var)\s+([\w$]+)", body))
+                            modules = model.usage_modules(declared) if declared else set()
                 matches = set().union(*(self.users(module) for module in modules)) if modules else set()
                 if not matches:
                     return set(), f"surface-wide:unattributed-composition:{start + 1}"

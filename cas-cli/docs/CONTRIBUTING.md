@@ -490,13 +490,22 @@ the larger of 25% of physical RAM and 8 GiB. Both knobs accept positive integers
 The producer budget uses 8 GiB for the large cas compile/link unit, rounded up
 from soundwave's measured 7,293,348 KiB maximum RSS (serial proof `7e4c6f50`,
 head `abd6817b5`), plus an assumed 256 MiB per dependency job and 2 GiB for
-scripts. A shared host/user linker slot bounds both producers to one link at a
-time, budgeted at 2.1 GiB. Soundwave's 2026-10-05 incremental relink sampler
+scripts. A shared host/user linker pool bounds both producers, budgeted at
+2.1 GiB per link. Soundwave's 2026-10-05 incremental relink sampler
 (`.cas/perf-98a0/link-rss.log`, 0.5s samples) measured 2,190,228 KiB maximum
 `ld.mold` RSS (2.089 GiB), with `rustc` peaking at 4,775,752 KiB (4.555 GiB).
 The cold-proof 8 GiB producer bound remains because incremental code generation
 does not establish the cold peak. Link admission rechecks memory while holding
-the slot; every invocation records child peak RSS in `link-rss.jsonl`.
+an atomic admission lock. The live slot count is
+`clamp(floor((MemAvailable - reserve - 2 GiB) / 2.1 GiB), 1, maximum)`,
+where `CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS` sets the maximum (default 8,
+positive integer). A count of 1 still waits if one link cannot fit. All active
+leases count, including higher slots after memory shrinks or a different cap
+is chosen. Queued children reserve a full estimate before starting; the pool
+is host/user-wide under `/var/tmp`, independent of producer `TMPDIR`.
+Every attempt records capacity and occupancy, every admission records its slot,
+and every invocation records child peak RSS in `link-rss.jsonl`. The producer
+start budget reserves one link; additional links require fresh pool admission.
 Supervisor memory/PSI samples must validate the estimates on each host.
 Insufficient concurrent capacity selects sequential legs with a fresh memory
 admission before each phase. `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS`

@@ -10,6 +10,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -105,12 +106,15 @@ class GuardTests(unittest.TestCase):
 
     def test_cross_producer_slot_serializes_children_and_records_rss(self):
         program = r'''
-import importlib.util, sys
+import importlib.util, sys, os
+from pathlib import Path
 spec=importlib.util.spec_from_file_location('memory', sys.argv[1]); m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+m.LINK_LEASE_ROOT=Path(os.environ['TMPDIR'])
 m.proof.memory_snapshot=lambda: {'total_bytes':64*m.proof.GIB,'available_bytes':60*m.proof.GIB,'source':'fixture'}
 sys.exit(m.link([sys.executable, '-c', "import pathlib,time; p=pathlib.Path("+repr(sys.argv[2])+"); f=p.open('a');f.write(str(time.monotonic())+' start\\n');f.flush();time.sleep(.15);f.write(str(time.monotonic())+' end\\n');f.close() "]))
 '''
         env = dict(self.env, TMPDIR=str(self.root), CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG=str(self.events))
+        env["CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY"] = json.dumps({"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": "1"})
         log = self.root / "link-times"
         command = [sys.executable, "-c", program, str(Path(guard.__file__).resolve()), str(log)]
         children = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
@@ -127,6 +131,128 @@ sys.exit(m.link([sys.executable, '-c', "import pathlib,time; p=pathlib.Path("+re
         completed = [item for item in map(json.loads, self.events.read_text().splitlines()) if item["phase"] == "link-complete"]
         self.assertEqual(len(completed), 2)
         self.assertTrue(all(item["peak_child_rss_bytes"] > 0 and not item["estimate_exceeded"] for item in completed))
+
+    def wait_until(self, predicate):
+        until = time.monotonic() + 5
+        while time.monotonic() < until:
+            if predicate():
+                return
+            time.sleep(.01)
+        self.fail("fixture condition did not arrive")
+
+    def launch_link(self, name, available, maximum=2, wait=5):
+        program = r'''import importlib.util, json, os, sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('memory', sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+m.LINK_LEASE_ROOT=Path(sys.argv[2]);m.poll=lambda env:.02
+m.proof.memory_snapshot=lambda: {'total_bytes':64*m.proof.GIB,'available_bytes':int(Path(sys.argv[3]).read_text()),'source':'fixture'}
+child="import os,time;from pathlib import Path;root=Path("+repr(sys.argv[2])+");name="+repr(sys.argv[4])+"; (root/(name+'.started')).write_text(str(os.getpid()));\nwhile not (root/(name+'.release')).exists(): time.sleep(.01)"
+sys.exit(m.link([sys.executable,'-c',child]))
+'''
+        scratch = self.root / (name + "-tmp")
+        scratch.mkdir()
+        env = dict(self.env, TMPDIR=str(scratch),
+                   CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG=str(self.events),
+                   CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps({
+                       "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": str(maximum),
+                       "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS": str(wait)}))
+        process = subprocess.Popen([sys.executable, "-c", program, str(Path(guard.__file__).resolve()),
+                                    str(self.root), str(available), name], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        def cleanup():
+            (self.root / (name + ".release")).touch()
+            if process.poll() is None:
+                process.terminate()
+            process.communicate(timeout=5)
+            started = self.root / (name + ".started")
+            if started.exists():
+                try:
+                    os.kill(int(started.read_text()), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        self.addCleanup(cleanup)
+        return process
+
+    def finish_link(self, process, name):
+        (self.root / (name + ".release")).touch()
+        _, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, stderr.decode())
+
+    def test_parallel_children_share_cap_and_resample_after_shrink(self):
+        available = self.root / "available"
+        available.write_text(str(60 * guard.proof.GIB))
+        first = self.launch_link("first", available)
+        self.wait_until(lambda: (self.root / "first.started").exists())
+        second = self.launch_link("second", available)
+        self.wait_until(lambda: (self.root / "second.started").exists())
+        # Both real children are live. Now capacity shrinks to 1, even though
+        # slot 1 (above the new limit) remains owned after slot 0 exits.
+        available.write_text(str(16 * guard.proof.GIB + guard.proof.GUARD_HEADROOM_BYTES + guard.proof.LINK_BYTES))
+        third = self.launch_link("third", available, maximum=8)
+        self.wait_until(lambda: self.events.exists() and 'live link capacity occupied' in self.events.read_text())
+        self.finish_link(first, "first")
+        time.sleep(.1)
+        self.assertFalse((self.root / "third.started").exists())
+        self.finish_link(second, "second")
+        self.wait_until(lambda: (self.root / "third.started").exists())
+        self.finish_link(third, "third")
+        admitted = [event for event in map(json.loads, self.events.read_text().splitlines()) if event.get("admitted")]
+        self.assertEqual([event["link_slots"] for event in admitted], [2, 2, 1])
+        self.assertEqual([event["active_links"] for event in admitted], [0, 1, 0])
+        self.assertEqual([event["slot_index"] for event in admitted], [0, 1, 0])
+
+    def test_link_waits_for_memory_and_deadline_records_refusals(self):
+        available = self.root / "available"
+        available.write_text(str(17 * guard.proof.GIB))
+        process = self.launch_link("recovered", available)
+        self.wait_until(lambda: self.events.exists() and 'memory reserve/headroom' in self.events.read_text())
+        self.assertFalse((self.root / "recovered.started").exists())
+        available.write_text(str(60 * guard.proof.GIB))
+        self.wait_until(lambda: (self.root / "recovered.started").exists())
+        self.finish_link(process, "recovered")
+        available.write_text(str(17 * guard.proof.GIB))
+        expired = self.launch_link("expired", available, wait=1)
+        _, stderr = expired.communicate(timeout=5)
+        self.assertNotEqual(expired.returncode, 0)
+        self.assertIn("deadline expired", stderr.decode())
+        self.assertFalse((self.root / "expired.started").exists())
+
+    def test_lease_survives_abrupt_wrapper_exit_until_linker_exits(self):
+        available = self.root / "available"
+        available.write_text(str(60 * guard.proof.GIB))
+        first = self.launch_link("orphan", available, maximum=1)
+        self.wait_until(lambda: (self.root / "orphan.started").exists())
+        first.kill()
+        first.wait(timeout=5)
+        second = self.launch_link("waiting", available, maximum=1)
+        self.wait_until(lambda: 'live link capacity occupied' in self.events.read_text())
+        self.assertFalse((self.root / "waiting.started").exists())
+        (self.root / "orphan.release").touch()
+        self.wait_until(lambda: (self.root / "waiting.started").exists())
+        self.finish_link(second, "waiting")
+        first.communicate(timeout=5)
+
+    def test_symlink_lease_fails_closed(self):
+        directory = self.root / "pool"
+        directory.mkdir()
+        victim = self.root / "victim"
+        victim.write_text("unchanged")
+        (directory / "slot-0.lock").symlink_to(victim)
+        with mock.patch.object(guard.proof, "memory_snapshot", return_value=self.high), self.assertRaises(OSError):
+            guard.claim_slot(directory, {})
+        self.assertEqual(victim.read_text(), "unchanged")
+
+    def test_live_slot_budget_and_override(self):
+        memory = {"budget_bytes": 32 * guard.proof.GIB}
+        self.assertEqual(guard.link_capacity({}, memory), 8)
+        self.assertEqual(guard.link_capacity({"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": "3"}, memory), 3)
+        memory["budget_bytes"] = guard.proof.GUARD_HEADROOM_BYTES + 2 * guard.proof.LINK_BYTES
+        self.assertEqual(guard.link_capacity({}, memory), 2)
+        memory["budget_bytes"] = 0
+        self.assertEqual(guard.link_capacity({}, memory), 1)
+        for value in ("", "0", "-1", "auto"):
+            with self.assertRaisesRegex(ValueError, "LINK_JOBS"):
+                guard.link_capacity({"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": value}, memory)
 
 
 if __name__ == "__main__":

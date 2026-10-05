@@ -456,6 +456,7 @@ def memory_budget(env):
 def execution_plan(env):
     positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS")
     positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS")
+    link_jobs = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") or 8
     memory = memory_budget(env)
     requested = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS")
     cores = cpu_count()
@@ -469,7 +470,7 @@ def execution_plan(env):
     return dict(memory, mode=mode, reason=reason, cores=cores, requested_compile_jobs=requested,
                 compile_jobs=jobs, per_job_bytes=COMPILE_JOB_BYTES,
                 producer_overhead_bytes=PRODUCER_BYTES, script_bytes=SCRIPT_BYTES,
-                link_jobs=1, per_link_bytes=LINK_BYTES, guard_headroom_bytes=GUARD_HEADROOM_BYTES,
+                link_jobs=link_jobs, link_admission="fresh-memory shared pool", per_link_bytes=LINK_BYTES, guard_headroom_bytes=GUARD_HEADROOM_BYTES,
                 link_estimate_source="soundwave b86ec0c2e + train9 incremental relink, 2026-10-05, .cas/perf-98a0/link-rss.log: max ld.mold 2190228 KiB (2.089 GiB), rustc 4775752 KiB (4.555 GiB), 0.5s ps; links rounded to 2.1 GiB; cold producer bound remains 8 GiB",
                 estimate_source="8 GiB large unit rounded from measured 7293348 KiB max RSS, soundwave proof 7e4c6f50 (abd6817b5); 256 MiB/dependency job and 2 GiB scripts assumed",
                 phases=[])
@@ -562,7 +563,8 @@ def env_policy(env):
     return {key: env[key] for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS",
                                     "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
                                     "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS",
-                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") if key in env}
+                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS",
+                                    "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") if key in env}
 
 
 def prove(root):

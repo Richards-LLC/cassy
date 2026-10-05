@@ -439,6 +439,9 @@ class ReceiptTests(unittest.TestCase):
                         "source": "fixture"}), mock.patch.object(proof, "cpu_count", return_value=cores):
                 plan = proof.execution_plan({})
                 self.assertEqual(plan["compile_jobs"], expected_jobs)
+                self.assertEqual(plan["link_jobs"], 8)
+                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": "2"})["link_jobs"], 2)
+                self.assertEqual(proof.env_policy({"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": "2"})["CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS"], "2")
                 estimated = 2 * (expected_jobs * proof.COMPILE_JOB_BYTES + proof.PRODUCER_BYTES) + proof.SCRIPT_BYTES + proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
                 if expected_jobs:
                     self.assertLessEqual(estimated, plan["budget_bytes"])
@@ -471,7 +474,8 @@ class ReceiptTests(unittest.TestCase):
 
     def test_invalid_memory_and_job_knobs_fail_closed(self):
         for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS", "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
-                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS", "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS"):
+                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS", "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS",
+                    "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS"):
             for value in ("", "0", "-1", "auto", "1.5"):
                 with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
                     proof.execution_plan({key: value})

@@ -5289,6 +5289,20 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_clear_context_impl(req).await.map_err(|mut error| {
+            // Codex delegates to safe recycling; the caller still requested
+            // clear_context. Keep that action on every error, including
+            // post-condition failures after a Claude control was queued.
+            // A neutral prefix preserves whether the reset was attempted.
+            error.message = format!("clear_context: {}", error.message).into();
+            error
+        })
+    }
+
+    async fn factory_clear_context_impl(
+        &self,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::factory_context_reset as reset;
         use crate::store::{open_agent_store, open_prompt_queue_store};
         use cas_types::{AgentRole, AgentStatus};

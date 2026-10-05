@@ -234,3 +234,12 @@ Re-pairing proves the retained origin-local signing key and updates the same ins
 
 **Phone layout invariants.** The phone rule keys on the short axis and pointer, not width alone (D5); every drawer/attention `.shell` class combination is listed in the phone block because a media query adds no specificity; only the primary pane mounts a terminal on a phone; the collapsed context pill paints no surface of its own and never spills across Pair (D7); severity is carried by text colour and the dot, never by a fill only some severities receive (D8).
 <!-- /keep -->
+
+
+## Connection evidence and stable Details
+
+An open Connection log shows the measured machine cause while that machine is Unsteady, including when its session attachment remains live. Session-specific causes lead when the machine is healthy. Retry and last-success evidence use the connection's measured state.
+
+NetworkInformation throughput, RTT and effective-type estimates do not count as a changed route. The four missed-heartbeat rule still owns half-open status; actual offline/online, wake and underlying transport-type changes retain their recovery behaviour.
+
+An Attention notice with unchanged identity and copied payload retains its open Details and Copy controls when the panel's outage explanation changes. Its current Copy callback is refreshed. A changed payload replaces the control; a whole-shell rebuild restores the corresponding notice's focus.

@@ -814,7 +814,6 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
   await journey.stage("Allowing it again settles the notice", async () => {
     const sheet = page.getByRole("dialog", { name: "New session" });
     await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).click();
-    await sheet.getByRole("button", { name: "Allow starting sessions", exact: true }).click();
     await expect(sheet.locator('[data-launch-view="form"]')).toBeVisible();
     await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true })).toHaveCount(0);

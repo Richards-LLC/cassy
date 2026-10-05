@@ -1,8 +1,8 @@
 # CAS Build Configuration
 
-[build]
-# Use all available CPU cores
-jobs = 16
+# Cargo uses the host's available cores by default. Factory workers receive
+# their separate CARGO_BUILD_JOBS throttle from cas-pty; assembly splits its
+# two concurrent producers with CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS.
 
 # Prefer setting RUSTC_WRAPPER=sccache in shell/CI so builds don't hard-fail
 # on machines without sccache installed.

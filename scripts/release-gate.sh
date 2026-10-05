@@ -208,6 +208,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # like failures; the temporary fallback remains useful for direct diagnostics.
 row_log_dir="${CAS_RELEASE_GATE_LOG_DIR:-$tmp_dir/rows}"
 mkdir -p "$row_log_dir"
+rm -f "$row_log_dir/compile-timing.tsv" "$row_log_dir/memory-admission.json"
 printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
 cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
 # The train owns durable row evidence; unchanged inputs reuse it automatically.
@@ -869,6 +870,86 @@ EOF
 # The merge queue validates the whole workspace, so the suite and archive rows
 # do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
 # `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
+run_assembly_compile() {
+    local row="$1" started ended wall user system status=0
+    shift
+    started="$(date -u +%FT%TZ)"
+    local LC_NUMERIC=C TIMEFORMAT='%R %U %S'
+    if { time "$@" 2>&1; } 2>"$tmp_dir/$row-compile.time"; then
+        :
+    else
+        status=$?
+    fi
+    ended="$(date -u +%FT%TZ)"
+    read -r wall user system <"$tmp_dir/$row-compile.time"
+    printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' \
+        >"$row_log_dir/compile-timing.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$row" "$started" "$ended" "$wall" "$user" "$system" "$status" "$cache_head" \
+        >>"$row_log_dir/compile-timing.tsv"
+    printf 'assembly compile: %s interval=%s to %s wall=%ss user=%ss system=%ss jobs=%s\n' \
+        "$row" "$started" "$ended" "$wall" "$user" "$system" "${CARGO_BUILD_JOBS:-auto}"
+    return "$status"
+}
+
+await_assembly_test_slot() {
+    if [[ -z "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}" ]]; then
+        [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]] || return 0
+        local test_threads
+        test_threads="$(python3 - "$repo_root/scripts/assembly-proof.py" \
+            "$CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY" "$1" "$row_log_dir/memory-admission.json" <<'PY_ASSEMBLY_MEMORY'
+import contextlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("assembly_proof", sys.argv[1])
+proof = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proof)
+execution = {"phases": []}
+with contextlib.redirect_stdout(sys.stderr):
+    threads = proof.admit_phase(json.loads(sys.argv[2]), execution, sys.argv[3] + "-tests")
+Path(sys.argv[4]).write_text(json.dumps(execution["phases"][0]) + "\n")
+print(threads)
+PY_ASSEMBLY_MEMORY
+)" || return $?
+        export NEXTEST_TEST_THREADS="$test_threads"
+        return 0
+    fi
+    local test_threads
+    test_threads="$(python3 - "$CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR" "$1" <<'PY_ASSEMBLY_SLOT'
+import os
+from pathlib import Path
+import re
+import sys
+import time
+
+sync, row = Path(sys.argv[1]), sys.argv[2]
+(sync / ("compiled-" + row)).touch()
+owner = int((sync / "owner").read_text())
+deadline = time.monotonic() + 3600
+while True:
+    if (sync / "abort").exists():
+        sys.exit("assembly test admission aborted: " + row)
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        sys.exit("assembly proof owner exited: " + row)
+    if (sync / ("release-" + row)).exists():
+        threads = (sync / ("release-" + row)).read_text().strip()
+        if not re.fullmatch(r"[1-9][0-9]*", threads):
+            sys.exit("invalid assembly test thread admission: " + row)
+        print(threads)
+        break
+    if time.monotonic() >= deadline:
+        sys.exit("assembly test admission timed out: " + row)
+    time.sleep(0.1)
+PY_ASSEMBLY_SLOT
+)" || return $?
+    export NEXTEST_TEST_THREADS="$test_threads"
+}
+
 check_nextest() {
     # The archive row executes the remaining workspace tests in the queue's
     # remapped environment. Cover its one exclusion here, once, instead of
@@ -876,6 +957,13 @@ check_nextest() {
     local -a selection=()
     if row_selected archive-mode; then
         selection=(--filterset 'binary_id(~component_output_test)')
+    fi
+    if [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]]; then
+        run_assembly_compile nextest \
+            env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+            -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+            "$cargo_bin" nextest run --workspace "${selection[@]}" --no-run || return $?
+        await_assembly_test_slot nextest || return $?
     fi
     env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
@@ -999,10 +1087,14 @@ check_archive_mode() {
     archive_dir="$(mktemp -d "${archive_base}.XXXXXX")"
     archive="$archive_dir/suite.tar.zst"
     remap="$archive_dir/workspace-remap"
-    archive_tmp="$archive_dir/tmp"
+    # The archive and extraction can be several GB: keep them on the checkout
+    # disk. Test fixtures are disposable, and their SQLite/index commits must
+    # use the same temp filesystem as native tests (cas-98a0).
+    archive_tmp="$tmp_dir/archive-test-tmp"
     archive_cargo_home="$archive_dir/cargo-home"
     archive_bin="$archive_dir/bin"
     mkdir -p "$remap" "$archive_tmp" "$archive_cargo_home" "$archive_bin"
+    assert_no_cas_ancestor "$archive_tmp" || return 1
     [[ -f Cargo.toml ]] || {
         printf 'archive-mode: root Cargo.toml is missing\n'
         return 1
@@ -1025,9 +1117,13 @@ check_archive_mode() {
         rm -rf "$archive_dir"
         return "$status"
     }
-    if env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+    local -a compile_command=(env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
-        "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then
+        "$cargo_bin" nextest archive --workspace --archive-file "$archive")
+    if [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]]; then
+        compile_command=(run_assembly_compile archive-mode "${compile_command[@]}")
+    fi
+    if "${compile_command[@]}"; then
         :
     else
         status=$?
@@ -1050,9 +1146,20 @@ check_archive_mode() {
     fi
     printf 'archive-mode: archive size %s bytes recorded%s\n' "$archive_bytes" \
         "${archive_size_file:+ in $archive_size_file}"
-    # Extraction is deliberately on the home disk, not a small /tmp tmpfs.
-    # The remap has every package cwd but no source; snapshot tests read
-    # source-tree .snap files and are excluded rather than "fixed".
+    if await_assembly_test_slot archive-mode; then
+        :
+    else
+        status=$?
+        git worktree remove --force "$remap" >/dev/null 2>&1 || true
+        rm -rf "$archive_dir"
+        return "$status"
+    fi
+    printf 'archive-mode: test TMPDIR=%s; extraction=%s; workspace-remap=%s\n' \
+        "$archive_tmp" "$archive_dir/extract" "$remap"
+    # --extract-to decouples the large disk extraction from test-time TMPDIR.
+    # Producer and remap remain outside disposable roots in assembly proofs;
+    # missing-wrapper, empty CARGO_HOME, PATH and snapshot exclusion still
+    # exercise the queue consumer's independent archive environment.
     if (
         cd "$archive_dir"
         env -u CAS_ROOT -u COLUMNS -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE \
@@ -1062,7 +1169,7 @@ check_archive_mode() {
             INSTA_WORKSPACE_ROOT="$remap" CARGO="$cargo_bin" \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
             "$remap/scripts/run-verified-tests.sh" nextest run --archive-file "$archive" \
-            --workspace-remap "$remap" --no-fail-fast \
+            --extract-to "$archive_dir/extract" --workspace-remap "$remap" --no-fail-fast \
             --filterset 'not binary_id(~component_output_test)'
     ); then
         status=0

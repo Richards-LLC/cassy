@@ -4,7 +4,7 @@
 use super::{WorkerSpawnContext, WorkerSpawnResult};
 use anyhow::Context;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -107,6 +107,34 @@ pub(crate) fn launch(
     (task, cancellation)
 }
 
+/// A kernel-stuck child must not make Tokio wait forever for spawn_blocking
+/// during daemon shutdown. Poll reaping for a bounded interval, then transfer
+/// only the reap to an ordinary detached OS thread (never the Tokio pool).
+fn wait_for_exit(
+    timeout: Duration,
+    mut poll: impl FnMut() -> std::io::Result<Option<ExitStatus>>,
+) -> bool {
+    let started = Instant::now();
+    loop {
+        match poll() {
+            Ok(Some(_)) => return true,
+            Err(_) => return false,
+            Ok(None) if started.elapsed() >= timeout => return false,
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn reap_bounded(mut child: Child) {
+    if !wait_for_exit(Duration::from_millis(250), || child.try_wait()) {
+        let _ = std::thread::Builder::new()
+            .name("factory-provisioner-reaper".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
+}
+
 /// Shared production/test seam: the command may stall anywhere in preparation.
 pub(crate) fn run_command(
     mut command: Command,
@@ -124,7 +152,10 @@ pub(crate) fn run_command(
     }
     let mut child = command.spawn()?;
     {
-        let mut pid = cancellation.child_pid.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pid = cancellation
+            .child_pid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *pid = Some(child.id());
         if cancellation.cancelled.load(Ordering::SeqCst) {
             kill_group(child.id());
@@ -133,7 +164,10 @@ pub(crate) fn run_command(
     loop {
         let cancelled = cancellation.cancelled.load(Ordering::SeqCst);
         let timed_out = started.elapsed() >= timeout;
-        let mut pid = cancellation.child_pid.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pid = cancellation
+            .child_pid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if cancelled || timed_out {
             kill_group(child.id());
             let _ = child.kill();
@@ -141,15 +175,25 @@ pub(crate) fn run_command(
             drop(pid);
             // Reap outside the daemon loop. Even a kernel-stuck child cannot
             // hold up shutdowns, wake delivery or the reset consumer.
-            let _ = child.wait();
+            reap_bounded(child);
             if cancelled {
-                anyhow::bail!("provision_cancelled: spawn generation retired; provisioner group killed");
+                anyhow::bail!(
+                    "provision_cancelled: spawn generation retired; provisioner group killed"
+                );
             }
-            anyhow::bail!("provision_timeout: worktree preparation exceeded {} seconds; provisioner group killed", timeout.as_secs());
+            anyhow::bail!(
+                "provision_timeout: worktree preparation exceeded {} seconds; provisioner group killed",
+                timeout.as_secs()
+            );
         }
         match child.try_wait() {
             Ok(Some(status)) => {
                 *pid = None;
+                if cancellation.cancelled.load(Ordering::SeqCst) {
+                    anyhow::bail!(
+                        "provision_cancelled: spawn generation retired; provisioner group killed"
+                    );
+                }
                 anyhow::ensure!(status.success(), "provisioner exited with {status}");
                 return Ok(());
             }
@@ -159,11 +203,90 @@ pub(crate) fn run_command(
                 let _ = child.kill();
                 *pid = None;
                 drop(pid);
-                let _ = child.wait();
+                reap_bounded(child);
                 return Err(error.into());
             }
         }
         drop(pid);
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn launch_stalled_for_test(
+    command: Command,
+    timeout: Duration,
+) -> (
+    tokio::task::JoinHandle<anyhow::Result<ProvisionedWorker>>,
+    Arc<ProvisioningCancellation>,
+) {
+    let cancellation = Arc::new(ProvisioningCancellation::default());
+    let stop = cancellation.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        run_command(command, &stop, Instant::now(), timeout)?;
+        anyhow::bail!("test provisioner exited without a result")
+    });
+    (task, cancellation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_child_reap_has_a_bounded_wait() {
+        let started = Instant::now();
+        assert!(!wait_for_exit(Duration::from_millis(30), || Ok(None)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_provisioner_times_out_without_blocking_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let entered = dir.path().join("entered");
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", r#"touch "$1"; sleep 30 & wait"#, "fixture"])
+            .arg(&entered);
+        let started = Instant::now();
+        let (handle, _) = launch_stalled_for_test(command, Duration::from_secs(1));
+        let mut ticks = 0;
+        while !handle.is_finished() && started.elapsed() < Duration::from_secs(3) {
+            ticks += 1;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            ticks > 1,
+            "the loop must complete passes while the provisioner stalls"
+        );
+        assert!(entered.exists(), "the fixture must enter provisioning");
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("provision_timeout")
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_before_launch_prevents_provisioner_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("should-not-exist");
+        let stop = ProvisioningCancellation::default();
+        stop.cancel();
+        let mut command = Command::new("touch");
+        command.arg(&path);
+        let error =
+            run_command(command, &stop, Instant::now(), Duration::from_secs(1)).unwrap_err();
+        assert!(error.to_string().contains("provision_cancelled"));
+        assert!(!path.exists());
     }
 }

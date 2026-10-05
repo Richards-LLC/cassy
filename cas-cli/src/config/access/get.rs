@@ -98,6 +98,9 @@ impl Config {
             }
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.target_seed_min_free_gib" => {
+                Some(factory.target_seed_min_free_gib.to_string())
+            }
             "factory.prompt_retention_days" => Some(factory.prompt_retention_days.to_string()),
             "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
                 Some(factory.cargo_build_jobs.clone())

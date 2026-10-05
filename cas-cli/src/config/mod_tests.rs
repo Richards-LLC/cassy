@@ -941,6 +941,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),
         ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.target_seed_min_free_gib", "30", "30"),
         ("factory.prompt_retention_days", "14", "14"),
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),

@@ -327,10 +327,14 @@ fn cancel_targeted_in_flight_spawn(
     cancelled_spawns: &mut std::collections::HashSet<String>,
     in_flight_worker: Option<&str>,
     shutdown_targets: &[String],
+    cancellation: Option<&crate::ui::factory::app::provisioning::ProvisioningCancellation>,
 ) {
     if let Some(worker) = in_flight_worker {
         if shutdown_targets.iter().any(|target| target == worker) {
             cancelled_spawns.insert(worker.to_string());
+            if let Some(cancellation) = cancellation {
+                cancellation.cancel();
+            }
         }
     }
 }
@@ -7408,28 +7412,44 @@ impl FactoryDaemon {
             // name in dead_workers must not cancel a later independent spawn.
             let cancelled = take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
             self.spawn_cancellation = None;
-            let outcome = handle.await.map(|outcome| outcome.map(|provisioned| {
-                if !cancelled {
-                    append_spawn_audit(
-                        self.app.cas_dir(), &self.session_name, request_id,
-                        Some(&pending_name), "provision", "prepared", &provisioned.receipt,
-                    );
-                    if let Some(provenance) = &provisioned.base_provenance {
+            let outcome = handle.await.map(|outcome| {
+                outcome.map(|provisioned| {
+                    if !cancelled {
                         append_spawn_audit(
-                            self.app.cas_dir(), &self.session_name, request_id,
-                            Some(&pending_name), "provision", "base", provenance,
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&pending_name),
+                            "provision",
+                            "prepared",
+                            &provisioned.receipt,
                         );
+                        if let Some(provenance) = &provisioned.base_provenance {
+                            append_spawn_audit(
+                                self.app.cas_dir(),
+                                &self.session_name,
+                                request_id,
+                                Some(&pending_name),
+                                "provision",
+                                "base",
+                                provenance,
+                            );
+                        }
+                        report_spawn_warnings(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &pending_name,
+                            &provisioned.warnings,
+                        );
+                        for warning in &provisioned.warnings {
+                            self.app.set_error(warning.clone());
+                        }
                     }
-                    report_spawn_warnings(
-                        self.app.cas_dir(), self.app.supervisor_name(), &self.session_name,
-                        request_id, &pending_name, &provisioned.warnings,
-                    );
-                    for warning in &provisioned.warnings {
-                        self.app.set_error(warning.clone());
-                    }
-                }
-                provisioned.result
-            }));
+                    provisioned.result
+                })
+            });
             match outcome {
                 Ok(Ok(mut result)) if cancelled => {
                     crate::telemetry::track(
@@ -7663,6 +7683,34 @@ impl FactoryDaemon {
                         }
                     }
                 }
+                Ok(Err(e)) if cancelled => {
+                    let detail = format!(
+                        "Spawn cancelled by targeted shutdown: {e}. Inspect and remove any partial worktree/branch before reissuing this worker name."
+                    );
+                    if let Some(ref task_id) = pending_task_id {
+                        crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
+                            self.app.cas_dir(), task_id, &pending_name,
+                        );
+                    }
+                    crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), &pending_name);
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        request_id,
+                        Some(&pending_name),
+                        "provision",
+                        "cancelled",
+                        &detail,
+                    );
+                    self.app.set_error(detail.clone());
+                    let _ = enqueue_spawn_cancelled_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        &pending_name,
+                        &detail,
+                    );
+                }
                 Ok(Err(e)) => {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
@@ -7786,16 +7834,12 @@ impl FactoryDaemon {
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
-                        let (handle, cancellation) =
-                            crate::ui::factory::app::provisioning::launch(prep, SPAWN_PROVISION_TIMEOUT);
+                        let (handle, cancellation) = crate::ui::factory::app::provisioning::launch(
+                            prep,
+                            SPAWN_PROVISION_TIMEOUT,
+                        );
                         self.spawn_cancellation = Some(cancellation);
-                        self.spawn_task = Some((
-                            worker_name,
-                            request_id,
-                            spec,
-                            task_id,
-                            handle,
-                        ));
+                        self.spawn_task = Some((worker_name, request_id, spec, task_id, handle));
                     }
                     Err(e) => {
                         crate::telemetry::track(
@@ -7869,16 +7913,12 @@ impl FactoryDaemon {
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
-                        let (handle, cancellation) =
-                            crate::ui::factory::app::provisioning::launch(prep, SPAWN_PROVISION_TIMEOUT);
+                        let (handle, cancellation) = crate::ui::factory::app::provisioning::launch(
+                            prep,
+                            SPAWN_PROVISION_TIMEOUT,
+                        );
                         self.spawn_cancellation = Some(cancellation);
-                        self.spawn_task = Some((
-                            worker_name,
-                            request_id,
-                            spec,
-                            task_id,
-                            handle,
-                        ));
+                        self.spawn_task = Some((worker_name, request_id, spec, task_id, handle));
                     }
                     Err(e) => {
                         crate::telemetry::track(
@@ -7949,6 +7989,7 @@ impl FactoryDaemon {
                     &mut self.cancelled_spawns,
                     cancellable_in_flight,
                     &workers_to_stop,
+                    self.spawn_cancellation.as_deref(),
                 );
 
                 // cas-7a94: drop still-queued spawns for these names and release
@@ -12694,7 +12735,7 @@ mod tests {
         assert!(!take_spawn_cancellation(&mut cancelled, worker));
 
         // Shutdown-all after completion has no in-flight generation to cancel.
-        cancel_targeted_in_flight_spawn(&mut cancelled, None, &[worker.to_string()]);
+        cancel_targeted_in_flight_spawn(&mut cancelled, None, &[worker.to_string()], None);
 
         // A later spawn reusing the same name is allowed to finish and come up.
         assert!(
@@ -12757,7 +12798,7 @@ mod tests {
         store.add(&task).unwrap();
 
         let mut cancelled = HashSet::new();
-        cancel_targeted_in_flight_spawn(&mut cancelled, Some(worker), &[worker.to_string()]);
+        cancel_targeted_in_flight_spawn(&mut cancelled, Some(worker), &[worker.to_string()], None);
 
         assert!(
             take_spawn_cancellation(&mut cancelled, worker),

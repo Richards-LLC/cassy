@@ -1796,11 +1796,23 @@ fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
 
 impl WorkerSpawnContext {
     pub(crate) fn resolve(mut self) -> anyhow::Result<WorkerSpawnPrep> {
-        let data = DirectorData::load_fast(&self.cas_dir)?;
-        let focus = crate::ui::factory::app::preferred_epic_focus_from_session_metadata();
-        let state = crate::ui::factory::app::resolve_epic_state_for_focus(&data, &focus);
-        self.current_epic_id = state.epic_id().map(str::to_string);
-        self.epic_branch = crate::ui::factory::app::epic_branch_for_state(&data, &state);
+        if self.isolate {
+            match DirectorData::load_fast(&self.cas_dir) {
+                Ok(data) => {
+                    let focus = self.factory_session.as_deref()
+                        .map(crate::ui::factory::app::preferred_epic_focus_from_session_metadata_named)
+                        .unwrap_or_default();
+                    let state =
+                        crate::ui::factory::app::resolve_epic_state_for_focus(&data, &focus);
+                    self.current_epic_id = state.epic_id().map(str::to_string);
+                    self.epic_branch =
+                        crate::ui::factory::app::epic_branch_for_state(&data, &state);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to refresh spawn focus; using captured focus")
+                }
+            }
+        }
         let worker_name = self.worker_name.clone();
         let task_id = self.task_id.as_deref();
         let isolate = self.isolate;
@@ -1813,7 +1825,10 @@ impl WorkerSpawnContext {
                 // this per-request failure to the supervisor.
                 validate_live_spawn_repo_root(session_repo_root, &self.project_path)?;
                 // Verify repo has commits before trying to create worktrees
-                if !crate::worktree::GitOperations::new(session_repo_root.clone()).has_commits().unwrap_or(false) {
+                if !crate::worktree::GitOperations::new(session_repo_root.clone())
+                    .has_commits()
+                    .unwrap_or(false)
+                {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
                         vec![("success", "false"), ("reason", "repo_has_no_commits")],
@@ -1847,7 +1862,10 @@ impl WorkerSpawnContext {
                 let worktree_path = if cross_repo {
                     repo_root.join(".cas/worktrees").join(&worker_name)
                 } else {
-                    self.worktree_root.as_ref().expect("worktree root snapshot").join(&worker_name)
+                    self.worktree_root
+                        .as_ref()
+                        .expect("worktree root snapshot")
+                        .join(&worker_name)
                 };
                 let branch_name = format!("factory/{worker_name}");
                 // Dynamic spawns must match startup spawns: never the
@@ -1993,7 +2011,6 @@ impl WorkerSpawnContext {
         } else {
             (None, Vec::new(), None)
         };
-
 
         Ok(WorkerSpawnPrep {
             worker_name,
@@ -2182,8 +2199,10 @@ impl FactoryApp {
                 let existing: std::collections::HashSet<&str> =
                     self.worker_names.iter().map(String::as_str).collect();
                 let mut candidate = generate_unique(1)[0].clone();
-                while existing.contains(candidate.as_str()) {
+                let mut attempts = 0;
+                while existing.contains(candidate.as_str()) && attempts < 100 {
                     candidate = generate_unique(1)[0].clone();
+                    attempts += 1;
                 }
                 candidate
             }
@@ -2197,10 +2216,17 @@ impl FactoryApp {
             task_id: task_id.map(str::to_string),
             project_path: self.project_path().to_path_buf(),
             cas_dir: self.cas_dir.clone(),
-            worktree_repo_root: self.worktree_manager.as_ref().map(|m| m.repo_root().to_path_buf()),
+            worktree_repo_root: self
+                .worktree_manager
+                .as_ref()
+                .map(|m| m.repo_root().to_path_buf()),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             epic_branch: self.epic_branch.clone(),
             current_epic_id: self.current_epic_id.clone(),
+            factory_session: self
+                .factory_session
+                .clone()
+                .or_else(|| std::env::var("CAS_FACTORY_SESSION").ok()),
         })
     }
 
@@ -2210,7 +2236,9 @@ impl FactoryApp {
         isolate: bool,
         task_id: Option<&str>,
     ) -> anyhow::Result<WorkerSpawnPrep> {
-        let prep = self.snapshot_worker_spawn(name, isolate, task_id)?.resolve()?;
+        let prep = self
+            .snapshot_worker_spawn(name, isolate, task_id)?
+            .resolve()?;
         for notice in &prep.warnings {
             self.set_error(notice.clone());
         }
@@ -4272,7 +4300,7 @@ mod spawn_base_tests {
         // Simulate `git init` after daemon construction. The next spawn must
         // not silently keep using the ancestor root cached at startup.
         init_repo(&project);
-        let error = validate_live_spawn_repo_context(&manager, &project)
+        let error = validate_live_spawn_repo_root(manager.repo_root(), &project)
             .expect_err("changed repository context must fail this spawn loudly");
         assert!(error.to_string().contains("Repository context changed"));
         assert!(error.to_string().contains("Restart the factory daemon"));

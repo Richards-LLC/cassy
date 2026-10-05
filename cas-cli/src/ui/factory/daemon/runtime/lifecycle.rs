@@ -2852,6 +2852,9 @@ impl FactoryDaemon {
 
     /// Cleanup on shutdown
     async fn cleanup(&mut self) -> anyhow::Result<()> {
+        // Stop the isolated provisioner before any asynchronous shutdown waits.
+        // This group never contains the supervisor or live worker harnesses.
+        self.cancel_provisioning();
         self.merge_sweep.shutdown().await;
 
         // Clean up notification socket

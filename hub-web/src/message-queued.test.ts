@@ -6,7 +6,7 @@ describe("Commander MessageQueued callback", () => {
   it("relays the daemon acknowledgment with its client reference", () => {
     const onMessageQueued = vi.fn();
     const callbacks = { onMessageQueued } as unknown as HubCallbacks;
-    const supervisor = new HubConnectionSupervisor({} as StoredMachine, callbacks);
+    const supervisor = new HubConnectionSupervisor({ credentialId: "send-credential", credentialGeneration: 7 } as StoredMachine, callbacks);
     const internals = supervisor as unknown as {
       handleDaemonObject(session: string, message: Record<string, unknown>): void;
     };
@@ -27,7 +27,7 @@ describe("Commander MessageQueued callback", () => {
       target: "patient-pelican-9",
       stamped: true,
       device_label: "Desktop",
-    });
+    }, { credentialId: "send-credential", generation: 7 });
   });
 });
 

@@ -145,8 +145,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Retry of a refused send (cas-b1ee): same leased path, the refused send's own in_reply_to.
     expect(source).toContain("retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },");
     expect(source).toContain("if (retryOf) history.discardRefused(retryOf);");
-    expect(source).toContain("supervisorMessage(supervisor, text, clientRef, replyTo)");
-    expect(source).toContain("history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);");
+    expect(source).toContain("supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)");
+    expect(source).toContain("holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);");
     expect(source).toContain("composerSlot.prepend(conversation.pinned);");
     // The list's waiting affordance is driven by unanswered asks and blockers.
     expect(source).toContain("const waiting = waitingOnOperator(conversationHistories.get(key));");
@@ -291,7 +291,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
     // A reconnecting refusal clears when the session is live again (cas-b789).
     // In the banner's words (journey F9).
-    expect(main).toContain(": outageRefusal(machine.label);\n    showComposerStatus(refused, \"error\", true);");
+    expect(main).toContain('Your message is kept; re-pair, then send it.` : outageRefusal(machine.label), "error", true);');
     expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
@@ -1183,7 +1183,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       has_earlier: false,
     };
     socket.receive(JSON.stringify({ channel: "pty:factory-a", message: { ConversationHistory: historyPage } }));
-    expect(callbacks.onConversationHistory).toHaveBeenCalledWith("factory-a", historyPage);
+    expect(callbacks.onConversationHistory).toHaveBeenCalledWith("factory-a", historyPage, { credentialId: "credential-id", generation: 0 });
     const session = new TextEncoder().encode("factory-a");
     const pane = new TextEncoder().encode("supervisor");
     const payload = new Uint8Array([0x1b, 0x5b, 0x48, 0x4f, 0x4b]);

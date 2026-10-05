@@ -1573,7 +1573,7 @@ function openConnectionLog(machineId: string): void {
     dialog.id = "connection-log";
     dialog.className = "connection-log";
     dialog.setAttribute("aria-label", "Connection log");
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" role="status"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><pre>Running diagnostics…</pre></section>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><pre>Running diagnostics…</pre></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
@@ -1586,7 +1586,8 @@ function openConnectionLog(machineId: string): void {
     const state = machineState?.phase !== "live" ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
     const cause = state?.cause;
     const retry = state?.nextRetryAt === undefined ? "No retry scheduled." : `Next retry in ${Math.max(0, Math.ceil((state.nextRetryAt - Date.now()) / 1000))}s.`;
-    summary.textContent = `${cause ? `${CAUSE_COPY[cause.code].title} (${cause.layer}). ${CAUSE_COPY[cause.code].action}` : "No active failure measured."} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
+    const evidence = cause ? `${cause.status === undefined ? "" : ` Measured HTTP status: ${cause.status}.`}${cause.closeCode === undefined ? "" : ` Measured socket close: ${cause.closeCode}.`}${cause.permission === undefined || cause.permission === "unknown" ? "" : ` Measured local-network permission: ${cause.permission}.`}` : "";
+    summary.textContent = `${cause ? `${CAUSE_COPY[cause.code].title} (${cause.layer}).${evidence} ${CAUSE_COPY[cause.code].action}` : "No active failure measured."} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
   };
   update();
   const timer = window.setInterval(update, 1000);
@@ -1697,6 +1698,13 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       repair.remove();
     }
     banner.dataset.scope = pairingLost ? "pairing" : unsteady ? "unsteady" : sessionOnly ? "session" : "machine";
+    if (!banner.querySelector(".banner-diagnose")) {
+      const details = document.createElement("button");
+      details.type = "button"; details.className = "banner-diagnose";
+      details.textContent = "Details"; details.setAttribute("aria-label", "Connection details");
+      details.onclick = () => openConnectionLog(machineId);
+      banner.append(details);
+    }
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
     // A toast already up when the banner arrives moves clear of it (cas-00cc).

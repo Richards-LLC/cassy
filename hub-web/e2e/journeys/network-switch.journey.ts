@@ -132,7 +132,7 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
     await expect(header).toHaveText(" · Reconnecting");
     await expect(row).toHaveText("Reconnecting");
     await expect(footer).toHaveText("Reconnecting");
-    await expect(page.locator(".terminal-disconnected-banner")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // The composer's line follows the outage from unsteady to lost.
     await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     await sendNow(page, "While Tailscale is off");

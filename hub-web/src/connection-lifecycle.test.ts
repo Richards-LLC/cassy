@@ -160,6 +160,39 @@ describe("Commander live connection lifecycle", () => {
     expect(hub.requests).toHaveLength(stopped);
   });
 
+  it("keeps delivering a flood while the catalog stalls, with one catalog flight (cas-2b3a5)", async () => {
+    const hub = transport();
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("burst"), () => {}, event => events.push(event));
+    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
+    hub.stallRefresh(true);
+    for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i, revision: 0 });
+    await vi.waitFor(() => expect(events).toHaveLength(100));
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+  });
+  it("resyncs gaps, accepts replay revisions, and resets on a new epoch (cas-2b3a5)", async () => {
+    const hub = transport();
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("event-gap"), () => {}, event => events.push(event));
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.event({ kind: "stream_metadata", epoch: "one", oldest_sequence: 1, latest_sequence: 1 });
+    hub.event({ kind: "session_added", sequence: 1, revision: 0 });
+    hub.event({ kind: "replay_complete" });
+    hub.event({ kind: "session_added", sequence: 1, revision: 1 });
+    hub.event({ kind: "session_added", sequence: 3, revision: 0 });
+    await vi.waitFor(() => expect(connection.snapshot().cause?.code).toBe("event_sequence_gap"));
+    expect(events.map(event => [event.sequence, event.revision])).toEqual([[1, 0], [1, 1], [3, 0]]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(hub.streams).toHaveLength(2));
+    hub.event({ kind: "stream_metadata", epoch: "two", oldest_sequence: 1, latest_sequence: 1 });
+    hub.event({ kind: "session_added", sequence: 1, revision: 0 });
+    hub.event({ kind: "replay_complete" });
+    await vi.waitFor(() => expect(events).toHaveLength(4));
+    expect(connection.snapshot().cause?.code).toBe("event_epoch_changed");
+  });
   it("clears permission guidance when the same tailnet pairing reconnects (cas-b85a)", async () => {
     const hub = transport();
     const machine = await storedMachine("local-network");

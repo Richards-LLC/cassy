@@ -39,8 +39,8 @@ SCRIPT_BYTES = 2 * GIB
 TEST_FIXED_BYTES = 4 * GIB
 TEST_THREAD_BYTES = GIB // 4
 # Soundwave incremental cas relink, b86ec0c2e + train9, 2026-10-05:
-# .cas/perf-98a0/link-rss.log, 0.5s ps sampler: max cc/mold 2.09 GB,
-# rustc 4.55 GB; 30 link processes peaked at 9.75 GB summed. Round links
+# .cas/perf-98a0/link-rss.log, 0.5s ps sampler: max cc/mold 2.089 GiB,
+# rustc 4.555 GiB; 30 link processes peaked at 9.75 GiB summed. Round links
 # conservatively to 2.1 GiB/slot. Retain the cold-proof 8 GiB producer bound
 # above rather than assume incremental rustc RSS covers cold code generation.
 LINK_BYTES = math.ceil(2.1 * GIB)
@@ -470,7 +470,7 @@ def execution_plan(env):
                 compile_jobs=jobs, per_job_bytes=COMPILE_JOB_BYTES,
                 producer_overhead_bytes=PRODUCER_BYTES, script_bytes=SCRIPT_BYTES,
                 link_jobs=1, per_link_bytes=LINK_BYTES, guard_headroom_bytes=GUARD_HEADROOM_BYTES,
-                link_estimate_source="soundwave b86ec0c2e + train9 incremental relink, 2026-10-05, .cas/perf-98a0/link-rss.log: max cc/mold 2.09 GB and rustc 4.55 GB (0.5s ps); links rounded to 2.1 GiB; cold producer bound remains 8 GiB",
+                link_estimate_source="soundwave b86ec0c2e + train9 incremental relink, 2026-10-05, .cas/perf-98a0/link-rss.log: max ld.mold 2190228 KiB (2.089 GiB), rustc 4775752 KiB (4.555 GiB), 0.5s ps; links rounded to 2.1 GiB; cold producer bound remains 8 GiB",
                 estimate_source="8 GiB large unit rounded from measured 7293348 KiB max RSS, soundwave proof 7e4c6f50 (abd6817b5); 256 MiB/dependency job and 2 GiB scripts assumed",
                 phases=[])
 

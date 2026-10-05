@@ -1675,7 +1675,7 @@ for row in nextest archive-mode; do
     fi
 done
 
-# The fixture has 64 GiB total, 60 available. A 48 GiB reserve admits one
+# The fixture has 64 GiB total, 60 available. A 44 GiB reserve admits one
 # producer, not two: this is real serial dispatch through both shell rows.
 repo="$(new_fixture assembly-serial-memory)"
 CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB=44 run_gate "$repo" '' \

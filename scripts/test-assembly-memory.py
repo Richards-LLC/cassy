@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Assembly memory guard contracts; real child groups, no Cargo or Rust."""
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
 import subprocess
+import signal
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -73,6 +76,32 @@ class GuardTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "breached memory reserve"):
             guard.compile_guard([sys.executable, "-c", "import time;time.sleep(60)"], '{}', self.events, self.root)
         self.assertEqual(json.loads(self.events.read_text().splitlines()[-1])["action"], "reserve-breached-abort")
+
+    def test_compile_pause_has_a_deadline_and_resumes_before_teardown(self):
+        low = dict(self.high, available_bytes=17 * guard.proof.GIB)
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(guard.proof, "memory_snapshot", side_effect=itertools.chain([self.high], itertools.repeat(low))), \
+                mock.patch.object(guard.time, "monotonic", side_effect=itertools.count(0, 2)), \
+                mock.patch.object(guard, "deadline", return_value=1), \
+                self.assertRaisesRegex(ValueError, "recovery deadline expired"):
+            guard.compile_guard([sys.executable, "-c", "import time;time.sleep(60)"], '{}', self.events, self.root)
+        self.assertEqual(json.loads(self.events.read_text().splitlines()[-1])["action"], "memory-pause-deadline-abort")
+
+    def test_sigterm_reaps_the_compile_child(self):
+        pidfile = self.root / "pid"
+        program = 'import os,pathlib,time; pathlib.Path('+repr(str(pidfile))+').write_text(str(os.getpid())); time.sleep(60)'
+        timer = threading.Timer(.2, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        try:
+            with mock.patch.dict(os.environ, self.env, clear=True), \
+                    mock.patch.object(guard.proof, "memory_snapshot", return_value=self.high), \
+                    self.assertRaisesRegex(InterruptedError, "SIGTERM"):
+                timer.start()
+                guard.compile_guard([sys.executable, "-c", program], '{}', self.events, self.root)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pidfile.read_text()), 0)
+        finally:
+            timer.cancel()
+            timer.join()
 
     def test_cross_producer_slot_serializes_children_and_records_rss(self):
         program = r'''

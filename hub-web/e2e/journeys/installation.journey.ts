@@ -96,9 +96,10 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
       const html = await page.locator(".installation-inventory").evaluate((dialog) => dialog.outerHTML);
       const css = await readFile("dist/app.css", "utf8");
       await writeFile(join(qa, "inventory.html"), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}\ndialog{position:fixed;inset:0;margin:auto}</style></head><body>${html}</body></html>`);
-      for (const [name, media] of [["forced-colors", { forcedColors: "active" }], ["reduced-motion", { reducedMotion: "reduce" }], ["contrast-more", { contrast: "more" }]] as const) {
+      for (const [name, query, media] of [["forced-colors", "(forced-colors: active)", { forcedColors: "active" }], ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }], ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }]] as const) {
         await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
         await page.emulateMedia(media);
+        expect(await page.evaluate((query) => matchMedia(query).matches, query)).toBe(true);
         await expect(page.locator(".installation-inventory-row code")).toHaveText(id!);
         await page.screenshot({ path: join(qa, `a11y-${name}.png`) });
       }
@@ -122,6 +123,18 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     expect(hub.installations.get(id!)!.revoked_at).not.toBeNull();
     await page.reload();
     await expect(page.getByText("Pair a machine to start your first conversation.")).toBeVisible();
+    await expect(page.locator("body")).toMatchAriaSnapshot(`
+      - complementary "Supervisor conversations":
+        - text: Cassy Cloud
+        - button "Pair a machine"
+        - button "Appearance & commands"
+        - heading "Conversations" [level=1]
+        - paragraph: Your projects. Your supervisors.
+        - navigation "Choose a supervisor"
+        - status
+        - text: Pair a machine to start your first conversation.
+        - button "0 paired machines Not paired"
+    `);
   });
 });
 

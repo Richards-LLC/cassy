@@ -70,7 +70,8 @@ def main(argv: list[str]) -> int:
             files.update({"receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"})
             trace = Path(data.get("output_dir", "")) / "trace.zip"
             if trace.is_file():
-                shutil.copyfile(trace, bundle / "trace.zip")
+                if trace.resolve() != (bundle / "trace.zip").resolve():
+                    shutil.copyfile(trace, bundle / "trace.zip")
                 (bundle / "trace-actions.txt").write_text(trace_actions(bundle, hub))
                 files["trace"] = "trace.zip"
                 files["trace_actions"] = "trace-actions.txt"
@@ -84,18 +85,21 @@ def main(argv: list[str]) -> int:
             part_files = {"receipt": f"{rel}/receipt.webm", "aria_yaml": f"{rel}/final.aria.yml", "aria_json": f"{rel}/final.aria.json"}
             part_trace = Path(part.get("output_dir", "")) / "trace.zip"
             if part_trace.is_file():
-                shutil.copyfile(part_trace, part_dir / "trace.zip")
+                if part_trace.resolve() != (part_dir / "trace.zip").resolve():
+                    shutil.copyfile(part_trace, part_dir / "trace.zip")
                 (part_dir / "trace-actions.txt").write_text(trace_actions(part_dir, hub))
                 part_files.update({"trace": f"{rel}/trace.zip", "trace_actions": f"{rel}/trace-actions.txt"})
             for stage in part.get("stages", []):
                 stage = dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
                 stages.append(stage)
                 files["cells"].append(stage["screenshot"])
-            folded.append({"title": part.get("title"), "verdict": part["status"], **part_files})
+            folded.append({"title": part.get("title"), "verdict": part["status"], "label": part.get("label", "real-bundle, protocol-double"), **part_files})
         if folded:
             files["parts"] = folded
         if data is None:
-            data = {"id": ident, "title": json.loads(parts[0].read_text()).get("title", ident), "label": "real-bundle, protocol-double"}
+            data = {"id": ident, "title": json.loads(parts[0].read_text()).get("title", ident)}
+        labels = {item.strip() for row in [data, *folded] for item in row.get("label", "" if row is data and not result.is_file() else "real-bundle, protocol-double").split(",") if item.strip()}
+        data["label"] = ", ".join(sorted(labels))
         data["status"] = "PASS" if verdicts and all(verdict == "PASS" for verdict in verdicts) else "FAIL"
         (bundle / "bundle.json").write_text(json.dumps({
             "schema": 1,
@@ -106,7 +110,7 @@ def main(argv: list[str]) -> int:
             "label": data.get("label"),
             "head_sha": commit,
             "hub_web_dist": tree,
-            "build_url": "hub-web/dist at /commander/ with the hub protocol double",
+            "build_url": "hub-web/dist at /commander/; transport: " + data["label"],
             "playwright_version": pw_version,
             "created_at": created,
             "visual_change": False,
@@ -124,7 +128,7 @@ def main(argv: list[str]) -> int:
         f"- evaluated_commit: {commit}",
         f"- suite_exit: {status}",
         f"- journeys: {len(rows)}, PASS {sum(1 for row in rows if row[2] == 'PASS')}",
-        "- label: real-bundle, protocol-double",
+        "- labels: see each bundle and part for its actual transport",
         "",
         "| ID | Journey | Run | Total | Slowest stage |",
         "|---|---|---|---|---|",

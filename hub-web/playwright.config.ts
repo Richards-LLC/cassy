@@ -40,6 +40,7 @@ export default defineConfig({
       name: "journeys",
       testDir: "./e2e/journeys",
       testMatch: "**/*.journey.ts",
+      testIgnore: "real-hub.journey.ts", // Requires the separately registered disposable real hub.
       fullyParallel: false,
       timeout: 60_000,
       use: {

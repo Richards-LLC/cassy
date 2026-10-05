@@ -1069,15 +1069,22 @@ impl CasCore {
         // With no recorded head there is no anchor advance: check this tip
         // against itself under the same per-task lineage rule as park/QA
         // requests. Recorded anchors and explicit receipts remain authoritative.
-        let own_tip = recorded_head.is_some() || branch_tip.as_deref().is_some_and(|tip| {
-            self.open_task_store().is_ok_and(|store| {
-                self.tip_is_own_task_lineage(
-                    store.as_ref(), task, repo, Some(&branch), tip, Some(tip),
-                )
-            })
-        });
+        let own_tip = recorded_head.is_some()
+            || branch_tip.as_deref().is_some_and(|tip| {
+                self.open_task_store().is_ok_and(|store| {
+                    self.tip_is_own_task_lineage(
+                        store.as_ref(),
+                        task,
+                        repo,
+                        Some(&branch),
+                        tip,
+                        Some(tip),
+                    )
+                })
+            });
         let head = recorded_head.clone().or_else(|| {
-            branch_tip.clone()
+            branch_tip
+                .clone()
                 .filter(|tip| own_tip && is_ancestor(repo, tip, &classification_target))
         });
         if passes.iter().any(|pass| {
@@ -2210,7 +2217,10 @@ mod stale_anchor_rebind_tests_cas_00eb {
 
     // A task merged out of band, while its plain worker lane still names a
     // different delivery. Neither an anchor nor a receipt was recorded.
-    fn shared_lane_close_fixture(env: &mut TestEnvGuard, keep_task_branch: bool) -> (Fixture, String) {
+    fn shared_lane_close_fixture(
+        env: &mut TestEnvGuard,
+        keep_task_branch: bool,
+    ) -> (Fixture, String) {
         let mut f = fixture(env, TaskStatus::InProgress);
         let repo = f.dir.path();
         git(repo, &["checkout", "-q", "-b", "epic", "main"]);
@@ -2218,17 +2228,43 @@ mod stale_anchor_rebind_tests_cas_00eb {
         std::fs::create_dir_all(repo.join("hub-web/dist")).unwrap();
         std::fs::write(repo.join("hub-web/dist/app.css"), ".foreign{color:red}\n").unwrap();
         git(repo, &["add", "hub-web/dist/app.css"]);
-        git(repo, &["commit", "-q", "-m", "feat(cas-5e53): foreign shared lane"]);
+        git(
+            repo,
+            &["commit", "-q", "-m", "feat(cas-5e53): foreign shared lane"],
+        );
         let foreign = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "epic"]);
-        git(repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge foreign delivery"]);
-        git(repo, &["merge", "-q", "--no-ff", WORKER_TASK_BRANCH, "-m", "merge own delivery"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge foreign delivery",
+            ],
+        );
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                WORKER_TASK_BRANCH,
+                "-m",
+                "merge own delivery",
+            ],
+        );
         if !keep_task_branch {
             git(repo, &["branch", "-D", WORKER_TASK_BRANCH]);
         }
         f.task.deliverables.factory_branch_anchor = None;
         f.task.deliverables.parked_branch = None;
-        open_task_store(&repo.join(".cas")).unwrap().update(&f.task).unwrap();
+        open_task_store(&repo.join(".cas"))
+            .unwrap()
+            .update(&f.task)
+            .unwrap();
         (f, foreign)
     }
 
@@ -2236,26 +2272,49 @@ mod stale_anchor_rebind_tests_cas_00eb {
     fn cas_de60_close_without_receipt_uses_own_task_branch_not_shared_lane() {
         let mut env = TestEnvGuard::temp_home();
         let (f, foreign) = shared_lane_close_fixture(&mut env, true);
-        let result = f.core.independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
-        assert!(matches!(result, QaCloseGate::Refuse(_)), "new unreviewed delivery needs QA");
+        let result = f
+            .core
+            .independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
+        assert!(
+            matches!(result, QaCloseGate::Refuse(_)),
+            "new unreviewed delivery needs QA"
+        );
         let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
         assert_eq!(passes.len(), 1);
-        assert_eq!(passes[0].bound_head, f.tip, "a target-contained shared tip is not this task's delivery");
+        assert_eq!(
+            passes[0].bound_head, f.tip,
+            "a target-contained shared tip is not this task's delivery"
+        );
         assert_ne!(passes[0].bound_head, foreign);
         assert_eq!(passes[0].branch, WORKER_TASK_BRANCH);
-        let qa_task = open_task_store(&f.dir.path().join(".cas")).unwrap()
-            .get(passes[0].qa_task_id.as_deref().unwrap()).unwrap();
-        assert!(!qa_task.description.contains("hub-web/dist/app.css"), "foreign paths must not dispatch unrelated journeys: {}", qa_task.description);
+        let qa_task = open_task_store(&f.dir.path().join(".cas"))
+            .unwrap()
+            .get(passes[0].qa_task_id.as_deref().unwrap())
+            .unwrap();
+        assert!(
+            !qa_task.description.contains("hub-web/dist/app.css"),
+            "foreign paths must not dispatch unrelated journeys: {}",
+            qa_task.description
+        );
     }
 
     #[test]
     fn cas_de60_close_without_task_delivery_refuses_instead_of_binding_shared_lane() {
         let mut env = TestEnvGuard::temp_home();
         let (f, _) = shared_lane_close_fixture(&mut env, false);
-        let result = f.core.independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
-        let QaCloseGate::Refuse(text) = result else { panic!("a foreign lane cannot identify this delivery"); };
+        let result = f
+            .core
+            .independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
+        let QaCloseGate::Refuse(text) = result else {
+            panic!("a foreign lane cannot identify this delivery");
+        };
         assert!(text.contains("commit_receipt"), "{text}");
-        assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty(), "unknown delivery opens no foreign QA round");
+        assert!(
+            cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id)
+                .unwrap()
+                .is_empty(),
+            "unknown delivery opens no foreign QA round"
+        );
     }
 
     #[test]
@@ -2268,12 +2327,33 @@ mod stale_anchor_rebind_tests_cas_00eb {
         git(repo, &["cherry-pick", &foreign]);
         let shared_tip = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "epic"]);
-        git(repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge reused lane"]);
-        let result = f.core.independent_qa_close_gate(&f.task, repo, "epic", None, None);
-        let QaCloseGate::Refuse(text) = result else { panic!("a reused lane is not a task delivery tip"); };
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge reused lane",
+            ],
+        );
+        let result = f
+            .core
+            .independent_qa_close_gate(&f.task, repo, "epic", None, None);
+        let QaCloseGate::Refuse(text) = result else {
+            panic!("a reused lane is not a task delivery tip");
+        };
         assert!(text.contains("commit_receipt"), "{text}");
-        assert!(!text.contains(&format!("commit_receipt={shared_tip}")), "do not recommend a foreign receipt: {text}");
-        assert!(cas_store::list_qa_passes(&repo.join(".cas"), &f.task.id).unwrap().is_empty());
+        assert!(
+            !text.contains(&format!("commit_receipt={shared_tip}")),
+            "do not recommend a foreign receipt: {text}"
+        );
+        assert!(
+            cas_store::list_qa_passes(&repo.join(".cas"), &f.task.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2285,8 +2365,13 @@ mod stale_anchor_rebind_tests_cas_00eb {
                 f.task.deliverables.factory_branch_anchor = Some(f.tip.clone());
             }
             let receipt = (!recorded_anchor).then_some(f.tip.as_str());
-            let result = f.core.independent_qa_close_gate(&f.task, f.dir.path(), "epic", receipt, None);
-            assert!(matches!(result, QaCloseGate::Refuse(_)), "unreviewed own delivery needs QA");
+            let result =
+                f.core
+                    .independent_qa_close_gate(&f.task, f.dir.path(), "epic", receipt, None);
+            assert!(
+                matches!(result, QaCloseGate::Refuse(_)),
+                "unreviewed own delivery needs QA"
+            );
             let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
             assert_eq!(passes.len(), 1);
             assert_eq!(passes[0].bound_head, f.tip);

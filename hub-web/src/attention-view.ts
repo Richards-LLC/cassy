@@ -323,6 +323,9 @@ export function renderAttentionPanel(
     const prior = payloads.get(article.dataset.attentionId!);
     const next = article.querySelector<HTMLDetailsElement>("details.attention-payload");
     if (prior && next && prior.querySelector("pre")?.textContent === next.querySelector("pre")?.textContent) {
+      const copy = prior.querySelector<HTMLButtonElement>(".attention-copy");
+      const nextCopy = next.querySelector<HTMLButtonElement>(".attention-copy");
+      if (copy && nextCopy) copy.onclick = nextCopy.onclick;
       next.replaceWith(prior);
     }
   }

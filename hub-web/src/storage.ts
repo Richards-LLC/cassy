@@ -195,7 +195,9 @@ export class MachineCatalog {
     return this.backend.update(machine.id, (current) => {
       const prior = visibleMachine(current);
       if (pairingEnvelope(current)?.state === "staged") return current;
-      if (prior?.deviceId === machine.deviceId && (prior.credentialGeneration ?? 0) > (machine.credentialGeneration ?? 0)) return current;
+      if (prior && prior.deviceId !== machine.deviceId) return current;
+      if (prior && (prior.credentialGeneration ?? 0) > (machine.credentialGeneration ?? 0)) return current;
+      if (prior && machine.credentialGeneration !== undefined && prior.credentialGeneration === machine.credentialGeneration && prior.credentialId !== machine.credentialId) return current;
       return machine;
     }, signal);
   }

@@ -1,3 +1,5 @@
+import { installationLock, notifyInstallation } from "./installation-access";
+import { catalog, installationStore } from "./storage";
 import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { CoalescedRefresh } from "./catalog-refresh";
@@ -491,6 +493,19 @@ export class HubConnectionSupervisor {
    * TransientAuthError, retried like a network failure. Any other 401 or 403
    * is returned for the caller to read as a lost pairing.
    */
+  private installationMutation = false;
+
+  private async adoptInstallation(): Promise<boolean> {
+    if (this.machine.credentialGeneration === undefined && typeof indexedDB === "undefined") return false;
+    const pending = (await installationStore.list()).some((r) => r.pending && r.id.split("@")[0] === this.machine.id);
+    if (pending) throw new Error("Installation cleanup is pending. Retry cleanup before reconnecting.");
+    const installed = (await catalog.snapshot()).machines.find((m) => m.id === this.machine.id && m.baseUrl === this.machine.baseUrl);
+    if (!installed || installed.credentialId === this.machine.credentialId) return false;
+    Object.assign(this.machine, installed);
+    this.expiredRefreshAttempted = false;
+    return true;
+  }
+
   private async authorizedFetch(method: string, path: string, init: RequestInit = {}): Promise<{ response: Response; refusal: AuthRefusal }> {
     // The proof binds the bare path; the hub rejects an htu with a query.
     const htu = path.split("?")[0] ?? path;
@@ -502,6 +517,11 @@ export class HubConnectionSupervisor {
       credentials: "omit",
     });
     let response = await send();
+    if ((response.status === 401 || response.status === 403) && (this.machine.credentialGeneration !== undefined || typeof indexedDB !== "undefined") && !this.installationMutation) {
+      // A peer may have rotated between signing and arrival. Wait for its durable
+      // commit/rollback, then retry only a different accepted credential.
+      if (await installationLock(this.machine.id, () => this.adoptInstallation(), init.signal ?? undefined)) response = await send();
+    }
     if (response.status !== 401) return { response, refusal: {} };
     let refusal = await readAuthRefusal(response);
     if (refusal.retryable === false) return { response, refusal };
@@ -937,13 +957,23 @@ export class HubConnectionSupervisor {
   }
 
   private async refreshCredential(): Promise<void> {
-    const refreshed = await this.request<{ credential: string; credential_id: string; expires_at: string; scopes: StoredMachine["scopes"] }>("POST", "/v1/auth/refresh");
-    this.machine.credential = refreshed.credential;
-    this.machine.credentialId = refreshed.credential_id;
-    this.machine.expiresAt = refreshed.expires_at;
-    this.machine.scopes = refreshed.scopes;
-    this.expiredRefreshAttempted = false;
-    await this.callbacks.onCredentialRefreshed?.(this.machine);
+    const rotate = async () => {
+      if (await this.adoptInstallation()) return;
+      this.installationMutation = true;
+      try {
+        const refreshed = await this.request<{ credential: string; credential_id: string; credential_generation?: number; expires_at: string; scopes: StoredMachine["scopes"] }>("POST", "/v1/auth/refresh");
+        this.machine.credential = refreshed.credential;
+        this.machine.credentialId = refreshed.credential_id;
+        this.machine.credentialGeneration = refreshed.credential_generation;
+        this.machine.expiresAt = refreshed.expires_at;
+        this.machine.scopes = refreshed.scopes;
+        this.expiredRefreshAttempted = false;
+        await this.callbacks.onCredentialRefreshed?.(this.machine);
+        notifyInstallation(this.machine.id);
+      } finally { this.installationMutation = false; }
+    };
+    if (this.machine.credentialGeneration === undefined && typeof indexedDB === "undefined") await rotate();
+    else await installationLock(this.machine.id, rotate);
   }
 
   async attach(session: string): Promise<void> {

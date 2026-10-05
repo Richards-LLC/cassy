@@ -6,7 +6,11 @@ import io
 import importlib.util
 import itertools
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -387,6 +391,7 @@ class ReceiptTests(unittest.TestCase):
         if recover_test:
             snapshots = itertools.chain([memory, memory, dict(memory, available_bytes=17 * proof.GIB)], itertools.repeat(memory))
         with mock.patch.object(proof, "clone_scratch", return_value=Path(scratch.name) / "base"), \
+                mock.patch.dict(proof.os.environ, {"CAS_RELEASE_SCRATCH_EXTRA_BASES": "", "TMPDIR": scratch.name}), \
                 mock.patch.object(proof, "inputs", return_value=(self.expected, dict(proof.test_environment(self.root), CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS="1"))), \
                 mock.patch.object(proof, "memory_snapshot", return_value=memory, side_effect=snapshots), \
                 mock.patch.object(proof, "cpu_count", return_value=32), \
@@ -413,6 +418,55 @@ class ReceiptTests(unittest.TestCase):
 
     def test_script_failure_blocks_rust_suites_and_pass_publication(self):
         self.run_producer(failure="ci-script-tests")
+
+    def test_signal_tears_down_children_and_owned_scratch(self):
+        # Real process/signal boundary; fake only tool probes and test work.
+        script = '''
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location('proof', sys.argv[1])
+p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+root, scratch = map(pathlib.Path, sys.argv[2:4])
+p.clone_scratch = lambda env: scratch / 'base'
+p.inputs = lambda root: ({'format': p.FORMAT, 'code_input': 'signal-fixture'}, {})
+p.execution_plan = lambda env: {'mode': 'serial', 'phases': []}
+def contexts(root, clone, env, logs, target, execution):
+    return p.run_row(clone, 'archive-mode', dict(env, SCRATCH=str(scratch)), logs)
+p.run_contexts = contexts
+p.prove(root)
+'''
+        (self.root / "scripts").mkdir(exist_ok=True)
+        # A real gate row that blocks mid-archive; its own cleanup contract is
+        # exercised separately by the shell fixture suite.
+        (self.root / "scripts/release-gate.sh").write_text(
+            '#!/bin/bash\n'
+            'echo "$BASHPID" > "$SCRATCH/child-pid"\n'
+            'touch "$SCRATCH/ready"\n'
+            'exec python3 -c "import time; time.sleep(60)"\n')
+        self.commit()
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            child = subprocess.Popen([sys.executable, "-c", script,
+                                      str(Path(proof.__file__).resolve()), str(self.root), str(scratch)],
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 10
+                while not (scratch / "ready").exists() and child.poll() is None:
+                    self.assertLess(time.monotonic(), deadline, "archive fixture did not start")
+                    time.sleep(.02)
+                self.assertIsNone(child.poll(), "proof exited before archive fixture")
+                child.send_signal(signal.SIGTERM)
+                child.communicate(timeout=10)
+                self.assertFalse(list(scratch.glob("assembly-clone-*")), "SIGTERM leaked clone")
+                pid = int((scratch / "child-pid").read_text())
+                # The child must have been waited/reaped before scratch removal.
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+            finally:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.communicate(timeout=10)
 
     def test_script_pass_precedes_both_contexts_and_receipt_reuse(self):
         self.run_producer()
@@ -560,6 +614,7 @@ class ReceiptTests(unittest.TestCase):
             with self.subTest(base=base), \
                     mock.patch.dict(proof.os.environ, {"CAS_RELEASE_GATE_HOME_DIR": base}, clear=True), \
                     mock.patch.object(proof, "no_cas_ancestor") as ancestry, \
+                    mock.patch.object(proof.release_scratch, "sweep", return_value={}), \
                     mock.patch.object(proof, "inputs", side_effect=RuntimeError("guard accepted")):
                 with self.assertRaisesRegex(RuntimeError, "guard accepted"):
                     proof.prove(self.root)

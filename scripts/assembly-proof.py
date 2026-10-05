@@ -24,6 +24,9 @@ import sys
 import tempfile
 import time
 import tomllib
+# Also support the existing importlib fixture/receipt consumers.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_scratch
 
 FORMAT = 2
 MAX_AGE = 86400
@@ -363,7 +366,7 @@ def run_row(root, row, env, log_dir):
     log = log_dir / (row + ".log")
     print(f"assembly proof: {row} in {root}; log: {log}", flush=True)
     with log.open("w") as stream:
-        result = subprocess.run(["bash", str(root / "scripts/release-gate.sh"),
+        result = release_scratch.child_run(["bash", str(root / "scripts/release-gate.sh"),
                                  "0.0.0", "--only", row], cwd=root, env=row_env,
                                 stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode:
@@ -581,8 +584,14 @@ def env_policy(env):
 
 
 def prove(root):
+    with release_scratch.ChildScope():
+        return prove_owned(root)
+
+
+def prove_owned(root):
     # Refuse an unusable clone context before tool probing or the native suite.
     scratch = clone_scratch(os.environ)
+    scratch_report = release_scratch.sweep(root, scratch, clean=True)
     expected, env = inputs(root)
     path = receipt_path(root, expected)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -593,7 +602,7 @@ def prove(root):
             return found
         head = git(root, "rev-parse", "HEAD").decode().strip()
         record = {"inputs": expected, "status": "RUNNING", "head": head,
-                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {},
+                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {}, "scratch": scratch_report,
                   "environment_keys": {key: digest(value.encode())
                                        for key, value in environment_material(root, env).items()}}
         write(path, record)
@@ -603,20 +612,29 @@ def prove(root):
         write(path, record)
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
-        with tempfile.TemporaryDirectory(prefix="assembly-clone-", dir=scratch.parent) as directory:
-            clone = Path(directory) / "repo"
-            subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout",
-                            str(common_dir(root)), str(clone)], check=True)
-            subprocess.run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
-            no_cas_ancestor(clone)
-            # Reuse compiled dependencies; Cargo invalidates producer paths.
-            try:
-                script_result, native_result, archive_result = run_contexts(
-                    root, clone, env, log_dir, path.parent.parent / "assembly-target", record["execution"])
-            finally:
-                write(path, record)  # retain admission/fallback evidence on failure
-            record["script_tests"] = script_result
-            record["contexts"] = {"worktree": native_result, "clone": archive_result}
+        target = path.parent.parent / "assembly-target"
+        record["legacy_cache"] = release_scratch.cache_report(root, target, env=env)
+        target = release_scratch.select_cache(target)
+        cache = release_scratch.BoundedCache(target, env, root)
+        record["cache"] = cache.events
+        try:
+            with cache as clone_target, \
+                    release_scratch.OwnedDirectory("assembly-clone-", scratch.parent) as directory:
+                clone = Path(directory) / "repo"
+                release_scratch.child_run(["git", "clone", "--quiet", "--shared", "--no-checkout",
+                                str(common_dir(root)), str(clone)], check=True)
+                release_scratch.child_run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
+                no_cas_ancestor(clone)
+                # Reuse compiled dependencies; Cargo invalidates producer paths.
+                try:
+                    script_result, native_result, archive_result = run_contexts(
+                        root, clone, env, log_dir, clone_target, record["execution"])
+                finally:
+                    write(path, record)  # retain admission/fallback evidence on failure
+                record["script_tests"] = script_result
+                record["contexts"] = {"worktree": native_result, "clone": archive_result}
+        finally:
+            write(path, record)  # include cleanup/cache decisions even on interruption
         current, _ = inputs(root)
         if current != expected or git(root, "rev-parse", "HEAD").decode().strip() != head:
             raise ValueError("assembly inputs changed while tests ran")

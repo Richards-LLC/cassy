@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import subprocess
 import sys
@@ -49,12 +50,28 @@ class AdmissionTests(unittest.TestCase):
         return host.admission(role, self.env, lambda _: HIGH, directory=self.pool,
                               wait_secs=.5, poll_secs=.02, report=self.events.append, **kwargs)
 
+    def wait_for_proof(self, child, marker):
+        # Node/Python startup can exceed a fixed sleep under assembly load.
+        # Keep the proof lease until the real admission wait is observable.
+        lines = []
+        deadline = time.monotonic() + 3
+        while True:
+            self.assertFalse(marker.exists(), 'worker native suite started while proof held reserve')
+            self.assertIsNone(child.poll(), 'worker exited before reporting its admission wait')
+            self.assertLess(time.monotonic(), deadline, 'worker admission wait was not reported')
+            readable, _, _ = select.select([child.stdout], [], [], .02)
+            if readable:
+                line = child.stdout.readline()
+                lines.append(line)
+                if 'waiting for host memory (proof running)' in line:
+                    return ''.join(lines)
+
     def test_frontend_runner_waits_for_proof_and_reports_wait(self):
         # Execute the actual frontend entry point with one fake native runner.
         # Relocate only the lease directory to avoid touching a production proof.
         scripts = self.root / 'scripts'
         scripts.mkdir()
-        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py']:
+        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py']:
             shutil.copy(ROOT / 'scripts' / name, scripts / name)
         (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
             "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))
@@ -71,14 +88,13 @@ class AdmissionTests(unittest.TestCase):
             child = subprocess.Popen(['node', str(runner), 'vitest'], cwd=self.root/'hub', env=env,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
-                time.sleep(.25)
-                self.assertFalse(marker.exists(), 'worker native suite started while proof held reserve')
-                self.assertIsNone(child.poll())
+                prefix = self.wait_for_proof(child, marker)
             except BaseException:
                 child.kill()
                 child.communicate(timeout=3)
                 raise
         stdout, stderr = child.communicate(timeout=5)
+        stdout = prefix + stdout
         self.assertEqual(child.returncode, 0, stdout + stderr)
         self.assertIn('waiting for host memory (proof running)', stdout)
         self.assertIn('verified-web-tests: PASS (1 vitest tests passed)', stdout)
@@ -87,7 +103,7 @@ class AdmissionTests(unittest.TestCase):
     def test_package_build_typecheck_and_visual_qa_wait_at_actual_entrypoints(self):
         scripts = self.root / 'scripts'
         scripts.mkdir()
-        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py']:
+        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py']:
             shutil.copy(ROOT / 'scripts' / name, scripts / name)
         (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
             "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))
@@ -109,13 +125,13 @@ class AdmissionTests(unittest.TestCase):
                     child = subprocess.Popen(['sh', '-c', commands[name]], cwd=hub, env=env,
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     try:
-                        time.sleep(.25)
-                        self.assertFalse(marker.exists(), f'{name} bypassed proof budget')
+                        prefix = self.wait_for_proof(child, marker)
                     except BaseException:
                         child.kill()
                         child.communicate(timeout=3)
                         raise
                 stdout, stderr = child.communicate(timeout=5)
+                stdout = prefix + stdout
                 self.assertEqual(child.returncode, 0, stdout+stderr)
                 self.assertIn('waiting for host memory (proof running)', stdout)
                 self.assertTrue(marker.exists())

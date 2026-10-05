@@ -791,7 +791,10 @@ jobs:
         with:
           name: hub-web-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}
           path: hub-web/e2e/.results/
-          if-no-files-found: ignore
+          # .results is a dot-directory: upload-artifact@v4 skips hidden files
+          # unless told otherwise, which shipped an empty artifact (cas-4ce5 QA).
+          include-hidden-files: true
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Check

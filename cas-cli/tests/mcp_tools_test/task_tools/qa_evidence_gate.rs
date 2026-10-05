@@ -224,6 +224,7 @@ async fn first_park_binds_fresh_bundle_and_receipt_to_current_tip_cas_8cfe() {
         .unwrap();
         let branch = format!("factory/test-agent-{TASK}");
         git(&fx.repo, &["checkout", "-q", "-b", &branch]);
+        std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
         let old_head = git(&fx.repo, &["rev-parse", "HEAD"]);
         let tasks = open_task_store(&cas_dir).unwrap();
         let mut task = tasks.get(TASK).unwrap();
@@ -241,12 +242,7 @@ async fn first_park_binds_fresh_bundle_and_receipt_to_current_tip_cas_8cfe() {
             }
             request
         };
-        let stale = extract_text(
-            fx.core
-                .cas_task_close(Parameters(request()))
-                .await
-                .unwrap(),
-        );
+        let stale = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
         assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
         assert_eq!(fx.status(), TaskStatus::InProgress);
         assert!(
@@ -308,6 +304,7 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
     .unwrap();
     let branch = format!("factory/test-agent-{TASK}");
     git(&fx.repo, &["checkout", "-q", "-b", &branch]);
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
     let old_head = git(&fx.repo, &["rev-parse", "HEAD"]);
     fx.write_bundle(&old_head);
     let parked = close_text(&fx.core, TASK).await;
@@ -335,6 +332,7 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
 
     let head = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
     fx.write_bundle(&head);
+    assert!(git(&fx.repo, &["status", "--porcelain"]).is_empty());
     let before = cas::qa_pass::branch_merge_refusal(&cas_dir, &fx.repo, &branch)
         .expect("approval of A cannot authorize B before re-close");
     assert!(before.contains(&head[..8]), "{before}");

@@ -1848,8 +1848,14 @@ fn scoped_visual_qa_ignores_per_render_random_ids_but_still_reports_new_findings
 // cas-f290: captured cas-a286 Atlas findings, including the ancestor class
 // rename and the 0.02px width difference in the independently built reports.
 fn cas_f290_atlas_finding(origin: &str, scheme: &str, base: bool) -> serde_json::Value {
-    let class = if base { "os-dropped" } else { "codename-squeezed" };
-    let element = format!("div > div.conversation-shell.thread-open > main.conversation-main > header.conversation-heading.thead > div.conversation-identity:nth-of-type(2) > div.id > span.conversation-host > span.host-where.{class}:nth-of-type(1) > span.host-machine:nth-of-type(1)");
+    let class = if base {
+        "os-dropped"
+    } else {
+        "codename-squeezed"
+    };
+    let element = format!(
+        "div > div.conversation-shell.thread-open > main.conversation-main > header.conversation-heading.thead > div.conversation-identity:nth-of-type(2) > div.id > span.conversation-host > span.host-where.{class}:nth-of-type(1) > span.host-machine:nth-of-type(1)"
+    );
     serde_json::json!({
         "type": "clipped-content", "reason": "text-bounds-exceed-overflow-ancestor",
         "selector": element, "elementPath": element, "ancestorPath": element,
@@ -1861,89 +1867,144 @@ fn cas_f290_atlas_finding(origin: &str, scheme: &str, base: bool) -> serde_json:
 }
 
 fn cas_f290_reports(fx: &Fixture, tip: serde_json::Value, base: serde_json::Value) {
-    for (origin, directory, findings) in [
-        (TIP, "visual-qa", tip), (BASE, "visual-qa-baseline", base),
-    ] {
-        scoped_report(&fx.bundle_dir().join(directory).join("visual-qa.json"), "FAIL",
-            chrono::Utc::now(), &[&format!("{origin}/commander/?conversation=1")], findings);
+    for (origin, directory, findings) in
+        [(TIP, "visual-qa", tip), (BASE, "visual-qa-baseline", base)]
+    {
+        scoped_report(
+            &fx.bundle_dir().join(directory).join("visual-qa.json"),
+            "FAIL",
+            chrono::Utc::now(),
+            &[&format!("{origin}/commander/?conversation=1")],
+            findings,
+        );
     }
 }
 
 #[test]
 fn scoped_visual_qa_pairs_exact_cas_a286_renamed_atlas_findings_cas_f290() {
     let fx = scoped_fixture();
-    cas_f290_reports(&fx,
-        serde_json::json!([cas_f290_atlas_finding(TIP,"light",false),cas_f290_atlas_finding(TIP,"dark",false)]),
-        serde_json::json!([cas_f290_atlas_finding(BASE,"light",true),cas_f290_atlas_finding(BASE,"dark",true)]));
-    fx.validate(&fx.notes()).expect("same Atlas clipping survives the ancestor class rename");
+    cas_f290_reports(
+        &fx,
+        serde_json::json!([
+            cas_f290_atlas_finding(TIP, "light", false),
+            cas_f290_atlas_finding(TIP, "dark", false)
+        ]),
+        serde_json::json!([
+            cas_f290_atlas_finding(BASE, "light", true),
+            cas_f290_atlas_finding(BASE, "dark", true)
+        ]),
+    );
+    fx.validate(&fx.notes())
+        .expect("same Atlas clipping survives the ancestor class rename");
 }
 
 #[test]
 fn scoped_visual_qa_keeps_new_renamed_findings_added_cas_f290() {
     let fx = scoped_fixture();
-    let original = cas_f290_atlas_finding(TIP,"light",false);
+    let original = cas_f290_atlas_finding(TIP, "light", false);
     for (pointer, value) in [
-        ("/type",serde_json::json!("contrast")),
-        ("/reason",serde_json::json!("text-outside-scroll-range")),
-        ("/textSample",serde_json::json!("Borealis")),
-        ("/ancestorBox/x",serde_json::json!(300.0)),
-        ("/ancestorBox/width",serde_json::json!(12.0)),
-        ("/viewport/width",serde_json::json!(412)),
-        ("/scheme",serde_json::json!("dark")),
+        ("/type", serde_json::json!("contrast")),
+        ("/reason", serde_json::json!("text-outside-scroll-range")),
+        ("/textSample", serde_json::json!("Borealis")),
+        ("/ancestorBox/x", serde_json::json!(300.0)),
+        ("/ancestorBox/width", serde_json::json!(12.0)),
+        ("/viewport/width", serde_json::json!(412)),
+        ("/scheme", serde_json::json!("dark")),
     ] {
-        let mut changed=original.clone();
-        *changed.pointer_mut(pointer).unwrap()=value;
-        cas_f290_reports(&fx,serde_json::json!([changed]),serde_json::json!([cas_f290_atlas_finding(BASE,"light",true)]));
-        let refusal=fx.validate(&fx.notes()).unwrap_err();
-        assert!(refusal.problem.contains("introduced 1"),"{pointer}: {refusal:?}");
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        cas_f290_reports(
+            &fx,
+            serde_json::json!([changed]),
+            serde_json::json!([cas_f290_atlas_finding(BASE, "light", true)]),
+        );
+        let refusal = fx.validate(&fx.notes()).unwrap_err();
+        assert!(
+            refusal.problem.contains("introduced 1"),
+            "{pointer}: {refusal:?}"
+        );
     }
 }
 
 #[test]
 fn scoped_visual_qa_matches_semantic_identity_but_preserves_rules_cas_f290() {
-    let fx=scoped_fixture();
-    let mut tip=cas_f290_atlas_finding(TIP,"light",false);
-    let mut base=cas_f290_atlas_finding(BASE,"light",true);
-    for finding in [&mut tip,&mut base] {
+    let fx = scoped_fixture();
+    let mut tip = cas_f290_atlas_finding(TIP, "light", false);
+    let mut base = cas_f290_atlas_finding(BASE, "light", true);
+    for finding in [&mut tip, &mut base] {
         finding.as_object_mut().unwrap().remove("ancestorBox");
-        finding["role"]=serde_json::json!("button");
-        finding["accessibleName"]=serde_json::json!("Send for review");
+        finding["role"] = serde_json::json!("button");
+        finding["accessibleName"] = serde_json::json!("Send for review");
     }
-    cas_f290_reports(&fx,serde_json::json!([tip.clone()]),serde_json::json!([base.clone()]));
-    fx.validate(&fx.notes()).expect("a renamed button retains role and accessible name");
-    for (field,value) in [("accessibleName","Discard"),("role","link"),("reason","text-outside-scroll-range")] {
-        let mut changed=tip.clone();changed[field]=serde_json::json!(value);
-        cas_f290_reports(&fx,serde_json::json!([changed]),serde_json::json!([base.clone()]));
-        assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
+    cas_f290_reports(
+        &fx,
+        serde_json::json!([tip.clone()]),
+        serde_json::json!([base.clone()]),
+    );
+    fx.validate(&fx.notes())
+        .expect("a renamed button retains role and accessible name");
+    for (field, value) in [
+        ("accessibleName", "Discard"),
+        ("role", "link"),
+        ("reason", "text-outside-scroll-range"),
+    ] {
+        let mut changed = tip.clone();
+        changed[field] = serde_json::json!(value);
+        cas_f290_reports(
+            &fx,
+            serde_json::json!([changed]),
+            serde_json::json!([base.clone()]),
+        );
+        assert!(
+            fx.validate(&fx.notes())
+                .unwrap_err()
+                .problem
+                .contains("introduced 1")
+        );
     }
 }
 
 #[test]
 fn scoped_visual_qa_does_not_pair_renames_without_identity_cas_f290() {
-    let fx=scoped_fixture();
-    for invalid_bounds in [serde_json::Value::Null,serde_json::json!({"x":94,"y":32.31,"width":-1,"height":14.38})] {
-        let mut tip=cas_f290_atlas_finding(TIP,"light",false);
-        let mut base=cas_f290_atlas_finding(BASE,"light",true);
-        tip["ancestorBox"]=invalid_bounds.clone();base["ancestorBox"]=invalid_bounds;
-        cas_f290_reports(&fx,serde_json::json!([tip]),serde_json::json!([base]));
-        assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
+    let fx = scoped_fixture();
+    for invalid_bounds in [
+        serde_json::Value::Null,
+        serde_json::json!({"x":94,"y":32.31,"width":-1,"height":14.38}),
+    ] {
+        let mut tip = cas_f290_atlas_finding(TIP, "light", false);
+        let mut base = cas_f290_atlas_finding(BASE, "light", true);
+        tip["ancestorBox"] = invalid_bounds.clone();
+        base["ancestorBox"] = invalid_bounds;
+        cas_f290_reports(&fx, serde_json::json!([tip]), serde_json::json!([base]));
+        assert!(
+            fx.validate(&fx.notes())
+                .unwrap_err()
+                .problem
+                .contains("introduced 1")
+        );
     }
 }
 
 #[test]
 fn scoped_visual_qa_uses_each_base_finding_once_without_order_bias_cas_f290() {
-    let fx=scoped_fixture();
-    let make=|origin,base,x| {
-        let mut finding=cas_f290_atlas_finding(origin,"light",base);
-        finding["ancestorBox"]["x"]=serde_json::json!(x);
+    let fx = scoped_fixture();
+    let make = |origin, base, x| {
+        let mut finding = cas_f290_atlas_finding(origin, "light", base);
+        finding["ancestorBox"]["x"] = serde_json::json!(x);
         finding
     };
-    // First head can pair with either base (within0.5px); second only with first.
+    // First head can pair with either base (within 0.5px); second only with first.
     // An arbitrary first-match loop incorrectly reports the second as added.
-    let tip=serde_json::json!([make(TIP,false,94.2),make(TIP,false,93.8)]);
-    let base=serde_json::json!([make(BASE,true,94.0),make(BASE,true,94.6)]);
-    cas_f290_reports(&fx,tip.clone(),base);
-    fx.validate(&fx.notes()).expect("one-to-one pairing finds the complete matching");
-    cas_f290_reports(&fx,tip,serde_json::json!([make(BASE,true,94.0)]));
-    assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
+    let tip = serde_json::json!([make(TIP, false, 94.2), make(TIP, false, 93.8)]);
+    let base = serde_json::json!([make(BASE, true, 94.0), make(BASE, true, 94.6)]);
+    cas_f290_reports(&fx, tip.clone(), base);
+    fx.validate(&fx.notes())
+        .expect("one-to-one pairing finds the complete matching");
+    cas_f290_reports(&fx, tip, serde_json::json!([make(BASE, true, 94.0)]));
+    assert!(
+        fx.validate(&fx.notes())
+            .unwrap_err()
+            .problem
+            .contains("introduced 1")
+    );
 }

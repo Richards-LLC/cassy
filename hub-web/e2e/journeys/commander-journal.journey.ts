@@ -15,6 +15,7 @@ async function send(page: Page, text: string) {
 test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, async ({ page, context, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
   const second = await context.newPage();
+  await second.clock.install({ time: await page.evaluate(() => Date.now()) });
   const other = new HubDouble(second, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
   const errors: string[] = [];
   second.on("pageerror", (error) => errors.push(error.message));
@@ -62,7 +63,7 @@ test("HUB-J12 cancellation persists and cannot drain after reload", journeyPart,
     await page.reload(); await choose(page);
     hub.upstreamBack(PELICAN);
     await expect(page.locator("#conversation-connection")).toHaveText(" · Live", { timeout: 20_000 });
-    await expect(page.getByRole("log")).not.toContainText("Cancel this waiting instruction");
+    await expect(page.getByText("Cancel this waiting instruction", { exact: true })).toHaveCount(0);
     expect(hub.sends.some((row) => row.text === "Cancel this waiting instruction")).toBe(false);
   });
 });
@@ -77,16 +78,28 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
       if (mode === "readwrite" && (typeof stores === "string" ? [stores] : [...stores]).includes("replies")) tx.addEventListener("complete", () => events.push("reply-commit"));
       return tx;
     };
-    const write = WebSocket.prototype.send;
-    WebSocket.prototype.send = function(data) {
-      if (typeof data === "string" && data.includes('"OperatorReplyPersisted"')) events.push("application-ack");
-      return write.call(this, data);
-    };
   });
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  // Routed sockets define send on the constructed instance. Observe the
+  // transport actually used by the bundle, after routeWebSocket is installed.
+  await page.addInitScript(() => {
+    const Socket = window.WebSocket;
+    window.WebSocket = class extends Socket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        const write = this.send.bind(this);
+        this.send = (data) => {
+          if (typeof data === "string" && data.includes('"OperatorReplyPersisted"'))
+            (window as unknown as { __receiptOrder: string[] }).__receiptOrder.push("application-ack");
+          return write(data);
+        };
+      }
+    };
+  });
   let id = 0;
   await journey.stage("The reply is stored on this device before its application ACK", async () => {
     await journey.open(); await choose(page);
+    await page.evaluate(() => { (window as unknown as { __receiptOrder: string[] }).__receiptOrder.length = 0; });
     id = hub.supervisorSays(PELICAN, "A durable reply on this device");
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(1);

@@ -6,7 +6,11 @@ import io
 import importlib.util
 import itertools
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -413,6 +417,55 @@ class ReceiptTests(unittest.TestCase):
 
     def test_script_failure_blocks_rust_suites_and_pass_publication(self):
         self.run_producer(failure="ci-script-tests")
+
+    def test_signal_tears_down_children_and_owned_scratch(self):
+        # Real process/signal boundary; fake only tool probes and test work.
+        script = '''
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location('proof', sys.argv[1])
+p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+root, scratch = map(pathlib.Path, sys.argv[2:4])
+p.clone_scratch = lambda env: scratch / 'base'
+p.inputs = lambda root: ({'format': p.FORMAT, 'code_input': 'signal-fixture'}, {})
+p.execution_plan = lambda env: {'mode': 'serial', 'phases': []}
+def contexts(root, clone, env, logs, target, execution):
+    return p.run_row(clone, 'archive-mode', dict(env, SCRATCH=str(scratch)), logs)
+p.run_contexts = contexts
+p.prove(root)
+'''
+        (self.root / "scripts").mkdir(exist_ok=True)
+        # A real gate row that blocks mid-archive; its own cleanup contract is
+        # exercised separately by the shell fixture suite.
+        (self.root / "scripts/release-gate.sh").write_text(
+            '#!/bin/bash\n'
+            'echo "$BASHPID" > "$SCRATCH/child-pid"\n'
+            'touch "$SCRATCH/ready"\n'
+            'exec python3 -c "import time; time.sleep(60)"\n')
+        self.commit()
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            child = subprocess.Popen([sys.executable, "-c", script,
+                                      str(Path(proof.__file__).resolve()), str(self.root), str(scratch)],
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 10
+                while not (scratch / "ready").exists() and child.poll() is None:
+                    self.assertLess(time.monotonic(), deadline, "archive fixture did not start")
+                    time.sleep(.02)
+                self.assertIsNone(child.poll(), "proof exited before archive fixture")
+                child.send_signal(signal.SIGTERM)
+                child.communicate(timeout=10)
+                self.assertFalse(list(scratch.glob("assembly-clone-*")), "SIGTERM leaked clone")
+                pid = int((scratch / "child-pid").read_text())
+                # The child must have been waited/reaped before scratch removal.
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+            finally:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.communicate(timeout=10)
 
     def test_script_pass_precedes_both_contexts_and_receipt_reuse(self):
         self.run_producer()

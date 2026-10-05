@@ -1,7 +1,7 @@
 import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { join } from "node:path";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 
 test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, async ({ page, journey }) => {
   const workers = ["young-otter-14", "rapid-kestrel-30", "steady-stork-35", "ready-owl-88", "warm-phoenix-6", "keen-otter-80"];
@@ -36,7 +36,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
           clone.querySelectorAll("script, link").forEach(node => node.remove());
           return clone.outerHTML;
         });
-        const css = readFileSync(new URL("../../dist/app.css", import.meta.url), "utf8");
+        const css = await (await page.request.get(new URL("app.css", page.url()).href)).text();
         writeFileSync(join(RECEIPTS, "HUB-J7", `${scheme}-${width}.html`), "<!doctype html>" + dom.replace("</head>", `<style>${css}</style></head>`));
       }
     }

@@ -474,6 +474,8 @@ pub(crate) fn seed_worker_target_from_baseline(
     if std::fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         anyhow::bail!("worker target is a symlink; refusing baseline re-seed");
     }
+    #[cfg(unix)]
+    let _target_lease = crate::factory_target_cache::owner::acquire(cas_dir, worktree_path)?;
     let staging = worktree_path.join(".target-seed-in-progress");
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
@@ -568,6 +570,10 @@ fn hardlink_seed_tree_inner(
             // recreates the lock file on first use, so omit it at every depth.
             if entry.file_name() == ".cargo-lock" {
                 continue;
+            }
+            #[cfg(unix)]
+            if entry.file_name() == crate::factory_target_cache::owner::MARKER {
+                continue; // A snapshot's ownership generation never seeds another target.
             }
             if entry.file_name() == TARGET_SEED_METADATA_FILE
                 || skipped_crates.iter().any(|crate_name| {
@@ -6593,6 +6599,9 @@ mod spawn_isolation_tests {
         };
 
         let result = prep.run().expect("create and seed worker worktree");
+        assert!(crate::factory_target_cache::owner::for_retirement(
+            result.cwd.parent().unwrap().parent().unwrap(), &result.cwd,
+        ).unwrap().is_some(), "actual seeding must publish verifiable target provenance");
         let seeded_artifact = result
             .cwd
             .join("target")

@@ -34,9 +34,26 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
         Path::new(worktree),
         &artifacts.join(label),
         None,
-        process_uses_many,
+        retirement_process_uses,
         registered_live_owner,
     )
+}
+
+fn retirement_process_uses(worktree: &Path, cache: &Path, descriptors: &[i32]) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        super::process_probe::linux_uses_many_owned(
+            Path::new("/proc"),
+            worktree,
+            cache,
+            descriptors,
+            true,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        process_uses_many(worktree, cache, descriptors)
+    }
 }
 
 fn registered_live_owner(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
@@ -92,6 +109,29 @@ fn retire(
     if !target.exists() || fs::symlink_metadata(&target)?.file_type().is_symlink() {
         return Ok(false);
     }
+    #[cfg(unix)]
+    let target_lease = match super::owner::for_retirement(cas_root, &worktree) {
+        Ok(Some(lease)) => lease,
+        result => {
+            let bytes: u64 = WalkDir::new(&target)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| {
+                    entry
+                        .metadata()
+                        .ok()
+                        .filter(|meta| meta.is_file())
+                        .map(|meta| meta.len())
+                })
+                .sum();
+            tracing::warn!(target = %target.display(), retained_bytes = bytes,
+                reason = ?result.err(), "retired target deferred: legacy/unverifiable ownership or live lifetime lease");
+            return Ok(false);
+        }
+    };
+    #[cfg(not(unix))]
+    return Ok(false); // No verified lifetime lease on this platform.
     if list_validated_git_worktrees(repo)
         .iter()
         .any(|tree| tree.path.starts_with(&target))
@@ -121,7 +161,11 @@ fn retire(
     #[cfg(unix)]
     let descriptors: Vec<_> = {
         use std::os::fd::AsRawFd;
-        locks.iter().map(|file| file.as_raw_fd()).collect()
+        locks
+            .iter()
+            .map(|file| file.as_raw_fd())
+            .chain(std::iter::once(target_lease.fd()))
+            .collect()
     };
     #[cfg(not(unix))]
     let descriptors: Vec<i32> = Vec::new();
@@ -164,6 +208,10 @@ fn retire(
     }
     copy_evidence(&target, &destination)?;
     // Recheck identity/liveness after potentially large evidence copies.
+    #[cfg(unix)]
+    if !target_lease.revalidate(&target)? {
+        return Ok(false);
+    }
     if registry(cas_root, &worktree)?
         || probe(&target, &target, &descriptors)
         || !list_validated_git_worktrees(repo).iter().any(|tree| {
@@ -176,6 +224,11 @@ fn retire(
     }
     let quarantine = worktree.join(format!("{QUARANTINE_PREFIX}retired-{stamp}"));
     fs::rename(&target, &quarantine)?;
+    #[cfg(unix)]
+    if !target_lease.revalidate(&quarantine)? {
+        fs::rename(&quarantine, &target)?;
+        return Ok(false);
+    }
     if probe(&target, &quarantine, &descriptors) {
         if !target.exists() {
             fs::rename(&quarantine, &target)?;
@@ -316,6 +369,11 @@ mod tests {
                 worker.to_str().unwrap(),
             ],
         );
+        drop(
+            super::super::owner::acquire(&root, &worker)
+                .unwrap()
+                .unwrap(),
+        );
         fs::create_dir_all(worker.join("target/debug/deps")).unwrap();
         fs::write(worker.join("target/debug/.cargo-lock"), "").unwrap();
         fs::write(worker.join("target/debug/deps/output"), "regenerable").unwrap();
@@ -387,6 +445,24 @@ mod tests {
             .unwrap()
         );
         drop(lane);
+        let cargo_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(worker.join("target/debug/.cargo-lock"))
+            .unwrap();
+        cargo_lock.lock_exclusive().unwrap();
+        assert!(
+            !retire(
+                &root,
+                &worker,
+                &artifacts,
+                None,
+                |_, _, _| false,
+                |_, _| Ok(false)
+            )
+            .unwrap()
+        );
+        drop(cargo_lock);
         assert!(
             !retire(
                 &root,
@@ -413,5 +489,74 @@ mod tests {
             .is_err()
         );
         assert!(worker.join("target/worker-check.log").exists());
+    }
+
+    #[test]
+    fn verified_target_retires_with_opaque_process_but_open_output_and_legacy_survive_cas_f96d() {
+        use std::os::unix::fs::symlink;
+        let (temp, root, worker, artifacts) = fixture();
+        let proc_root = temp.path().join("proc");
+        let process = proc_root.join("123");
+        fs::create_dir_all(process.join("fd")).unwrap();
+        fs::write(process.join("stat"), "123 (opaque process) S 0 0 0 0 0 0").unwrap();
+        symlink("/unrelated", process.join("cwd")).unwrap();
+        symlink("/usr/bin/program", process.join("exe")).unwrap();
+        fs::write(process.join("cmdline"), b"program\0").unwrap();
+        fs::create_dir(process.join("maps")).unwrap();
+        let probe = |target: &Path, cache: &Path, fds: &[i32]| {
+            super::super::process_probe::linux_uses_many_owned(&proc_root, target, cache, fds, true)
+        };
+        let lease = super::super::owner::acquire(&root, &worker)
+            .unwrap()
+            .unwrap();
+        assert!(!retire(&root, &worker, &artifacts, None, probe, |_, _| Ok(false)).unwrap());
+        drop(lease);
+        // An abruptly dead/reused builder leaves an active record; start-time
+        // mismatch must distinguish it from a currently live owner of that PID.
+        let record_path = fs::read_dir(root.join("worker-target-owners"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        record["active"] = true.into();
+        record["start"] = (record["start"].as_u64().unwrap() + 1).into();
+        fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        symlink(
+            worker.join("target/debug/deps/output"),
+            process.join("fd/3"),
+        )
+        .unwrap();
+        assert!(!retire(&root, &worker, &artifacts, None, probe, |_, _| Ok(false)).unwrap());
+        assert!(worker.join("target/worker-check.log").exists());
+        fs::remove_file(process.join("fd/3")).unwrap();
+        assert!(retire(&root, &worker, &artifacts, None, probe, |_, _| Ok(false)).unwrap());
+        assert!(worker.join("source").exists());
+        assert!(WalkDir::new(&artifacts).into_iter().flatten().any(|entry| {
+            entry.file_name() == "junit.xml"
+                && fs::read_to_string(entry.path()).unwrap() == "proof receipt"
+        }));
+        // Unknown output at the old path cannot inherit the retired inode's provenance.
+        fs::create_dir(worker.join("target")).unwrap();
+        fs::write(worker.join("target/legacy"), b"retained bytes").unwrap();
+        assert!(
+            !retire(
+                &root,
+                &worker,
+                &artifacts,
+                None,
+                |_, _, _| false,
+                |_, _| Ok(false)
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read(worker.join("target/legacy")).unwrap(),
+            b"retained bytes"
+        );
     }
 }

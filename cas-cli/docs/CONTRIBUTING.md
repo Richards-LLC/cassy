@@ -708,9 +708,20 @@ including check logs and `nextest` receipts are copied, synced and verified in
 `<project-artifacts>/<last-task>/retired-target/<worker>/<head>-<attempt>/`.
 A worker without an associated task uses the inventory-only `_retired-workers`
 namespace. Recycle keeps its warm target; parked checkouts remain registered.
-Failed evidence copying or unreadable process evidence preserves the target and
-reports the deferred path and retained bytes. New target ownership for opaque
-hosts is tracked separately in cas-f96d.
+Failed evidence copying preserves the target and reports the deferred path and
+retained bytes. Newly CAS-created private targets have a durable external
+record in `.cas/worker-target-owners`, binding checkout and target device/inode,
+plus a unique generation marker inside the target to defeat inode reuse,
+lease inode, creator/builder PID start time and Linux boot identity. This record
+precedes seeding or build data. The capped runner holds the target lifetime
+lease and passes it to descendants; lane and slot locks remain private to the
+runner. A held lease or matching live owner prevents retirement, including after
+the runner dies. Retirement holds the same lease through evidence copying and
+quarantine, revalidating ownership before deletion. On Linux only, verified
+lease-managed targets tolerate opaque unrelated processes while still checking
+every readable output handle, executable and mapping. Unknown legacy targets,
+replaced inodes and unavailable owner identities remain retained with bytes;
+they are never silently adopted. macOS keeps the conservative `lsof` probe.
 
 Assembly and release scratch uses an owner record, PID start-time identity and
 an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before

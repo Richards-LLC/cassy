@@ -348,6 +348,72 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
     core
 }
 
+/// cas-5c7a closed external ops while the supervisor checkout carried other
+/// Rust work beyond the task's main target. No delivery receipt or lane was
+/// recorded for the chore; its portable external proof is the delivery.
+#[tokio::test]
+async fn no_code_chore_close_ignores_unrelated_scoped_rust_diff_cas_2d27() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
+    let repo = temp.path();
+    let cas_dir = repo.join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = 'cas-2d27-fixture'\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n",
+    )
+    .unwrap();
+    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::create_dir_all(repo.join("cas-cli/tests")).unwrap();
+    std::fs::create_dir_all(repo.join("cas-cli/src")).unwrap();
+    std::fs::write(
+        repo.join("cas-cli/Cargo.toml"),
+        "[package]\nname = 'cas'\nversion = '0.1.0'\nedition = '2024'\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("cas-cli/src/lib.rs"), "pub fn seed() {}\n").unwrap();
+    proof_boundary_git(repo, &["add", ".gitignore", "cas-cli"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "seed main"]);
+    proof_boundary_git(repo, &["checkout", "-q", "-b", "epic/unrelated-work"]);
+    // This is intentionally unclaimed lane work: a task window alone must
+    // not turn a no-code supervisor close into delivery of the epic's tests.
+    std::fs::write(
+        repo.join("cas-cli/tests/ops_regression.rs"),
+        "#[test]\nfn ops_regression() { assert!(true); }\n",
+    )
+    .unwrap();
+    proof_boundary_git(repo, &["add", "cas-cli/tests/ops_regression.rs"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "test: unrelated epic proof"]);
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-5c7a".into(), "Repair cloud identity".into());
+    task.status = TaskStatus::InProgress;
+    task.task_type = TaskType::Chore;
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some("petra-stella-cloud#82".into());
+    task.risk = vec![cas::types::TaskRisk::None];
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-2d27-fixture".into(),
+        target_branch: "main".into(),
+    });
+    tasks.add(&task).unwrap();
+    let supervisor = registered_supervisor(&cas_dir, "no-code-ops-supervisor").await;
+    let mut request = close_request(&task.id, "reviewed external ops; no code delivery");
+    request.supervisor_override = Some(true);
+    let closed = extract_text(
+        supervisor
+            .cas_task_close(Parameters(request))
+            .await
+            .unwrap(),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+    let stored = tasks.get(&task.id).unwrap();
+    assert_eq!(stored.status, TaskStatus::Closed);
+    assert!(stored.notes.contains("petra-stella-cloud#82"));
+    assert!(!stored.notes.contains("SCOPED_PROOF:"));
+    assert!(stored.deliverables.factory_branch_anchor.is_none());
+}
+
 #[tokio::test]
 async fn public_verdicts_project_only_their_receipt_bound_delivery() {
     let mut test_env = TestEnvGuard::temp_home();

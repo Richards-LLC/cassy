@@ -487,7 +487,8 @@ describe("cas-0546: the header's Interrupt and Raw output say why they can't run
     expect(button.dataset.disabledReason).toBe(reason);
     expect(button.title).toBe(reason);
     expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(reason);
-    expect(note.classList.contains("sr-only")).toBe(true);
+    // A hidden description node: named by aria-describedby, never read twice as page text.
+    expect(note.hidden).toBe(true);
     expect(button.getAttribute("aria-label")).toBe("Interrupt the cas-src supervisor");
     expect(button.textContent).toBe("Interrupt");
     applyActionAvailability(button, note, undefined);

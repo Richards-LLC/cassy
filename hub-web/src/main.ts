@@ -71,12 +71,38 @@ import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connecti
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import { applyDraftNote, applyMicState, composerMarkup } from "./composer-markup";
 import { countdownLabel, nextCountdown, pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
+import { OperatorInboxController, startInboxLoop } from "./inbox/controller";
+import { InboxView } from "./inbox/inbox-view";
+import { inboxThreads } from "./inbox/projection";
+import { IndexedDbInboxStore } from "./inbox/store";
+import { operatorOrigin } from "./inbox/wire";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
 
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
+// cas-9b7d: the account's durable operator inbox. It loads on its own, with
+// no machine connection, so retained supervisor messages read on a new
+// device while every hub is off.
+const operatorInbox = new OperatorInboxController({
+  origin: operatorOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-operator-inbox-origin"]')?.content ?? relayOrigin),
+  store: new IndexedDbInboxStore(window.indexedDB),
+  pageOrigin: window.location.origin,
+  locks: navigator.locks ?? null,
+  channel: typeof BroadcastChannel === "function" ? new BroadcastChannel("cas-operator-inbox") : null,
+});
+const inboxView = new InboxView(operatorInbox, { defaultLabel: `Commander on ${navigator.platform || "this device"}`.slice(0, 80) });
+let inboxLoop: AbortController | null = null;
+function syncInboxLoop(ready: boolean): void {
+  if (ready && !inboxLoop) {
+    inboxLoop = new AbortController();
+    startInboxLoop(operatorInbox, inboxLoop.signal);
+  } else if (!ready && inboxLoop) {
+    inboxLoop.abort();
+    inboxLoop = null;
+  }
+}
 const arrivedFragment = readPairingFragment(window.location, window.history, pendingPairingStore);
 let pendingPairing: PendingPairing | null = arrivedFragment.kind === "fragment" ? arrivedFragment.fragment : null;
 // Opening the link is the operator's "yes"; making them hunt for Pair a machine
@@ -519,6 +545,7 @@ async function boot(): Promise<void> {
     }).catch(() => { /* Durable storage remains authoritative; refusal recovery retries adoption. */ });
   });
   machineCatalogLoaded = true;
+  void operatorInbox.snapshot().then((snapshot) => hydrateInboxThreads(snapshot.events)).catch(() => undefined);
   if (stored.pendingCleanup > 0 || remotePending > 0) {
     pairingCleanupFailed = true;
     pairingCleanupContext = { cause: "cancel", storeOpen: false, rollbackPending: true };
@@ -4573,6 +4600,7 @@ function bindEvents(): void {
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");
   if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
   if (document.querySelector<HTMLButtonElement>("#pair-toggle")) document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#inbox-toggle, #empty-inbox")) button.onclick = () => void inboxView.open();
   for (const pair of document.querySelectorAll<HTMLButtonElement>("#empty-pair")) {
     pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   }
@@ -4877,3 +4905,54 @@ async function forgetPairedMachine(id: string): Promise<void> {
   if (dialog?.open) { renderMachineRegister(); dialog.addEventListener('close', () => render(), { once: true }); document.getElementById('paired-machines-close')?.focus(); }
   else render();
 }
+
+/**
+ * cas-9b7d: retained inbox turns of a paired machine join its conversation
+ * threads, so a machine that is off still shows the supervisor's latest
+ * words. A turn carries the machine's own durable notification id, so a copy
+ * that also arrives directly is the same bubble, not a second one.
+ */
+function hydrateInboxThreads(events: Parameters<typeof inboxThreads>[0]): void {
+  let changed = false;
+  for (const machine of machines.values()) {
+    for (const [session, turns] of inboxThreads(events, machine.id)) {
+      const history = conversationHistory(sessionKey(machine.id, session), session);
+      for (const turn of turns) {
+        if (turn.kind === "reply") {
+          history.hydrateReply({
+            notification_id: turn.notificationId,
+            reply_to: turn.replyTo,
+            message: turn.message,
+            summary: turn.summary,
+            device_id: turn.deviceId,
+            ...(turn.turnKind ? { kind: turn.turnKind as OperatorReply["kind"] } : {}),
+            attachments: turn.attachments as OperatorReply["attachments"],
+            session,
+            at: turn.at,
+          });
+          changed = true;
+        } else if (turn.kind === "message") {
+          history.hydrateSend({
+            notification_id: turn.notificationId,
+            target: "supervisor",
+            text: turn.text,
+            state: "acknowledged",
+            stamped: true,
+            device_id: turn.deviceId,
+            ...(turn.operatorLabel ? { operator_label: turn.operatorLabel } : {}),
+            session,
+            at: turn.at,
+          });
+          changed = true;
+        }
+      }
+    }
+  }
+  if (changed) { updateConversationViews(); renderConversationList(); }
+}
+
+operatorInbox.subscribe((snapshot) => {
+  syncInboxLoop(snapshot.state.kind === "ready");
+  hydrateInboxThreads(snapshot.events);
+});
+void operatorInbox.load().catch(() => { /* the inbox dialog reports its own state */ });

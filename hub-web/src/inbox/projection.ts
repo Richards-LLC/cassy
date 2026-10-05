@@ -18,6 +18,9 @@ import type { InboxEvent } from "./store";
 export interface InboxMessage {
   kind: "message";
   hubId: string;
+  /** Routing IDs of the conversation, for read marks and offline replies. */
+  projectId: string;
+  sessionId: string;
   session: string;
   notificationId: number;
   text: string;
@@ -32,6 +35,9 @@ export interface InboxMessage {
 export interface InboxReply {
   kind: "reply";
   hubId: string;
+  /** Routing IDs of the conversation, for read marks and offline replies. */
+  projectId: string;
+  sessionId: string;
   session: string;
   notificationId: number;
   message: string;
@@ -48,6 +54,9 @@ export interface InboxReply {
 export interface InboxQueuedCommand {
   kind: "command";
   hubId: string;
+  /** Routing IDs of the conversation, for read marks and offline replies. */
+  projectId: string;
+  sessionId: string;
   session: string;
   commandId: string;
   text: string;
@@ -83,7 +92,8 @@ export function projectInboxEvent(event: InboxEvent): InboxTurn | null {
   const session = text(snapshot.factory_session) ?? text(plain.session_name);
   const at = text(snapshot.created_at) ?? event.storedAt;
   if (!session) return null;
-  const base = { hubId: event.hubId, session, at, eventId: event.eventId, sequence: event.sequence };
+  if (!event.projectId || !event.sessionId) return null;
+  const base = { hubId: event.hubId, projectId: event.projectId, sessionId: event.sessionId, session, at, eventId: event.eventId, sequence: event.sequence };
 
   const commandId = text(snapshot.command_id);
   const promptId = positiveInt(snapshot.prompt_id);

@@ -2837,3 +2837,27 @@ button.chip:disabled { cursor: default; }
 .status-line .status-identifier { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .status-chip { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-family: var(--font-ui); letter-spacing: normal; text-transform: none; }
 .conversation-context .status-activity .status-identifier { display: inline; }
+
+/* == cas-9b7d: Operator inbox dialog == */
+#operator-inbox-dialog[open] { width: min(40rem, calc(100vw - var(--space-6))); }
+.operator-inbox-body { display: flex; flex-direction: column; gap: var(--space-3); min-height: 0; overflow: auto; }
+.operator-inbox-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.operator-inbox-heading h2 { font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
+.operator-inbox-lead { color: inherit; }
+.operator-inbox-warning, .operator-inbox-status { color: var(--text-mid); border-left: 3px solid currentColor; padding-left: var(--space-2); }
+.operator-inbox-signin, .operator-inbox-approval, .operator-inbox-ready, .operator-inbox-thread-view { display: flex; flex-direction: column; gap: var(--space-3); }
+.operator-inbox-code { align-self: flex-start; }
+.operator-inbox-threads, .operator-inbox-turns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.operator-inbox-thread { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-3); text-align: left; }
+.operator-inbox-thread .operator-inbox-preview { grid-column: 1; color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operator-inbox-thread time { grid-column: 2; grid-row: 1; color: var(--text-mid); }
+.operator-inbox-turn { display: flex; flex-direction: column; gap: var(--space-1); }
+.operator-inbox-author { font-size: var(--fs-xs); color: var(--text-mid); }
+.operator-inbox-turn time, .operator-inbox-command-state { font-size: var(--fs-xs); color: var(--text-mid); }
+.operator-inbox-message, .operator-inbox-command { align-items: flex-end; }
+.operator-inbox-bubble { margin: 0; overflow-wrap: anywhere; }
+.operator-inbox-composer { display: flex; flex-direction: column; gap: var(--space-2); }
+.operator-inbox-composer textarea { width: 100%; font: inherit; }
+.operator-inbox-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--text-mid); font-size: var(--fs-xs); }
+.conversation-welcome-inbox { margin-top: var(--space-3); }
+.link-button { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }

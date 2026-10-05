@@ -143,6 +143,12 @@ export class HubDouble {
   readonly staleInstallationRefusals: string[] = [];
   installationRefreshes = 0;
   private readonly installationSecrets = new Set<string>();
+  private readonly expiredInstallationSecrets = new Set<string>();
+  expireInstallation(deviceId: string): void {
+    const device = this.installations.get(deviceId);
+    if (!device) throw new Error("unknown installation");
+    this.expiredInstallationSecrets.add(device.credential);
+  }
   private readonly installationOperations = new Map<string, { candidate: InstallationRow; prior?: InstallationRow; phase: "prepared" | "committed" | "aborted" }>();
   private readonly installationHighwater = new Map<string, number>();
   /** The hub origin each pairing exchange was posted to, in order. */
@@ -680,6 +686,9 @@ export class HubDouble {
       this.staleInstallationRefusals.push(path);
       return route.fulfill({ status: 401, json: { reason: "unknown_credential", retryable: false } });
     }
+    if (active && this.expiredInstallationSecrets.has(active.credential) && path !== "/v1/auth/refresh") {
+      return route.fulfill({ status: 401, json: { reason: "credential_expired", retryable: false } });
+    }
     if (path === "/v1/auth/refresh" && active) {
       this.installationRefreshes++;
       const generation = (this.installationHighwater.get(active.device_id) ?? active.credential_generation) + 1;
@@ -848,7 +857,7 @@ export class HubDouble {
     const active = this.installations.get(candidate.device_id);
     if (commit) {
       if (operation.phase === "aborted" || (active?.credential_id !== prior?.credential_id && active?.credential_id !== candidate.credential_id)) return route.fulfill({ status: 409 });
-      this.installations.set(candidate.device_id, candidate); operation.phase = "committed";
+      this.installations.set(candidate.device_id, { ...candidate }); operation.phase = "committed";
     } else if (operation.phase !== "aborted") {
       if (operation.phase === "committed") {
         if (active?.credential_id !== candidate.credential_id || active.revoked_at) return route.fulfill({ status: 409 });

@@ -2192,6 +2192,56 @@ mod stale_anchor_rebind_tests_cas_00eb {
         );
     }
 
+    // A task merged out of band, while its plain worker lane still names a
+    // different delivery. Neither an anchor nor a receipt was recorded.
+    fn shared_lane_close_fixture(env: &mut TestEnvGuard, keep_task_branch: bool) -> (Fixture, String) {
+        let mut f = fixture(env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        git(repo, &["checkout", "-q", "-b", "epic", "main"]);
+        git(repo, &["checkout", "-q", "-b", "factory/worker", "main"]);
+        std::fs::create_dir_all(repo.join("hub-web/dist")).unwrap();
+        std::fs::write(repo.join("hub-web/dist/app.css"), ".foreign{color:red}\n").unwrap();
+        git(repo, &["add", "hub-web/dist/app.css"]);
+        git(repo, &["commit", "-q", "-m", "feat(cas-5e53): foreign shared lane"]);
+        let foreign = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "epic"]);
+        git(repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge foreign delivery"]);
+        git(repo, &["merge", "-q", "--no-ff", WORKER_TASK_BRANCH, "-m", "merge own delivery"]);
+        if !keep_task_branch {
+            git(repo, &["branch", "-D", WORKER_TASK_BRANCH]);
+        }
+        f.task.deliverables.factory_branch_anchor = None;
+        f.task.deliverables.parked_branch = None;
+        open_task_store(&repo.join(".cas")).unwrap().update(&f.task).unwrap();
+        (f, foreign)
+    }
+
+    #[test]
+    fn cas_de60_close_without_receipt_uses_own_task_branch_not_shared_lane() {
+        let mut env = TestEnvGuard::temp_home();
+        let (f, foreign) = shared_lane_close_fixture(&mut env, true);
+        let result = f.core.independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
+        assert!(matches!(result, QaCloseGate::Refuse(_)), "new unreviewed delivery needs QA");
+        let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].bound_head, f.tip, "a target-contained shared tip is not this task's delivery");
+        assert_ne!(passes[0].bound_head, foreign);
+        assert_eq!(passes[0].branch, WORKER_TASK_BRANCH);
+        let qa_task = open_task_store(&f.dir.path().join(".cas")).unwrap()
+            .get(passes[0].qa_task_id.as_deref().unwrap()).unwrap();
+        assert!(!qa_task.description.contains("hub-web/dist/app.css"), "foreign paths must not dispatch unrelated journeys: {}", qa_task.description);
+    }
+
+    #[test]
+    fn cas_de60_close_without_task_delivery_refuses_instead_of_binding_shared_lane() {
+        let mut env = TestEnvGuard::temp_home();
+        let (f, _) = shared_lane_close_fixture(&mut env, false);
+        let result = f.core.independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
+        let QaCloseGate::Refuse(text) = result else { panic!("a foreign lane cannot identify this delivery"); };
+        assert!(text.contains("commit_receipt"), "{text}");
+        assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty(), "unknown delivery opens no foreign QA round");
+    }
+
     /// AC2: qa_request on a parked task whose pending pass is bound to the
     /// stale anchor retires that pass and opens one at the tip, with the
     /// rebind on record.

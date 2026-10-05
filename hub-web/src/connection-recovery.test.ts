@@ -7,10 +7,25 @@ import { HubConnectionSupervisor } from "./connection";
 import { createDeviceKey } from "./dpop";
 import { createPairingRequest, pollPairingRequest, acknowledgePairing } from "./pairing-relay";
 import type { PendingRelayRequest } from "./pending-pairing";
+import { exchangePendingPairing } from "./pairing-exchange";
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 const pending: PendingRelayRequest = { kind: "relay-request", pairingRequestId: "request-secret", userCode: "ABCD-EFGH", pollSecret: "poll-secret", controllerOrigin: "https://controller.test", requestedScopes: ["machine-read"], expiresAt: "2027-01-01T00:00:00Z", interval: 1 };
 describe("bounded connection recovery (cas-2b3a5)", () => {
+  it.each(["key", "fetch", "body"])("bounds exchange %s before installation and preserves an uncertain retry", async stage => {
+    vi.useFakeTimers();
+    const stagePersisted = vi.fn(), activatePersisted = vi.fn(), rollbackPersisted = vi.fn();
+    const result = exchangePendingPairing({
+      invitation: { kind: "invitation", token: "secret", hubId: "hub", hubUrl: "https://hub.test", controllerOrigin: "https://controller.test", scopes: ["machine-read"] },
+      controllerOrigin: "https://controller.test", deviceLabel: "Browser", operatorLabel: "Operator", installationGeneration: 1,
+      createKey: () => stage === "key" ? new Promise(() => {}) : Promise.resolve({ privateKey: {} as CryptoKey, publicKey: {} }),
+      fetcher: () => stage === "fetch" ? new Promise(() => {}) : Promise.resolve({ ok: true, json: () => new Promise(() => {}) } as unknown as Response),
+      stagePersisted, activatePersisted, rollbackPersisted,
+    });
+    const rejected = expect(result).rejects.toMatchObject({ recoverable: true, message: expect.stringContaining("Allow Local network access") });
+    await vi.advanceTimersByTimeAsync(10_000); await rejected;
+    expect(stagePersisted).not.toHaveBeenCalled(); expect(activatePersisted).not.toHaveBeenCalled(); expect(rollbackPersisted).not.toHaveBeenCalled();
+  });
   it("settles an uncooperative fetch and aborts its signal at the deadline", async () => {
     vi.useFakeTimers();
     let signal: AbortSignal | undefined;

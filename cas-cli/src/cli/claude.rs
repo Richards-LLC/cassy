@@ -384,20 +384,19 @@ fn warn_about_profile_state(profile: &str, profile_dir: &Path) {
 }
 
 fn set_profile_env(profile: &str, profile_dir: &Path) {
+    // Use the same environment delta as bare launches and login probes. Only
+    // this production bootstrap applies it to the process; tests apply the
+    // command's delta through TestEnvGuard so every change is restored.
+    let mut command = Command::new("claude");
+    configure_profile_command(&mut command, profile, profile_dir);
     // SAFETY: every caller runs before telemetry creates background threads.
-    unsafe {
-        if profile == "main" {
-            std::env::remove_var("CLAUDE_CONFIG_DIR");
-            std::env::remove_var("CLAUDE_SECURESTORAGE_CONFIG_DIR");
-        } else {
-            std::env::set_var("CLAUDE_CONFIG_DIR", profile_dir);
-            std::env::set_var("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_dir);
+    for (key, value) in command.get_envs() {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
-        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
-        std::env::remove_var("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
-        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR");
     }
 }
 
@@ -702,7 +701,14 @@ mod tests {
             env.set("CLAUDE_CONFIG_DIR", "/tmp/ambient-config");
             env.set("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/tmp/ambient-secure");
             let dir = Path::new("/tmp/.claude-alt");
-            set_profile_env(&profile, dir);
+            let mut command = Command::new("claude");
+            configure_profile_command(&mut command, &profile, dir);
+            for (key, value) in command.get_envs() {
+                match value {
+                    Some(value) => env.set(key, value),
+                    None => env.remove(key),
+                }
+            }
             for key in ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"] {
                 assert_eq!(
                     std::env::var_os(key),

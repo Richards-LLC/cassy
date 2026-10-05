@@ -24730,7 +24730,7 @@ mod merge_state_gate_tests {
     /// A reopened delivery remains on origin after its retired author's
     /// checkout switches to unrelated work. Exercise the public close entry,
     /// rather than manufacturing pre-close hook evidence directly.
-    async fn retired_worker_receipt_close_cas_9ffa(status: TaskStatus, published: bool) {
+    async fn retired_worker_receipt_close_cas_9ffa(status: TaskStatus, published: bool, qa_request: bool) {
         use crate::mcp::CasService;
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
@@ -24752,8 +24752,7 @@ mod merge_state_gate_tests {
 
         let worker = "retired-raven-9ffa";
         let branch = "factory/retired-raven-9ffa-cas-9ffa";
-        let worktrees = tempfile::tempdir().unwrap();
-        let wt = worktrees.path().join(worker);
+        let wt = p.join(".cas/worktrees").join(worker);
         git(p, &["worktree", "add", "-q", "-b", branch, wt.to_str().unwrap(), "main"]);
         std::fs::write(wt.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
         git(&wt, &["add", "delivery.rs"]);
@@ -24810,11 +24809,22 @@ mod merge_state_gate_tests {
         });
         task.notes = "Reopened after request_changes; assignee retired before re-parking".into();
         store.add(&task).unwrap();
-        let request = serde_json::from_value(serde_json::json!({
-            "action": "close", "id": task.id, "supervisor_override": true,
-            "commit_receipt": corrected, "reason": "Inspected the pushed corrected delivery of the retired worker",
-        })).unwrap();
-        let response = service.task(Parameters(request)).await.unwrap();
+        let response = if qa_request {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "qa_request", "task_id": task.id, "head_sha": corrected,
+                "summary": "Inspect the reopened corrected delivery of the retired worker",
+            })).unwrap();
+            service.verification(Parameters(request)).await.unwrap_or_else(|error| {
+                CasCore::tool_error(error.message.to_string())
+            })
+        } else {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "close", "id": task.id, "supervisor_override": true,
+                "commit_receipt": corrected, "reason": "Inspected the pushed corrected delivery of the retired worker",
+            })).unwrap();
+            service.task(Parameters(request)).await.unwrap()
+        };
         let text = response.content.into_iter().filter_map(|content| match content.raw {
             rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
@@ -24822,9 +24832,14 @@ mod merge_state_gate_tests {
         let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
         if published {
             assert!(!text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
-            assert!(text.contains("MERGE REQUIRED"), "{text}");
-            assert_eq!(after.status, TaskStatus::AwaitingMerge, "{text}");
-            assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(corrected.as_str()), "{text}");
+            if qa_request {
+                assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
+                assert_eq!(after.status, status, "QA request must not waive the close gates: {text}");
+            } else {
+                assert!(text.contains("MERGE REQUIRED"), "{text}");
+                assert_eq!(after.status, TaskStatus::AwaitingMerge, "{text}");
+                assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(corrected.as_str()), "{text}");
+            }
             assert_eq!(after.deliverables.parked_branch.as_deref(), Some(branch), "{text}");
             assert_eq!(rounds.len(), 1, "{text}");
             assert_eq!(rounds[0].bound_head, corrected, "{text}");
@@ -24840,17 +24855,27 @@ mod merge_state_gate_tests {
 
     #[tokio::test]
     async fn supervisor_parks_reopened_retired_workers_pushed_receipt_cas_9ffa() {
-        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true).await;
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true, false).await;
     }
 
     #[tokio::test]
     async fn supervisor_parks_inprogress_retired_workers_pushed_receipt_cas_9ffa() {
-        retired_worker_receipt_close_cas_9ffa(TaskStatus::InProgress, true).await;
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::InProgress, true, false).await;
     }
 
     #[tokio::test]
     async fn supervisor_refuses_unpublished_retired_workers_receipt_cas_9ffa() {
-        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false).await;
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_requests_qa_for_reopened_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_qa_request_refuses_unpublished_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false, true).await;
     }
 
     /// cas-f1f4 (GH #1087): the gabber-studio cas-4c7d sequence through the

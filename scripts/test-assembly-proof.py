@@ -342,6 +342,88 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid timing.tsv"):
                 proof.run_row(self.root, "ci-script-tests", {}, logs)
 
+    def test_run_row_uses_checkout_target_and_logs_source_identity(self):
+        logs = self.root / '.cas/isolation-logs'
+        logs.mkdir(parents=True)
+        actual_run = proof.subprocess.run
+        captured = {}
+
+        def gate(command, **kwargs):
+            if command[0] == 'git':
+                return actual_run(command, **kwargs)
+            captured.update(kwargs['env'])
+            rows = Path(kwargs['env']['CAS_RELEASE_GATE_LOG_DIR'])
+            rows.mkdir()
+            (rows / 'nextest.log').write_text('PASS: 1 test(s) passed\n')
+            kwargs['stdout'].write('PASS nextest fixture\n')
+            return proof.subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(proof.subprocess, 'run', side_effect=gate):
+            result = proof.run_row(self.root, 'nextest', {'CARGO_TARGET_DIR': '/other/worktree/target'}, logs)
+        self.assertEqual(captured['CARGO_TARGET_DIR'], str(self.root / 'target'))
+        self.assertEqual(result['head'], self.git('rev-parse', 'HEAD'))
+        self.assertIn(str(self.root), (logs / 'nextest.log').read_text())
+        self.assertIn(self.git('rev-parse', 'HEAD'), (logs / 'nextest.log').read_text())
+
+    def test_merged_private_clone_target_keeps_bounded_owner_and_source_receipt(self):
+        # Real Git clones/leases and shell rows; only Cargo/tool probes are fake.
+        (self.root / '.gitignore').write_text('.cas/\ntarget/\n')
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        (scripts / 'release-gate.sh').write_text("""#!/bin/bash
+set -eu
+row=$3
+mkdir -p "$CAS_RELEASE_GATE_LOG_DIR"
+printf 'PASS: 1 test(s) passed\n' > "$CAS_RELEASE_GATE_LOG_DIR/$row.log"
+printf 7 > "$CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE"
+printf 'PASS %s fixture\n' "$row"
+""")
+        self.commit()
+        expected = {'format': proof.FORMAT, 'code_input': proof.code_input(self.root)}
+        head = self.git('rev-parse', 'HEAD')
+        path = proof.receipt_path(self.root, expected)
+        legacy = path.parent.parent / 'assembly-target'
+        leased = legacy.with_name(legacy.name + '-leased-v1')
+        for directory in (legacy, leased):
+            directory.mkdir(parents=True)
+            (directory / 'opaque').write_text('preserve unknown artifacts')
+        observed = {}
+
+        def contexts(root, clone, env, logs, target, execution):
+            observed['clone'] = clone
+            self.assertEqual(target, clone / 'target')
+            self.assertIsNotNone(proof.release_scratch.read_owner(target))
+            owner = json.loads((target / proof.proof_target.OWNER).read_text())
+            self.assertEqual(owner['worktree'], str(clone.resolve()))
+            self.assertEqual(owner['head'], head)
+            self.assertFalse(owner['dirty'])
+            self.assertTrue(proof.release_scratch.CURRENT.leases)
+            results = [proof.run_row(checkout, row, env, logs)
+                       for checkout, row in ((root, 'ci-script-tests'), (root, 'nextest'),
+                                             (clone, 'archive-mode'))]
+            for result in results:
+                source = json.loads(Path(result['log']).read_text().splitlines()[0].removeprefix('PROOF_SOURCE: '))
+                self.assertEqual(source['head'], head)
+                self.assertEqual(source['target'], str(Path(result['checkout']) / 'target'))
+            return tuple(results)
+
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / 'base'
+            env = {'CAS_RELEASE_GATE_HOME_DIR': str(scratch), 'CARGO_TARGET_DIR': '/foreign/target'}
+            with mock.patch.object(proof, 'clone_scratch', return_value=scratch), \
+                    mock.patch.object(proof, 'inputs', return_value=(expected, env)), \
+                    mock.patch.object(proof, 'execution_plan', return_value={}), \
+                    mock.patch.object(proof, 'run_contexts', side_effect=contexts):
+                record, receipt = proof.prove(self.root)
+        self.assertEqual(record['status'], 'PASS')
+        self.assertFalse(observed['clone'].parent.exists(), 'owned clone removed after child teardown')
+        self.assertTrue(record['cache'])
+        self.assertTrue(all(row['path'] == str(observed['clone'] / 'target') for row in record['cache']))
+        self.assertEqual({row['path'] for row in record['legacy_cache']}, {str(legacy), str(leased)})
+        for directory in (legacy, leased):
+            self.assertEqual((directory / 'opaque').read_text(), 'preserve unknown artifacts')
+        self.assertEqual(json.loads(receipt.read_text())['status'], 'PASS')
+
     def run_producer(self, failure=None, serial=False, deny_test=False, recover_test=False):
         self.path.unlink()
         scratch = tempfile.TemporaryDirectory()
@@ -355,6 +437,8 @@ class ReceiptTests(unittest.TestCase):
         def run(root, row, env, logs):
             rows.append(row)
             self.assertFalse(proof.IDENTITY & env.keys())
+            self.assertEqual(env['CARGO_TARGET_DIR'], str(root / 'target'))
+            self.assertEqual(env['CARGO_BUILD_TARGET_DIR'], str(root / 'target'))
             if not serial:
                 producers.wait(timeout=5)  # all three legs must overlap
             if row == "ci-script-tests":

@@ -99,6 +99,9 @@ if [[ "${1:-}" == '--learn' ]]; then
     exit $?
 fi
 
+# The guardian must re-execute the requested mode/base, before parsing rewrites argv.
+gate_original_args=("$@")
+
 # Lane admission uses the current checked-in version, before release prep.
 # An explicit base limits docs lint to this lane's merged delta. Without it,
 # HEAD^ is the push delta; a root commit compares against the empty tree.
@@ -203,7 +206,7 @@ readonly scratch_archive_history_file archive_size_file
 # entire child group, waits for it, then removes scratch and remap metadata.
 if [[ -z "${CAS_RELEASE_GATE_SCRATCH_RUN_DIR:-}" ]]; then
     exec python3 "$repo_root/scripts/release_scratch.py" --repo "$repo_root" \
-        --base "$scratch_base" guard -- bash "$repo_root/scripts/release-gate.sh" "$@"
+        --base "$scratch_base" guard -- bash "$repo_root/scripts/release-gate.sh" "${gate_original_args[@]}"
 fi
 
 # The gate IS the "slow CI environment" the `cas init` watchdog names.

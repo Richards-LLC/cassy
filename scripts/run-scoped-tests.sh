@@ -184,7 +184,7 @@ echo
 
 # Interleave stderr into the captured log: the build-script panic and the
 # package-spec error both arrive on stderr, and the verdict below reads them.
-(cd "${REPO_ROOT}" && "${CARGO}" ${CARGO_CMD} "$@" 2>&1) | tee -a "${log}"
+python3 "${REPO_ROOT}/scripts/proof_target.py" run "${REPO_ROOT}" -- "${CARGO}" ${CARGO_CMD} "$@" 2>&1 | tee -a "${log}"
 cargo_status="${PIPESTATUS[0]}"
 if [[ "${proof_mode}" -eq 1 && -n "${SCOPED_TEST_LOG:-}" ]]; then
     printf 'SCOPED_RUN_RESULT: cargo_exit=%s\n' "${cargo_status}" >>"${log}"

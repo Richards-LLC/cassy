@@ -33,7 +33,7 @@ class FastRows(unittest.TestCase):
         self.repo = Path(self.scratch.name) / "repo"
         self.repo.mkdir()
         self.write(".gitignore", "/cargo-called\n")
-        for helper in ("release-gate.sh", "release-portable.sh", "cas-test-targets.py",
+        for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py",
                        "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py"):

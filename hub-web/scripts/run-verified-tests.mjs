@@ -3,7 +3,7 @@
 // labels (which may include skipped tests). The Rust runner uses this same
 // VERIFIED_TEST_COUNT_FILE receipt contract.
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,9 +35,10 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
       cwd, stdio: 'inherit', env: { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: report },
     });
     if (result.error) throw result.error;
-    if (result.status !== 0) return result.status ?? 1;
+    // Keep failures/skips and all native parts for the journey receipt, too.
+    // An absent report still fails; it can never become a zero-impact run.
+    if (result.status !== 0 && !existsSync(report)) return result.status ?? 1;
     const raw = readFileSync(report, 'utf8');
-    const count = passedCount(runner, JSON.parse(raw));
     if (runner === 'playwright') {
       // Keep the report consumed by journey-bundles.py, even though this run
       // uses a fresh scratch report to reject stale/absent summaries.
@@ -45,6 +46,8 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
       // Playwright creates outputDir itself when tests execute.
       writeFileSync(join(dest, 'report.json'), raw);
     }
+    if (result.status !== 0) return result.status ?? 1;
+    const count = passedCount(runner, JSON.parse(raw));
     if (countFile) writeFileSync(countFile, `${count}\n`);
     console.log(`verified-web-tests: PASS (${count} ${runner} tests passed)`);
     return 0;

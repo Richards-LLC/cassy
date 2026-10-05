@@ -58,6 +58,7 @@ new_fixture() {
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
+    cp "$script_dir/proof_target.py" "$repo/scripts/proof_target.py"
     cp "$script_dir/assembly-memory.py" "$repo/scripts/assembly-memory.py"
     cp "$script_dir/host_memory.py" "$repo/scripts/host_memory.py"
     # The producer and its guard share deterministic physical-memory fixtures.
@@ -167,6 +168,7 @@ PY_NESTED_VERSION
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
 .cas/
+target/
 __pycache__/
 EOF
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$repo/.context/zig/zig"

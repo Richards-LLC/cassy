@@ -7439,6 +7439,28 @@ impl CasCore {
         // independent reviewer spawned (cas-619f). A live supervisor's
         // override (already validated above) waives it with a logged reason.
         if close_disposition.requires_delivery_gates()
+            && task.task_type == TaskType::Epic
+            && close_repo_verified
+            && close_project_root.join("hub-web/src").is_dir()
+            && close_project_root.join("docs/qa/journeys.md").is_file()
+        {
+            let Some(head) = epic_close_tip(&task, req.commit_receipt.as_deref(), &close_project_root) else {
+                return Ok(Self::tool_error("EPIC ASSEMBLY REJECTED: epic journey tip is unreadable"));
+            };
+            let assembly_config = self.load_config();
+            let paths = crate::config::resolved_factory_artifact_paths(&self.cas_root, assembly_config.factory().artifacts_root.as_deref());
+            let artifacts = paths.task_dirs(&task.id)[0].clone();
+            let ctx = crate::qa_evidence::EvidenceContext {
+                task_id: &task.id, task_artifacts_dir: &artifacts, repo: &close_project_root,
+                delivered_head: &head, notes: &task.notes, deployed_origins: &[],
+            };
+            match crate::qa_evidence::journeys::check_epic_journeys(&ctx) {
+                Ok(receipt) => append_close_decision_note(task_store.as_ref(), &mut task,
+                    &format!("Epic full-suite journey receipt accepted: {} (head {head})", receipt.display())),
+                Err(refusal) => return Ok(Self::tool_error(format!("EPIC ASSEMBLY REJECTED: {}. Next: {}", refusal.problem, refusal.command))),
+            }
+        }
+        if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && task.assignee.is_some()
             && (close_repo_verified || worker_worktree_path.is_some())
@@ -7463,13 +7485,17 @@ impl CasCore {
                     delivery_receipt,
                 )
             });
-            match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+            let journey_base = commit_receipt_window.as_ref().and_then(|window| {
+                task_attribution::delivery_base(&evidence_repo, &resolved_parent_branch, window, delivery_receipt)
+            });
+            match super::qa_evidence_gate::qa_evidence_close_gate_for_delivery(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
                 delivery_receipt,
                 attributed_paths.as_deref(),
+                journey_base.as_deref(),
             ) {
                 Ok(notes) => {
                     for note in notes {

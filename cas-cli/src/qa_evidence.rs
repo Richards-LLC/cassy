@@ -15,6 +15,9 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+#[path = "qa_journeys.rs"]
+pub mod journeys;
+
 /// Note token that cites a bundle manifest: `qa-bundle: <abs>/bundle.json`.
 pub const BUNDLE_CITATION: &str = "qa-bundle:";
 /// Same-line (or preceding-line) escape for a deliberate skip marker.
@@ -89,6 +92,8 @@ struct Manifest {
     #[serde(default)]
     producer: String,
     head_sha: String,
+    #[serde(default)]
+    executed_head_sha: String,
     created_at: String,
     #[serde(default)]
     visual_change: bool,
@@ -445,6 +450,16 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             "push the delivery commit, then retry close".to_string(),
         )
     })?;
+    // A documented rebind preserves the execution revision. Only unchanged
+    // product/journey inputs across documentation-only commits can reuse it.
+    let delivered_time = if manifest.executed_head_sha.is_empty() {
+        delivered_time
+    } else if journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
+        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
+            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
+    } else {
+        return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
+    };
     let head_covers_delivery = manifest.head_sha == ctx.delivered_head
         || git(
             ctx.repo,
@@ -2096,6 +2111,11 @@ pub fn run_close_gate_with_write_dir(
             command = command,
         )
     };
+    if let Some(selection) = journeys::check_close_journeys(ctx, reasons)
+        .map_err(|refusal| reject(refusal, "affected journey receipt"))?
+    {
+        pass.notes.push(selection);
+    }
     match tier {
         EvidenceTier::None => {}
         EvidenceTier::Bundle => {

@@ -25,7 +25,10 @@ for (const runner of ['vitest', 'playwright']) {
           assert.equal(run(), 0);
           assert.equal(readFileSync(count, 'utf8'), '2\n');
           if (runner === 'playwright') assert.equal(JSON.parse(readFileSync(join(cwd, 'e2e/.results/report.json'))).stats.expected, 2);
-        } else if (scenario === 'failed') assert.equal(run(), 7);
+        } else if (scenario === 'failed') {
+          assert.equal(run(), 7);
+          if (runner === 'playwright') assert.equal(JSON.parse(readFileSync(join(cwd, 'e2e/.results/report.json'))).stats.expected, 0);
+        }
         else assert.throws(run, scenario === 'missing' ? /ENOENT/ : /zero tests/);
         if (scenario !== 'pass') assert.equal(existsSync(count), false);
       } finally { rmSync(cwd, { recursive: true, force: true }); }

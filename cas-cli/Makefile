@@ -215,6 +215,7 @@ test-ci-tiers:
 	cd .. && bash scripts/test-no-mecha-references.sh
 	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py
+	cd .. && python3 scripts/test-proof-target.py
 	cd .. && python3 scripts/test-assembly-memory.py
 	cd .. && python3 scripts/test-worker-memory.py
 	cd .. && python3 scripts/test-release-scratch.py
@@ -241,6 +242,8 @@ test-ci-tiers:
 	cd .. && ./scripts/test-check-release-runner-trust.sh
 	cd .. && ./scripts/test-check-release-preflight.sh
 	cd .. && ./scripts/test-journeys.sh
+	cd .. && python3 scripts/test-journey-receipt.py
+	cd .. && node --test scripts/test-verified-web-tests.mjs
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh

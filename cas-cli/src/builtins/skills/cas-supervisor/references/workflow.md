@@ -443,8 +443,13 @@ When workers share the main directory, there's no branch merging — workers com
    on the epic tip proves every child and checks cross-task integration.
    In a project with `scripts/assembly-proof.py`, the assembly command is
    `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
-   nextest in the worktree and archive-mode in a plain clone. A matching code
-   tree reuses its durable two-context PASS; integration recovery and the
+   nextest in the worktree and archive-mode in a plain clone. Both use their
+   own `<worktree>/target`, seeding immutable dependencies from the worker
+   build-cache; workspace freshness and Cargo locks remain private. Each log
+   names its source worktree and HEAD. For scoped Cargo checks outside assembly,
+   run `python3 scripts/proof_target.py run <worktree> -- cargo check --workspace --tests`;
+   `scripts/run-scoped-tests.sh` uses the same isolation automatically.
+   A matching code tree reuses its durable two-context PASS; integration recovery and the
    release gate cite that receipt instead of running the suite again.
    On exit 0, record a progress note on the epic:
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,

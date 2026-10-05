@@ -240,6 +240,36 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(hub.requests).toHaveLength(requests);
   });
+  it("keeps network-quality estimates from bypassing four failed heartbeats (cas-eefe)", async () => {
+    const hub = transport();
+    const hints = Object.assign(new EventTarget(), { rtt: 50, downlink: 10, effectiveType: "4g" });
+    vi.stubGlobal("navigator", { connection: hints });
+    vi.stubGlobal("document", Object.assign(new EventTarget(), { visibilityState: "visible" }));
+    const connection = supervisor(await storedMachine("quality-estimate"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.block(true);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(1));
+    const before = hub.requests.filter(request => request.path === "/v1/machine").length;
+    hints.rtt = 250;
+    hints.downlink = 1;
+    hints.effectiveType = "3g";
+    hints.dispatchEvent(new Event("change"));
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(2));
+    expect(connection.snapshot().phase).toBe("live");
+    expect(connection.snapshot().degraded).toBe(true);
+    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(3));
+    expect(connection.snapshot().phase).toBe("live");
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+  });
+
   it("bounds an unanswered event catalog refresh to the probe deadline (cas-b85a)", async () => {
     const hub = transport();
     const connection = supervisor(await storedMachine("refresh-deadline"));

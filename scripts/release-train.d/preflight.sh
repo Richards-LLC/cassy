@@ -388,6 +388,10 @@ cut_preflight_check_receipts() {
     done < <(release_train_receipts_unmerged_records)
 }
 
+cut_preflight_check_unreleased_tooling() {
+    python3 "$script_dir/release-learning.py" --warn-tooling "$worktree"
+}
+
 cut_stage_preflight() {
     local branch
     branch="$(git -C "$worktree" branch --show-current)"
@@ -413,5 +417,6 @@ cut_stage_preflight() {
     cut_preflight_check_announce_token || return 1
     cut_preflight_check_integration || return 1
     cut_preflight_check_receipts
+    cut_preflight_check_unreleased_tooling
     printf 'preflight passed version=%s worktree=%s\n' "$version" "$worktree"
 }

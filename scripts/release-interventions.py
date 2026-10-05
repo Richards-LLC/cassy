@@ -34,7 +34,7 @@ def metrics(run_dir):
     blocked = set()
     blocker_rows = read(run_dir / "blockers.log")
     for row in blocker_rows:
-        for name in row.strip().split(","):
+        for name in row.split()[0].split(",") if row.split() else []:
             if name in STAGES:
                 blocked.add(name)
                 stages.setdefault(name, None)

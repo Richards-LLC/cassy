@@ -64,7 +64,7 @@ version and worktree, never a version-keyed path.
    artifacts on the `release/` branch, writes the commit and branch to the
    run-dir `receipts.commit` receipt, and never opens a docs-only PR. Before
    the next release, `preflight` warns about an unmerged prior receipt commit.
-   Leave it for `prep` to carry forward after assembly; its report files are
+   These docs-only release commits stay for `prep` to carry forward after assembly; its report files are
    outside the initial metadata rebase allowlist.
    `prep` refreshes `Cargo.lock` with `cargo update --workspace --offline`.
    `assemble` rebases CHANGELOG, release notes and
@@ -77,6 +77,13 @@ version and worktree, never a version-keyed path.
    <release-worktree> --status` for bounded, read-only state. A targeted
    `--gate --only <row,row>` is diagnostic and never authorizes pipeline.
 6. Done when the receipt checklist holds; never call the release published before. It needs the
+   `receipts release-learning` gate: every blocker in `blockers.log` and every
+   supervisor intervention maps to a learned executable gate row (`learn=<row>`)
+   or a still-open task (`task=cas-<id>`). On refusal, supply the diagnosed cause
+   and executable row to its printed `release-gate.sh --learn` command; its
+   `--run-dir` and `--evidence file:line` options annotate the evidence line.
+   Preflight warns about release tooling on unreleased epic or parked branches;
+   bring those fixes onto main before the next cut. The checklist also needs the
    full exact-SHA gate (the full suite on the assembled tree), queue/pipeline landed SHA, `annotated tag peels`,
    `release.tag-complete.epoch`, `release-published.receipt`, the matching
    workflow and asset proofs, `four Slack POSTED` entries through the

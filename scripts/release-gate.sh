@@ -26,12 +26,32 @@ readonly -a gate_check_ids=(
 usage() {
     printf 'Usage: %s <version> [--reuse | --only <row,row>]\n' "$0"
     printf '       %s --fast-rows [--base <ref>]\n' "$0"
-    printf '       %s --learn "<symptom>" "<cause>" "<check-id>"\n' "$0"
+    printf '       %s --learn "<symptom>" "<cause>" "<check-id>" [--run-dir <dir> --evidence <file:line> ...]\n' "$0"
 }
 
 learn() {
     local symptom="$1" cause="$2" check_id="$3"
-    local date entry path before
+    local date entry path before mapping_dir='' known registered=false
+    local -a mapping_rows=()
+    shift 3
+    while (($#)); do
+        case "$1" in
+            --run-dir) [[ $# -ge 2 ]] || return 2; mapping_dir="$2"; shift 2 ;;
+            --evidence) [[ $# -ge 2 ]] || return 2; mapping_rows+=("$2"); shift 2 ;;
+            *) printf 'error: unknown --learn option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    if [[ -n "$mapping_dir" || ${#mapping_rows[@]} -gt 0 ]]; then
+        [[ -n "$mapping_dir" && ${#mapping_rows[@]} -gt 0 ]] || {
+            printf 'error: --run-dir and --evidence are required together\n' >&2; return 2;
+        }
+        for known in "${gate_check_ids[@]}"; do
+            [[ "$check_id" == "$known" ]] && registered=true
+        done
+        "$registered" || { printf 'error: learned evidence needs an executable gate row: %s\n' "$check_id" >&2; return 2; }
+        python3 "$repo_root/scripts/release-learning.py" --validate-map "$repo_root" \
+            "$mapping_dir" "$check_id" "${mapping_rows[@]}" || return $?
+    fi
     [[ "$symptom" != *$'\n'* && "$cause" != *$'\n'* ]] || {
         printf 'error: --learn values must be single-line strings\n' >&2
         return 2
@@ -58,6 +78,10 @@ learn() {
         fi
         rm -f "$before"
     done
+    if [[ -n "$mapping_dir" ]]; then
+        python3 "$repo_root/scripts/release-learning.py" --map "$repo_root" \
+            "$mapping_dir" "$check_id" "${mapping_rows[@]}" || return $?
+    fi
     if [[ -x "$repo_root/scripts/gen-builtin-reference-history.sh" ]]; then
         "$repo_root/scripts/gen-builtin-reference-history.sh"
         printf 'Regenerated builtin reference history after --learn; commit the ledger before starting a gate.\n'
@@ -66,11 +90,12 @@ learn() {
 }
 
 if [[ "${1:-}" == '--learn' ]]; then
-    [[ "$#" -eq 4 ]] || {
+    [[ "$#" -ge 4 ]] || {
         usage >&2
         exit 2
     }
-    learn "$2" "$3" "$4"
+    shift
+    learn "$@"
     exit $?
 fi
 

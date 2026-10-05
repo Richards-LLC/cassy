@@ -17,6 +17,7 @@ fi
 release_train_receipts() {
     local draft receipt landed branch report_dir artifact draft_rel commit_sha
     local receipt_temp candidate_subject
+    python3 "$script_dir/release-learning.py" --check "$worktree" "$run_dir" || return 1
     local -a report_paths=()
     if [[ -s "$run_dir/receipts.commit" ]]; then
         commit_sha="$(release_train_receipts_record_field "$run_dir/receipts.commit" COMMIT_SHA)"
@@ -116,6 +117,7 @@ stage_receipts() {
 
 cut_stage_receipts() {
     if cut_has_external_stage receipts; then
+        python3 "$script_dir/release-learning.py" --check "$worktree" "$run_dir" || return 1
         cut_run_external_stage receipts
     else
         release_train_receipts "$@"

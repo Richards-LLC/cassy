@@ -132,7 +132,7 @@ fi
 invocation_blockers="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-${CAS_RELEASE_TRAIN_BLOCKERS:-none}}"
 if [[ "$invocation_resume" == true && "$invocation_blockers" == none \
     && -s "$run_dir/blockers.log" ]]; then
-    invocation_blockers="$(paste -sd, "$run_dir/blockers.log")"
+    invocation_blockers="$(awk '{print $1}' "$run_dir/blockers.log" | paste -sd,)"
 fi
 if [[ "$invocation_kind" == manual && "$invocation_blockers" == none \
     && "$invocation_stage" =~ ^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$ ]]; then

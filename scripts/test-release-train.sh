@@ -44,6 +44,25 @@ printf '{"sessions":[]}\n'
 EOF
 chmod +x "$CAS_RELEASE_TRAIN_CAS"
 
+# Rescued-stage fixtures explicitly keep an open follow-up before completion.
+export CAS_RELEASE_LEARNING_TASK_DB="$tmp/learning-tasks.db"
+python3 - "$CAS_RELEASE_LEARNING_TASK_DB" <<'PY_LEARNING_TASK'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('CREATE TABLE tasks (id TEXT, status TEXT)')
+    db.execute("INSERT INTO tasks VALUES ('cas-fixture', 'open')")
+PY_LEARNING_TASK
+learn_fixture_blockers() {
+    python3 - "$1/blockers.log" <<'PY_LEARNING_MAP'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+if path.exists():
+    rows = [row if ' task=' in row else row + ' task=cas-fixture' for row in path.read_text().splitlines()]
+    path.write_text('\n'.join(rows) + '\n')
+PY_LEARNING_MAP
+}
+
 new_worktree() {
     local name="$1"
     local dir="$tmp/$name"
@@ -2452,6 +2471,7 @@ else
 fi
 cp "$tmp/published-filled.md" "$published_draft"
 mv "$tmp/published-outputs.json" "$published_dir/post-publication-outputs.json"
+learn_fixture_blockers "$published_dir"
 if run_published_resume --resume >"$tmp/published-resume.out" 2>&1 \
     && [[ -s "$published_dir/stage.host-update.done" ]] \
     && [[ "$(grep -c '^pipeline$' "$published_log")" == 1 ]] \
@@ -2467,6 +2487,7 @@ touch "$published_dir/report-fail-request"
 if run_published_resume --resume >"$tmp/published-report.out" 2>&1; then
     bad 'published resume bypassed the injected partial report failure'
 elif grep -qF 'BLOCKER report' "$tmp/published-report.out" \
+    && learn_fixture_blockers "$published_dir" \
     && run_published_resume --resume >"$tmp/published-report-resume.out" 2>&1 \
     && [[ -s "$published_dir/stage.host-update.done" ]] \
     && [[ "$(grep -c '^announce$' "$published_log")" == 2 ]]; then
@@ -2740,6 +2761,7 @@ data = json.loads(path.read_text())
 data.update(status='RUNNING', tip='1' * 40)
 path.write_text(json.dumps(data))
 PYFIX
+learn_fixture_blockers "$combined_resume_dir"
 if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut --resume >/dev/null 2>&1 \
     && [[ -s "$combined_resume_dir/stage.host-update.done" ]] \
     && [[ "$(grep -c '^gate$' "$combined_log")" == 3 ]]; then
@@ -3201,6 +3223,12 @@ if python3 "$script_dir/test-release-completion.py"; then
     ok 'rule-175 completion, clean install, full merge coverage and embargo regressions'
 else
     bad 'rule-175 completion regression suite'
+fi
+
+if python3 "$script_dir/test-release-learning.py"; then
+    ok 'receipts lessons and unreleased tooling warnings'
+else
+    bad 'receipts lessons and unreleased tooling warnings'
 fi
 
 if python3 "$script_dir/test-release-publish-toolchain.py"; then

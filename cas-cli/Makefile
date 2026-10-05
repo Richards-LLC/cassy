@@ -227,6 +227,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-classify-fast-admission.sh
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-self-hosted-rust-setup.sh
+	cd .. && python3 scripts/test-release-learning.py
 	cd .. && python3 scripts/test-release-publish-toolchain.py
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh

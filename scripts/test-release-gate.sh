@@ -134,6 +134,7 @@ jobs:
 EOF
     cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
     cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
+    cp "$script_dir/release-learning.py" "$repo/scripts/release-learning.py"
     cat >"$repo/scripts/check-release-publish-toolchain.py" <<'PY_ZIG_FIXTURE'
 import os, sys
 if os.environ.get('GATE_FIXTURE_ZIGBUILD_FAIL') == '1':

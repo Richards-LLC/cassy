@@ -73,6 +73,7 @@ import { applyDraftNote, applyMicState, composerMarkup } from "./composer-markup
 import { countdownLabel, nextCountdown, pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
 import { OperatorInboxController, startInboxLoop } from "./inbox/controller";
 import { InboxView } from "./inbox/inbox-view";
+import { enrollPairedInstallation } from "./inbox/hub-enrollment";
 import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
@@ -4951,8 +4952,33 @@ function hydrateInboxThreads(events: Parameters<typeof inboxThreads>[0]): void {
   if (changed) { updateConversationViews(); renderConversationList(); }
 }
 
+/**
+ * cas-4634: once this profile is signed in to the inbox, ask each paired hub
+ * that is a machine of the same account to verify this installation into it
+ * (cloud contract §5.5). Once per machine per page; a hub outside the
+ * account or an older hub without the route is left as it is.
+ */
+const installationEnrollmentTried = new Set<string>();
+function enrollPairedInstallations(): void {
+  for (const machine of machines.values()) {
+    const connection = connections.get(machine.id);
+    if (!connection || installationEnrollmentTried.has(machine.id) || connection.snapshot().phase !== "live") continue;
+    if (machine.accountEnrollment?.state === "enrolled") continue;
+    installationEnrollmentTried.add(machine.id);
+    void enrollPairedInstallation(connection, operatorInbox.client, machine.publicKey)
+      .then((outcome) => {
+        if (outcome.kind === "enrolled") {
+          machine.accountEnrollment = outcome.enrollment;
+          void catalog.put(machine).catch(() => undefined);
+        }
+      })
+      .catch(() => { /* retried on the next page load */ });
+  }
+}
+
 operatorInbox.subscribe((snapshot) => {
   syncInboxLoop(snapshot.state.kind === "ready");
   hydrateInboxThreads(snapshot.events);
+  if (snapshot.state.kind === "ready") enrollPairedInstallations();
 });
 void operatorInbox.load().catch(() => { /* the inbox dialog reports its own state */ });

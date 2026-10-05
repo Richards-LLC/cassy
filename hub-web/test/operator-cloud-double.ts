@@ -638,6 +638,7 @@ export class OperatorCloudDouble {
     if (method === "PUT" && path === "/api/operator/read-marks") return this.putReadMark(request, device);
     if (method === "GET" && path === "/api/operator/read-marks") return this.getReadMarks(url.searchParams);
     if (method === "POST" && path === "/api/operator/commands") return this.submitCommand(request, device);
+    if (method === "POST" && path === "/api/operator/assertions") return this.enrollmentAssertion(request, device);
     match = /^\/api\/operator\/commands\/([^/]+)$/.exec(path);
     if (method === "GET" && match) return this.commandStatus(match[1]);
     match = /^\/api\/operator\/commands\/([^/]+)\/cancel$/.exec(path);
@@ -1019,6 +1020,42 @@ export class OperatorCloudDouble {
         updated_by_device_id: mark.by,
       }));
     return json(200, { wire_version: 1, read_marks: marks, next_cursor: null });
+  }
+
+  // ---------------------------------------------------------------- hub assertion (§5.5)
+
+  private async enrollmentAssertion(request: DoubleRequest, device: Device): Promise<DoubleResponse> {
+    const body = this.parseBody(request);
+    if (isResponse(body)) return body;
+    const { hub_id, hub_challenge, installation_jkt } = body as Record<string, string>;
+    if (typeof hub_id !== "string" || typeof hub_challenge !== "string" || typeof installation_jkt !== "string") {
+      return error(400, "invalid_request", { field: "hub_challenge" });
+    }
+    const machine = [...this.machines.values()].find((entry) => entry.hubId === hub_id && entry.status === "active");
+    if (!machine) return error(422, "hub_not_enrolled");
+    const iat = Math.floor(this.now() / 1000);
+    const { kid } = await this.issuerKey();
+    const assertion = await this.sign("psc-op-enrollment+jwt", {
+      iss: this.baseUrl,
+      aud: `cas-hub:${hub_id}`,
+      sub: device.id,
+      acct: this.accountId,
+      hub: hub_id,
+      projects: machine.projects,
+      cmd_scopes: device.scopes.filter((scope) => scope.hub_id === hub_id),
+      origin: device.origin,
+      ins_jkt: installation_jkt,
+      dev_jkt: device.jkt,
+      gen: device.generation.toString(),
+      cak: kid,
+      fgen: this.feedGeneration.toString(),
+      epoch: this.activeEpoch.toString(),
+      chl: hub_challenge,
+      iat,
+      exp: iat + 300,
+      jti: randomId(),
+    });
+    return json(200, { assertion, expires_at: iso((iat + 300) * 1000) });
   }
 
   // ---------------------------------------------------------------- commands (§10)

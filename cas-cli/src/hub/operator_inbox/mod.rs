@@ -18,6 +18,9 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+pub mod assertion;
+pub mod jws;
+pub mod machine;
 mod wire;
 pub use wire::{
     AckOutcome, AckReceipt, AckRow, AppendOutcome, AppendReceipt, AppendRow, Cursor,

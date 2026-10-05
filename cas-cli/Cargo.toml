@@ -40,6 +40,8 @@ cas-code = { path = "../crates/cas-code" }
 
 # Diff parsing, rendering, and syntax highlighting
 cas-diffs = { path = "../crates/cas-diffs" }
+# Operator inbox HPKE envelopes (cas-9b7d); keeps hpke 0.14 types out of cas-cli.
+cas-operator-crypto = { path = "../crates/cas-operator-crypto" }
 
 # Search infrastructure (workspace crate)
 cas-search = { path = "../crates/cas-search" }

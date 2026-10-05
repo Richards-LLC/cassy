@@ -4,7 +4,10 @@ import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, type
 import type { MachineCatalog } from "./storage";
 import type { PairingInstallIdentity, StoredMachine, Scope } from "./types";
 
-export type AccountEnrollment = { state: "unenrolled" };
+/** Verified by the hub from a cloud enrollment assertion (cas-4634). */
+export type AccountEnrollment =
+  | { state: "unenrolled" }
+  | { state: "enrolled"; account_id: string; relay_device_id: string; grant_generation: string; feed_generation: string; epoch: string; verified_at: string };
 export type InstallationKey = Awaited<ReturnType<typeof createDeviceKey>>;
 export interface InstallationRecord extends InstallationKey {
   id: string;

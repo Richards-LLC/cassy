@@ -140,6 +140,8 @@ export class HubDouble {
   readonly sends: SentMessage[] = [];
   readonly exchanges: Array<Record<string, unknown>> = [];
   readonly installations = new Map<string, InstallationRow>();
+  /** cas-4634: account enrollments the hub verified, by device ID (absent = unenrolled). */
+  readonly accountEnrollments = new Map<string, Record<string, unknown>>();
   readonly staleInstallationRefusals: string[] = [];
   installationRefreshes = 0;
   private readonly installationSecrets = new Set<string>();
@@ -701,12 +703,12 @@ export class HubDouble {
       active.credential_generation = generation; active.credential_id = `refresh-${generation}`;
       active.credential = `journey-refreshed-${generation}`;
       this.installationHighwater.set(active.device_id, generation); this.installationSecrets.add(active.credential);
-      return route.fulfill({ json: { ...active, expires_at: "2099-01-01T00:00:00Z", account_enrollment: { state: "unenrolled" } } });
+      return route.fulfill({ json: { ...active, expires_at: "2099-01-01T00:00:00Z", account_enrollment: this.accountEnrollments.get(active.device_id) ?? { state: "unenrolled" } } });
     }
     if (path === "/v1/auth/devices") {
       if (!active) return route.fulfill({ status: 401 });
       const devices = [...this.installations.values()].filter((d) => d.machine === machineId && (active.scopes.includes("hub-admin") || d.device_id === active.device_id));
-      return route.fulfill({ json: devices.map((d) => ({ device_id: d.device_id, device_label: d.device_label, operator_label: d.operator_label, controller_origin: d.controller_origin, credential_generation: d.credential_generation, key_fingerprint: fingerprint(d.public_key_jwk), revoked_at: d.revoked_at, issued_at: "2026-10-05T12:00:00Z", last_used_at: "2026-10-05T14:00:00Z", account_enrollment: { state: "unenrolled" } })) });
+      return route.fulfill({ json: devices.map((d) => ({ device_id: d.device_id, device_label: d.device_label, operator_label: d.operator_label, controller_origin: d.controller_origin, credential_generation: d.credential_generation, key_fingerprint: fingerprint(d.public_key_jwk), revoked_at: d.revoked_at, issued_at: "2026-10-05T12:00:00Z", last_used_at: "2026-10-05T14:00:00Z", account_enrollment: this.accountEnrollments.get(d.device_id) ?? { state: "unenrolled" } })) });
     }
     const revoke = /^\/v1\/auth\/devices\/([^/]+)\/revoke$/.exec(path);
     if (revoke) {

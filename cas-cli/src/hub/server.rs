@@ -144,6 +144,14 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/scopes",
             post(grant_own_scopes::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/auth/account/challenge",
+            post(account_challenge::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/account/enrollment",
+            post(account_enrollment::<R>).options(preflight::<R>),
+        )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route(
             "/v1/launch/profiles",
@@ -2819,6 +2827,110 @@ async fn grant_own_scopes<R: SessionReadModel>(
             tracing::error!(%error, scope = scope.as_str(), "self-grant failed");
             with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"grant_failed"}))).into_response(), &headers)
         }
+    }
+}
+
+/// DPoP-authenticate a mutation on `path` (the grant_own_scopes pattern).
+fn authenticate_mutation<R: SessionReadModel>(
+    state: &HubState<R>,
+    auth: &AuthStore,
+    headers: &HeaderMap,
+    path: &str,
+) -> anyhow::Result<AuthContext> {
+    let origin = request_origin(state, HubAction::Mutation, headers, "POST")?;
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .context("authorization required")?;
+    let proof = headers
+        .get("dpop")
+        .and_then(|value| value.to_str().ok())
+        .context("proof required")?;
+    auth.authenticate_dpop(authorization, proof, &origin, "POST", path, chrono::Utc::now())
+}
+
+/// cas-4634: a one-use challenge for this device's account enrollment
+/// assertion (contract §5.5). The device names it to the cloud, which signs
+/// it into a `psc-op-enrollment+jwt` for this hub.
+async fn account_challenge<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let context = match authenticate_mutation(&state, auth, &headers, "/v1/auth/account/challenge") {
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    match auth.issue_account_challenge(&context, chrono::Utc::now()) {
+        Ok((challenge, expires_at)) => with_cors(
+            Json(serde_json::json!({"hub_id": state.machine.id, "hub_challenge": challenge, "expires_at": expires_at})).into_response(),
+            &headers,
+        ),
+        Err(error) => {
+            tracing::error!(%error, "account challenge failed");
+            with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"challenge_failed"}))).into_response(), &headers)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AccountEnrollmentRequest {
+    assertion: String,
+}
+
+/// cas-4634: verify the cloud's enrollment assertion and bind this exact
+/// installation to the asserted account device. Every refusal is a closed
+/// code; the assertion itself is never logged.
+async fn account_enrollment<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(request): Json<AccountEnrollmentRequest>,
+) -> Response {
+    let Some(auth) = state.auth.clone() else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let context = match authenticate_mutation(&state, &auth, &headers, "/v1/auth/account/enrollment") {
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    if request.assertion.len() > 16 * 1024 {
+        return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"assertion_malformed"}))).into_response(), &headers);
+    }
+    let verifier = crate::hub::operator_inbox::assertion::HubVerifier::shared(auth.state_dir());
+    let token = request.assertion;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let now = chrono::Utc::now();
+        let (assertion, account) = match verifier.verify(&token, now) {
+            Ok(verified) => verified,
+            Err(error) => return Ok(Err(error.code())),
+        };
+        auth.bind_account(&context, &assertion, Some(&account), now)
+            .map(|bound| bound.map_err(|refusal| match refusal {
+                crate::hub::auth::EnrollmentRefusal::ChallengeUnknown => "challenge_unknown",
+                crate::hub::auth::EnrollmentRefusal::ChallengeExpired => "challenge_expired",
+                crate::hub::auth::EnrollmentRefusal::WrongHub => "wrong_hub",
+                crate::hub::auth::EnrollmentRefusal::AssertionExpired => "assertion_expired",
+                crate::hub::auth::EnrollmentRefusal::InstallationMismatch => "installation_mismatch",
+                crate::hub::auth::EnrollmentRefusal::OriginMismatch => "origin_mismatch",
+                crate::hub::auth::EnrollmentRefusal::AccountMismatch => "account_mismatch",
+                crate::hub::auth::EnrollmentRefusal::HubNotEnrolled => "hub_not_enrolled",
+            }))
+    })
+    .await;
+    match outcome {
+        Ok(Ok(Ok(enrollment))) => with_cors(Json(serde_json::json!({"account_enrollment": enrollment})).into_response(), &headers),
+        Ok(Ok(Err(code))) => {
+            let status = match code {
+                "issuer_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+                "hub_not_enrolled" => StatusCode::CONFLICT,
+                _ => StatusCode::FORBIDDEN,
+            };
+            with_cors((status, Json(serde_json::json!({"error": code}))).into_response(), &headers)
+        }
+        Ok(Err(error)) => with_cors(unauthorized_for(&error), &headers),
+        Err(_) => with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"enrollment_failed"}))).into_response(), &headers),
     }
 }
 

@@ -33,7 +33,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     await inventory(page);
     await expect(page.locator(".installation-inventory-row")).toHaveCount(1);
     await expect(page.locator(".installation-inventory-row")).toContainText("Generation 5");
-    await expect(page.locator(".installation-inventory-row")).toContainText("Un-enrolled");
+    await expect(page.locator(".installation-inventory-row")).toContainText("Not in an operator inbox");
     await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
   });
 
@@ -270,4 +270,65 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
     await expect(page.locator("#paired-machines-toggle")).toContainText("Atlas");
     await elsewhere.close();
   });
+});
+
+/**
+ * cas-4634: the hub records an installation as enrolled only after verifying
+ * the cloud's enrollment assertion (hub/auth/account.rs). The inventory then
+ * says so in plain words, on a desktop and a phone, light and dark.
+ * With QA_ARTIFACTS set, this part also writes the cas-qa-craft polish
+ * evidence: a standalone snapshot of the dialog and the three a11y modes.
+ */
+test("HUB-J2 an installation the hub verified reads as in the operator inbox (cas-4634)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS] });
+  await journey.open();
+  const qa = process.env.QA_ARTIFACTS;
+  const row = page.locator(".installation-inventory-row");
+  await journey.stage("M01 a newly paired browser is not in an operator inbox", async () => {
+    await pair(page, "e".repeat(43));
+    await inventory(page);
+    await expect(row).toContainText("AccountNot in an operator inbox");
+    await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+  });
+  await journey.stage("M02 after the hub verifies its enrollment, the row names the operator inbox", async () => {
+    const id = [...hub.installations.keys()][0]!;
+    hub.accountEnrollments.set(id, { state: "enrolled", account_id: "acct-1", relay_device_id: "dev-relay-1", grant_generation: "2", feed_generation: "1", epoch: "4", verified_at: "2026-10-05T21:00:00Z" });
+    await inventory(page);
+    await expect(row).toContainText("AccountOperator inbox (key epoch 4)");
+    await expect(row, "no account or relay ID is shown as if it were a name").not.toContainText("acct-1");
+  });
+  for (const size of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
+    for (const scheme of ["light", "dark"] as const) {
+      await journey.stage(`M03 the enrolled row reads whole at ${size.width}px in ${scheme}`, async () => {
+        await page.setViewportSize(size);
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.evaluate((value) => { document.documentElement.dataset.scheme = value; }, scheme);
+        const account = row.locator("dd").last();
+        await expect(account).toHaveText("Operator inbox (key epoch 4)");
+        await account.scrollIntoViewIfNeeded();
+        await expect(account).toBeInViewport();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
+        if (qa) await page.screenshot({ path: `${qa}/enrolled-${scheme}-${size.name}.png` });
+      });
+    }
+  }
+  if (qa) {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.emulateMedia({ colorScheme: "light" });
+    const { readFile, writeFile } = await import("node:fs/promises");
+    const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
+    const dialog = await page.locator(".installation-inventory").evaluate((node) => node.outerHTML);
+    await writeFile(`${qa}/enrolled.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Browser installations</title><style>${css}</style></head><body>${dialog}</body></html>`);
+    const modes: Array<[string, string, Parameters<typeof page.emulateMedia>[0]]> = [
+      ["forced-colors", "(forced-colors: active)", { forcedColors: "active", reducedMotion: null, contrast: null }],
+      ["reduced-motion", "(prefers-reduced-motion: reduce)", { forcedColors: null, reducedMotion: "reduce", contrast: null }],
+      ["contrast-more", "(prefers-contrast: more)", { forcedColors: null, reducedMotion: null, contrast: "more" }],
+    ];
+    for (const [name, query, media] of modes) {
+      await page.emulateMedia(media);
+      expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
+      await expect(row.locator("dd").last()).toHaveText("Operator inbox (key epoch 4)");
+      await page.screenshot({ path: `${qa}/a11y-${name}.png` });
+    }
+  }
 });

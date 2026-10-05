@@ -58,6 +58,14 @@ pub(super) fn identity(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// The §4.2 decimal-string pattern `^(0|[1-9][0-9]{0,18})$`.
+pub(super) fn decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 19
+        && value.bytes().all(|b| b.is_ascii_digit())
+        && (value.len() == 1 || !value.starts_with('0'))
+}
+
 pub(super) fn route(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 200

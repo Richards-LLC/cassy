@@ -1,11 +1,21 @@
 //! Possession-proven installation rotations under the cross-process auth lock.
 use super::*;
 
-/// cas-4c78 owns verified enrollment. Display labels never identify accounts.
+/// Verified account enrollment (cas-4634, `account.rs`). Display labels never
+/// identify accounts. Inventory exposes only safe status: account, relay
+/// device, grant generation, feed generation and epoch; never keys.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum AccountEnrollment {
     Unenrolled,
+    Enrolled {
+        account_id: String,
+        relay_device_id: String,
+        grant_generation: String,
+        feed_generation: String,
+        epoch: String,
+        verified_at: DateTime<Utc>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

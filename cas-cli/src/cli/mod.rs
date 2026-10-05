@@ -14,6 +14,7 @@ mod history_cmd;
 mod artifact_cmd;
 pub use artifact_cmd::render_artifact_line;
 mod hub;
+mod hub_operator;
 mod hub_reverse_pairing;
 mod hub_service;
 mod index_cmd;

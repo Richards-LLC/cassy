@@ -13,6 +13,11 @@ export interface InstallationSummary {
   revoked_at: string | null;
   account_enrollment: AccountEnrollment;
 }
+/** Plain words for the Account row (cas-4634: verified by the hub, never a label). */
+export function accountEnrollmentLabel(enrollment: AccountEnrollment | undefined): string {
+  if (!enrollment || enrollment.state === "unenrolled") return "Not in an operator inbox";
+  return `Operator inbox (key epoch ${enrollment.epoch})`;
+}
 interface InstallationClient { request<T>(method: string, path: string): Promise<T> }
 
 /** Exact-ID consent is kept beside the inventory. Removing a local catalog is separate. */
@@ -34,14 +39,14 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
   dialog.showModal();
   try {
     const devices = await client.request<InstallationSummary[]>("GET", "/v1/auth/devices");
-    status.textContent = machine.scopes.includes("hub-admin") ? `${devices.length} installations. Account enrollment is not set up.` : "This browser's access. Viewing other installations requires hub admin permission.";
+    status.textContent = machine.scopes.includes("hub-admin") ? `${devices.length} installations. ${devices.filter((device) => device.account_enrollment?.state === "enrolled").length} in your operator inbox.` : "This browser's access. Viewing other installations requires hub admin permission.";
     devices.sort((a, b) => Number(b.device_id === machine.deviceId) - Number(a.device_id === machine.deviceId));
     for (const device of devices) {
       const row = doc.createElement("section"); row.className = "installation-inventory-row";
       const heading = doc.createElement("h3"); heading.textContent = `${device.device_label}${device.device_id === machine.deviceId ? " · This browser" : ""}`;
       const id = doc.createElement("code"); id.textContent = device.device_id;
       const details = doc.createElement("dl"); details.className = "pair-details";
-      for (const [label, value] of [["Access", device.revoked_at ? "Revoked" : `Generation ${device.credential_generation}`], ["Paired", device.issued_at], ["Last used", device.last_used_at], ["Origin", device.controller_origin], ["Signing key", device.key_fingerprint], ["Account", "Un-enrolled"]]) {
+      for (const [label, value] of [["Access", device.revoked_at ? "Revoked" : `Generation ${device.credential_generation}`], ["Paired", device.issued_at], ["Last used", device.last_used_at], ["Origin", device.controller_origin], ["Signing key", device.key_fingerprint], ["Account", accountEnrollmentLabel(device.account_enrollment)]]) {
         const item = doc.createElement("div"); const term = doc.createElement("dt"); const detail = doc.createElement("dd");
         term.textContent = label!; detail.textContent = value!; item.append(term, detail); details.append(item);
       }

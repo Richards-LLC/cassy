@@ -21,6 +21,8 @@ import time
 OWNER = ".cas-scratch-owner.json"
 LOCK = ".cas-scratch-owner.lock"
 CURRENT = None
+PROC_ROOT = Path("/proc")
+TEARDOWN_WAIT_SECS = 20
 
 
 def positive(env, key, default):
@@ -58,23 +60,38 @@ def contains(path, child):
     return path == child or path in child.parents
 
 
-def process_uses(path):
-    if Path("/proc").is_dir():
-        for process in Path("/proc").iterdir():
+def process_uses(path, own_lock_fd=None):
+    if PROC_ROOT.is_dir():
+        for process in PROC_ROOT.iterdir():
             if not process.name.isdigit():
                 continue
             try:
                 if process.stat().st_uid != os.getuid():
                     continue  # Owned 0700 scratch is not accessible to other users.
-                probes = [process / "cwd"] + list((process / "fd").iterdir())
+                state = (process / "stat").read_text().rsplit(") ", 1)[1].split()[0]
+                if state in ("Z", "X"):
+                    continue  # Exited tasks have no live cwd, mappings or file handles.
+                probes = [process / "cwd", process / "exe"] + list((process / "fd").iterdir())
                 for probe in probes:
+                    if (int(process.name) == os.getpid() and probe.parent.name == "fd"
+                            and probe.name == str(own_lock_fd)):
+                        continue  # Exempt this exact eviction descriptor, not other own outputs.
                     try:
                         if contains(path, Path(os.readlink(probe))):
                             return True
                     except FileNotFoundError:
                         pass
+                for argument in (process / "cmdline").read_bytes().split(b"\0"):
+                    value = os.fsdecode(argument).split("=", 1)[-1]
+                    if value.startswith("/") and contains(path, Path(value)):
+                        return True
+                for line in (process / "maps").read_text().splitlines():
+                    fields = line.split(maxsplit=5)
+                    if len(fields) == 6 and fields[5].startswith("/") and contains(path, Path(fields[5])):
+                        return True
             except FileNotFoundError:
-                pass  # Process exited during inventory.
+                if process.exists():
+                    return True  # Missing evidence of a still-present process is unknown.
             except PermissionError:
                 return True
         return False
@@ -91,14 +108,22 @@ class OwnedDirectory:
         self.lock = (self.path / LOCK).open("a+")
         fcntl.flock(self.lock, fcntl.LOCK_EX)
         (self.path / OWNER).write_text(json.dumps({"pid": os.getpid(), "created": time.time()}))
+        if CURRENT is not None:
+            with CURRENT.lock:
+                CURRENT.leases.add(self.lock.fileno())
 
     def __enter__(self):
         return self.path
 
     def __exit__(self, *exc):
         try:
+            if CURRENT is not None:
+                CURRENT.stop()  # Reap before clone/base finally-cleanup unwinds.
             shutil.rmtree(self.path)
         finally:
+            if CURRENT is not None:
+                with CURRENT.lock:
+                    CURRENT.leases.discard(self.lock.fileno())
             self.lock.close()
 
 
@@ -106,6 +131,9 @@ class ChildScope:
     """Stop and reap process groups before any owned directory is removed."""
     def __init__(self):
         self.children = set()
+        self.signalled = set()
+        self.interrupted = False
+        self.leases = set()
         self.lock = threading.RLock()
         self.cancelled = False
         self.handlers = {}
@@ -123,6 +151,11 @@ class ChildScope:
     def interrupt(self, sig, frame):
         # Do not re-enter Popen.wait from its signal handler: its waitpid
         # mutex may be held by this same thread. Unwind first, then reap.
+        if self.interrupted:
+            return
+        self.interrupted = True
+        for watched in self.handlers:
+            signal.signal(watched, signal.SIG_IGN)
         self.stop(wait=False)
         raise InterruptedError("release run interrupted by " + signal.Signals(sig).name)
 
@@ -130,14 +163,19 @@ class ChildScope:
         with self.lock:
             self.cancelled = True
             children = list(self.children)
-        for child in children:
+            newly_signalled = [child for child in children if child.pid not in self.signalled]
+            self.signalled.update(child.pid for child in newly_signalled)
+        for child in newly_signalled:
             try:
+                os.killpg(child.pid, signal.SIGCONT)
                 os.killpg(child.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
         if not wait:
             return
-        deadline = time.monotonic() + 5
+        # The nested compile guard itself gets 5s to kill/reap Cargo.
+        # Its owning gate must finish that teardown before this parent kills it.
+        deadline = time.monotonic() + TEARDOWN_WAIT_SECS
         for child in children:
             try:
                 child.wait(timeout=max(.01, deadline - time.monotonic()))
@@ -152,7 +190,8 @@ class ChildScope:
         with self.lock:
             if self.cancelled:
                 raise InterruptedError("release child admission cancelled")
-            child = subprocess.Popen(command, start_new_session=True, **kwargs)
+            inherited = set(kwargs.pop("pass_fds", ())) | self.leases
+            child = subprocess.Popen(command, start_new_session=True, pass_fds=tuple(inherited), **kwargs)
             self.children.add(child)
         try:
             status = child.wait()
@@ -249,7 +288,7 @@ def sweep(repo, base, clean=False, env=None):
                                 if clean or lease.exists():
                                     lock = lease.open("a+" if clean else "r")
                                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                                if process_uses(path.resolve()):
+                                if process_uses(path.resolve(), lock.fileno() if lock else None):
                                     reason = "live process"
                                 else:
                                     reclaimable, reason = True, "dead owner past age bound"
@@ -305,9 +344,15 @@ class BoundedCache:
             raise ValueError("assembly target lease must not be a symlink")
         self.lock = lock_path.open("a+")
         fcntl.flock(self.lock, fcntl.LOCK_EX)
+        if CURRENT is not None:
+            with CURRENT.lock:
+                CURRENT.leases.add(self.lock.fileno())
         try:
             self.prune()
         except BaseException:
+            if CURRENT is not None:
+                with CURRENT.lock:
+                    CURRENT.leases.discard(self.lock.fileno())
             self.lock.close()
             raise
         return self.path
@@ -318,6 +363,9 @@ class BoundedCache:
             if self.path.exists():
                 (self.path / ".cas-last-used").touch()
         finally:
+            if CURRENT is not None:
+                with CURRENT.lock:
+                    CURRENT.leases.discard(self.lock.fileno())
             self.lock.close()
 
 

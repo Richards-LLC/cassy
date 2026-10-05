@@ -1526,6 +1526,9 @@ dialog form > *,
 /* Behind the disclosure the terms read as sentences, not eyebrows (cas-b2e4 F02). */
 .pair-technical .pair-details dt { text-transform: none; letter-spacing: normal; font-size: var(--fs-meta); }
 .pair-technical fieldset { margin: 0; }
+/* cas-5e53 F08: hub:admin consent sits in plain view beside the name fields. */
+.pair-admin-consent { margin: 0; grid-template-columns: 1fr; }
+.pair-admin-consent legend { font-weight: var(--weight-semibold); }
 
 .pair-alternative {
   color: var(--text-mid);

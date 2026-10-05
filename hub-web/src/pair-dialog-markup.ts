@@ -2,7 +2,7 @@ import { cloudBrand, escapeHtml } from "./cloud-brand";
 import { cleanupStepCopy, type CleanupStepContext } from "./pairing-cleanup";
 import type { PairingDraft, PairingStep } from "./pairing-draft";
 import { DEFAULT_PAIRING_SCOPES } from "./pairing-relay";
-import { PAIRING_SCOPES, pairCommand, scopeChoices, scopeLabel, scopeSummary, ungrantedScopes } from "./pairing-scopes";
+import { HUB_ADMIN_CONSENT, HUB_ADMIN_SCOPE, PAIRING_SCOPES, pairCommand, scopeChoices, scopeLabel, scopeSummary, ungrantedScopes } from "./pairing-scopes";
 import type { PendingPairing } from "./pending-pairing";
 import type { Scope } from "./types";
 
@@ -155,8 +155,13 @@ export function pairDialogMarkup(state: PairDialogState): string {
       : `${capabilityLead(leadScopes.length ? leadScopes : invitationScopes ?? pairingDraft.scopes)}${withheldLead(pageOrigin, invitationScopes)}<p>One-time invitation ready. Check the machine, then add your name.</p><label>Machine's hub address<input name="url" type="url" required${focus("url")} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine name<input name="label" required${focus("label")} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label>`;
     // The link form keeps its scope boxes (and the command that widens them)
     // with the other technical details, after the fields everyone fills in.
-    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>`);
-    return `<dialog id="pair-dialog">${cloudBrand()}<form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2>${machine}<label>Your name (shown on the machine)<input name="operator" required${focus("operator")} autocomplete="name" placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label><label>Name for this browser<input name="device" required${focus("device")} value="${escapeAttr(pairingDraft.deviceLabel)}"></label>${linkTechnical}<details><summary>Browser signing key</summary><label><input type="checkbox" name="rotate-key"> Rotate the signing key when updating this installation</label><p>The existing key proves this is the same browser. If browser storage was lost, this creates a new installation; revoke the old device explicitly.</p></details>${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset class="pair-scope-list"><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes.filter((scope) => scope !== HUB_ADMIN_SCOPE), invitationScopes?.filter((scope) => scope !== HUB_ADMIN_SCOPE))}</fieldset>`);
+    // cas-5e53 F08: hub:admin is consent, so it sits in plain view beside the
+    // name fields, unticked, never folded into Technical details.
+    const adminConsent = invitationScopes?.includes(HUB_ADMIN_SCOPE)
+      ? `<fieldset class="pair-admin-consent"><legend>Hub administration</legend><label class="scope"><input type="checkbox" name="scope" value="${HUB_ADMIN_SCOPE}"${pairingDraft.scopes.includes(HUB_ADMIN_SCOPE) ? " checked" : ""}>${scopeLabel(HUB_ADMIN_SCOPE)}<span class="scope-note">${escapeHtml(HUB_ADMIN_CONSENT)}</span></label></fieldset>`
+      : "";
+    return `<dialog id="pair-dialog">${cloudBrand()}<form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2>${machine}<label>Your name (shown on the machine)<input name="operator" required${focus("operator")} autocomplete="name" placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label><label>Name for this browser<input name="device" required${focus("device")} value="${escapeAttr(pairingDraft.deviceLabel)}"></label>${adminConsent}${linkTechnical}<details><summary>Browser signing key</summary><label><input type="checkbox" name="rotate-key"> Rotate the signing key when updating this installation</label><p>The existing key proves this is the same browser. If browser storage was lost, this creates a new installation; revoke the old device explicitly.</p></details>${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
@@ -174,7 +179,7 @@ export function pairDialogMarkup(state: PairDialogState): string {
  * a default `cas hub pair` link fail its first exchange with a bare 401.
  */
 function scopeChecks(selectedScopes: readonly Scope[], grantedScopes: readonly Scope[] | undefined): string {
-  return scopeChoices(grantedScopes, selectedScopes).map((choice) => `<label class="scope${choice.granted ? "" : " scope-denied"}"><input type="checkbox" name="scope" value="${choice.scope}" ${choice.checked ? "checked" : ""} ${choice.granted ? "" : "disabled"}>${choice.label}${choice.granted ? "" : '<span class="scope-note">not granted by this invitation</span>'}</label>`).join("");
+  return scopeChoices(grantedScopes, selectedScopes).map((choice) => `<label class="scope${choice.granted ? "" : " scope-denied"}"><input type="checkbox" name="scope" value="${choice.scope}" ${choice.checked ? "checked" : ""} ${choice.granted ? "" : "disabled"}>${choice.label}${choice.granted ? choice.note ? `<span class="scope-note">${escapeHtml(choice.note)}</span>` : "" : '<span class="scope-note">not granted by this invitation</span>'}</label>`).join("");
 }
 
 /**

@@ -175,3 +175,78 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
   });
   await peer.close();
 });
+
+// cas-5e53 independent QA F08: an ordinary admin invitation (`cas hub pair
+// --scopes …,hub:admin`) must let the operator reach and revoke ANOTHER, old
+// installation through the real pairing entry path, with hub:admin held only
+// by explicit consent.
+test("HUB-J2 an admin invitation, explicitly consented, revokes another browser installation (cas-5e53 F08)", journeyPart, async ({ page, browser, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS] });
+  await journey.open();
+  const link = (token: string, scopes: string) => `pair=${token}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=${scopes}`;
+  const ordinary = "machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt";
+  // The old installation is a genuinely separate browser (its own storage and
+  // key), paired the ordinary way, never seeded into the double.
+  const elsewhere = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const old = await elsewhere.newPage();
+  await hub.install(old);
+  await old.goto(page.url());
+  let oldId = "";
+  await journey.stage("An old installation pairs from another browser", async () => {
+    await old.evaluate((hash) => { location.hash = hash; }, link("o".repeat(43), ordinary));
+    const dialog = old.locator("#pair-dialog");
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
+    await dialog.getByRole("textbox", { name: "Name for this browser" }).fill("Old laptop");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    expect(hub.installations.size).toBe(1);
+    oldId = [...hub.installations.keys()][0]!;
+  });
+
+  await journey.stage("The admin invitation offers hub:admin unticked, with what it allows", async () => {
+    await page.evaluate((hash) => { location.hash = hash; }, link("a".repeat(43), `${ordinary},hub:admin`));
+    const dialog = page.locator("#pair-dialog");
+    await expect(dialog).toBeVisible();
+    const admin = dialog.getByRole("checkbox", { name: /hub:admin/ });
+    await expect(admin).toBeVisible();
+    await expect(admin, "admin is never pre-ticked: it needs explicit consent").not.toBeChecked();
+    await expect(dialog.locator(".pair-admin-consent label.scope")).toContainText("See and revoke this machine's other browser installations");
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
+    // Keyboard consent: focus the box and press Space.
+    await admin.focus();
+    await page.keyboard.press("Space");
+    await expect(admin).toBeChecked();
+  });
+
+  await journey.stage("Pairing with that consent grants hub:admin", async () => {
+    const dialog = page.locator("#pair-dialog");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const mine = [...hub.installations.values()].find((row) => row.device_id !== oldId)!;
+    expect(mine.scopes, "the consented admin scope was granted").toContain("hub-admin");
+  });
+
+  await journey.stage("The inventory lists the other installation and revokes it by exact ID", async () => {
+    if (!await page.locator("#paired-machines-dialog").isVisible()) await page.locator("#paired-machines-toggle").click();
+    await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
+    const inventory = page.locator(".installation-inventory");
+    await expect(inventory.getByText("2 installations.", { exact: false })).toBeVisible();
+    const row = inventory.locator(".installation-inventory-row", { hasText: oldId });
+    await expect(row).toContainText("Old laptop");
+    page.once("dialog", async (dialog) => { expect(dialog.message()).toContain(oldId); await dialog.accept(); });
+    await row.getByRole("button", { name: "Revoke this installation", exact: true }).click();
+    await expect(row.getByRole("button", { name: "Revoked", exact: true })).toBeDisabled();
+    await expect(inventory.getByRole("status")).toHaveText(`Revoked ${oldId}. Its live connections are closing.`);
+    expect(hub.installations.get(oldId)!.revoked_at, "the other installation is revoked").not.toBeNull();
+    const mine = [...hub.installations.values()].find((r) => r.device_id !== oldId)!;
+    expect(mine.revoked_at, "this browser keeps its access").toBeNull();
+    await inventory.getByRole("button", { name: "Close", exact: true }).click();
+  });
+
+  await journey.stage("The revoked browser is refused; this one still lists the machine", async () => {
+    await old.reload();
+    await expect(old.getByText(/needs pairing|was revoked|no longer paired/i).filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator("#paired-machines-toggle")).toContainText("Atlas");
+    await elsewhere.close();
+  });
+});

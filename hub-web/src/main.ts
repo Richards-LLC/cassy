@@ -1111,8 +1111,16 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
       rotateKey: values.get("rotate-key") === "on",
       deviceLabel: String(values.get("device")),
       operatorLabel: String(values.get("operator")),
-      // The relay form has no scope boxes, so its invitation's own scopes stand.
-      requestedScopes: form.querySelector('input[name="scope"]') ? values.getAll("scope") as Scope[] : undefined,
+      // The link form lists every scope box (its hub:admin box is the consent
+      // beside the name fields). The relay form has no scope list, so its
+      // invitation's scopes stand, except hub:admin, which is held only when
+      // its consent box is ticked (cas-5e53 F08).
+      requestedScopes: (() => {
+        const chosen = values.getAll("scope") as Scope[];
+        if (form.querySelector(".pair-scope-list")) return chosen;
+        if (!invitation.scopes) return undefined;
+        return [...invitation.scopes.filter((scope) => scope !== "hub-admin"), ...(chosen.includes("hub-admin") ? ["hub-admin" as Scope] : [])];
+      })(),
       fetcher: window.fetch.bind(window),
       createKey: createDeviceKey,
       installationGeneration: operation.generation,

@@ -25,12 +25,22 @@ No invented Yes/Hold choices, no repeated ask body, no raw activity-note feed or
 
 ## Shared seams and base
 
-Base Commander origin1926696d3. cas-0546 final source0bd88b7c9 (supersedes66be3adfe) is on factory/steady-stork-35-cas-0546 (the generic factory/steady-stork-35 is older328dbbbd2). Preserve its waitingOnOperator asks/blockers-only rule and removal of task-lifecycle attention notices. Its header actions, hidden/inert pane host and stage, Interrupt/Raw output wiring and width token are outside this task. Second lander rebases, rather than hand-merging main.ts.
+Integrated base cas-0546 source87fd6b6d4 (supersedes0bd88b7c9) is on factory/steady-stork-35-cas-0546 (the generic factory/steady-stork-35 is older328dbbbd2). Preserve its waitingOnOperator asks/blockers-only rule and removal of task-lifecycle attention notices. Its header actions, hidden/inert pane host and stage, Interrupt/Raw output wiring and width token are outside this task. Second lander rebases, rather than hand-merging main.ts.
 
 ## Acceptance and evidence
 
-Before/after actual built-dist captures at1280/390 light/dark for C1–C5. A red-capable journey drives a no-options ask and markdown previews, asserts zero invented choices, one full ask, bookmark keyboard navigation, six roster workers with truthful current task/unknown data, human statuses and no rail overflow. Include explicit-options, answered/retired, empty roster and long text transitions; final ARIA state and receipt trace. Playwright at most2 workers, no concurrent display matrices; Vitest maxWorkers2 and one typecheck/build at a time. Current product tokens/colors/motion stay in place. Strict visual QA against base plus independent QA, and actual Android emulator proof (supervisor seam) required. No source/build/pass claim yet.
+Before/after actual built-dist captures at1280/390 light/dark for C1–C5. A red-capable journey drives a no-options ask and markdown previews, asserts zero invented choices, one full ask, bookmark keyboard navigation, six roster workers with truthful current task/unknown data, human statuses and no rail overflow. Include explicit-options, answered/retired, empty roster and long text transitions; final ARIA state and receipt trace. Playwright at most2 workers, no concurrent display matrices; Vitest maxWorkers2 and one typecheck/build at a time. Current product tokens/colors/motion stay in place. Strict visual QA against base plus independent QA, and actual Android emulator proof (supervisor seam) required. Final acceptance is recorded in the commit-bound QA ledger.
 
 ## Critique
 
-Pending actual built-dist renders and strict base/treatment visual QA; no scores invented.
+The scoped critique reviews the implemented ask and progress surfaces in actual built-dist light/dark desktop/phone captures; final integration captures and strict findings are attached in the QA bundle.
+
+| Dimension | Score | Evidence and remaining limit |
+| --- | --- | --- |
+| Distinctiveness | 4 | The stepped ask stays the single answer surface; a slim bookmark connects it to the composer. |
+| Fit | 5 | Declared choices and free text match supervisor intent; worker task titles come from exact reported joins. |
+| Hierarchy | 4 | Full questions remain in the thread, with one compact pointer and prose status labels. |
+| Craft | 4 | Markdown-clean excerpts, wrapped identifiers and stable bookmark targets survive short phone layouts. |
+| Accessibility | 4 | Named buttons, keyboard focus, 44px phone targets, and tested forced-colors/reduced-motion/contrast states; native Android keyboard captures supplement browser emulation. |
+
+The report scores this change. Existing header findings are tracked separately against the base; independent QA remains supervisor-owned.

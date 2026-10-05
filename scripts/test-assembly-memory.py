@@ -88,6 +88,17 @@ class GuardTests(unittest.TestCase):
             guard.compile_guard([sys.executable, "-c", "import time;time.sleep(60)"], '{}', self.events, self.root)
         self.assertEqual(json.loads(self.events.read_text().splitlines()[-1])["action"], "memory-pause-deadline-abort")
 
+    def test_compile_child_inherits_scratch_lease_cas_72f4(self):
+        lease = self.root / 'lease.lock'
+        result = self.root / 'inherited'
+        with lease.open('a+') as stream:
+            env = dict(self.env, CAS_RELEASE_GATE_SCRATCH_LEASE_FDS=str(stream.fileno()))
+            program = 'import os,pathlib;os.fstat('+str(stream.fileno())+');pathlib.Path('+repr(str(result))+').touch()'
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(guard.proof, 'memory_snapshot', return_value=self.high):
+                self.assertEqual(guard.compile_guard([sys.executable, '-c', program], '{}', self.events, self.root), 0)
+        self.assertTrue(result.exists())
+
     def test_sigterm_reaps_the_compile_child(self):
         pidfile = self.root / "pid"
         program = 'import os,pathlib,time; pathlib.Path('+repr(str(pidfile))+').write_text(str(os.getpid())); time.sleep(60)'

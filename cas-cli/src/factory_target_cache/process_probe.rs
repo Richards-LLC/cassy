@@ -1,12 +1,22 @@
 //! Linux process evidence. Missing/inaccessible evidence is never proof of idle.
 use super::*;
 
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(all(test, unix))]
 pub(super) fn linux_uses(
     proc_root: &Path,
     worktree: &Path,
     cache: &Path,
     own_lock_fd: Option<i32>,
+) -> bool {
+    let descriptors: Vec<_> = own_lock_fd.into_iter().collect();
+    linux_uses_many(proc_root, worktree, cache, &descriptors)
+}
+
+pub(super) fn linux_uses_many(
+    proc_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    own_lock_fds: &[i32],
 ) -> bool {
     if worktree.as_os_str().is_empty() || cache.as_os_str().is_empty() {
         return true;
@@ -23,7 +33,7 @@ pub(super) fn linux_uses(
             continue;
         };
         let process = entry.path();
-        match process_uses(&process, pid, worktree, cache, own_lock_fd) {
+        match process_uses(&process, pid, worktree, cache, own_lock_fds) {
             Ok(true) => return true,
             Ok(false) => {}
             // A process can exit between directory enumeration and probes.
@@ -44,7 +54,7 @@ fn process_uses(
     pid: u32,
     worktree: &Path,
     cache: &Path,
-    own_lock_fd: Option<i32>,
+    own_lock_fds: &[i32],
 ) -> io::Result<bool> {
     let stat = fs::read_to_string(process.join("stat"))?;
     let fields: Vec<_> = stat
@@ -88,7 +98,9 @@ fn process_uses(
     for fd in fs::read_dir(process.join("fd"))? {
         let fd = fd?;
         if pid == std::process::id()
-            && own_lock_fd.is_some_and(|own| fd.file_name() == own.to_string().as_str())
+            && own_lock_fds
+                .iter()
+                .any(|own| fd.file_name() == own.to_string().as_str())
         {
             continue; // Exempt only the eviction lock descriptor, never the PID.
         }
@@ -179,6 +191,17 @@ mod tests {
         )
         .unwrap();
         assert!(linux_uses(&root, &cache, &cache, None));
+    }
+
+    #[test]
+    fn retirement_exempts_exact_profile_locks_not_other_handles_cas_72f4() {
+        let (_temp, root, process, cache) = fixture();
+        symlink(cache.join("debug/.cargo-lock"), process.join("fd/17")).unwrap();
+        symlink(cache.join("release/.cargo-lock"), process.join("fd/18")).unwrap();
+        assert!(!linux_uses_many(&root, &cache, &cache, &[17, 18]));
+        assert!(linux_uses_many(&root, &cache, &cache, &[17]));
+        symlink(cache.join("test-output"), process.join("fd/19")).unwrap();
+        assert!(linux_uses_many(&root, &cache, &cache, &[17, 18]));
     }
 
     #[test]

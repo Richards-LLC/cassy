@@ -330,6 +330,47 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         self.assertTrue(finished.exists(), 'parent killed nested guard before its five-second budget')
         self.assertFalse(directory.exists())
 
+    def test_dead_managed_owner_is_reclaimed_with_the_real_host_process_table(self):
+        if not Path('/proc').is_dir():
+            self.skipTest('real Linux host fixture; real macOS owner children covered above')
+        old = self.parent / 'base.real-host'
+        self.idle_owner(old)
+        (old / 'extract').mkdir()
+        (old / 'extract/output').write_bytes(b'x' * 4096)
+        self.old(old)
+        with mock.patch.object(scratch, 'PROC_ROOT', Path('/proc')):
+            report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertFalse(old.exists(), report)
+        self.assertGreaterEqual(report['reclaimed_bytes'], 4096)
+
+    def test_gc_cli_reports_legacy_cache_and_is_read_only(self):
+        target = self.parent / 'assembly-target'
+        target.mkdir()
+        (target / 'output').write_bytes(b'x' * 2345)
+        before = sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*'))
+        command = [sys.executable, scratch.__file__, '--repo', str(self.repo), '--base', str(self.base), '--cache', str(target), 'report']
+        result = subprocess.run(command, env=self.env, text=True, capture_output=True, check=True)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['caches'][0]['retained_bytes'], 2345)
+        self.assertGreaterEqual(report['retained_bytes'], 2345)
+        self.assertEqual(before, sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*')))
+        self.assertEqual(scratch.select_cache(target), target.with_name('assembly-target-leased-v1'))
+        with scratch.BoundedCache(target, self.env, self.repo):
+            result = subprocess.run(command[:-1] + ['--adopt-legacy-cache', 'clean'], env=self.env, text=True, capture_output=True, check=True)
+            self.assertIn('protected', json.loads(result.stdout)['caches'][0]['reason'])
+            self.assertFalse((target / scratch.OWNER).exists())
+
+    def test_constructor_signal_unwinds_registered_resource_before_context_entry(self):
+        original = scratch.owner_record
+        def interrupt(path, lease):
+            record = original(path, lease)
+            os.kill(os.getpid(), signal.SIGTERM)  # Pending until registration completes.
+            return record
+        with self.assertRaises(InterruptedError), mock.patch.object(scratch, 'owner_record', side_effect=interrupt):
+            with scratch.ChildScope(), scratch.OwnedDirectory('base.', self.parent):
+                self.fail('pending signal was not delivered')
+        self.assertFalse(list(self.parent.glob('base.*')))
+
     def test_opaque_process_evidence_fails_closed(self):
         if not self.proc.is_dir():
             self.skipTest('Linux proc permission fixture')

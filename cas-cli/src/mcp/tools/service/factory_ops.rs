@@ -6167,6 +6167,7 @@ impl CasService {
             );
         }
         out.push_str(&orphan_processes.render());
+        out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
         out.push_str(&artifact_report.render());
         // GH #704: leaked disposable roots under $TMPDIR filled a 32 GB tmpfs
         // and broke every live session's shell output. Name them here, with
@@ -6822,6 +6823,7 @@ impl CasService {
             orphan_process_summary.skipped,
         );
         output.push_str(&artifact_cleanup.render());
+        output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -7366,6 +7368,9 @@ pub(crate) fn retire_dead_worker_for_shutdown(
                 &held_task_ids,
                 "dead worker retired by shutdown request",
             );
+        }
+        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
+            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
         }
         recipients.insert(agent.id.clone());
         if let Some(session_id) = &agent.cc_session_id {

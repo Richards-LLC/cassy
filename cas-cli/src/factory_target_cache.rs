@@ -23,6 +23,8 @@ mod lane;
 pub(crate) mod parked;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod process_probe;
+pub(crate) mod retirement;
+pub(crate) mod scratch;
 pub use lane::LanePreviewRecord;
 
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
@@ -844,8 +846,13 @@ fn output_in_use(cache: &Path, eviction_lock: &fs::File) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
+    let descriptors: Vec<_> = own_lock_fd.into_iter().collect();
+    process_uses_many(worktree, cache, &descriptors)
+}
+
+#[cfg(target_os = "macos")]
+fn process_uses_many(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> bool {
     // Unknown/inaccessible evidence must preserve the cache. Include fd fields
     // to exempt precisely the eviction lock, while keeping this process's
     // executable, mappings and every other output handle visible.
@@ -858,11 +865,17 @@ fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool
     if !output.status.success() || !output.stderr.is_empty() {
         return true;
     }
-    lsof_uses(&output.stdout, worktree, cache, own_lock_fd)
+    lsof_uses_many(&output.stdout, worktree, cache, own_lock_fds)
+}
+
+#[cfg(all(test, unix))]
+fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
+    let descriptors: Vec<_> = own_lock_fd.into_iter().collect();
+    lsof_uses_many(output, worktree, cache, &descriptors)
 }
 
 #[cfg(all(unix, any(target_os = "macos", test)))]
-fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
+fn lsof_uses_many(output: &[u8], worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let mut pid = None;
     let mut fd = None;
@@ -887,7 +900,9 @@ fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, own_lock_fd: Option<i
                 if pid.is_none() {
                     return true;
                 }
-                if pid == Some(std::process::id()) && own_lock_fd.is_some() && fd == own_lock_fd {
+                if pid == Some(std::process::id())
+                    && fd.is_some_and(|fd| own_lock_fds.contains(&fd))
+                {
                     continue;
                 }
                 let path = Path::new(std::ffi::OsStr::from_bytes(&field[1..]));
@@ -902,12 +917,12 @@ fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, own_lock_fd: Option<i
 }
 
 #[cfg(target_os = "linux")]
-fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
-    process_probe::linux_uses(Path::new("/proc"), worktree, cache, own_lock_fd)
+fn process_uses_many(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> bool {
+    process_probe::linux_uses_many(Path::new("/proc"), worktree, cache, own_lock_fds)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_uses(_worktree: &Path, _cache: &Path, _own_lock_fd: Option<i32>) -> bool {
+fn process_uses_many(_worktree: &Path, _cache: &Path, _own_lock_fds: &[i32]) -> bool {
     true
 }
 

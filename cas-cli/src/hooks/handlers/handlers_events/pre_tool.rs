@@ -54,11 +54,13 @@ pub fn handle_pre_tool_use(
 }
 
 fn worker_suite_rewrite_allowed(output: &HookOutput) -> bool {
-    use cas_core::hooks::types::{HookSpecificOutput, PreToolUseHarness};
+    use cas_core::hooks::types::HookSpecificOutput;
     match output.hook_specific_output.as_ref() {
         Some(HookSpecificOutput::PreToolUse { permission_decision: Some(decision), .. }) => decision == "allow",
         // The captured Codex schema represents an ordinary allow by no body.
-        None => PreToolUseHarness::current() == PreToolUseHarness::Codex,
+        None => cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("codex")),
         _ => false,
     }
 }

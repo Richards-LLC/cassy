@@ -85,8 +85,12 @@ Run the same script against a local serve of the base build, over the same
 pages, into `<ledger-dir>/visual-qa-baseline/`. Then set
 `visual_qa_status: "scoped"` and list the base report as
 `files.visual_qa_baseline_json`. Cassy accepts the pair when every finding of
-the reviewed tip also appears in the base run, compared by type, element, page,
-scheme and viewport. A finding only the tip has is one the delivery introduced,
+the reviewed tip pairs once with a base finding by type, rule/reason, page,
+render state, scheme, full viewport and stable element identity. Identity uses
+role + accessible name when supplied, or matching text + shared bounds within
+0.5 CSS pixels. A CSS class rename alone does not add a finding; a new rule,
+text or geometry still does. Historical reports lacking identity evidence
+require matching selectors. A finding only the tip has is one the delivery introduced,
 and `qa_record` refuses the pair.
 
 This captures desktop 1280 and phone 390, each in light and dark. Then score

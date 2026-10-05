@@ -139,6 +139,8 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
 
     const round = (value) => Math.round(value * 100) / 100;
     const sample = (value, length = 96) => value.replace(/\s+/g, ' ').trim().slice(0, length);
+    const convertedColors = new Map();
+    let colorContext;
     const cssColor = (value) => {
       if (!value || value === 'transparent') return [0, 0, 0, 0];
       const hex = value.match(/^#([0-9a-f]{3,8})$/i);
@@ -159,34 +161,39 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         const alpha = rgb[4] === undefined ? 1 : (rgb[4].endsWith('%') ? Number.parseFloat(rgb[4]) / 100 : Number.parseFloat(rgb[4]));
         return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), alpha];
       }
-      const oklch = value.match(/^oklch\(\s*([^)]*)\s*\)$/i);
-      if (oklch) {
-        const [channels, opacity, ...extra] = oklch[1].split('/').map((part) => part.trim());
-        const parts = channels.split(/\s+/);
-        if (extra.length || parts.length !== 3 || (opacity !== undefined && !opacity)) return null;
-        const [lightness, chroma, hue] = parts;
-        const l = Number.parseFloat(lightness) / (lightness.endsWith('%') ? 100 : 1);
-        const c = Number.parseFloat(chroma) * (chroma.endsWith('%') ? 0.004 : 1);
-        const angle = Number.parseFloat(hue) * (hue.endsWith('turn') ? 360 : hue.endsWith('rad') ? 180 / Math.PI : hue.endsWith('grad') ? 0.9 : 1);
-        const alpha = opacity === undefined ? 1 : Number.parseFloat(opacity) / (opacity.endsWith('%') ? 100 : 1);
-        if (![l, c, angle, alpha].every(Number.isFinite)) return null;
-        const a = c * Math.cos(angle * Math.PI / 180);
-        const b = c * Math.sin(angle * Math.PI / 180);
-        const linearL = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3;
-        const linearM = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3;
-        const linearS = (l - 0.0894841775 * a - 1.2914855480 * b) ** 3;
-        const srgb = (linear) => {
-          const gamma = linear <= 0.0031308 ? 12.92 * linear : 1.055 * linear ** (1 / 2.4) - 0.055;
-          return Math.min(255, Math.max(0, gamma * 255));
-        };
-        return [
-          srgb(4.0767416621 * linearL - 3.3077115913 * linearM + 0.2309699292 * linearS),
-          srgb(-1.2684380046 * linearL + 2.6097574011 * linearM - 0.3413193965 * linearS),
-          srgb(-0.0041960863 * linearL - 0.7034186147 * linearM + 1.7076147010 * linearS),
-          alpha,
-        ];
+      // Let the rendering browser convert CSS Color 4 (color(), Lab/LCH,
+      // OKLab/OKLCH, color-mix(), etc.) to the same sRGB pixels we inspect.
+      // A detached, cached 1px canvas avoids duplicating gamut conversions or
+      // adding an element to the inspected page. Preserve explicit alpha;
+      // otherwise byte rounding could turn a translucent layer into opaque.
+      if (convertedColors.has(value)) return convertedColors.get(value);
+      let color = null;
+      if (CSS.supports('color', value)) {
+        if (!colorContext) {
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = 1;
+          colorContext = canvas.getContext('2d', { colorSpace: 'srgb', willReadFrequently: true });
+        }
+        if (colorContext) {
+          // fillStyle leaves its old value when assignment is unsupported.
+          // Two sentinels distinguish that from a valid color equal to either.
+          colorContext.fillStyle = '#010203';
+          colorContext.fillStyle = value;
+          const first = colorContext.fillStyle;
+          colorContext.fillStyle = '#040506';
+          colorContext.fillStyle = value;
+          if (colorContext.fillStyle === first) {
+            colorContext.clearRect(0, 0, 1, 1);
+            colorContext.fillRect(0, 0, 1, 1);
+            const pixels = colorContext.getImageData(0, 0, 1, 1).data;
+            const opacity = value.match(/\/\s*([-+\d.eE]+%?)\s*\)$/);
+            const alpha = opacity ? Math.min(1, Math.max(0, Number.parseFloat(opacity[1]) / (opacity[1].endsWith('%') ? 100 : 1))) : pixels[3] / 255;
+            color = [pixels[0], pixels[1], pixels[2], alpha];
+          }
+        }
       }
-      return null;
+      convertedColors.set(value, color);
+      return color;
     };
     const over = (foreground, background) => {
       const alpha = foreground[3] + background[3] * (1 - foreground[3]);
@@ -294,13 +301,21 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const backgroundFor = (element) => {
       let background = fallback;
       let hasUnverifiableImage = false;
+      let hasUnverifiableColor = false;
       for (const current of ancestors(element)) {
         const style = getComputedStyle(current);
-        if (style.backgroundImage && style.backgroundImage !== 'none') hasUnverifiableImage = true;
         const color = cssColor(style.backgroundColor);
+        // An opaque descendant covers the ancestor's unknown background.
+        // Its own image still paints above its color, so inspect that last.
+        if (color?.[3] === 1) {
+          hasUnverifiableImage = false;
+          hasUnverifiableColor = false;
+        }
+        if (!color) hasUnverifiableColor = true;
         if (color) background = over(color, background);
+        if (style.backgroundImage && style.backgroundImage !== 'none') hasUnverifiableImage = true;
       }
-      return { background, hasUnverifiableImage };
+      return { background, hasUnverifiableImage, hasUnverifiableColor };
     };
     const box = (rect) => ({ x: round(rect.x), y: round(rect.y), width: round(rect.width), height: round(rect.height), right: round(rect.right), bottom: round(rect.bottom) });
     const textNodes = [];
@@ -327,6 +342,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         foreground: fg ? fg.slice(0, 3).map(Math.round) : null,
         background: background.background.slice(0, 3).map(Math.round),
         hasUnverifiableImage: background.hasUnverifiableImage,
+        hasUnverifiableColor: background.hasUnverifiableColor,
         hidden: state.hidden,
         opacity: round(state.opacity),
         ariaHidden: ariaHidden(element),
@@ -372,7 +388,10 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       type,
       selector: item?.selector || item?.elementPath || 'document',
       elementPath: item?.elementPath || item?.selector || 'document',
-      textSample: item?.text,
+      // Identity evidence for cross-build comparison, independent of CSS names.
+      // Preserve ancestorBox as well so historical clipping reports still pair.
+      textSample: item?.text || (item?.element ? sample(item.element.textContent || '') : undefined),
+      textBounds: item?.box || (item?.element ? box(item.element.getBoundingClientRect()) : undefined),
       allowlistedBy: item?.element ? allowlistedBy(item.element, type) : [],
       ...details,
     });
@@ -385,7 +404,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.colorAlpha === 0 ? 'color-alpha-0' : 'visibility-hidden' });
         continue;
       }
-      if (!item.foreground || item.hasUnverifiableImage) {
+      if (!item.foreground || item.hasUnverifiableImage || item.hasUnverifiableColor) {
         addInfo('unverifiable-contrast', item, { reason: item.hasUnverifiableImage ? 'background-image' : 'unsupported-color' });
         continue;
       }

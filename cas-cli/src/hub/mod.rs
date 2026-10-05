@@ -22,6 +22,7 @@ mod death;
 mod discovery;
 mod events;
 mod identity;
+pub(crate) mod observation;
 pub mod launch_env;
 pub mod projects;
 mod runtime;

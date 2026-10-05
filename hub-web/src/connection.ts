@@ -971,20 +971,30 @@ export class HubConnectionSupervisor {
       this.hiddenAt = undefined;
       if (hiddenFor >= HEARTBEAT_INTERVAL_MS) this.networkChanged();
     };
-    const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
+    const connection = (navigator as Navigator & { connection?: EventTarget & { type?: string } }).connection;
+    let networkType = connection?.type;
+    const transportChanged = () => {
+      const nextType = connection?.type;
+      // change also fires for rtt/downlink/effectiveType estimates under load.
+      // Those are not a changed route, and a failed opportunistic probe must
+      // not turn one missed heartbeat into four (cas-eefe).
+      if (typeof nextType !== "string" || nextType === networkType) return;
+      networkType = nextType;
+      changed();
+    };
     window.addEventListener("online", changed);
     window.addEventListener("offline", offline);
     window.addEventListener("pageshow", changed);
     document.addEventListener("resume", changed);
     document.addEventListener("visibilitychange", visibility);
-    connection?.addEventListener?.("change", changed);
+    connection?.addEventListener?.("change", transportChanged);
     this.removeNetworkListeners = () => {
       window.removeEventListener("online", changed);
       window.removeEventListener("offline", offline);
       window.removeEventListener("pageshow", changed);
       document.removeEventListener("resume", changed);
       document.removeEventListener("visibilitychange", visibility);
-      connection?.removeEventListener?.("change", changed);
+      connection?.removeEventListener?.("change", transportChanged);
     };
   }
 

@@ -89,3 +89,41 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     });
   }
 });
+
+
+test("HUB-J12 degraded live machine keeps its measured cause in the open Connection log (cas-2b3a5)", journeyPart, async ({ page, journey }) => {
+  const clock = new ProtocolClock(page);
+  const hub = new HubDouble(page, { machines: [ATLAS], paired: ["atlas"], multiplex: true, time: clock });
+  await page.addInitScript(() => { Math.random = () => 0.5; });
+  await hub.install();
+  await page.goto("./");
+  await hub.seedPaired();
+  await clock.start();
+  await journey.stage("Open Details during an outage and leave it open after recovery", async () => {
+    await page.goto("./");
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+    await hub.down("atlas", { sockets: "close" });
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Reconnecting");
+    await page.getByRole("button", { name: "Connection details", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Connection log" })).toBeVisible();
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+  });
+  await journey.stage("Two failed heartbeats show the machine cause despite a live session", async () => {
+    await hub.down("atlas");
+    for (let beat = 0; beat < 2; beat++) {
+      const failed = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
+      await clock.advance(5_000);
+      await failed;
+    }
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Unsteady");
+    // The log's periodic projection is a one-second protocol timer, independent
+    // of the five-second heartbeat. Let that tick observe the settled failure.
+    await clock.advance(1_000);
+    await expect(page.locator(".connection-log-summary")).toContainText("Network or browser policy blocked the request (browser)");
+    await expect(page.locator(".connection-log-summary")).not.toContainText("No active failure measured");
+    await expect(page.locator(".connection-log-summary")).toContainText("Last successful connection:");
+  });
+});

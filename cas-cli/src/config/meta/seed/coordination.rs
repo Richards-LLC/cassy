@@ -94,17 +94,17 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
-        key: "factory.target_seed_min_free_gib",
+        key: "factory.spawn_min_free_gib",
         section: "factory",
-        name: "Target Seed Minimum Free Space (GiB)",
-        description: "Refuse Cargo target seeding below this available-space floor on the worker filesystem. Failure names target_seed_disk_floor before staging or copying. 0 disables the floor.",
+        name: "Worker Spawn Minimum Free Space (GiB)",
+        description: "Refuse worker spawns below this available-space floor before checkout or reuse, whether target seeding is enabled or not. Failure names spawn_disk_floor. 0 disables the floor.",
         value_type: ConfigType::Int,
         default: "25",
         constraint: Constraint::Range(0, 65536),
         advanced: false,
         requires_feature: None,
         keywords: &["factory", "cargo", "seed", "disk", "space", "workers"],
-        use_cases: &["Fail a low-disk spawn before seeding its private target"],
+        use_cases: &["Fail a low-disk spawn before creating or reusing its worktree"],
     });
 
     registry.register(ConfigMeta {

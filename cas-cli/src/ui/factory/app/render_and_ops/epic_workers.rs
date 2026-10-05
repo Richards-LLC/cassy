@@ -1243,6 +1243,7 @@ fn recorded_epic_parent_branch_for_resolved_base(
         })
 }
 
+#[cfg(test)]
 fn cleanup_cancelled_spawn_worktree_with_manager(
     manager: Option<&mut WorktreeManager>,
     result: &mut WorkerSpawnResult,
@@ -2163,16 +2164,6 @@ impl FactoryApp {
         self.finish_worker_spawn(result, None, None, None)
     }
 
-    /// Remove a worktree created by a spawn generation that was cancelled
-    /// before its pane was registered. Reused worktrees predate this spawn and
-    /// are deliberately preserved.
-    pub(crate) fn cleanup_cancelled_spawn_worktree(
-        &mut self,
-        result: &mut WorkerSpawnResult,
-    ) -> anyhow::Result<bool> {
-        cleanup_cancelled_spawn_worktree_with_manager(self.worktree_manager.as_mut(), result)
-    }
-
     /// Phase 1: Prepare spawn data (fast, runs on main thread).
     ///
     /// Resolves the worker name, computes paths, and returns a `WorkerSpawnPrep`
@@ -2193,6 +2184,15 @@ impl FactoryApp {
         isolate: bool,
         task_id: Option<&str>,
     ) -> anyhow::Result<WorkerSpawnContext> {
+        let spawn_type = if name.is_some() { "named" } else { "anonymous" };
+        crate::telemetry::track(
+            "factory_worker_spawn_requested",
+            vec![
+                ("spawn_type", spawn_type),
+                ("worktrees_enabled", bool_prop(self.worktrees_enabled())),
+                ("isolate", bool_prop(isolate)),
+            ],
+        );
         let worker_name = match name {
             Some(name) => name.to_string(),
             None => {
@@ -2208,10 +2208,15 @@ impl FactoryApp {
             }
         };
         if self.worker_names.contains(&worker_name) {
+            crate::telemetry::track(
+                "factory_worker_spawn_result",
+                vec![("success", "false"), ("reason", "worker_exists")],
+            );
             anyhow::bail!("Worker '{worker_name}' already exists");
         }
         Ok(WorkerSpawnContext {
             worker_name,
+            spawn_type: spawn_type.into(),
             isolate,
             task_id: task_id.map(str::to_string),
             project_path: self.project_path().to_path_buf(),
@@ -2239,6 +2244,16 @@ impl FactoryApp {
         let prep = self
             .snapshot_worker_spawn(name, isolate, task_id)?
             .resolve()?;
+        crate::telemetry::track(
+            "factory_worker_spawn_prepared",
+            vec![
+                (
+                    "spawn_type",
+                    if name.is_some() { "named" } else { "anonymous" },
+                ),
+                ("worktrees_enabled", bool_prop(prep.worktree_info.is_some())),
+            ],
+        );
         for notice in &prep.warnings {
             self.set_error(notice.clone());
         }

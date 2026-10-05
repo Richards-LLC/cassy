@@ -7447,27 +7447,21 @@ impl FactoryDaemon {
                             self.app.set_error(warning.clone());
                         }
                     }
+                    if cancelled {
+                        provisioned.retire();
+                    }
                     provisioned.result
                 })
             });
             match outcome {
-                Ok(Ok(mut result)) if cancelled => {
+                Ok(Ok(_)) if cancelled => {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
                         vec![("success", "false"), ("reason", "cancelled_by_shutdown")],
                     );
-                    let cleanup_status =
-                        match self.app.cleanup_cancelled_spawn_worktree(&mut result) {
-                            Ok(true) => {
-                                "The newly-created worktree and branch were removed.".to_string()
-                            }
-                            Ok(false) => {
-                                "No worktree created by this spawn required cleanup.".to_string()
-                            }
-                            Err(e) => {
-                                format!("Worktree cleanup failed and needs operator attention: {e}")
-                            }
-                        };
+                    // Dropping the cancelled provisioned envelope queues cleanup
+                    // off-loop, retaining its per-name lease until retirement ends.
+                    let cleanup_status = "Best-effort removal of the new worktree, branch and own Git locks is queued off-loop; reused worktrees are preserved.";
                     let visible_error = format!(
                         "Spawn for worker '{pending_name}' was cancelled by shutdown before its \
                          pane registered. {cleanup_status}"
@@ -7685,7 +7679,7 @@ impl FactoryDaemon {
                 }
                 Ok(Err(e)) if cancelled => {
                     let detail = format!(
-                        "Spawn cancelled by targeted shutdown: {e}. Inspect and remove any partial worktree/branch before reissuing this worker name."
+                        "Spawn cancelled by targeted shutdown: {e}. Provisioner retirement performs best-effort cleanup; inspect any reported leftovers before retrying."
                     );
                     if let Some(ref task_id) = pending_task_id {
                         crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(

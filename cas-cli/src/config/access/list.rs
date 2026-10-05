@@ -178,8 +178,8 @@ impl Config {
                 factory.max_concurrent_builders.to_string(),
             ),
             (
-                "factory.target_seed_min_free_gib".to_string(),
-                factory.target_seed_min_free_gib.to_string(),
+                "factory.spawn_min_free_gib".to_string(),
+                factory.spawn_min_free_gib.to_string(),
             ),
             (
                 "factory.prompt_retention_days".to_string(),

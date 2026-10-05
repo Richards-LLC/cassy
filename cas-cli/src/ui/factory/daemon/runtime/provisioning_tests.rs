@@ -164,9 +164,9 @@ async fn stalled_provisioner_keeps_loop_passes_and_reports_timeout() {
     stall(&mut daemon, Duration::from_secs(1)).await;
     // The real consumer must return while the preparation is still blocked.
     for _ in 0..3 {
-        tokio::time::timeout(Duration::from_millis(100), daemon.process_pending_spawns())
-            .await
-            .unwrap();
+        let started = Instant::now();
+        daemon.process_pending_spawns().await;
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
     assert!(daemon.spawn_task.is_some());
     drain_failure(&mut daemon).await;
@@ -260,20 +260,20 @@ async fn targeted_shutdown_kills_stalled_provisioner_without_retiring_other_name
         names: vec!["stalled-worker".into()],
         force: true,
     });
-    tokio::time::timeout(Duration::from_millis(500), daemon.process_pending_spawns())
-        .await
-        .unwrap();
+    let started = Instant::now();
+    daemon.process_pending_spawns().await;
+    assert!(started.elapsed() < Duration::from_millis(500));
     drain_failure(&mut daemon).await;
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(
         !daemon.app.cas_dir().join("late-write").exists(),
         "shutdown must kill descendant writers"
     );
+    assert!(independent.wait().unwrap().success());
     assert!(
         survivor.exists(),
         "cancelling a provisioner must preserve other process groups"
     );
-    assert!(independent.wait().unwrap().success());
     let notices = crate::store::open_prompt_queue_store(daemon.app.cas_dir())
         .unwrap()
         .peek_all(20)
@@ -316,9 +316,9 @@ async fn daemon_provisioning_deadline_retires_only_stalled_generation() {
         task_id: None,
     });
     daemon.app.spawning_count += 1;
-    tokio::time::timeout(Duration::from_millis(500), daemon.process_pending_spawns())
-        .await
-        .unwrap();
+    let started = Instant::now();
+    daemon.process_pending_spawns().await;
+    assert!(started.elapsed() < Duration::from_millis(500));
     assert!(daemon.spawn_task.is_none());
     assert!(daemon.spawn_cancellation.is_none());
     assert_eq!(daemon.app.spawning_count, 1);

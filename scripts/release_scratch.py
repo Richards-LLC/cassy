@@ -276,6 +276,7 @@ class ChildScope:
         self.children = set()
         self.signalled = set()
         self.interrupted = False
+        self.spawning = False
         self.leases = set()
         self.directories = set()
         self.caches = set()
@@ -302,7 +303,10 @@ class ChildScope:
         for watched in self.handlers:
             signal.signal(watched, signal.SIG_IGN)
         self.stop(wait=False)
-        raise InterruptedError("release run interrupted by " + signal.Signals(sig).name)
+        if not self.spawning:
+            raise InterruptedError("release run interrupted by " + signal.Signals(sig).name)
+        # Popen has not returned its PID yet. Finish registration before
+        # unwinding; blocking signals here would leak the mask into exec.
 
     def stop(self, wait=True):
         with self.lock:
@@ -338,9 +342,15 @@ class ChildScope:
             child_env = dict(kwargs.pop("env", os.environ))
             inherited = set(kwargs.pop("pass_fds", ())) | self.leases | inherited_leases(child_env)
             child_env["CAS_RELEASE_GATE_SCRATCH_LEASE_FDS"] = ",".join(map(str, sorted(inherited)))
-            with defer_signals():
+            self.spawning = True
+            try:
                 child = subprocess.Popen(command, env=child_env, start_new_session=True, pass_fds=tuple(inherited), **kwargs)
                 self.children.add(child)
+            finally:
+                self.spawning = False
+            if self.cancelled:
+                self.stop(wait=False)
+                raise InterruptedError("release interrupted during child creation")
         try:
             status = child.wait()
             if check and status:

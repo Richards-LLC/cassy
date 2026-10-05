@@ -180,16 +180,20 @@ def compile_guard(command, policy, events, root):
     paused = False
     paused_at = None
     handlers = {}
+    interrupted = []
     def forward(sig, frame):
         for watched in handlers:
             signal.signal(watched, signal.SIG_IGN)
-        raise InterruptedError("assembly compile interrupted by " + signal.Signals(sig).name)
+        interrupted.append(signal.Signals(sig).name)
+        if child is not None:
+            raise InterruptedError("assembly compile interrupted by " + interrupted[0])
     try:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             handlers[sig] = signal.signal(sig, forward)
-        with proof.release_scratch.defer_signals():
-            child = subprocess.Popen(command, env=env, start_new_session=True,
-                                     pass_fds=tuple(proof.release_scratch.inherited_leases(env)))
+        child = subprocess.Popen(command, env=env, start_new_session=True,
+                                 pass_fds=tuple(proof.release_scratch.inherited_leases(env)))
+        if interrupted:
+            raise InterruptedError("assembly compile interrupted during child creation by " + interrupted[0])
         while child.poll() is None:
             memory = proof.memory_budget(policy)
             event = dict(memory, phase="compile", paused=paused, action="sample")

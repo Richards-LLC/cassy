@@ -371,6 +371,21 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
                 self.fail('pending signal was not delivered')
         self.assertFalse(list(self.parent.glob('base.*')))
 
+    def test_signal_during_child_spawn_registers_then_reaps(self):
+        spawned = []
+        original = scratch.subprocess.Popen
+        def interrupt(command, **kwargs):
+            child = original(command, **kwargs)
+            spawned.append(child.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+        with self.assertRaises(InterruptedError), mock.patch.object(scratch.subprocess, 'Popen', side_effect=interrupt):
+            with scratch.ChildScope() as scope, scratch.OwnedDirectory('base.', self.parent):
+                scope.run([sys.executable, '-c', 'import time;time.sleep(60)'])
+        self.assertFalse(list(self.parent.glob('base.*')))
+        with self.assertRaises(ProcessLookupError):
+            os.kill(spawned[0], 0)
+
     def test_opaque_process_evidence_fails_closed(self):
         if not self.proc.is_dir():
             self.skipTest('Linux proc permission fixture')

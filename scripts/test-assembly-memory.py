@@ -98,6 +98,24 @@ class GuardTests(unittest.TestCase):
                 self.assertEqual(guard.compile_guard([sys.executable, '-c', program], '{}', self.events, self.root), 0)
         self.assertTrue(result.exists())
 
+    def test_signal_during_compile_spawn_reaps_child_cas_72f4(self):
+        original = guard.subprocess.Popen
+        spawned = []
+        def interrupt(command, **kwargs):
+            child = original(command, **kwargs)
+            spawned.append(child.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(guard.proof, 'memory_snapshot', return_value=self.high), \
+                mock.patch.object(guard, 'native_configuration', return_value=('cc', [])), \
+                mock.patch.object(guard, 'stable_wrapper', return_value=self.root / 'unused-wrapper'), \
+                mock.patch.object(guard.subprocess, 'Popen', side_effect=interrupt), \
+                self.assertRaises(InterruptedError):
+            guard.compile_guard([sys.executable, '-c', 'import time;time.sleep(60)'], '{}', self.events, self.root)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(spawned[0], 0)
+
     def test_sigterm_reaps_the_compile_child(self):
         pidfile = self.root / "pid"
         program = 'import os,pathlib,time; pathlib.Path('+repr(str(pidfile))+').write_text(str(os.getpid())); time.sleep(60)'

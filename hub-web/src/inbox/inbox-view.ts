@@ -10,6 +10,7 @@
 import { renderMarkdown } from "../markdown-renderer";
 import { relativeTimestamp } from "../time";
 import { commandStatusLabel } from "./commands";
+import type { CommandState } from "./store";
 import type { InboxSnapshot, InboxState, OperatorInboxController } from "./controller";
 import { inboxThreads, type InboxTurn } from "./projection";
 
@@ -34,6 +35,23 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attributes: Record<st
   for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+/** QA F03: envelopes refused on open or verification are kept for replay
+ * coverage and never shown; the operator still learns that they exist. */
+export function unverifiedCount(snapshot: InboxSnapshot): number {
+  return snapshot.events.filter((event) => event.verification !== "verified").length;
+}
+
+export function withheldCopy(count: number): string {
+  return count === 1
+    ? "1 message couldn’t be verified, so it isn’t shown."
+    : `${count} messages couldn’t be verified, so they aren’t shown.`;
+}
+
+/** QA F01: the reply's trust state is a state line, not metadata. */
+function commandStateMarkup(state: CommandState): HTMLElement {
+  return el("span", { class: "operator-inbox-command-state", "data-state": state }, commandStatusLabel(state));
 }
 
 function codename(session: string): string {
@@ -165,7 +183,7 @@ export class InboxView {
   }
 
   private signInMarkup(state: InboxState): HTMLElement {
-    const section = el("div", { class: "operator-inbox-signin" });
+    const section = el("form", { class: "operator-inbox-signin" });
     if (state.kind === "revoked" || state.kind === "unavailable") section.append(el("p", { class: "operator-inbox-warning" }, state.reason));
     section.append(
       el("p", { class: "operator-inbox-lead" }, "Read your supervisors’ messages here even when their machines are off, and leave a reply for when they’re back."),
@@ -175,8 +193,12 @@ export class InboxView {
     const input = el("input", { id: "operator-inbox-label", type: "text", maxlength: "80", value: this.deps.defaultLabel });
     label.append(input);
     section.append(label);
-    const signIn = el("button", { id: "operator-inbox-signin", type: "button", class: "primary" }, this.busy ? "Signing in…" : "Sign in");
-    signIn.onclick = () => void this.act(() => this.controller.beginSignIn(input.value.trim() || this.deps.defaultLabel), "Sign-in could not start.");
+    // QA F02: Enter in "Name this browser" signs in, like the button.
+    const signIn = el("button", { id: "operator-inbox-signin", type: "submit", class: "primary" }, this.busy ? "Signing in…" : "Sign in");
+    section.onsubmit = (event) => {
+      event.preventDefault();
+      void this.act(() => this.controller.beginSignIn(input.value.trim() || this.deps.defaultLabel), "Sign-in could not start.");
+    };
     const actions = el("div", { class: "dialog-actions" });
     actions.append(signIn);
     section.append(actions);
@@ -205,6 +227,8 @@ export class InboxView {
     const snapshot = this.snapshot;
     const threads = snapshot ? inboxThreadList(snapshot) : [];
     const selected = this.selected ? threads.find((thread) => thread.hubId === this.selected!.hubId && thread.session === this.selected!.session) : undefined;
+    const withheld = snapshot ? unverifiedCount(snapshot) : 0;
+    if (withheld > 0) section.append(el("p", { class: "operator-inbox-withheld", role: "status" }, withheldCopy(withheld)));
     if (selected) {
       section.append(this.threadMarkup(selected));
     } else if (threads.length === 0) {
@@ -241,7 +265,7 @@ export class InboxView {
 
   private threadMarkup(thread: Thread): HTMLElement {
     const section = el("div", { class: "operator-inbox-thread-view" });
-    const back = el("button", { type: "button", id: "operator-inbox-back" }, "← All conversations");
+    const back = el("button", { type: "button", id: "operator-inbox-back", class: "operator-inbox-back" }, "← All conversations");
     back.onclick = () => {
       this.selected = null;
       this.render();
@@ -249,17 +273,24 @@ export class InboxView {
     section.append(back, el("h3", {}, `${thread.machineLabel} · ${codename(thread.session)}`));
     const log = el("ol", { class: "operator-inbox-turns", "aria-label": `Messages with ${codename(thread.session)}` });
     const commands = new Map((this.snapshot?.commands ?? []).map((command) => [command.commandId, command]));
+    // Like the Conversations thread, a run of turns by one author is named once.
+    let previousAuthor: string | null = null;
+    const author = (name: string): HTMLElement[] => {
+      const first = name !== previousAuthor;
+      previousAuthor = name;
+      return first ? [el("span", { class: "operator-inbox-author" }, name)] : [];
+    };
     for (const turn of thread.turns) {
       const item = el("li", { class: `operator-inbox-turn operator-inbox-${turn.kind}` });
       if (turn.kind === "reply") {
         const bubble = el("div", { class: "operator-inbox-bubble" });
         bubble.append(...renderMarkdown(document, turn.message));
-        item.append(el("span", { class: "operator-inbox-author" }, "Supervisor"), bubble);
+        item.append(...author("Supervisor"), bubble);
       } else {
-        item.append(el("span", { class: "operator-inbox-author" }, "You"), el("p", { class: "operator-inbox-bubble" }, turn.text));
+        item.append(...author("You"), el("p", { class: "operator-inbox-bubble" }, turn.text));
         if (turn.kind === "command") {
           const command = commands.get(turn.commandId);
-          item.append(el("span", { class: "operator-inbox-command-state" }, command ? commandStatusLabel(command.state) : "Pending machine"));
+          item.append(commandStateMarkup(command?.state ?? "pending_machine"));
         }
       }
       item.append(el("time", { datetime: turn.at }, relativeTimestamp(turn.at)));
@@ -270,7 +301,7 @@ export class InboxView {
       if (command.hubId !== thread.hubId || command.sessionName !== thread.session) continue;
       if (thread.turns.some((turn) => turn.kind === "command" && turn.commandId === command.commandId)) continue;
       const item = el("li", { class: "operator-inbox-turn operator-inbox-command" });
-      item.append(el("span", { class: "operator-inbox-author" }, "You"), el("p", { class: "operator-inbox-bubble" }, command.body), el("span", { class: "operator-inbox-command-state" }, commandStatusLabel(command.state)));
+      item.append(...author("You"), el("p", { class: "operator-inbox-bubble" }, command.body), commandStateMarkup(command.state));
       log.append(item);
     }
     section.append(log);

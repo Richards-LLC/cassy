@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { journeyDay, journeyNow } from "./clock";
 import { operatorCloudDouble, routeOperatorCloud } from "./operator-cloud-route";
 
@@ -39,7 +39,8 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
     await expect(inbox.getByText("this isn’t end-to-end encryption")).toBeVisible();
     await inbox.getByLabel("Name this browser").fill("Pixel 9");
-    await inbox.getByRole("button", { name: "Sign in" }).click();
+    // QA F02 (round 1): Enter in the name field signs in.
+    await inbox.getByLabel("Name this browser").press("Enter");
     await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
     await expect(inbox.getByRole("link", { name: "Approve on Petra Stella Cloud" })).toHaveAttribute("href", /\/operator\/approve\?code=/);
   });
@@ -62,6 +63,32 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await inbox.getByLabel(/Reply — soundwave gets it when it’s back/).fill("Go. Cut the release.");
     await inbox.getByRole("button", { name: "Queue reply" }).click();
     await expect(inbox.getByText("Pending machine")).toBeVisible();
+    // QA F01 (round 1): bodies read as messages in the thread's bubble inks,
+    // metadata stays quieter, and the reply's machine state is a state line.
+    const look = await inbox.evaluate((dialog) => {
+      const style = (selector: string) => getComputedStyle(dialog.querySelector(selector)!);
+      const supervisor = style(".operator-inbox-reply .operator-inbox-bubble");
+      const mine = style(".operator-inbox-command .operator-inbox-bubble");
+      const author = style(".operator-inbox-author");
+      const state = dialog.querySelector(".operator-inbox-command-state")!;
+      return {
+        supervisorInk: supervisor.color,
+        supervisorFill: supervisor.backgroundColor,
+        mineInk: mine.color,
+        mineFill: mine.backgroundColor,
+        authorInk: author.color,
+        stateWeight: Number(getComputedStyle(state).fontWeight),
+        stateInk: getComputedStyle(state).color,
+        stateKind: state.getAttribute("data-state"),
+      };
+    });
+    expect(look.supervisorInk).not.toBe(look.authorInk);
+    expect(look.supervisorFill).not.toBe("rgba(0, 0, 0, 0)");
+    expect(look.mineFill).not.toBe(look.supervisorFill);
+    expect(look.mineInk).not.toBe(look.authorInk);
+    expect(look.stateWeight).toBeGreaterThanOrEqual(600);
+    expect(look.stateInk).not.toBe(look.authorInk);
+    expect(look.stateKind).toBe("pending_machine");
     expect([...cloud.commands.values()].map((command) => [command.machineId, command.status])).toEqual([[soundwave.id, "pending_machine"]]);
   });
 
@@ -134,5 +161,36 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await expect(inbox.getByText("Accepted by machine")).toBeVisible();
     // Signed in once: the reload neither asked again nor replayed history twice.
     expect(cloud.enrollments.size).toBe(2);
+  });
+});
+
+test("HUB-J19 a message that can't be verified is named, never shown (cas-9b7d QA F03)", journeyPart, async ({ page, journey }) => {
+  const cloud = operatorCloudDouble();
+  const commandKey = (await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"])) as CryptoKeyPair;
+  await cloud.enrollMachine(HUB, [PROJECT], new Uint8Array(await crypto.subtle.exportKey("raw", commandKey.publicKey)), "soundwave");
+  await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId, plaintext: supervisorTurn(201, "Genuine message one.", journeyDay(3, 9)) });
+  await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId, plaintext: supervisorTurn(202, "TAMPERED-SECRET should never render.", journeyDay(2, 9)) });
+  // One ciphertext byte flipped after sealing; the stated digest is left as the producer sent it.
+  const tampered = cloud.events[1];
+  tampered.ciphertext = new Uint8Array(tampered.ciphertext);
+  tampered.ciphertext[tampered.ciphertext.length - 5] ^= 0x41;
+  await routeOperatorCloud(page.context(), cloud);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const inbox = page.getByRole("dialog", { name: "Operator inbox" });
+
+  await journey.stage("Sign in; the genuine message shows and the refused one is named", async () => {
+    await journey.open();
+    await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+    await inbox.getByLabel("Name this browser").fill("QA phone");
+    await inbox.getByRole("button", { name: "Sign in" }).click();
+    const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
+    await cloud.approve(code);
+    await expect(inbox.getByText("1 message couldn’t be verified, so it isn’t shown.")).toBeVisible({ timeout: 15_000 });
+    await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+    await expect(inbox.getByText("Genuine message one.")).toBeVisible();
+    await expect(inbox.getByText("1 message couldn’t be verified, so it isn’t shown.")).toBeVisible();
+    await expect(page.getByText(/TAMPERED-SECRET/)).toHaveCount(0);
+    const phone = [...cloud.devices.values()].find((device) => device.label === "QA phone")!;
+    expect([...(cloud.acks.get(phone.id) ?? [])].map((value) => String(Array.isArray(value) ? value[0] : value))).not.toContain(tampered.eventId);
   });
 });

@@ -2851,11 +2851,45 @@ button.chip:disabled { cursor: default; }
 .operator-inbox-thread { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-3); text-align: left; }
 .operator-inbox-thread .operator-inbox-preview { grid-column: 1; color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .operator-inbox-thread time { grid-column: 2; grid-row: 1; color: var(--text-mid); }
-.operator-inbox-turn { display: flex; flex-direction: column; gap: var(--space-1); }
-.operator-inbox-author { font-size: var(--fs-xs); color: var(--text-mid); }
-.operator-inbox-turn time, .operator-inbox-command-state { font-size: var(--fs-xs); color: var(--text-mid); }
-.operator-inbox-message, .operator-inbox-command { align-items: flex-end; }
-.operator-inbox-bubble { margin: 0; overflow-wrap: anywhere; }
+/* QA F01 (round 1): the thread speaks Commander's conversation language.
+ * Bodies are bubbles in the thread's own inks (supervisor left on --sup-bg,
+ * you right on --you-bubble-bg); author and age stay metadata in --ink-mid;
+ * the reply's machine state is a semibold state line with a mark, not a
+ * caption. `dialog p` is muted globally, so the bubbles restate their ink. */
+.operator-inbox { color: var(--ink); }
+.operator-inbox-thread strong { color: var(--ink); font-weight: var(--weight-semibold); }
+.operator-inbox-turns { gap: 16px; padding-block: var(--space-2); }
+.operator-inbox-turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 85%; min-width: 0; }
+.operator-inbox-message, .operator-inbox-command { align-self: flex-end; align-items: flex-end; }
+.operator-inbox-author { padding: 0 6px; font: var(--weight-medium) 12px/1.3 var(--font-ui); color: var(--ink-mid); }
+.operator-inbox-turn time { padding: 2px 6px 0; font-size: 12px; color: var(--ink-mid); }
+.operator-inbox-bubble { max-width: 100%; min-width: 0; margin: 0; padding: 12px 19px; overflow-wrap: anywhere; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift-sup); font-size: var(--fs-base); line-height: 1.45; }
+dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit; }
+.operator-inbox-reply .operator-inbox-bubble { color: var(--sup-fg); }
+.operator-inbox-message .operator-inbox-bubble, .operator-inbox-command .operator-inbox-bubble { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; box-shadow: none; white-space: pre-wrap; }
+.operator-inbox-bubble p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.operator-inbox-bubble p + p { margin-top: 8px; }
+.operator-inbox-bubble .markdown-heading { font-weight: var(--weight-semibold); }
+.operator-inbox-bubble .markdown-list { margin: 8px 0 0; padding-inline-start: 1.35em; }
+.operator-inbox-bubble .markdown-list:first-child { margin-top: 0; }
+.operator-inbox-bubble .markdown-inline-code { padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, currentColor 11%, transparent); font: var(--weight-medium) 0.9em/1.35 var(--font-mono); }
+.operator-inbox-bubble .markdown-code { max-width: 100%; margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--sheet-bg); color: var(--ink); font: var(--weight-regular) 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.operator-inbox-bubble .markdown-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.operator-inbox-command-state { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 0; font: var(--weight-semibold) 13px/1.3 var(--font-ui); color: var(--ink); }
+.operator-inbox-command-state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; border: 2px solid currentColor; }
+.operator-inbox-command-state:is([data-state="pending_machine"], [data-state="reserved"], [data-state="sealing"], [data-state="submitting"]) { color: var(--warn-text); }
+.operator-inbox-command-state[data-state="accepted"] { color: var(--state-ok); }
+.operator-inbox-command-state[data-state="accepted"]::before { background: currentColor; }
+.operator-inbox-command-state:is([data-state="rejected_by_machine"], [data-state="refused"], [data-state="expired"]) { color: var(--crit-bg); }
+.operator-inbox-command-state[data-state="cancelled"] { color: var(--ink-mid); font-weight: var(--weight-medium); }
+.operator-inbox-back { align-self: flex-start; min-height: 32px; padding: 0 12px; border-radius: var(--radius-pill); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+.operator-inbox-thread-view h3 { margin: 0; font: var(--weight-semibold) var(--fs-md)/1.25 var(--font-ui); color: var(--ink); }
+/* QA F03: a withheld envelope is named once, quietly, above the list. */
+.operator-inbox-withheld { color: var(--ink-mid); font-size: var(--fs-xs); }
+@media (forced-colors: active) {
+  .operator-inbox-bubble { border: 1px solid CanvasText; }
+  .operator-inbox-command-state::before { forced-color-adjust: none; border-color: CanvasText; }
+}
 .operator-inbox-composer { display: flex; flex-direction: column; gap: var(--space-2); }
 .operator-inbox-composer textarea { width: 100%; font: inherit; }
 .operator-inbox-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--text-mid); font-size: var(--fs-xs); }

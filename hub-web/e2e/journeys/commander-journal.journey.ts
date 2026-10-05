@@ -58,17 +58,19 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     await expect(second.getByRole("log").locator(".conversation-held")).not.toHaveCount(0);
     await expect.poll(async () => (await journalRows(page, "sends")).filter((row) => row.send?.state === "held").map((row) => row.send!.text).sort()).toEqual(["First tab keeps this", "Second tab keeps that"]);
   });
-  const releaseAttach = [hub.holdAttach(PELICAN), other.holdAttach(PELICAN)];
+  const references = (await journalRows(page, "sends")).filter(row => row.send?.state === "held").map(row => row.send!.id).sort();
   await journey.stage("Both tabs reload the same two held client references", async () => {
-    // The catalog is reachable again while both session attaches remain held.
-    await Promise.all([hub.up("atlas"), other.up("atlas")]);
     await Promise.all([page.reload(), second.reload()]);
-    await Promise.all([choose(page), choose(second)]);
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(2);
-    await expect(second.getByRole("log").locator(".conversation-held")).toHaveCount(2);
+    // A wholly unreachable hub has no live session catalog on cold reload.
+    // Verify kept references on both devices before either transport recovers.
+    for (const tab of [page, second]) {
+      expect((await journalRows(tab, "sends")).filter(row => row.send?.state === "held").map(row => row.send!.id).sort()).toEqual(references);
+    }
+    expect([...hub.sends, ...other.sends]).toHaveLength(0);
   });
   await journey.stage("Both connections recover; each item crosses the wire once", async () => {
-    for (const release of releaseAttach) release();
+    await Promise.all([hub.up("atlas"), other.up("atlas")]);
+    await Promise.all([choose(page), choose(second)]);
     await expect.poll(() => [...hub.sends, ...other.sends].map((row) => row.text).sort(), { timeout: 20_000 }).toEqual(["First tab keeps this", "Second tab keeps that"]);
     const sends = [...hub.sends, ...other.sends];
     expect(new Set(sends.map((row) => row.client_ref)).size).toBe(2);

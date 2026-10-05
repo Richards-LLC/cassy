@@ -2298,7 +2298,7 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
 /// Return shell statements with heredoc bodies and comments removed. Quoted
 /// arguments remain one word, so a formatter name in a script string cannot be
 /// mistaken for the executable command.
-fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
+pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     let shell_command = shell_command_without_heredoc_bodies(command);
     let tokens = factory_shell_tokens(&shell_command);
     let mut statements = Vec::new();
@@ -2333,7 +2333,7 @@ fn shell_word_basename(word: &str) -> &str {
 
 /// Find the executable word after the small set of shell wrappers commonly
 /// used by worker commands. This is deliberately not a shell evaluator.
-fn executable_word_index(words: &[String]) -> Option<usize> {
+pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];

@@ -55,60 +55,22 @@ fn selected(args: &[String]) -> bool {
     false
 }
 
-// Remove literal stdin bodies before inspecting commands. Documentation and
-// fixture source may contain full-suite examples without executing them.
-fn shell_commands(command: &str) -> String {
-    let marker = regex::Regex::new(r#"^<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)"#)
-        .expect("constant heredoc marker");
-    let mut delimiter: Option<String> = None;
-    let mut clean = String::new();
-    for line in command.lines() {
-        if let Some(end) = &delimiter {
-            if line.trim() == end {
-                delimiter = None;
-            }
-            continue;
-        }
-        let mut quote = None;
-        let mut escaped = false;
-        for (offset, ch) in line.char_indices() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' && quote != Some('\'') {
-                escaped = true;
-                continue;
-            }
-            if let Some(q) = quote {
-                if ch == q {
-                    quote = None;
-                }
-                continue;
-            }
-            if matches!(ch, '\'' | '"') {
-                quote = Some(ch);
-                continue;
-            }
-            if ch == '<' {
-                if let Some(m) = marker.captures(&line[offset..]) {
-                    delimiter = Some(m[1].to_string());
-                    break;
-                }
-            }
-        }
-        clean.push_str(line);
-        clean.push(';');
-    }
-    clean
-}
-
 fn unfiltered(command: &str, depth: usize) -> bool {
     if depth > 4 {
         return true;
     }
-    for words in super::attribution::split_shell_statements(&shell_commands(command)) {
+    for words in super::pre_tool::shell_statement_words(command) {
         if words.first().is_some_and(|w| w.starts_with('#')) {
+            continue;
+        }
+        let Some(executable) = super::pre_tool::executable_word_index(&words) else {
+            continue;
+        };
+        let name = words[executable].rsplit('/').next().unwrap_or("");
+        if matches!(
+            name,
+            "cat" | "printf" | "echo" | "rg" | "grep" | "sed" | "head" | "tail"
+        ) {
             continue;
         }
         // Inspect literal shell wrappers; don't turn quoted source text or

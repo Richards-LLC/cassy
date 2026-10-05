@@ -260,7 +260,7 @@ pub(crate) fn qa_evidence_close_gate_for_delivery(
         let base = super::close_ops::resolve_branch_sha(repo, &format!("{base}^{{commit}}"))
             .ok_or("QA EVIDENCE REJECTED: journey selection base is unreadable")?;
         let selected = crate::qa_evidence::journeys::select_journeys(repo, &base, &head, Some(changed))
-            .map_err(|e| format!("QA EVIDENCE REJECTED: {e}; run scripts/journey-eval.sh for the repaired selection"))?;
+            .map_err(|e| format!("QA EVIDENCE REJECTED: {e}; affected paths [{}]; run scripts/journey-eval.sh for the repaired selection", changed.join(", ")))?;
         reasons.push(crate::qa_evidence::journeys::selection_reason(&base, &selected));
     }
     let terminal_render = changed.as_deref().is_some_and(|paths| requires_terminal_qa(paths, &qa));

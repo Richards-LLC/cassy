@@ -922,6 +922,11 @@ pub enum PendingReason {
     /// The row was surfaced as undelivered rather than waiting for silence
     /// forever.
     UndeliveredAfterWakeDeclines,
+    /// cas-d1659: the wake budget is spent while the recipient is busy. Cassy
+    /// stopped offering wakes, but the row stays pending and surfaceable: the
+    /// recipient's next turn start or tool boundary injects it. Not terminal
+    /// and not processed until it is surfaced or acknowledged.
+    AwaitingBusyRecipient,
     /// Terminal non-delivery: dead worker source dropped.
     DroppedDeadSource,
     /// Terminal non-delivery: duplicate idle suppression.
@@ -975,6 +980,7 @@ impl PendingReason {
             Self::AwaitingDelivery => "awaiting_delivery",
             Self::AwaitingAck => "awaiting_ack",
             Self::UndeliveredAfterWakeDeclines => "undelivered_after_wake_declines",
+            Self::AwaitingBusyRecipient => "awaiting_busy_recipient",
             Self::DroppedDeadSource => "dropped_dead_source",
             Self::SuppressedIdle => "suppressed_idle",
             Self::SupersededStale => "superseded_stale",
@@ -995,6 +1001,7 @@ impl PendingReason {
             "awaiting_delivery" => Some(Self::AwaitingDelivery),
             "awaiting_ack" => Some(Self::AwaitingAck),
             "undelivered_after_wake_declines" => Some(Self::UndeliveredAfterWakeDeclines),
+            "awaiting_busy_recipient" => Some(Self::AwaitingBusyRecipient),
             "dropped_dead_source" => Some(Self::DroppedDeadSource),
             "suppressed_idle" => Some(Self::SuppressedIdle),
             "superseded_stale" => Some(Self::SupersededStale),
@@ -1010,7 +1017,9 @@ impl PendingReason {
 
     fn implied_stage(self) -> DeliveryStage {
         match self {
-            Self::GatedNotReady | Self::TargetUnavailable => DeliveryStage::Gated,
+            Self::GatedNotReady | Self::TargetUnavailable | Self::AwaitingBusyRecipient => {
+                DeliveryStage::Gated
+            }
             Self::DroppedDeadSource => DeliveryStage::Dropped,
             Self::SuppressedIdle | Self::SupersededStale | Self::ShutdownCancelled => {
                 DeliveryStage::Suppressed
@@ -1055,6 +1064,7 @@ impl PendingReason {
             Self::GatedNotReady
             | Self::SessionIneligible
             | Self::AwaitingDelivery
+            | Self::AwaitingBusyRecipient
             | Self::NoIntendedRecipients => false,
             // cas-94a1 decided against the POST-cas-78d3 machine, not the
             // pre-fix corpse data: now that hook surfacing really acks, a row
@@ -2278,6 +2288,20 @@ pub trait PromptQueueStore: Send + Sync {
         &self,
         prompt_id: i64,
         detail: Option<&str>,
+    ) -> Result<()>;
+
+    /// cas-d1659: park a row whose wake budget ran out while the recipient was
+    /// busy. The daemon stops offering wakes, but the message is not lost:
+    /// the row stays `Gated` with [`PendingReason::AwaitingBusyRecipient`],
+    /// `processed_at` stays NULL, and the recipient's turn-start or
+    /// tool-boundary surfacing injects it. `recheck_at` holds the row out of
+    /// daemon selection until then, so a recheck costs one evaluation instead
+    /// of one per poll tick. A row already acked or processed is left as is.
+    fn park_for_busy_recipient(
+        &self,
+        prompt_id: i64,
+        detail: Option<&str>,
+        recheck_at: DateTime<Utc>,
     ) -> Result<()>;
 
     /// Pending rows that have burned at least `min_attempts` transport
@@ -5681,6 +5705,42 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn park_for_busy_recipient(
+        &self,
+        prompt_id: i64,
+        detail: Option<&str>,
+        recheck_at: DateTime<Utc>,
+    ) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let open: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM prompt_queue
+                     WHERE id = ? AND processed_at IS NULL AND acked_at IS NULL",
+                    params![prompt_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if open.is_none() {
+                // Surfaced, acked or terminal meanwhile: nothing to park.
+                return Ok(());
+            }
+            Self::atomic_stage_stamp_in_tx(
+                &tx,
+                prompt_id,
+                PendingReason::AwaitingBusyRecipient.implied_stage(),
+                AtomicStampOpts::reason(PendingReason::AwaitingBusyRecipient, detail),
+            )?;
+            tx.execute(
+                "UPDATE prompt_queue SET next_attempt_at = ? WHERE id = ?",
+                params![recheck_at.to_rfc3339(), prompt_id],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     fn list_most_retried_pending(
         &self,
         min_attempts: u32,
@@ -8399,6 +8459,106 @@ mod tests {
                 .is_some_and(|detail| detail.contains("3 consecutive"))
         );
         assert_eq!(report.wake_gate_declines, 3);
+    }
+
+    /// cas-d1659 (AC3): a busy worker's wake was declined three times, which
+    /// spends the wake budget. The message must NOT be abandoned: it stays
+    /// pending, out of daemon selection until its recheck, and the worker's
+    /// next turn start surfaces it.
+    #[test]
+    fn cas_d1659_busy_recipient_row_is_surfaced_at_next_turn_start() {
+        let (_temp, store) = create_test_store();
+        let message = store
+            .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .record_wake_gate_decline(message, "pane has not been silent long enough")
+                .unwrap();
+        }
+        store
+            .park_for_busy_recipient(
+                message,
+                Some("wake budget spent while the recipient stayed busy"),
+                Utc::now() + chrono::Duration::minutes(2),
+            )
+            .unwrap();
+
+        let parked = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(parked.stage, DeliveryStage::Gated, "busy is not terminal");
+        assert_eq!(
+            parked.pending_reason,
+            Some(PendingReason::AwaitingBusyRecipient)
+        );
+        assert_eq!(
+            parked.legacy_status,
+            MessageStatus::Pending,
+            "a parked row is not processed until it is surfaced or acked"
+        );
+        assert!(
+            !store
+                .peek_for_targets(&["busy-worker"], None, 10)
+                .unwrap()
+                .iter()
+                .any(|row| row.id == message),
+            "the daemon stops offering wakes until the recheck"
+        );
+
+        let surfaced = store
+            .surface_unseen_for_recipient("busy-worker", None, 10)
+            .unwrap();
+        assert_eq!(
+            surfaced.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![message],
+            "the next turn start injects the parked message"
+        );
+        let after = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(after.stage, DeliveryStage::Confirmed);
+        assert_eq!(after.legacy_status, MessageStatus::Confirmed);
+        assert!(
+            store
+                .surface_unseen_for_recipient("busy-worker", None, 10)
+                .unwrap()
+                .is_empty(),
+            "surfaced once, not again"
+        );
+    }
+
+    /// cas-d1659: the old terminal stamp is what lost the message. Kept as a
+    /// contrast so the regression above cannot pass by accident.
+    #[test]
+    fn cas_d1659_abandoned_wake_starved_row_is_not_surfaceable() {
+        let (_temp, store) = create_test_store();
+        let message = store
+            .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
+            .unwrap();
+        store
+            .mark_undelivered_after_wake_declines(message, Some("budget spent"))
+            .unwrap();
+        assert!(
+            store
+                .surface_unseen_for_recipient("busy-worker", None, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// cas-d1659: parking never revives a row the recipient already has.
+    #[test]
+    fn cas_d1659_park_leaves_an_acked_row_alone() {
+        let (_temp, store) = create_test_store();
+        let message = store
+            .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
+            .unwrap();
+        store.ack(message).unwrap();
+        let before = store.message_delivery_report(message).unwrap().unwrap();
+        store
+            .park_for_busy_recipient(message, Some("late park"), Utc::now())
+            .unwrap();
+        let after = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(after.stage, before.stage);
+        assert_eq!(after.pending_reason, before.pending_reason);
+        assert_eq!(after.legacy_status, before.legacy_status);
     }
 
     /// cas-99d2 (GH #126, AC2): a reply enqueued BEFORE the message was

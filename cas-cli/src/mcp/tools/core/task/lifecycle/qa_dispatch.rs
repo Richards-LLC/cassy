@@ -2098,6 +2098,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
     }
 
     /// cas-ba4a still holds: a commit claiming another task stops the advance.
+    /// (Task ids are hex: `cas-f0a6` is recognised as foreign, `cas-zz99` is not.)
     #[test]
     fn park_keeps_the_anchor_when_a_later_commit_is_another_tasks() {
         let mut env = TestEnvGuard::temp_home();
@@ -2108,7 +2109,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         git(repo, &["add", "other.txt"]);
         git(
             repo,
-            &["commit", "-q", "-m", "fix(cas-zz99): someone else's change"],
+            &["commit", "-q", "-m", "fix(cas-f0a6): someone else's change"],
         );
         let foreign_tip = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);

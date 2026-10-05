@@ -9,7 +9,7 @@ export type InstallationKey = Awaited<ReturnType<typeof createDeviceKey>>;
 export interface InstallationRecord extends InstallationKey {
   id: string;
   known?: { deviceId: string; credentialGeneration: number };
-  pending?: { operationId: string; baseUrl: string; controllerOrigin: string; previousKey?: InstallationKey; identity?: PairingInstallIdentity };
+  pending?: { operationId: string; baseUrl: string; controllerOrigin: string; invitationHash: string; previousKey?: InstallationKey; identity?: PairingInstallIdentity };
 }
 export interface InstallationStore {
   get(id: string): Promise<InstallationRecord | undefined>;
@@ -22,6 +22,21 @@ export const installationLock: InstallationLock = async (hubId, run, signal) => 
   return navigator.locks.request(`cassy-installation:${hubId}`, { mode: "exclusive", ...(signal ? { signal } : {}) }, run);
 };
 const encoder = new TextEncoder();
+// A signal alone cannot bound a stuck signing/fetch/body promise. Late results
+// cannot reach the caller or advance the local installation transaction.
+export async function installationDeadline<T>(run: (signal: AbortSignal) => Promise<T>, parent?: AbortSignal): Promise<T> {
+  const controller = new AbortController();
+  const signal = parent ? anySignal([parent, controller.signal]) : controller.signal;
+  let rejectAbort!: (error: unknown) => void;
+  const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
+  const onAbort = () => rejectAbort(signal.reason ?? new DOMException("Installation request cancelled.", "AbortError"));
+  signal.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(new DOMException("The hub did not confirm installation access within 10 seconds. Retry cleanup before pairing again.", "TimeoutError")), 10_000);
+  try {
+    if (signal.aborted) { onAbort(); return await aborted; }
+    return await Promise.race([run(signal), aborted]);
+  } finally { clearTimeout(timer); signal.removeEventListener("abort", onAbort); }
+}
 export function b64url(bytes: ArrayBuffer | Uint8Array): string {
   return btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
@@ -46,7 +61,21 @@ export class InstallationAccess {
   constructor(private readonly store: InstallationStore, private readonly catalog: MachineCatalog,
     private readonly lock: InstallationLock = installationLock, private readonly createKey = createDeviceKey) {}
 
+  async forgetRevoked(hubId: string, baseUrl: string, deviceId: string): Promise<void> {
+    await this.lock(hubId, async () => {
+      const record = await this.store.get(`${hubId}@${new URL(baseUrl).origin}`);
+      if (record?.pending) throw new Error("Access was revoked, but another pairing still needs cleanup. Retry cleanup before enrolling again.");
+      if (record?.known?.deviceId === deviceId) {
+        delete record.known;
+        await this.store.put(record);
+      }
+    });
+  }
+
   async pair(options: ExchangeOptions): Promise<StoredMachine> {
+    if (options.invitation.controllerOrigin && options.invitation.controllerOrigin !== options.controllerOrigin) {
+      throw new PairingExchangeError("This pairing invitation belongs to a different Cassy Cloud origin.");
+    }
     return this.lock(options.invitation.hubId, async () => {
       await this.recoverHub(options.invitation.hubId, options.fetcher);
       const baseUrl = options.invitation.hubUrl ?? new URL(options.legacyHubUrl!).origin;
@@ -54,20 +83,27 @@ export class InstallationAccess {
       // Check support before sending a capability that they could consume.
       let protocol: number | undefined;
       try {
-        const support = await options.fetcher(new URL("/v1/health", baseUrl), { credentials: "omit", cache: "no-store", signal: anySignal([...(options.signal ? [options.signal] : []), AbortSignal.timeout(10_000)]) });
-        if (!support.ok) throw new Error("hub health refused");
-        protocol = (await support.json() as { installation_protocol?: number }).installation_protocol;
+        protocol = await installationDeadline(async (signal) => {
+          const support = await options.fetcher(new URL("/v1/auth/pairing/protocol", baseUrl), {
+            method: "POST", credentials: "omit", cache: "no-store", signal, headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ controller_origin: options.controllerOrigin, pairing_token_hash: await installationHash(options.invitation.token) }),
+          });
+          if (!support.ok) throw new Error("hub health refused");
+          return (await support.json() as { installation_protocol?: number }).installation_protocol;
+        }, options.signal);
       } catch { throw new PairingExchangeError("Cannot reach the hub to check safe installation rotation. Check its address and browser network permission, then retry.", { recoverable: true }); }
       if (protocol !== 1) throw new PairingExchangeError("Update this hub before pairing: it does not support safe installation rotation.", { recoverable: true });
       const id = `${options.invitation.hubId}@${new URL(baseUrl).origin}`;
       const prior = (await this.catalog.snapshot()).machines.find((m) => m.id === options.invitation.hubId && new URL(m.baseUrl).origin === new URL(baseUrl).origin);
       let record = await this.store.get(id);
       if (!record) {
-        record = { id, ...(prior ? { privateKey: prior.privateKey, publicKey: prior.publicKey } : await this.createKey()) };
+        record = { id, ...(prior ? { privateKey: prior.privateKey, publicKey: prior.publicKey } : await installationDeadline(() => this.createKey(), options.signal)) };
+        options.signal?.throwIfAborted();
+        if (options.isCurrent?.() === false) throw new PairingExchangeError("Pairing was cancelled before access could be saved.");
         await this.store.put(record);
       }
       const previousKey = options.rotateKey ? { privateKey: record.privateKey, publicKey: record.publicKey } : undefined;
-      if (previousKey) record = { ...record, ...await this.createKey() };
+      if (previousKey) record = { ...record, ...await installationDeadline(() => this.createKey(), options.signal) };
       const operationId = crypto.randomUUID();
       const credential = b64url(crypto.getRandomValues(new Uint8Array(32)));
       const ceiling = options.invitation.scopes ?? options.requestedScopes ?? [];
@@ -75,7 +111,9 @@ export class InstallationAccess {
       const known = prior ?? record.known;
       const transcript = await installationTranscript(options, record, known, operationId, credential, scopes);
       const proof = await signInstallation(record.privateKey, transcript);
-      record.pending = { operationId, baseUrl, controllerOrigin: options.controllerOrigin, previousKey };
+      options.signal?.throwIfAborted();
+      if (options.isCurrent?.() === false) throw new PairingExchangeError("Pairing was cancelled before access could be saved.");
+      record.pending = { operationId, baseUrl, controllerOrigin: options.controllerOrigin, invitationHash: await installationHash(options.invitation.token), previousKey };
       await this.store.put(record); // Before POST: recovery can cancel even a lost response.
       const current = record;
       try {
@@ -117,12 +155,15 @@ export class InstallationAccess {
   private async action(record: InstallationRecord, action: "commit" | "abort", fetcher: ExchangeOptions["fetcher"], signal?: AbortSignal): Promise<void> {
     const pending = record.pending;
     if (!pending) return;
-    const proof = await signInstallation(record.privateKey, [`cassy-installation-${action}-v1`, record.id.split("@")[0], pending.controllerOrigin, pending.operationId]);
-    const response = await fetcher(new URL(`/v1/auth/pairing/${action}`, pending.baseUrl), {
-      method: "POST", credentials: "omit", headers: { "Content-Type": "application/json" }, signal,
-      body: JSON.stringify({ operation_id: pending.operationId, controller_origin: pending.controllerOrigin, public_key_jwk: record.publicKey, proof }),
-    });
-    if (!response.ok) throw new Error("Installation recovery needs the hub to confirm its credential generation. Retry cleanup before pairing again.");
+    await installationDeadline(async (requestSignal) => {
+      const proof = await signInstallation(record.privateKey, [`cassy-installation-${action}-v1`, record.id.split("@")[0], pending.controllerOrigin, pending.operationId, pending.invitationHash]);
+      requestSignal.throwIfAborted();
+      const response = await fetcher(new URL(`/v1/auth/pairing/${action}`, pending.baseUrl), {
+        method: "POST", credentials: "omit", headers: { "Content-Type": "application/json" }, signal: requestSignal,
+        body: JSON.stringify({ operation_id: pending.operationId, controller_origin: pending.controllerOrigin, public_key_jwk: record.publicKey, pairing_token_hash: pending.invitationHash, proof }),
+      });
+      if (!response.ok) throw new Error("Installation recovery needs the hub to confirm its credential generation. Retry cleanup before pairing again.");
+    }, signal);
   }
 
   private async recoverHub(hubId: string, fetcher: ExchangeOptions["fetcher"]): Promise<void> {

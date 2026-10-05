@@ -1,11 +1,12 @@
 import { webcrypto } from "node:crypto";
-import { beforeAll, describe, expect, it } from "vitest";
-import { InstallationAccess, type InstallationRecord, type InstallationStore, type InstallationLock, installationTranscript } from "./installation-access";
+import { beforeAll, afterEach, describe, expect, it, vi } from "vitest";
+import { InstallationAccess, type InstallationRecord, type InstallationStore, type InstallationLock, installationTranscript, installationDeadline } from "./installation-access";
 import { MachineCatalog, type MachineCatalogRecord } from "./storage";
 import { PairingCleanupError, type ExchangeOptions } from "./pairing-exchange";
 import type { StoredMachine } from "./types";
 
 beforeAll(() => Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true }));
+afterEach(() => vi.useRealTimers());
 function fixture() {
   const rows = new Map<string, MachineCatalogRecord>();
   const keys = new Map<string, InstallationRecord>();
@@ -18,13 +19,67 @@ function fixture() {
 }
 const credential = (generation: number, secret: string) => ({ device_id: "stable-device", credential_id: `credential-${generation}`, credential_generation: generation, credential: secret, expires_at: "2030-01-01T00:00:00Z", scopes: ["machine-read"], account_enrollment: { state: "unenrolled" } });
 function options(f: ReturnType<typeof fixture>, fetcher: ExchangeOptions["fetcher"], overrides: Partial<ExchangeOptions> = {}): ExchangeOptions {
-  return { invitation: { kind: "invitation", token: "A".repeat(43), hubId: "hub", hubUrl: "https://soundwave.example", controllerOrigin: "https://commander.example", scopes: ["machine-read"] }, controllerOrigin: "https://commander.example", deviceLabel: "Phone", operatorLabel: "Operator", fetcher: (input, init) => String(input).endsWith("/v1/health") ? Promise.resolve(json({ installation_protocol: 1 })) : fetcher(input, init),
+  return { invitation: { kind: "invitation", token: "A".repeat(43), hubId: "hub", hubUrl: "https://soundwave.example", controllerOrigin: "https://commander.example", scopes: ["machine-read"] }, controllerOrigin: "https://commander.example", deviceLabel: "Phone", operatorLabel: "Operator", fetcher: (input, init) => String(input).endsWith("/v1/auth/pairing/protocol") ? Promise.resolve(json({ installation_protocol: 1 })) : fetcher(input, init),
     createKey: async () => { throw new Error("must use retained installation key"); }, installationGeneration: 1,
     stagePersisted: (m, i) => f.catalog.stage(m, i), activatePersisted: (i, s) => f.catalog.activate(i, s), rollbackPersisted: (i) => f.catalog.rollback(i), ...overrides };
 }
 const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
 
 describe("installation transaction using real WebCrypto and catalog code", () => {
+  it("bounds a noncooperating fetch or body and never exposes its late result", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: string) => void;
+    let signal!: AbortSignal;
+    const pending = installationDeadline((s) => { signal = s; return new Promise<string>((resolve) => { finish = resolve; }); });
+    const refused = expect(pending).rejects.toThrow("within 10 seconds");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await refused;
+    expect(signal.aborted).toBe(true);
+    finish("late success");
+    await expect(pending).rejects.toThrow("within 10 seconds");
+  });
+
+  it("refuses a changed controller origin before generating or storing keys", async () => {
+    const f = fixture();
+    await expect(f.access.pair(options(f, async () => { throw new Error("unexpected request"); }, { controllerOrigin: "https://other.example" }))).rejects.toThrow("different Cassy Cloud origin");
+    expect(f.keys.size).toBe(0);
+    expect(f.rows.size).toBe(0);
+  });
+
+  it("an uncertain abort preserves quarantine and the staged prior until confirmed", async () => {
+    const f = fixture(); let generation = 0; let cancel = false; let offline = false;
+    const fetcher: ExchangeOptions["fetcher"] = async (input, init) => {
+      if (String(input).endsWith("exchange")) { generation++; return json(credential(generation, JSON.parse(String(init?.body)).installation.credential)); }
+      if (String(input).endsWith("commit") && generation === 2) { cancel = true; offline = true; }
+      if (String(input).endsWith("abort") && offline) throw new TypeError("offline");
+      return new Response(null, { status: 204 });
+    };
+    const old = await f.access.pair(options(f, fetcher));
+    await expect(f.access.pair(options(f, fetcher, { isCurrent: () => !cancel }))).rejects.toBeInstanceOf(PairingCleanupError);
+    expect([...f.keys.values()][0]!.pending?.identity).toBeDefined();
+    expect(await f.access.recover(fetcher)).toBe(1);
+    offline = false;
+    expect(await f.access.recover(fetcher)).toBe(0);
+    expect((await f.catalog.snapshot()).machines[0]).toEqual(old);
+  });
+
+  it("a final installation-record write failure rolls back the committed candidate", async () => {
+    const f = fixture(); let generation = 0; let fail = false;
+    const put = f.store.put;
+    f.store.put = async (record) => {
+      if (fail && !record.pending) { fail = false; throw new Error("storage unavailable"); }
+      return put(record);
+    };
+    const fetcher: ExchangeOptions["fetcher"] = async (input, init) => {
+      if (String(input).endsWith("exchange")) { generation++; return json(credential(generation, JSON.parse(String(init?.body)).installation.credential)); }
+      return new Response(null, { status: 204 });
+    };
+    const old = await f.access.pair(options(f, fetcher));
+    fail = true;
+    await expect(f.access.pair(options(f, fetcher))).rejects.toThrow("storage unavailable");
+    expect((await f.catalog.snapshot()).machines[0]).toEqual(old);
+    expect([...f.keys.values()][0]!.known?.credentialGeneration).toBe(1);
+  });
   it("five repairs retain a nonextractable key, exact device and increasing credential generation", async () => {
     const f = fixture();
     let generation = 0;
@@ -55,6 +110,8 @@ describe("installation transaction using real WebCrypto and catalog code", () =>
       expect((await f.catalog.snapshot()).machines).toHaveLength(1);
     }
     expect(f.keys.size).toBe(1);
+    expect(JSON.stringify([...f.keys.values()])).not.toContain(options(f, fetcher).invitation.token);
+    expect([...f.keys.values()][0]!.pending).toBeUndefined();
   });
 
   it("cancellation after server commit aborts remotely before restoring the old catalog", async () => {
@@ -81,10 +138,19 @@ describe("installation transaction using real WebCrypto and catalog code", () =>
     const broken: ExchangeOptions["fetcher"] = async () => { throw new TypeError("network unavailable"); };
     await expect(f.access.pair(options(f, broken))).rejects.toBeInstanceOf(PairingCleanupError);
     expect([...f.keys.values()][0]!.pending).toBeDefined();
+    // Pending recovery keeps a hash commitment, never the invitation bearer.
+    const token = options(f, broken).invitation.token;
+    expect(JSON.stringify([...f.keys.values()])).not.toContain(token);
+    expect([...f.keys.values()][0]!.pending?.invitationHash).toHaveLength(43);
+    // The same record remains safe after the ten-minute invitation lifetime.
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(600_001);
+    expect(JSON.stringify([...f.keys.values()])).not.toContain(token);
     const recovered: string[] = [];
     expect(await f.access.recover(async (input) => { recovered.push(String(input)); return new Response(null, { status: 204 }); })).toBe(0);
     expect(recovered[0]).toContain("/abort");
     expect([...f.keys.values()][0]!.pending).toBeUndefined();
+    expect(JSON.stringify([...f.keys.values()])).not.toContain(token);
   });
 
   it("two tabs serialize, reread the winner and never stage from a stale generation", async () => {
@@ -143,6 +209,16 @@ describe("installation transaction using real WebCrypto and catalog code", () =>
     await f.access.pair(options(f, fetcher)); await f.catalog.remove("hub");
     const repaired = await f.access.pair(options(f, fetcher));
     expect(repaired.deviceId).toBe("stable-device");
+  });
+
+  it("confirmed own revocation clears the old enrollment binding while local Remove retains it", async () => {
+    const f = fixture();
+    const fetcher: ExchangeOptions["fetcher"] = async (input, init) => String(input).endsWith("exchange") ? json(credential(1, JSON.parse(String(init?.body)).installation.credential)) : new Response(null, { status: 204 });
+    const old = await f.access.pair(options(f, fetcher));
+    await f.access.forgetRevoked(old.id, old.baseUrl, old.deviceId);
+    await f.catalog.remove(old.id);
+    expect([...f.keys.values()][0]!.known).toBeUndefined();
+    expect([...f.keys.values()][0]!.publicKey).toEqual(old.publicKey);
   });
 
   it("catalog rejects late refresh overwrites from old generation or another installation", async () => {

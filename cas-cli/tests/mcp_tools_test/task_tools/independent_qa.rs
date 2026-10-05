@@ -755,6 +755,11 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
 async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatched() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
+    // cas-de60: an unparked merged delivery needs its own lineage; the
+    // shared worker lane is not authoritative delivery evidence.
+    let branch = format!("factory/test-agent-{task_id}");
+    git(&repo, &["checkout", "-q", "-b", &branch]);
+    let delivered = git(&repo, &["rev-parse", "HEAD"]);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -777,8 +782,8 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     // worker closed.
     git(&repo, &["branch", "epic/ui", "main"]);
     git(&repo, &["checkout", "-q", "epic/ui"]);
-    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "factory/test-agent"]);
-    git(&repo, &["checkout", "-q", "factory/test-agent"]);
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", &branch]);
+    git(&repo, &["checkout", "-q", &branch]);
 
     let refused = close_text(&core, &task_id).await;
     assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
@@ -787,6 +792,8 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert_eq!(passes.len(), 1);
+    assert_eq!(passes[0].branch, branch);
+    assert_eq!(passes[0].bound_head, delivered);
     let handoff = open_prompt_queue_store(&cas_dir)
         .unwrap()
         .peek_all(50)
@@ -807,7 +814,7 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     let guard = cas::qa_pass::supervisor_merge_refusal(
         &cas_dir,
         &repo,
-        "git merge --no-ff --no-commit factory/test-agent",
+        &format!("git merge --no-ff --no-commit {branch}"),
     )
     .expect("the backstop's InProgress round must block a raw merge");
     assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
@@ -847,6 +854,9 @@ impl SupervisorRole {
 async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_cas_5c38() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
+    // cas-de60: identify the delivery before its first (post-merge) close.
+    let branch = format!("factory/test-agent-{task_id}");
+    git(&repo, &["checkout", "-q", "-b", &branch]);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -855,9 +865,9 @@ async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_c
     tasks.update(&task).unwrap();
 
     git(&repo, &["checkout", "-q", "main"]);
-    git(&repo, &["merge", "-q", "--no-ff", "-m", "merged in May", "factory/test-agent"]);
-    let merged = git(&repo, &["rev-parse", "factory/test-agent"]);
-    git(&repo, &["checkout", "-q", "factory/test-agent"]);
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merged in May", &branch]);
+    let merged = git(&repo, &["rev-parse", &branch]);
+    git(&repo, &["checkout", "-q", &branch]);
 
     let refused = close_text(&core, &task_id).await;
     assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");

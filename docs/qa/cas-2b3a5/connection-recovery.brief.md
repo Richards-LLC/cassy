@@ -19,12 +19,15 @@ are server UUIDs. Unsupported/unknown permission remains unknown; a denied
 granular permission is measured evidence, not proof that it caused the request.
 
 Whole-operation deadlines include signing, fetch and response bodies: reads,
-pairing create/poll/ack and credential refresh 10s; catalog and stage deadlines
+pairing create/poll/ack, pre-install exchange and credential refresh 10s; catalog and stage deadlines
 remain 3–5s; session launch 30s; SSE waits 60s between bytes (hub keepalive is
 15s), teardown 1s. Timed-out mutations may have reached the hub. No general
 request wrapper automatically resends mutations. Refresh rotation policy belongs
-to cas-5e53. Pairing exchange/install persistence also belongs to that task;
-this task does not race a partially installed credential against a new timer.
+to cas-5e53. Pairing key creation, exchange fetch and response body share a 10s deadline;
+its cancellation maps back to PairingExchangeError. Timeout keeps a retry with
+LNA site-settings guidance and explicit invitation-consumption uncertainty.
+Installation writes retain the original cancellation boundary and are never
+raced against the timer; their generation/rotation policy belongs to cas-5e53.
 
 Events continue while one shared catalog request runs; a burst requests one
 trailing refresh. SSE and multiplex share that lane, with at least 1s between

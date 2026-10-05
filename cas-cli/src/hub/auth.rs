@@ -1613,6 +1613,18 @@ impl AuthStore {
     }
 
     /// The audit writer's health as this process knows it (cas-0140).
+    /// Content-free connection evidence. Caller supplies fixed route/refusal
+    /// categories and a server-generated UUID, never raw headers or paths.
+    pub(crate) fn audit_connection(&self, category: &str, preflight: bool, status: u16, request_id: &str, reason: Option<&str>, count: u64) -> Result<()> {
+        let row = serde_json::json!({
+            "timestamp": Utc::now(), "action": "connection_recovery", "request_id": request_id,
+            "category": category, "preflight": preflight, "status": status,
+            "reason": reason, "count": count,
+        });
+        self.lock().and_then(|_state_lock| append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &row))
+    }
+
+    /// The audit writer's health as this process knows it (cas-0140).
     pub fn audit_health(&self) -> Option<AuditHealth> {
         self.0
             .audit_health

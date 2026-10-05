@@ -328,6 +328,33 @@ export class ConversationHistory {
     });
   }
 
+  markReplyPersisted(notificationId: number): void {
+    for (const event of this.events) if (event.kind === "reply" && event.value.notification_id === notificationId) event.value.device_persisted = true;
+  }
+
+  /** Reconcile another tab's committed journal, without making a claim replayable. */
+  synchronizePending(sends: PendingSend[], now = Date.now()): PendingSend[] {
+    const stored = new Map(sends.map((send) => [send.id, send]));
+    for (const event of this.events) {
+      if (event.kind !== "send" || event.value.notificationId !== undefined || event.value.dismissed || event.value.replaced) continue;
+      const current = stored.get(event.value.id);
+      if (!current) {
+        delete event.value.held;
+        event.value.state = "error";
+        event.value.error = "This pending message was settled or removed in another tab.";
+        event.value.dismissed = true;
+      } else if (current.state !== "held" && event.value.held) {
+        delete event.value.held;
+        event.value.state = current.state === "error" ? "error" : "unconfirmed";
+        event.value.error = current.error;
+        event.value.sentAt = current.sentAt;
+        event.value.unconfirmedAt = now;
+        event.value.restored = true;
+      }
+    }
+    return this.restorePending(sends, now);
+  }
+
   /**
    * Put messages kept across a reload back in the thread (cas-e7b1), each once.
    * A held message still waits: it has never left this browser, and the

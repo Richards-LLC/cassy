@@ -1846,6 +1846,7 @@ dialog form > *,
 .thread .bub.receipt .receipt-text { min-width: 0; }
 .thread .tick { width: 15px; height: 15px; margin-top: 4px; color: var(--state-ok); flex: none; display: block; }
 .thread .conversation-delivery { display: block; margin-top: 6px; font-size: 12px; opacity: 0.85; }
+.thread .reply-storage-receipt { display: block; margin-top: 6px; color: var(--ink); font-size: 12px; }
 /* P8 (cas-b1ee): a refused send looks refused, not delivered. No fill, a
  * dashed critical outline (--crit-bg on --canvas ≥5.9:1 both schemes), body
  * in --ink, a 13px semibold "Not sent" lead with a warning glyph, and Edit /

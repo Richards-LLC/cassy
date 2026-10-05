@@ -183,6 +183,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Assembly admits parallel test-binary links from live free memory
   (`CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS`, default 8) instead of one at a time;
   the reserve and compile guard are unchanged.
+- Worker browser and JS test suites (npm/npx, Playwright, Vitest and the
+  hub-web build, typecheck and visual-QA entry points) now wait for shared
+  host-memory admission through `scripts/worker-memory.py` instead of starving
+  the release proof: one suite runs per host, proofs take priority, waits print
+  `waiting for host memory (proof running), N s` bounded by
+  `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS` (default 600), and a running
+  suite is stopped if free memory falls inside its headroom. A credential or
+  other hook deny still wins over admission. Previously 125 headless browsers
+  pushed free memory below the proof's reserve and aborted it.
 - Each worktree's Rust proof builds into its own target directory
   (`scripts/proof_target.py`), and proof logs record the worktree, HEAD and
   target, so another worktree's build output can't produce a false result.

@@ -63,20 +63,20 @@ Run these commands in order:
 cas --version
 tailscale status --json
 tailscale serve status --json
-cas hub --tailscale-serve
+cas hub start
 cas hub status
 tailscale serve status --json
 curl --fail --silent --show-error https://MACHINE.TAILNET.ts.net/v1/health
 ```
 
-`cas hub --tailscale-serve` prints the stable HTTPS URL. The health response is intentionally minimal: `schema_version` and `ready`. The private files `~/.cas/hub/tailscale-serve.json` and `~/.cas/hub/tailscale-serve-teardown.json` preserve exact before/after Serve status receipts with mode 0600.
+`cas hub start` prints the stable HTTPS URL. The health response is intentionally minimal: `schema_version` and `ready`. The private files `~/.cas/hub/tailscale-serve.json` and `~/.cas/hub/tailscale-serve-teardown.json` preserve exact before/after Serve status receipts with mode 0600.
 
 If Tailscale is absent, logged out, lacks Serve permission, or the requested HTTPS port already has another handler, startup prints a refusal and the local hub remains available at `http://127.0.0.1:4173`. Cassy never runs `tailscale serve reset` and never replaces an unrelated handler.
 
 Use a non-default port only when 443 is deliberately assigned elsewhere:
 
 ```sh
-cas hub --tailscale-serve --tailscale-serve-port 8443
+cas hub start --tailscale-serve-port 8443
 ```
 
 The corresponding stable URL includes `:8443`.
@@ -99,13 +99,48 @@ cas hub service install --dry-run
 
 On macOS this writes and bootstraps the launchd LaunchAgent at
 `~/Library/LaunchAgents/dev.cas.commander-hub.plist` with `RunAtLoad` and
-`KeepAlive`; launchd supervision is loopback-only because Tailscale Serve cannot
-publish from its bootstrap namespace. To pair Commander on macOS, run
-`cas hub service uninstall && cas hub start --tailscale-serve` from an interactive
-shell instead. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
+`KeepAlive`. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
 enables it, starts it, and enables user lingering so it survives logout and
-reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`;
-they never contain hub identity, auth state, tokens, or credential paths.
+reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`
+and request tailnet-only Tailscale Serve HTTPS by default. They never contain
+hub identity, auth state, tokens, or credential paths.
+
+`cas hub start`, `cas hub restart`, service install and `cas update` request
+Serve even when the previous hub was loopback-only. Existing HTTPS port choices
+are preserved during restart/update. Use `--no-tailscale-serve` for an explicit
+loopback-only launch or service install. For a persistent host opt-out, add to
+`~/.cas/config.toml` (the hub reads host configuration, not project configuration):
+
+```toml
+[hub]
+tailscale_serve = false
+```
+
+An explicit `--tailscale-serve` overrides this setting for that launch; an
+explicit `--no-tailscale-serve` overrides the default. Service definitions encode
+the resolved choice so the service child cannot re-enable an opted-out launch.
+The next update reapplies the host configuration. Configure this host file with
+`CAS_ROOT="$HOME/.cas" cas config set hub.tailscale_serve false --store cas-root`.
+
+After a binary update, Cassy starts a stopped hub if its service is installed
+or `~/.cas/hub/machine-id` exists. A machine with neither stays stopped and
+prints `hub not running; start with cas hub start`. Start/restart and transport
+checks have bounded timeouts. Starting a previously absent hub is best effort:
+one attempt records `action=start_failed` and its cause if the service cannot
+start, while update continues. Recovery of an existing runtime still fails
+if loopback cannot be verified. Missing Tailscale, logout, Serve permission or publication
+failure leaves a healthy loopback hub and does not fail the update. Its receipt
+records `verified=true`, `loopback_verified=true`, `transport_verified=false`,
+a reason in `transport_warning`, and a remedy; run `tailscale status`, then
+`cas hub restart` after fixing the cause.
+
+On macOS, the CLI selected through `TAILSCALE`, Homebrew or the app bundle must
+be usable by the LaunchAgent. The GUI app and a separately installed tailscaled
+can have different login/session state; inspect the actual CLI's `tailscale
+status` when publication is unavailable. Installation now attempts Serve and
+falls back to loopback instead of refusing launchd publication up front. Check
+`cas hub status` for `Tailscale Serve: OK` before relying on phone access.
+
 Service output is written to `~/.cas/hub/hub.log`; `cas hub service status`
 reports the manager state, hub health, and this log path.
 

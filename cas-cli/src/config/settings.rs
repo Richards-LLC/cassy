@@ -19,6 +19,9 @@ pub struct SlackConfig {
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HubConfig {
+    /// Publish the machine hub through Tailscale Serve by default. Explicit false opts out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale_serve: Option<bool>,
     /// Public origin used when authorizing a Commander page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,

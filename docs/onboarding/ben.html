@@ -88,7 +88,7 @@ open -a Tailscale
 cas hub service install
 cas hub service status
 cas hub pair</code></pre>
-    <p>On macOS this is a user-level <code>launchd</code> service: it starts at login and survives a reboot, but stays loopback-only because Tailscale Serve needs the interactive user session. For Commander pairing, run <code>cas hub service uninstall &amp;&amp; cas hub start --tailscale-serve</code> from an interactive shell. Use <code>cas hub service uninstall</code> later without deleting the hub identity or pairings.</p>
+    <p>On macOS this is a user-level <code>launchd</code> service: it starts at login and survives a reboot, requesting Tailscale Serve by default. Check <code>cas hub status</code> for <code>Tailscale Serve: OK</code> before phone pairing. If publication is unavailable, the hub stays loopback-only; check <code>tailscale status</code> and retry <code>cas hub restart</code>. Use <code>--no-tailscale-serve</code> for loopback-only use. <code>cas hub service uninstall</code> removes supervision without deleting identity or pairings.</p>
   </section>
 
   <section class="card">

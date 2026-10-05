@@ -12,6 +12,7 @@ import csv
 import fcntl
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -24,7 +25,9 @@ import tempfile
 import time
 import tomllib
 
-import proof_target
+_target_spec = importlib.util.spec_from_file_location("proof_target", Path(__file__).with_name("proof_target.py"))
+proof_target = importlib.util.module_from_spec(_target_spec)
+_target_spec.loader.exec_module(proof_target)
 
 FORMAT = 2
 MAX_AGE = 86400

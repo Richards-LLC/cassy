@@ -598,7 +598,7 @@ def prove_owned(root):
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
         target = path.parent.parent / "assembly-target"
-        with release_scratch.BoundedCache(target, env) as clone_target, \
+        with release_scratch.BoundedCache(target, env, root) as clone_target, \
                 release_scratch.OwnedDirectory("assembly-clone-", scratch.parent) as directory:
             clone = Path(directory) / "repo"
             release_scratch.child_run(["git", "clone", "--quiet", "--shared", "--no-checkout",

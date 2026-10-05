@@ -391,6 +391,7 @@ class ReceiptTests(unittest.TestCase):
         if recover_test:
             snapshots = itertools.chain([memory, memory, dict(memory, available_bytes=17 * proof.GIB)], itertools.repeat(memory))
         with mock.patch.object(proof, "clone_scratch", return_value=Path(scratch.name) / "base"), \
+                mock.patch.dict(proof.os.environ, {"CAS_RELEASE_SCRATCH_EXTRA_BASES": "", "TMPDIR": scratch.name}), \
                 mock.patch.object(proof, "inputs", return_value=(self.expected, dict(proof.test_environment(self.root), CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS="1"))), \
                 mock.patch.object(proof, "memory_snapshot", return_value=memory, side_effect=snapshots), \
                 mock.patch.object(proof, "cpu_count", return_value=32), \

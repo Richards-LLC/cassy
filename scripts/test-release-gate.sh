@@ -67,6 +67,14 @@ path = Path(sys.argv[1])
 path.write_text(path.read_text().replace("def memory_snapshot():", "def memory_snapshot():\n    return {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_MEMORY_GUARD_FIXTURE
     cp "$script_dir/release_scratch.py" "$repo/scripts/release_scratch.py"
+    # Sweeper integration has isolated real-filesystem regressions; these gate
+    # fixtures must never reclaim the host's production scratch.
+    python3 - "$repo/scripts/release_scratch.py" <<'PY_SCRATCH_SWEEP_FIXTURE'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("def sweep(repo, base, clean=False, env=None):", "def sweep(repo, base, clean=False, env=None):\n    return {'entries': [], 'reclaimable_bytes': 0, 'reclaimed_bytes': 0}"))
+PY_SCRATCH_SWEEP_FIXTURE
     # Cargo is fake here: bypass only durable-location classification in the
     # copied producer. Production guard behavior has its own Python regressions.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_SCRATCH'

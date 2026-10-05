@@ -195,6 +195,11 @@ def sweep(repo, base, clean=False, env=None):
     cutoff = time.time() - positive(env, "CAS_RELEASE_SCRATCH_MAX_AGE_HOURS", 6) * 3600
     base = Path(base).absolute()
     parents = {base.parent: (base.name + ".", "assembly-clone-")}
+    legacy = env.get("CAS_RELEASE_SCRATCH_EXTRA_BASES", "/home/cas-release-gate/base:/var/tmp/cas-release-gate:/Users/Shared/cas-release-gate")
+    for value in filter(None, legacy.split(os.pathsep)):
+        other = Path(value).absolute()
+        parents.setdefault(other.parent, tuple())
+        parents[other.parent] += (other.name + ".", "assembly-clone-")
     temp_parent = Path(env.get("TMPDIR") or tempfile.gettempdir()).absolute()
     parents.setdefault(temp_parent, tuple())
     parents[temp_parent] += ("cas-release-gate.",)
@@ -205,8 +210,13 @@ def sweep(repo, base, clean=False, env=None):
             continue
         # Serialize allocators/sweepers in this parent. Missing-owner legacy
         # directories are admitted only after the age and OS liveness checks.
-        with (parent / ".cas-scratch-sweep.lock").open("a+") as sweep_lock:
-            fcntl.flock(sweep_lock, fcntl.LOCK_EX)
+        lock_path = parent / ".cas-scratch-sweep.lock"
+        if lock_path.is_symlink():
+            continue
+        lock_context = lock_path.open("a+" if clean else "r") if clean or lock_path.exists() else contextlib.nullcontext()
+        with lock_context as sweep_lock:
+            if sweep_lock:
+                fcntl.flock(sweep_lock, fcntl.LOCK_EX if clean else fcntl.LOCK_SH)
             for path in sorted(parent.iterdir()):
                 if not path.name.startswith(prefixes) or path.is_symlink() or not path.is_dir():
                     continue
@@ -217,7 +227,11 @@ def sweep(repo, base, clean=False, env=None):
                 reclaimable = False
                 lock = None
                 try:
-                    if any(contains(path.resolve(), tree) for tree in protected):
+                    remap_git = path / "workspace-remap/.git"
+                    clone_registry = path / "repo/.git/worktrees"
+                    if (any(contains(path.resolve(), tree) for tree in protected)
+                            or remap_git.is_file() or remap_git.is_symlink()
+                            or (clone_registry.is_dir() and any(clone_registry.iterdir()))):
                         reason = "registered worktree"
                     elif stat.st_mtime <= cutoff:
                         owner_file = path / OWNER
@@ -226,11 +240,15 @@ def sweep(repo, base, clean=False, env=None):
                             reason = "live owner"
                         else:
                             lease = Path(owner.get("lease", path / LOCK))
-                            if lease.is_symlink() or (path / LOCK).is_symlink():
+                            safe_lease = lease == path / LOCK or (lease.name == LOCK and lease.parent.name.startswith("cas-release-gate."))
+                            if not safe_lease or lease.is_symlink() or (path / LOCK).is_symlink():
                                 reason = "unsafe lease"
                             else:
-                                lock = lease.open("a+") if lease.parent.is_dir() else (path / LOCK).open("a+")
-                                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                if not lease.exists():
+                                    lease = path / LOCK
+                                if clean or lease.exists():
+                                    lock = lease.open("a+" if clean else "r")
+                                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                                 if process_uses(path.resolve()):
                                     reason = "live process"
                                 else:
@@ -257,21 +275,26 @@ def sweep(repo, base, clean=False, env=None):
 
 
 class BoundedCache:
-    def __init__(self, path, env):
+    def __init__(self, path, env, repo=None):
         self.path = Path(path)
         self.cap = int(positive(env, "CAS_ASSEMBLY_TARGET_MAX_GIB", 20) * 1024 ** 3)
         self.age = positive(env, "CAS_ASSEMBLY_TARGET_MAX_AGE_DAYS", 7) * 86400
         self.lock = None
+        self.repo = repo
 
     def prune(self):
         if self.path.is_symlink():
             raise ValueError("assembly target must not be a symlink")
         if not self.path.exists():
             return
+        if self.repo and any(contains(self.path.resolve(), tree) for tree in worktrees(self.repo)):
+            raise ValueError("assembly target contains a registered worktree")
         used = size(self.path)
         stamp = self.path / ".cas-last-used"
         modified = stamp.stat().st_mtime if stamp.exists() else self.path.stat().st_mtime
         if used > self.cap or time.time() - modified > self.age:
+            if process_uses(self.path.resolve()):
+                raise ValueError("over-bound assembly target still has live users; eviction refused")
             print(f"assembly target eviction: {self.path} bytes={used} cap={self.cap} age_bound_s={self.age}", flush=True)
             shutil.rmtree(self.path)
 
@@ -282,7 +305,11 @@ class BoundedCache:
             raise ValueError("assembly target lease must not be a symlink")
         self.lock = lock_path.open("a+")
         fcntl.flock(self.lock, fcntl.LOCK_EX)
-        self.prune()
+        try:
+            self.prune()
+        except BaseException:
+            self.lock.close()
+            raise
         return self.path
 
     def __exit__(self, *exc):

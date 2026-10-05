@@ -215,6 +215,19 @@ export class HubConnectionSupervisor {
   private desired = false;
   private attempt = 0;
   private eventAbort?: AbortController;
+  private catalogRequest?: Promise<HubSession[]>;
+  /** SSE and multiplexed events share this lane; event delivery never waits. */
+  private readonly eventCatalog = new CoalescedRefresh(async () => {
+    if (!this.desired || this.lifecycle.phase !== "live") return;
+    const stream = this.eventAbort;
+    try {
+      await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+    } catch (error) {
+      // Preserve the existing event-stream recovery path and its deadline.
+      // A late failure from an old stream must not abort its replacement.
+      if (stream === this.eventAbort && !stream?.signal.aborted) stream?.abort(error);
+    }
+  }, () => {});
   private retryTimer?: number;
   private heartbeatTimer?: number;
   private missedHeartbeats = 0;
@@ -270,7 +283,7 @@ export class HubConnectionSupervisor {
   private catalogRequest?: Promise<HubSession[]>;
   /** Shared SSE/multiplex lane: at most one event-driven catalog start/s. */
   private readonly eventCatalog = new CoalescedRefresh(async () => {
-    if (!this.desired) return;
+    if (!this.desired || this.lifecycle.phase !== "live") return;
     const stream = this.eventAbort;
     try { await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)])); }
     catch (error) { if (stream === this.eventAbort && !stream?.signal.aborted) stream?.abort(error); }

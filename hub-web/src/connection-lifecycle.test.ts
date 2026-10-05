@@ -107,22 +107,59 @@ function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = (
 }
 
 describe("Commander live connection lifecycle", () => {
-  it("fires100 events in1s with at most2 catalog GETs and fresh final state (cas-2b3a5)", async () => {
+  it("delivers a stalled catalog's entire burst and joins manual refreshes to its flight (cas-b55b)", async () => {
     const hub = transport();
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("burst"), () => {}, event => events.push(event));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
+    hub.stallRefresh(true);
+    for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
+    await vi.waitFor(() => expect(events).toHaveLength(100));
+    const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    connection.stop();
+    await Promise.all(manual);
+  });
+  it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {
+    const hub = transport(multiplex);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
     let latest: string | undefined;
-    const connection = supervisor(await storedMachine("rate-cap"), () => {}, () => {}, sessions => { latest = sessions[0]?.name; });
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("rate-cap"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    let socket: TransportSocket | undefined;
+    if (multiplex) {
+      const attached = connection.attach("session-a");
+      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+      socket = TransportSocket.instances[0]!;
+      socket.open(); socket.receive({ proto: 2 });
+      await attached;
+    }
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     for (let i = 1; i <= 100; i++) {
-      hub.catalogRevision(i); hub.event({ kind: "session_added", sequence: i, revision: 0 });
+      hub.catalogRevision(i);
+      const event = { kind: "session_added", sequence: i };
+      // Mix both transports: they must share one refresh lane, not one each.
+      if (socket && i % 2 === 0) socket.receive({ channel: "events", event });
+      else hub.event(event);
       await vi.advanceTimersByTimeAsync(10);
     }
     expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(latest).toBe("catalog-100"));
+    expect(events).toHaveLength(100);
     expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
+    connection.stop();
+    const stopped = hub.requests.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(hub.requests).toHaveLength(stopped);
   });
+
   it("distinguishes a measured browser health503 from an opaque fetch failure (cas-2b3a5)", async () => {
     transport();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable", { status: 503 })));

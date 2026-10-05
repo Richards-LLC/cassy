@@ -1,3 +1,4 @@
+import { CAUSE_COPY } from "./connection-diagnostics";
 import {
   attachElapsedSeconds,
   elapsedSeconds as stageElapsedSeconds,
@@ -55,9 +56,9 @@ export interface ConnectionSurfaceOptions {
 const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
   idle: "waiting to start the connection",
   resolving: "resolving the target node",
-  dialing: "dialing the relay",
+  dialing: "checking the machine's HTTP hub",
   auth: "checking session authorization",
-  attaching: "waiting for relay handshake",
+  attaching: "opening the machine's event stream or terminal socket",
   live: "waiting for the terminal heartbeat",
 };
 
@@ -93,8 +94,14 @@ export function connectionTimeline(snapshot: ConnectionSnapshotView): Connection
       tone: failed ? "failed" : "evidence",
     });
   }
+  if (snapshot.cause) {
+    const cause = snapshot.cause;
+    entries.push({ label: "Connection cause", detail: `${CAUSE_COPY[cause.code].title} · ${cause.layer}${cause.status === undefined ? "" : ` · HTTP ${cause.status}`}${cause.closeCode === undefined ? "" : ` · socket ${cause.closeCode}`}`, tone: "evidence" });
+    entries.push({ label: "Recovery action", detail: CAUSE_COPY[cause.code].action, tone: "evidence" });
+  }
+  entries.push({ label: "Last successful connection", detail: snapshot.lastSuccessAt ? new Date(snapshot.lastSuccessAt).toLocaleTimeString() : "Not measured in this visit", tone: "evidence" });
   if (retrying && snapshot.retryInMs !== undefined) {
-    const seconds = Math.max(0, Math.ceil(snapshot.retryInMs / 1_000));
+    const seconds = Math.max(0, Math.ceil((snapshot.nextRetryAt === undefined ? snapshot.retryInMs : snapshot.nextRetryAt - Date.now()) / 1_000));
     entries.push({
       label: "Next attempt",
       detail: `reconnecting in ${seconds}s`,

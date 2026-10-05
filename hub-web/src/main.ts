@@ -4,6 +4,8 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress } from "./progress-model";
 import { presentFleetSheet } from "./fleet-sheet";
+import { CAUSE_COPY } from "./connection-diagnostics";
+import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
@@ -1337,20 +1339,20 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
       const hubUrl = result.invitation.hubUrl;
       if (hubUrl) {
         try {
-          await fetch(new URL("/v1/health", hubUrl), {
+          await withRequestDeadline(signal => fetch(new URL("/v1/health", hubUrl), {
             method: "GET",
             mode: "no-cors",
             cache: "no-store",
             credentials: "omit",
-            signal: AbortSignal.timeout(3_000),
-          });
+            signal,
+          }), operation.signal, 3_000);
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           // The heading already says "Machine authorized"; the status only names the next step (cas-b2e4 F01).
           pairingStatus = "Add your name, then press Pair.";
         } catch {
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           const machine = result.invitation.machineLabel ?? result.invitation.hubId;
-          pairingStatus = `Approved — but this device can't reach ${machine}'s hub. Check that Tailscale (VPN) is connected on this device and that Private DNS or secure DNS isn't overriding it, then try a fresh code.`;
+          pairingStatus = `Approved — this browser's reachability check for ${machine} failed. Check Tailscale (VPN), browser site permissions (Local network access), and Private DNS or secure DNS, then press Pair to try this approved invitation.`;
         }
         render();
       }
@@ -1571,16 +1573,41 @@ function openConnectionLog(machineId: string): void {
     dialog = document.createElement("dialog");
     dialog.id = "connection-log";
     dialog.className = "connection-log";
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre></section>';
+    dialog.setAttribute("aria-label", "Connection log");
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><pre>Running diagnostics…</pre></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
+  const summary = dialog.querySelector<HTMLElement>(".connection-log-summary")!;
+  const download = dialog.querySelector<HTMLButtonElement>(".connection-log-export")!;
+  download.disabled = true;
+  const update = () => {
+    const connection = connections.get(machineId);
+    const machineState = connection?.snapshot();
+    const state = machineState?.phase !== "live" || machineState.degraded ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
+    const cause = state?.cause;
+    const retry = state?.nextRetryAt === undefined ? "No retry scheduled." : `Next retry in ${Math.max(0, Math.ceil((state.nextRetryAt - Date.now()) / 1000))}s.`;
+    const evidence = cause ? `${cause.status === undefined ? "" : ` Measured HTTP status: ${cause.status}.`}${cause.closeCode === undefined ? "" : ` Measured socket close: ${cause.closeCode}.`}${cause.permission === undefined || cause.permission === "unknown" ? "" : ` Measured local-network permission: ${cause.permission}.`}` : "";
+    summary.textContent = `${cause ? `${CAUSE_COPY[cause.code].title} (${cause.layer}).${evidence} ${CAUSE_COPY[cause.code].action}` : "No active failure measured."} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
+  };
+  update();
+  const timer = window.setInterval(update, 1000);
+  dialog.addEventListener("close", () => window.clearInterval(timer), { once: true });
   output.textContent = "Running diagnostics…";
   dialog.showModal();
   void connections.get(machineId)?.diagnose().then((result) => {
-    output.textContent = JSON.stringify(result, null, 2);
+    const json = JSON.stringify(result, null, 2);
+    output.textContent = json;
+    download.disabled = new TextEncoder().encode(json).byteLength > 65_536;
+    download.onclick = () => {
+      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = "commander-connection-diagnostics.json";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    };
   }).catch((error) => {
-    output.textContent = error instanceof Error ? error.message : "Diagnosis failed";
+    output.textContent = "Diagnostics unavailable. The connection cause above remains available.";
   });
 }
 
@@ -1624,7 +1651,6 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     if (!banner) {
       banner = document.createElement("div");
       banner.className = "terminal-disconnected-banner";
-      banner.setAttribute("role", "status");
       grid.prepend(banner);
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
@@ -1642,6 +1668,9 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     if (!words) {
       words = document.createElement("span");
       words.className = "banner-text";
+      // Announce the cause once; adjacent recovery controls stay discoverable
+      // without becoming part of the live-region announcement.
+      words.setAttribute("role", "status");
       banner.replaceChildren(words);
     }
     // cas-a6f0: still live but its heartbeats go unanswered: not lost yet.
@@ -1672,6 +1701,13 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       repair.remove();
     }
     banner.dataset.scope = pairingLost ? "pairing" : unsteady ? "unsteady" : sessionOnly ? "session" : "machine";
+    if (!banner.querySelector(".banner-diagnose")) {
+      const details = document.createElement("button");
+      details.type = "button"; details.className = "banner-diagnose";
+      details.textContent = "Details"; details.setAttribute("aria-label", "Connection details");
+      details.onclick = () => openConnectionLog(machineId);
+      banner.append(details);
+    }
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
     // A toast already up when the banner arrives moves clear of it (cas-00cc).
@@ -3383,6 +3419,13 @@ function render(captureDraft = true): void {
     return;
   }
   deferredRender.settled();
+  // A lease/connection change can rebuild the shell while the same notice
+  // is being copied. Keep that view's panel so payload reconciliation can
+  // retain its actual Details and Copy nodes, not only restore their focus.
+  const attentionPanel = document.querySelector<HTMLElement>("#attention-panel");
+  const preservedAttention = attentionPanel?.dataset.viewScope === attentionViewScope() ? attentionPanel : undefined;
+  const attentionFocus = preservedAttention?.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
+  preservedAttention?.remove();
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
   const pairedDialogWasOpen = machineDialog?.open === true;
@@ -3437,6 +3480,7 @@ function render(captureDraft = true): void {
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
   app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability() }, regions));
+  if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
   const visibleToast = document.querySelector<HTMLElement>("#toast.visible");
@@ -3454,6 +3498,7 @@ function render(captureDraft = true): void {
   }
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
+  if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
   // markup until its region shows it (the phone Attention badge, cas-a5c6),
   // and focus() on a hidden control does nothing, so a rebuild left focus on
@@ -3784,9 +3829,18 @@ function compatibilityWarning(machineId: string): string | undefined {
   return undefined;
 }
 
+function attentionViewScope(): string {
+  const view = [selectedMachineId, selectedSession];
+  // A changed roster is a structural rebuild: its new panel restores the
+  // corresponding notice/control. Transient lease/connection changes reuse it.
+  const roster = [...sessions].flatMap(([id, entries]) => entries.map(entry => [id, entry.name]));
+  return JSON.stringify([view, roster]);
+}
+
 function renderAttention(): void {
   const container = document.querySelector<HTMLElement>("#attention-panel");
   if (!container) return;
+  container.dataset.viewScope = attentionViewScope();
   // The open conversation's own attention: its machine's alarms and its session's events.
   const visibleAttention = attention.filter((item) => item.machineId === selectedMachineId && (!item.session || item.session === selectedSession));
   contextAttention = groupAttention(visibleAttention).length;

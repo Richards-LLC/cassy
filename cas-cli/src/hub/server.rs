@@ -45,6 +45,7 @@ pub struct HubState<R: SessionReadModel> {
     /// (cas-566b). Held across the whole operation, which also serializes
     /// operations on this hub.
     operations: Arc<tokio::sync::Mutex<HashMap<(String, String), OperationReplay>>>,
+    recovery: super::connection_recovery::RecoveryTelemetry,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -67,6 +68,7 @@ impl<R: SessionReadModel> HubState<R> {
             response_transport: TransportSecurity::Plaintext,
             launches: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            recovery: super::connection_recovery::RecoveryTelemetry::default(),
         }
     }
 
@@ -94,6 +96,7 @@ impl<R: SessionReadModel> HubState<R> {
 
 pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
     let response_transport = state.response_transport;
+    let recovery = (state.recovery.clone(), state.auth.clone());
     Router::new()
         .route("/", get(commander_index))
         .route("/commander", get(commander_index))
@@ -189,10 +192,45 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(recovery, connection_evidence))
         .layer(middleware::from_fn_with_state(
             response_transport,
             security_headers,
         ))
+}
+
+async fn connection_evidence(
+    State((telemetry, auth)): State<(super::connection_recovery::RecoveryTelemetry, Option<AuthStore>)>,
+    request: Request<Body>, next: Next,
+) -> Response {
+    let category = super::connection_recovery::category(request.uri().path());
+    let preflight = request.method() == axum::http::Method::OPTIONS;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut response = next.run(request).await;
+    let status = response.status().as_u16();
+    let reason = response.headers().get("x-cas-refusal").and_then(|value| value.to_str().ok());
+    if let Some(count) = telemetry.record(category, preflight, status, &request_id, reason)
+        && (preflight || status == 401 || status == 403) {
+        if let Some(auth) = auth {
+            let _ = auth.audit_connection(category, preflight, status, &request_id, reason.map(super::connection_recovery::refusal), count);
+        }
+    }
+    response.headers_mut().insert("x-cas-request-id", HeaderValue::from_str(&request_id).expect("UUID header"));
+    // Request IDs are observable to this origin only after the route grants
+    // CORS. Unbound pairing attempts must receive no CORS disclosure headers.
+    if response.headers().contains_key("access-control-allow-origin") {
+        let prior_expose = response.headers().get("access-control-expose-headers")
+            .and_then(|value| value.to_str().ok()).unwrap_or_default();
+        let expose = if prior_expose.split(',').any(|name| name.trim().eq_ignore_ascii_case("X-Cas-Request-Id")) {
+            prior_expose.to_owned()
+        } else if prior_expose.is_empty() {
+            "X-Cas-Request-Id".to_owned()
+        } else {
+            format!("{prior_expose}, X-Cas-Request-Id")
+        };
+        response.headers_mut().insert("access-control-expose-headers", HeaderValue::from_str(&expose).expect("fixed header extension"));
+    }
+    response
 }
 
 fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
@@ -599,6 +637,7 @@ async fn diagnostics<R: SessionReadModel>(
             "tailscale_status": tailscale,
             "daemon_health": {"status":"ready", "sessions":session_count},
             "checked_at": chrono::Utc::now(),
+            "connection_recovery": state.recovery.snapshot(),
         }))
         .into_response(),
         &headers,
@@ -1922,21 +1961,43 @@ async fn events<R: SessionReadModel>(
     // replayed once and then observed live once; sequence+revision make that a
     // harmless idempotent upsert, while the ordering avoids a lost-event gap.
     let receiver = state.events.subscribe();
+    let history = state.events.history();
+    let metadata = Event::default().event("stream_metadata").json_data(serde_json::json!({
+        "kind": "stream_metadata", "epoch": state.events.epoch.as_str(),
+        "oldest_sequence": history.first().map_or(0, |event| event.sequence),
+        "latest_sequence": history.last().map_or(0, |event| event.sequence),
+        "retained": history.len(),
+    })).expect("fixed stream metadata");
+    let initial = stream::iter(vec![Ok::<Event, Infallible>(metadata)]);
     let replay = stream::iter(
-        state
-            .events
-            .history()
+        history
             .into_iter()
             .map(|event| Ok::<Event, Infallible>(machine_event_sse(event))),
     );
-    let live = stream::unfold(receiver, |mut receiver| async move {
-        loop {
+    let audit = state.auth.clone();
+    let live_context = context.clone();
+    let live = stream::unfold((receiver, false), move |(mut receiver, ended)| {
+        let audit = audit.clone();
+        let context = live_context.clone();
+        async move {
+        if ended { return None; }
             match receiver.recv().await {
                 Ok(event) => {
-                    return Some((Ok::<Event, Infallible>(machine_event_sse(event)), receiver));
+                    Some((Ok::<Event, Infallible>(machine_event_sse(event)), (receiver, false)))
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let request_id = context.as_ref().map(|value| value.request_id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    if let Some(audit) = audit {
+                        let _ = audit.audit_connection("events", false, 200, &request_id, Some("viewer_lagged"), skipped);
+                    }
+                    let event = Event::default().event("viewer_lagged").json_data(serde_json::json!({
+                        "kind": "viewer_lagged", "skipped": skipped, "request_id": request_id,
+                    })).expect("fixed lag schema");
+                    // End after the explicit marker. Reconnecting snapshots
+                    // retained revisions; silently skipping would lose them.
+                    Some((Ok::<Event, Infallible>(event), (receiver, true)))
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
             }
         }
     });
@@ -1944,7 +2005,9 @@ async fn events<R: SessionReadModel>(
     let mut ticks = tokio::time::interval(Duration::from_millis(250));
     let termination = async move {
         loop {
-            ticks.tick().await;
+            // A newly-created timer may yield even on its first due tick.
+            // Check the grant before that yield: buffered metadata/replay
+            // must not escape before the live tail gets polled (cas-2b3a5).
             if let (Some(auth), Some(context)) = (&auth, &context) {
                 if auth
                     .ensure_active_context(context, chrono::Utc::now())
@@ -1953,9 +2016,12 @@ async fn events<R: SessionReadModel>(
                     break;
                 }
             }
+            ticks.tick().await;
         }
     };
-    let output = replay.chain(live).take_until(termination);
+    let complete = stream::iter(vec![Ok::<Event, Infallible>(Event::default().event("replay_complete")
+        .json_data(serde_json::json!({"kind":"replay_complete"})).expect("fixed replay marker"))]);
+    let output = initial.chain(replay).chain(complete).chain(live).take_until(termination);
     with_cors(
         Sse::new(output)
             .keep_alive(KeepAlive::default())
@@ -3340,14 +3406,28 @@ async fn proxy_machine_socket<R: SessionReadModel>(
             },
             event = async {
                 if events_subscribed {
-                    machine_events.recv().await.ok()
+                    machine_events.recv().await
                 } else {
                     futures_util::future::pending().await
                 }
             } => {
-                if let Some(event) = event {
-                    let envelope = serde_json::json!({"channel":"events","event":event});
-                    if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                match event {
+                    Ok(event) => {
+                        let envelope = serde_json::json!({"channel":"events","event":event});
+                        if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let request_id = auth.as_ref().map(|(_, context)| context.request_id.clone())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        if let Some((store, _)) = auth.as_ref() {
+                            let _ = store.audit_connection("events", false, 200, &request_id, Some("viewer_lagged"), skipped);
+                        }
+                        let envelope = serde_json::json!({"channel":"events","event":{
+                            "kind":"viewer_lagged", "skipped":skipped, "request_id":request_id,
+                        }});
+                        if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => { events_subscribed = false; }
                 }
             },
             revoked = async {
@@ -3643,8 +3723,9 @@ fn unauthorized_for(error: &anyhow::Error) -> Response {
     }
     response.headers_mut().insert(
         "access-control-expose-headers",
-        HeaderValue::from_static("WWW-Authenticate"),
+        HeaderValue::from_static("WWW-Authenticate, X-Cas-Request-Id"),
     );
+    response.headers_mut().insert("x-cas-refusal", HeaderValue::from_static(super::connection_recovery::refusal(refusal.code())));
     response
 }
 

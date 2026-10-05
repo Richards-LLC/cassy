@@ -48,11 +48,13 @@ describe("Commander designed connection states", () => {
       { label: "Earlier attempts", detail: "2 attempts did not reach a live session", tone: "evidence" },
       { label: "Attempt 3", detail: "Retry scheduled", tone: "retry" },
       { label: "Diagnostic", detail: "hub did not answer", tone: "evidence" },
+      { label: "Last successful connection", detail: "Not measured in this visit", tone: "evidence" },
       { label: "Next attempt", detail: "reconnecting in 3s", tone: "retry" },
     ]);
     expect(connectionTimeline(snapshot({ phase: "failed", fatal: true, reason: "unsupported browser" }))).toEqual([
       { label: "Attempt 1", detail: "Connection failed", tone: "failed" },
       { label: "Outcome", detail: "unsupported browser", tone: "failed" },
+      { label: "Last successful connection", detail: "Not measured in this visit", tone: "evidence" },
     ]);
   });
 
@@ -66,7 +68,7 @@ describe("Commander designed connection states", () => {
     });
     expect(connectingView(snapshot(), startedAt + 5_000)).toMatchObject({
       elapsedLabel: "5s",
-      step: "waiting for relay handshake",
+      step: "opening the machine's event stream or terminal socket",
       actionsAvailable: false,
     });
     expect(connectingView(snapshot({ reason: "target node is offline" }), startedAt + 15_000)).toMatchObject({
@@ -178,7 +180,7 @@ describe("the attach surface opens calmly (journey F3)", () => {
     const details = target.querySelector<HTMLDetailsElement>(":scope > details.connection-details")!;
     expect(details.open).toBe(false);
     expect(details.querySelector("summary")?.textContent).toBe("Details");
-    expect(details.querySelector(".connection-timeline")?.textContent).toContain("dialing the relay");
+    expect(details.querySelector(".connection-timeline")?.textContent).toContain("checking the machine's HTTP hub");
     // Everything outside Details is free of relay vocabulary.
     expect(target.querySelector(".terminal-connecting-title")?.textContent).not.toMatch(JARGON);
     expect(target.querySelector(":scope > .connection-timeline")).toBeNull();

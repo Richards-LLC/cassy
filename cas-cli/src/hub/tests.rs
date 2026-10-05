@@ -20,6 +20,15 @@ use crate::ui::factory::{
 /// process revokes its device, even with no event traffic or browser heartbeat.
 #[tokio::test]
 async fn installation_revoke_ends_open_sse_and_refuses_inventory_credential() {
+    installation_revoke_sse(false).await;
+}
+
+#[tokio::test]
+async fn installation_revoke_ends_idle_live_sse_after_replay_complete_cas_2b3a5() {
+    installation_revoke_sse(true).await;
+}
+
+async fn installation_revoke_sse(drain_replay: bool) {
     use chrono::Utc;
     use p256::ecdsa::SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
@@ -51,6 +60,16 @@ async fn installation_revoke_ends_open_sse_and_refuses_inventory_credential() {
     let opened = app.clone().oneshot(request("/v1/events")).await.unwrap();
     assert_eq!(opened.status(), StatusCode::OK);
     let mut stream = opened.into_body().into_data_stream();
+    if drain_replay {
+        let mut received = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !received.contains("event: replay_complete") {
+                let frame = stream.next().await.expect("authorized replay stays open").unwrap();
+                received.push_str(std::str::from_utf8(&frame).unwrap());
+            }
+        }).await.expect("metadata and complete marker arrive before revocation");
+        assert!(received.contains("event: stream_metadata"));
+    }
     let other_process = AuthStore::open(&root, "machine-test").unwrap();
     other_process.revoke_device(&credential.device_id, Utc::now()).unwrap();
     let ended = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await.expect("SSE must terminate without a heartbeat");
@@ -1202,7 +1221,7 @@ async fn h2_pair_02_bound_sixth_exchange_is_throttled_without_disclosing_unbound
     assert_eq!(throttled.headers()["vary"], "Origin");
     assert_eq!(
         throttled.headers()["access-control-expose-headers"],
-        "Retry-After"
+        "Retry-After, X-Cas-Request-Id"
     );
     assert!(
         !throttled
@@ -3534,7 +3553,8 @@ async fn cas_d636_the_401_carries_a_machine_readable_reason_and_the_hub_clock() 
     assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(stale.headers()["access-control-allow-origin"], "https://controller.example");
     assert_eq!(stale.headers()["www-authenticate"], "DPoP error=\"invalid_dpop_proof\", error_description=\"stale_proof\"");
-    assert_eq!(stale.headers()["access-control-expose-headers"], "WWW-Authenticate");
+    // This origin is bound: correlate the refusal with its safe request ID.
+    assert_eq!(stale.headers()["access-control-expose-headers"], "WWW-Authenticate, X-Cas-Request-Id");
     let body: serde_json::Value = serde_json::from_slice(&to_bytes(stale.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["reason"], "stale_proof");
     assert_eq!(body["retryable"], true);

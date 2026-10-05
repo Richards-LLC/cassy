@@ -68,7 +68,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const together = await page.waitForFunction(() => {
       const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText ?? "";
       const seen = {
-        banner: text(".terminal-disconnected-banner"),
+        banner: text(".terminal-disconnected-banner .banner-text"),
         header: text("#conversation-connection"),
         row: text('#conversation-list [data-thread-key="atlas:patient-pelican-9"]'),
         footer: text("#hub-footer-badges"),
@@ -84,6 +84,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await page.waitForTimeout(1_500);
     expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
     await expect(header).toHaveAttribute("aria-live", "off");
+    await expect(banner.getByRole("status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.getByRole("button", { name: "Connection details" })).toBeVisible();
     // Two machines, one of them down: the footer names it (cas-0739) and its dot is not all-clear (cas-b789).
     expect(seen.footer).toContain("Reconnecting to Atlas");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
@@ -195,7 +197,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     });
     hub.hold(PELICAN);
     hub.drop(PELICAN);
-    await expect(banner).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.locator(".banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // Turning the phone resizes the terminal, which tries to tell the hub: that
     // send fails while the connection is down, which used to raise a toast.
     await page.setViewportSize({ width: 390, height: 760 });
@@ -233,7 +235,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await listen();
     hub.hold(PELICAN);
     hub.drop(PELICAN);
-    await expect(banner).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    // The sentence is the banner's live words; its Details button sits beside them (cas-2b3a5).
+    await expect(banner.locator(".banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.getByRole("button", { name: "Connection details", exact: true })).toBeVisible();
     await expect(header).toContainText("Reconnecting");
     await expect.poll(rail).toBe("Not all clear. Atlas · Linux is reconnecting.");
     const outage = "Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.";

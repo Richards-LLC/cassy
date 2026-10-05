@@ -254,7 +254,24 @@ export function renderAttentionPanel(
   const kept = container.childElementCount > 0
     ? attentionPanelState(container)
     : rememberedPanelState.get(memory) ?? { open: new Set<string>(), folded: new Set<string>() };
+  // Panel evidence (outage, owner, grouping) can change while the same notice
+  // stays open. Keep its Details/Copy nodes if their copied payload is unchanged.
+  const payloads = new Map<string, HTMLDetailsElement>();
+  for (const article of container.querySelectorAll<HTMLElement>("[data-attention-id]")) {
+    const details = article.querySelector<HTMLDetailsElement>("details.attention-payload");
+    if (details) payloads.set(article.dataset.attentionId!, details);
+  }
   renderAttentionPanelContent(container, items, callbacks, options);
+  for (const article of container.querySelectorAll<HTMLElement>("[data-attention-id]")) {
+    const prior = payloads.get(article.dataset.attentionId!);
+    const next = article.querySelector<HTMLDetailsElement>("details.attention-payload");
+    if (prior && next && prior.querySelector("pre")?.textContent === next.querySelector("pre")?.textContent) {
+      const copy = prior.querySelector<HTMLButtonElement>(".attention-copy");
+      const nextCopy = next.querySelector<HTMLButtonElement>(".attention-copy");
+      if (copy && nextCopy) copy.onclick = nextCopy.onclick;
+      next.replaceWith(prior);
+    }
+  }
   restoreAttentionPanelState(container, kept);
   watchAttentionPanelState(container, memory);
   rememberedPanelState.set(memory, attentionPanelState(container));

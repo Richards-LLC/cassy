@@ -2,6 +2,9 @@ import { installationLock, notifyInstallation } from "./installation-access";
 import { catalog, installationStore } from "./storage";
 import { credentialFence, type CredentialFence } from "./commander-journal";
 import { anySignal } from "./abort-signals";
+import { withRequestDeadline } from "./request-deadline";
+import { EventRecovery } from "./event-recovery";
+import { ConnectionDiagnostics, type CauseEvidence } from "./connection-diagnostics";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { CoalescedRefresh } from "./catalog-refresh";
 import { dpopHeaders } from "./dpop";
@@ -100,7 +103,7 @@ export interface HubCallbacks {
  * "failed (409)". The message keeps the old wording for anything that logs it.
  */
 export class HubRequestError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string, readonly detail?: string, readonly body?: Readonly<Record<string, unknown>>) { super(message); }
+  constructor(message: string, readonly status: number, readonly code?: string, readonly detail?: string, readonly body?: Readonly<Record<string, unknown>>, readonly requestId?: string) { super(message); }
 }
 
 /** Read a refused response's `{error, detail}` body; a body that is not JSON leaves both unset. */
@@ -109,7 +112,7 @@ export async function hubRequestError(method: string, path: string, response: Re
   try { body = await response.json() as Record<string, unknown>; } catch { body = undefined; }
   const code = typeof body?.error === "string" ? body.error : undefined;
   const detail = typeof body?.detail === "string" ? body.detail : typeof body?.reason === "string" ? body.reason : undefined;
-  return new HubRequestError(`${method} ${path} failed (${response.status})`, response.status, code, detail, body);
+  return new HubRequestError(`${method} ${path} failed (${response.status})`, response.status, code, detail, body, response.headers.get("x-cas-request-id") ?? undefined);
 }
 
 /** A refused scope self-grant, keeping its status so a 403 can offer a pairing command instead. */
@@ -118,7 +121,7 @@ export class ScopeGrantError extends HubRequestError {
 }
 
 export class AuthenticationError extends Error {
-  constructor(readonly kind: AuthFailureKind, message: string) { super(message); }
+  constructor(readonly kind: AuthFailureKind, message: string, readonly requestId?: string) { super(message); }
 }
 
 /**
@@ -129,6 +132,9 @@ export class AuthenticationError extends Error {
  */
 export class TransientAuthError extends Error {
   constructor(readonly reason: string) { super(`the hub refused a proof (${reason}); retrying`); }
+}
+class EventRecoveryError extends Error {
+  constructor(readonly code: "event_sequence_gap" | "viewer_lagged", readonly requestId?: string) { super(code); }
 }
 
 /** What a hub 401 says about itself (cas-d636); a legacy hub says nothing. */
@@ -209,8 +215,7 @@ export class HubConnectionSupervisor {
     try {
       await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
     } catch (error) {
-      // Preserve the existing event-stream recovery path and its deadline.
-      // A late failure from an old stream must not abort its replacement.
+      // A cancelled or failed old stream must not abort its replacement.
       if (stream === this.eventAbort && !stream?.signal.aborted) stream?.abort(error);
     }
   }, () => {});
@@ -263,7 +268,9 @@ export class HubConnectionSupervisor {
   private readonly machineSubscriptions = new Set<string>();
   private readonly sessionPanes = new Map<string, PaneInfo[]>();
   private healthPing?: { id: number; startedAt: number };
-  private lastMachineEventSequence = 0;
+  private readonly eventRecovery = new EventRecovery();
+  private readonly diagnostics = new ConnectionDiagnostics();
+  private connectionGeneration = 0;
   /**
    * The connection was lost (heartbeats failed, the network went offline, a
    * reconnect failed) since it was last live. Sockets from before the loss may
@@ -347,9 +354,13 @@ export class HubConnectionSupervisor {
       attempt: this.attempt,
       missedHeartbeats: this.missedHeartbeats,
       degraded: this.missedHeartbeats >= DEGRADED_AFTER_MISSED_HEARTBEATS,
+      lastSuccessAt: this.lastHeartbeatAt || this.lifecycle.lastSuccessAt,
+      nextRetryAt: update.retryInMs === undefined ? undefined : now + update.retryInMs,
+      cause: phase === "live" || phase === "idle" ? undefined : this.lifecycle.cause,
       networkAccessHelp: phase === "live" || phase === "idle" || update.authFailure ? undefined : this.lifecycle.networkAccessHelp,
       ...update,
     };
+    this.diagnostics.record(this.lifecycle, this.connectionGeneration);
     this.callbacks.onState(this.lifecycle);
   }
 
@@ -370,6 +381,10 @@ export class HubConnectionSupervisor {
       attempt: this.socketAttempts.get(session) ?? 0,
       missedHeartbeats: 0,
       degraded: false,
+      lastSuccessAt: phase === "live" ? now : prior?.lastSuccessAt,
+      nextRetryAt: update.retryInMs === undefined ? undefined : now + update.retryInMs,
+      cause: update.sessionOnly ? { code: "session_upstream_unavailable", layer: "session", retryable: true }
+        : phase === "live" || phase === "idle" ? undefined : prior?.cause,
       // A session-only drop stays one through its retry; another failure, or
       // being live again, ends it (cas-d15c).
       sessionOnly: phase === "failed" || phase === "live" || phase === "idle" ? undefined : prior?.sessionOnly,
@@ -377,11 +392,13 @@ export class HubConnectionSupervisor {
       ...update,
     };
     this.attachLifecycles.set(session, snapshot);
+    this.diagnostics.record(snapshot, this.machineSocketGeneration, session);
     this.callbacks.onAttachState?.(session, snapshot);
   }
 
   private async connect(): Promise<void> {
     if (!this.desired) return;
+    this.connectionGeneration += 1;
     let stage = this.resumeStage;
     try {
       const unsupported = unsupportedBrowserReason();
@@ -443,6 +460,14 @@ export class HubConnectionSupervisor {
             return;
           } catch (refreshError) {
             if (refreshError instanceof AuthenticationError) authError = refreshError;
+            else {
+              // The refresh may have reached the hub. A transport timeout is
+              // not an explicit expiry/revocation; retry without destroying access.
+              const delay = Math.min(MACHINE_RETRY_CEILING_MS, backoffDelay(this.attempt++));
+              this.transition("backoff", "auth", { cause: this.failureCause(refreshError), retryInMs: delay });
+              this.retryTimer = window.setTimeout(() => { this.expiredRefreshAttempted = false; void this.connect(); }, delay);
+              return;
+            }
           }
         }
         this.blockAuthentication(authError.kind, authError.message);
@@ -457,13 +482,14 @@ export class HubConnectionSupervisor {
       this.resumeStage = stage;
       const reason = error instanceof Error ? error.message : "unknown connection failure";
       const target = new URL(this.machine.baseUrl).host;
-      this.transition("failed", stage, { reason: stageFailureDetail(stage, target, reason) });
+      const cause = this.failureCause(error);
+      this.transition("failed", stage, { reason: stageFailureDetail(stage, target, reason), cause });
       // Capped well below the backoff's 30 s ceiling: a network that returns
       // without an event (Tailscale switched on) is noticed within 10 s.
       const delay = Math.min(MACHINE_RETRY_CEILING_MS, backoffDelay(this.attempt++));
-      const networkAccessHelp = isNetworkFailure(error) ? await localNetworkAccessHelp(this.machine.baseUrl, this.machine.label) : undefined;
+      const networkAccessHelp = isNetworkFailure(error) ? await localNetworkAccessHelp(this.machine.baseUrl, this.machine.label, permission => { cause.permission = permission; }) : undefined;
       if (!this.desired) return;
-      this.transition("backoff", stage, { reason: stageFailureDetail(stage, target, reason), retryInMs: delay, networkAccessHelp });
+      this.transition("backoff", stage, { reason: stageFailureDetail(stage, target, reason), retryInMs: delay, networkAccessHelp, cause });
       this.retryTimer = window.setTimeout(() => {
         this.retryTimer = undefined;
         if (this.desired) void this.connect();
@@ -472,18 +498,24 @@ export class HubConnectionSupervisor {
   }
 
   private async withStageTimeout<T>(stage: Exclude<ConnectionStage, "idle" | "live">, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(new DOMException(`${stage} timed out after ${STAGE_TIMEOUT_MS[stage] / 1000}s`, "TimeoutError")), STAGE_TIMEOUT_MS[stage]);
-    try { return await task(controller.signal); }
-    catch (error) {
-      if (controller.signal.aborted) throw controller.signal.reason;
-      throw error;
-    } finally { window.clearTimeout(timer); }
+    return withRequestDeadline(task, undefined, STAGE_TIMEOUT_MS[stage]);
+  }
+
+  private failureCause(error: unknown): CauseEvidence {
+    if (error instanceof EventRecoveryError) return { code: error.code, layer: "events", retryable: true, requestId: error.requestId };
+    if (error instanceof AuthenticationError) return { code: `auth_${error.kind.replaceAll("-", "_")}` as CauseEvidence["code"], layer: "auth", retryable: false, requestId: error.requestId };
+    if (error instanceof TransientAuthError) return { code: "proof_refused", layer: "auth", retryable: true };
+    if (error instanceof DOMException && error.name === "TimeoutError") return { code: "request_timeout", layer: "http", retryable: true };
+    if (error instanceof HubRequestError) return { code: error.code === "health_probe" && error.status === 503 ? "health_http_unavailable" : "http_refused", layer: "http", retryable: true, status: error.status, requestId: error.requestId };
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return { code: "browser_offline", layer: "browser", retryable: true };
+    if (isNetworkFailure(error)) return { code: "network_or_browser_policy_unknown", layer: "browser", retryable: true, permission: "unknown" };
+    if (error instanceof UnsupportedBrowserError) return { code: "unsupported_browser", layer: "browser", retryable: false };
+    return { code: "stream_closed", layer: "events", retryable: true };
   }
 
   private async probeHealth(signal: AbortSignal): Promise<void> {
     const response = await fetch(new URL("/v1/health", this.machine.baseUrl), { signal, cache: "no-store", credentials: "omit" });
-    if (!response.ok) throw new Error(`daemon health failed (${response.status})`);
+    if (!response.ok) throw new HubRequestError(`daemon health failed (${response.status})`, response.status, "health_probe");
   }
 
   /**
@@ -511,13 +543,17 @@ export class HubConnectionSupervisor {
   private async authorizedFetch(method: string, path: string, init: RequestInit = {}): Promise<{ response: Response; refusal: AuthRefusal }> {
     // The proof binds the bare path; the hub rejects an htu with a query.
     const htu = path.split("?")[0] ?? path;
-    const send = async () => fetch(new URL(path, this.machine.baseUrl), {
+    const send = async () => {
+      const proof = await dpopHeaders(this.machine, method, htu, Date.now() + this.clockOffsetMs);
+      init.signal?.throwIfAborted();
+      return fetch(new URL(path, this.machine.baseUrl), {
       ...init,
       method,
-      headers: { ...(init.headers as Record<string, string> | undefined), ...await dpopHeaders(this.machine, method, htu, Date.now() + this.clockOffsetMs) },
+      headers: { ...(init.headers as Record<string, string> | undefined), ...proof },
       cache: "no-store",
       credentials: "omit",
     });
+    };
     let response = await send();
     if ((response.status === 401 || response.status === 403) && (this.machine.credentialGeneration !== undefined || typeof indexedDB !== "undefined") && !this.installationMutation) {
       // A peer may have rotated between signing and arrival. Wait for its durable
@@ -543,35 +579,46 @@ export class HubConnectionSupervisor {
   }
 
   async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return withRequestDeadline(async boundedSignal => {
     const startedAt = performance.now();
     const { response, refusal } = await this.authorizedFetch(method, path, {
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
+      signal: boundedSignal,
     });
     if (response.status === 401 || response.status === 403) {
       const kind = authFailureKind(response.status, refusal, this.machine.expiresAt);
-      throw new AuthenticationError(kind, authFailureMessage(kind, refusal));
+      throw new AuthenticationError(kind, authFailureMessage(kind, refusal), response.headers?.get("x-cas-request-id") ?? undefined);
     }
     if (!response.ok) throw await hubRequestError(method, path, response);
     this.callbacks.onLatency?.(Math.max(0, Math.round(performance.now() - startedAt)));
     if (response.status === 204) return undefined as T;
-    return response.json() as Promise<T>;
+    const result = await response.json() as T;
+    boundedSignal.throwIfAborted();
+    return result;
+    }, signal);
   }
 
   async refreshSessions(signal: AbortSignal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)): Promise<HubSession[]> {
-    // Heartbeat, manual refresh and event refresh share an active GET too.
-    this.catalogRequest ??= this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal)
-      .then(response => {
-        this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
-        return response.sessions;
-      }).finally(() => { this.catalogRequest = undefined; });
-    return this.catalogRequest;
+    signal.throwIfAborted();
+    if (!this.catalogRequest) this.catalogRequest = (async () => {
+      const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal);
+      signal.throwIfAborted();
+      this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
+      return response.sessions;
+    })().finally(() => { this.catalogRequest = undefined; });
+    const request = this.catalogRequest;
+    // A caller can be cancelled before the wrapper's task runs. Keep a
+    // rejection observer on the shared flight, and retain its identity even
+    // after its finally clears catalogRequest.
+    void request.catch(() => {});
+    return withRequestDeadline(() => request, signal, SOCKET_PROBE_TIMEOUT_MS);
   }
 
   private async refreshMachineInfo(signal?: AbortSignal): Promise<void> {
     try {
       const info = await this.request<HubMachineInfo>("GET", "/v1/machine", undefined, signal);
+      if (typeof info.version === "string") this.diagnostics.build(info.version);
       this.machineMultiplex = info.capabilities.includes("machine_multiplex_v2");
       this.callbacks.onMachineInfo?.(info);
     } catch (error) {
@@ -588,8 +635,9 @@ export class HubConnectionSupervisor {
    * the machine's stable error code tells Commander what to say.
    */
   async artifactView(session: string, artifactId: string): Promise<ArtifactViewResult> {
+    return withRequestDeadline(async signal => {
     const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}/url`;
-    const { response } = await this.authorizedFetch("GET", path);
+    const { response } = await this.authorizedFetch("GET", path, { signal });
     const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
     if (response.ok && body && typeof body.url === "string") {
       return { ok: true, view: body as unknown as ArtifactView };
@@ -600,6 +648,7 @@ export class HubConnectionSupervisor {
       code: typeof body?.error === "string" ? body.error : undefined,
       detail: typeof body?.status === "string" ? body.status : null,
     };
+    });
   }
 
   /** The machine's main project folders and launch roots (cas-41b9). */
@@ -624,9 +673,11 @@ export class HubConnectionSupervisor {
    * refusal is not a lost pairing.
    */
   async launchSession(request: LaunchRequest): Promise<LaunchResult> {
+    return withRequestDeadline(async signal => {
     const { response } = await this.authorizedFetch("POST", "/v1/sessions", {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
+      signal,
     });
     const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
     if (response.ok && body && typeof body.session === "string") {
@@ -638,6 +689,7 @@ export class HubConnectionSupervisor {
       ...(typeof body?.error === "string" ? { code: body.error } : {}),
       ...(typeof body?.detail === "string" ? { detail: body.detail } : typeof body?.reason === "string" ? { detail: body.reason } : {}),
     };
+    }, undefined, 30_000);
   }
 
   /**
@@ -647,9 +699,11 @@ export class HubConnectionSupervisor {
    * itself must change.
    */
   async enableFactoryOperate(): Promise<void> {
+    return withRequestDeadline(async signal => {
     const { response } = await this.authorizedFetch("POST", "/v1/auth/scopes", {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ add: ["factory-operate"] }),
+      signal,
     });
     if (!response.ok) {
       const error = await hubRequestError("POST", "/v1/auth/scopes", response);
@@ -658,22 +712,28 @@ export class HubConnectionSupervisor {
         : `Could not allow managing workers (${response.status}). Try again.`, error.code, error.detail);
     }
     const body = await response.json() as { scopes: StoredMachine["scopes"] };
+    signal.throwIfAborted();
     this.machine.scopes = body.scopes;
     await this.callbacks.onCredentialRefreshed?.(this.machine);
+    });
   }
 
   /** Add session launch to this paired device; keep the live and stored scope sets in sync. */
   async enableSessionLaunch(): Promise<void> {
+    return withRequestDeadline(async signal => {
     const { response } = await this.authorizedFetch("POST", "/v1/auth/scopes", {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ add: ["session-launch"] }),
+      signal,
     });
     if (!response.ok) throw new SessionLaunchGrantError(response.status, response.status === 403
       ? "This pairing no longer has control access. Pair with a control invitation, then try again."
       : `Could not enable session launch (${response.status}). Try again.`);
     const body = await response.json() as { scopes: StoredMachine["scopes"] };
+    signal.throwIfAborted();
     this.machine.scopes = body.scopes;
     await this.callbacks.onCredentialRefreshed?.(this.machine);
+    });
   }
 
   /**
@@ -715,8 +775,10 @@ export class HubConnectionSupervisor {
   }
 
   async diagnose(): Promise<Record<string, unknown>> {
-    const report = await this.request<Record<string, unknown>>("GET", "/v1/diagnostics");
-    return { ...report, browser: { online: navigator.onLine, last_successful_heartbeat: this.lastHeartbeatAt ? new Date(this.lastHeartbeatAt).toISOString() : null } };
+    let report: unknown;
+    try { report = await this.request<Record<string, unknown>>("GET", "/v1/diagnostics"); }
+    catch (error) { this.diagnostics.record({ ...this.lifecycle, since: Date.now(), cause: this.failureCause(error) }, this.connectionGeneration); }
+    return this.diagnostics.export(report, typeof navigator === "undefined" ? undefined : navigator.onLine);
   }
 
   private async openEventStream(signal: AbortSignal): Promise<Response> {
@@ -739,27 +801,40 @@ export class HubConnectionSupervisor {
     if (!response.body) throw new Error("event stream closed before attach");
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "";
+    let replaying = false;
     try {
       for (;;) {
         signal.throwIfAborted();
-        const { value, done } = await reader.read();
+        const { value, done } = await withRequestDeadline(() => reader.read(), signal, 60_000);
         if (done) return;
         buffer += value;
+        buffer = buffer.replaceAll("\r\n", "\n");
         let boundary = buffer.indexOf("\n\n");
         while (boundary >= 0) {
+          if (boundary > 131_072) throw new Error("event frame exceeded limit");
           const block = buffer.slice(0, boundary);
           buffer = buffer.slice(boundary + 2);
           const data = block.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
           if (data) {
             const event = JSON.parse(data) as Record<string, unknown>;
-            this.deliverMachineEvent(event);
+            if (event.kind === "stream_metadata" && typeof event.epoch === "string") {
+              replaying = true;
+              const reason = this.eventRecovery.begin(event.epoch, Number(event.oldest_sequence), Number(event.latest_sequence));
+              if (reason) this.recordEventRecovery(reason === "epoch_changed" ? "event_epoch_changed" : "event_retention_gap");
+            } else if (event.kind === "replay_complete") { replaying = false; }
+            else if (event.kind === "viewer_lagged") {
+              const requestId = typeof event.request_id === "string" ? event.request_id : undefined;
+              this.recordEventRecovery("viewer_lagged", requestId);
+              throw new EventRecoveryError("viewer_lagged", requestId);
+            } else this.deliverMachineEvent(event, replaying);
             void this.eventCatalog.request();
           }
           boundary = buffer.indexOf("\n\n");
         }
+        if (buffer.length > 131_072) throw new Error("event frame exceeded limit");
       }
     } finally {
-      await reader.cancel().catch(() => {});
+      await withRequestDeadline(() => reader.cancel(), undefined, 1_000).catch(() => {});
       reader.releaseLock();
     }
   }
@@ -811,7 +886,7 @@ export class HubConnectionSupervisor {
       // Stopped or refused while this beat was in flight: not a live machine.
       if (!this.desired || this.lifecycle.phase !== "live") return;
       this.missedHeartbeats += 1;
-      this.transition("live", "live", { reason: error instanceof Error ? error.message : "heartbeat failed" });
+      this.transition("live", "live", { reason: error instanceof Error ? error.message : "heartbeat failed", cause: this.failureCause(error) });
       if (this.missedHeartbeats >= RECONNECT_AFTER_MISSED_HEARTBEATS) this.connectionLostNow("Lost connection to the machine");
     }
   }
@@ -892,20 +967,30 @@ export class HubConnectionSupervisor {
       this.hiddenAt = undefined;
       if (hiddenFor >= HEARTBEAT_INTERVAL_MS) this.networkChanged();
     };
-    const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
+    const connection = (navigator as Navigator & { connection?: EventTarget & { type?: string } }).connection;
+    let networkType = connection?.type;
+    const transportChanged = () => {
+      const nextType = connection?.type;
+      // change also fires for rtt/downlink/effectiveType estimates under load.
+      // Those are not a changed route, and a failed opportunistic probe must
+      // not turn one missed heartbeat into four (cas-eefe).
+      if (typeof nextType !== "string" || nextType === networkType) return;
+      networkType = nextType;
+      changed();
+    };
     window.addEventListener("online", changed);
     window.addEventListener("offline", offline);
     window.addEventListener("pageshow", changed);
     document.addEventListener("resume", changed);
     document.addEventListener("visibilitychange", visibility);
-    connection?.addEventListener?.("change", changed);
+    connection?.addEventListener?.("change", transportChanged);
     this.removeNetworkListeners = () => {
       window.removeEventListener("online", changed);
       window.removeEventListener("offline", offline);
       window.removeEventListener("pageshow", changed);
       document.removeEventListener("resume", changed);
       document.removeEventListener("visibilitychange", visibility);
-      connection?.removeEventListener?.("change", changed);
+      connection?.removeEventListener?.("change", transportChanged);
     };
   }
 
@@ -1038,7 +1123,7 @@ export class HubConnectionSupervisor {
       if (!this.desired || event.code === 1000) return;
       if (!timedOut) {
         const detail = becameReady ? "Terminal connection closed" : "Terminal connection closed before it became ready";
-        this.transitionAttach(session, "failed", becameReady ? "dialing" : (this.attachLifecycles.get(session)?.stage ?? "dialing"), { reason: detail });
+        this.transitionAttach(session, "failed", becameReady ? "dialing" : (this.attachLifecycles.get(session)?.stage ?? "dialing"), { reason: detail, cause: { code: "socket_closed", layer: "socket", retryable: true, closeCode: event.code } });
         this.callbacks.onSocketError(session, `${detail}. Retrying…`);
       }
       this.scheduleAttach(session);
@@ -1196,7 +1281,7 @@ export class HubConnectionSupervisor {
         }
         if (!this.desired || !wasReady || event.code === 1000 || this.machineProtocolBlocked) return;
         for (const desired of this.desiredSessions) {
-          this.transitionAttach(desired, "failed", "dialing", { reason: "Machine terminal transport closed" });
+          this.transitionAttach(desired, "failed", "dialing", { reason: "Machine terminal transport closed", cause: { code: "socket_closed", layer: "socket", retryable: true, closeCode: event.code } });
           this.callbacks.onSocketError(desired, "Machine terminal transport closed. Retrying…");
           this.scheduleAttach(desired);
         }
@@ -1262,10 +1347,11 @@ export class HubConnectionSupervisor {
     // Opaque errors are retried: a healthy public route cannot prove that
     // an authenticated route's browser-side failure revoked the pairing.
     const detail = error instanceof Error ? error.message : "unknown terminal attach failure";
-    const networkAccessHelp = isNetworkFailure(error) ? await localNetworkAccessHelp(this.machine.baseUrl, this.machine.label) : undefined;
+    const cause = this.failureCause(error);
+    const networkAccessHelp = isNetworkFailure(error) ? await localNetworkAccessHelp(this.machine.baseUrl, this.machine.label, permission => { cause.permission = permission; }) : undefined;
     if (!this.desired || this.servedByMachineSocket(session)) return;
     const failedStage = this.attachLifecycles.get(session)?.stage ?? "dialing";
-    this.transitionAttach(session, "failed", failedStage, { reason: stageFailureDetail(failedStage, new URL(this.machine.baseUrl).host, detail), networkAccessHelp });
+    this.transitionAttach(session, "failed", failedStage, { reason: stageFailureDetail(failedStage, new URL(this.machine.baseUrl).host, detail), networkAccessHelp, cause });
     this.callbacks.onSocketError(session, `Terminal attach failed: ${detail}. Retrying…`);
     this.scheduleAttach(session);
   }
@@ -1285,8 +1371,9 @@ export class HubConnectionSupervisor {
     this.healthPing = undefined;
     for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
     this.sockets.clear();
-    if (session) this.transitionAttach(session, "failed", "auth", { reason: detail, authFailure: kind });
-    this.transition("failed", "auth", { reason: detail, authFailure: kind });
+    const cause = this.failureCause(new AuthenticationError(kind, detail));
+    if (session) this.transitionAttach(session, "failed", "auth", { reason: detail, authFailure: kind, cause });
+    this.transition("failed", "auth", { reason: detail, authFailure: kind, cause });
     this.callbacks.onAuthFailure?.(kind, detail);
     if (session) this.callbacks.onSocketError(session, "authentication blocked; re-pair to reconnect");
   }
@@ -1562,11 +1649,29 @@ export class HubConnectionSupervisor {
     if (envelope.message) this.handleDaemonObject(session, envelope.message as Record<string, any>, frameFence);
   }
 
-  private deliverMachineEvent(event: Record<string, unknown>): void {
+  private recordEventRecovery(code: "event_sequence_gap" | "event_retention_gap" | "event_epoch_changed" | "viewer_lagged", requestId?: string): void {
+    this.transition(this.lifecycle.phase, this.lifecycle.stage, { cause: { code, layer: "events", retryable: true, requestId } });
+  }
+
+  private deliverMachineEvent(event: Record<string, unknown>, replaying = false): void {
+    if (event.kind === "viewer_lagged") {
+      const requestId = typeof event.request_id === "string" ? event.request_id : undefined;
+      this.recordEventRecovery("viewer_lagged", requestId);
+      this.eventAbort?.abort(new EventRecoveryError("viewer_lagged", requestId));
+      return;
+    }
     const sequence = Number(event.sequence ?? 0);
     if (Number.isFinite(sequence) && sequence > 0) {
-      if (sequence <= this.lastMachineEventSequence) return;
-      this.lastMachineEventSequence = sequence;
+      const result = this.eventRecovery.accept(sequence, Number(event.revision ?? 0));
+      if (!result.deliver) return;
+      if (result.gap && !replaying) {
+        this.recordEventRecovery("event_sequence_gap");
+        // Reconnect replays retained rows, including revisions, without losing
+        // the triggering live event. Deliver it before reopening the stream.
+        this.callbacks.onMachineEvent(event);
+        this.eventAbort?.abort(new EventRecoveryError("event_sequence_gap"));
+        return;
+      }
     }
     this.callbacks.onMachineEvent(event);
   }

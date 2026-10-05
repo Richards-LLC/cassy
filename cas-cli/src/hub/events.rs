@@ -91,6 +91,7 @@ fn is_false(value: &bool) -> bool {
 
 #[derive(Clone)]
 pub struct MachineEventBus {
+    pub(crate) epoch: Arc<String>,
     tx: broadcast::Sender<MachineEvent>,
     sequence: Arc<AtomicU64>,
     sessions: Arc<Mutex<HashSet<String>>>,
@@ -148,6 +149,7 @@ impl MachineEventBus {
             .map_or(1, |event| event.sequence.saturating_add(1));
         let (tx, _) = broadcast::channel(capacity.max(1));
         Self {
+            epoch: Arc::new(uuid::Uuid::new_v4().to_string()),
             tx,
             sequence: Arc::new(AtomicU64::new(next_sequence)),
             sessions: Arc::new(Mutex::new(HashSet::new())),

@@ -160,6 +160,47 @@ describe("Commander live connection lifecycle", () => {
     expect(hub.requests).toHaveLength(stopped);
   });
 
+  it("distinguishes a measured browser health503 from an opaque fetch failure (cas-2b3a5)", async () => {
+    transport();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable", { status: 503 })));
+    const connection = supervisor(await storedMachine("health-503"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().cause).toMatchObject({ code: "health_http_unavailable", status: 503, layer: "http" }));
+    expect(connection.snapshot().authFailure).toBeUndefined();
+  });
+  it("keeps delivering a flood while the catalog stalls, with one catalog flight (cas-2b3a5)", async () => {
+    const hub = transport();
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("burst"), () => {}, event => events.push(event));
+    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
+    hub.stallRefresh(true);
+    for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i, revision: 0 });
+    await vi.waitFor(() => expect(events).toHaveLength(100));
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+  });
+  it("resyncs gaps, accepts replay revisions, and resets on a new epoch (cas-2b3a5)", async () => {
+    const hub = transport();
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("event-gap"), () => {}, event => events.push(event));
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.event({ kind: "stream_metadata", epoch: "one", oldest_sequence: 1, latest_sequence: 1 });
+    hub.event({ kind: "session_added", sequence: 1, revision: 0 });
+    hub.event({ kind: "replay_complete" });
+    hub.event({ kind: "session_added", sequence: 1, revision: 1 });
+    hub.event({ kind: "session_added", sequence: 3, revision: 0 });
+    await vi.waitFor(() => expect(connection.snapshot().cause?.code).toBe("event_sequence_gap"));
+    expect(events.map(event => [event.sequence, event.revision])).toEqual([[1, 0], [1, 1], [3, 0]]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(hub.streams).toHaveLength(2));
+    hub.event({ kind: "stream_metadata", epoch: "two", oldest_sequence: 1, latest_sequence: 1 });
+    hub.event({ kind: "session_added", sequence: 1, revision: 0 });
+    hub.event({ kind: "replay_complete" });
+    await vi.waitFor(() => expect(events).toHaveLength(4));
+    expect(connection.snapshot().cause?.code).toBe("event_epoch_changed");
+  });
   it("clears permission guidance when the same tailnet pairing reconnects (cas-b85a)", async () => {
     const hub = transport();
     const machine = await storedMachine("local-network");
@@ -199,6 +240,55 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(hub.requests).toHaveLength(requests);
   });
+  it.each([undefined, "wifi"])("keeps network-quality estimates from bypassing four failed heartbeats (type=%s, cas-eefe)", async type => {
+    const hub = transport();
+    const hints = Object.assign(new EventTarget(), { type, rtt: 50, downlink: 10, effectiveType: "4g" });
+    vi.stubGlobal("navigator", { connection: hints });
+    vi.stubGlobal("document", Object.assign(new EventTarget(), { visibilityState: "visible" }));
+    const connection = supervisor(await storedMachine("quality-estimate"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.block(true);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(1));
+    const before = hub.requests.filter(request => request.path === "/v1/machine").length;
+    hints.rtt = 250;
+    hints.downlink = 1;
+    hints.effectiveType = "3g";
+    hints.dispatchEvent(new Event("change"));
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(2));
+    expect(connection.snapshot().phase).toBe("live");
+    expect(connection.snapshot().degraded).toBe(true);
+    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(3));
+    expect(connection.snapshot().phase).toBe("live");
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+  });
+
+  it("still probes a measured network transport change immediately (cas-eefe)", async () => {
+    const hub = transport();
+    const hints = Object.assign(new EventTarget(), { type: "wifi" });
+    vi.stubGlobal("navigator", { connection: hints });
+    vi.stubGlobal("document", Object.assign(new EventTarget(), { visibilityState: "visible" }));
+    const connection = supervisor(await storedMachine("transport-change"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(request => request.path === "/v1/machine").length;
+    hub.block(true);
+    hints.type = "cellular";
+    hints.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before + 1);
+    expect(connection.snapshot().missedHeartbeats).toBe(4);
+  });
+
   it("bounds an unanswered event catalog refresh to the probe deadline (cas-b85a)", async () => {
     const hub = transport();
     const connection = supervisor(await storedMachine("refresh-deadline"));

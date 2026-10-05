@@ -5,6 +5,7 @@ import { installationStore } from "./storage";
 import { statusClass, statusLabel, workerProgress } from "./progress-model";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
+import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
@@ -1338,20 +1339,20 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
       const hubUrl = result.invitation.hubUrl;
       if (hubUrl) {
         try {
-          await fetch(new URL("/v1/health", hubUrl), {
+          await withRequestDeadline(signal => fetch(new URL("/v1/health", hubUrl), {
             method: "GET",
             mode: "no-cors",
             cache: "no-store",
             credentials: "omit",
-            signal: AbortSignal.timeout(3_000),
-          });
+            signal,
+          }), operation.signal, 3_000);
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           // The heading already says "Machine authorized"; the status only names the next step (cas-b2e4 F01).
           pairingStatus = "Add your name, then press Pair.";
         } catch {
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           const machine = result.invitation.machineLabel ?? result.invitation.hubId;
-          pairingStatus = `Approved — but this device can't reach ${machine}'s hub. Check that Tailscale (VPN) is connected on this device and that Private DNS or secure DNS isn't overriding it, then try a fresh code.`;
+          pairingStatus = `Approved — this browser's reachability check for ${machine} failed. Check Tailscale (VPN), browser site permissions (Local network access), and Private DNS or secure DNS, then press Pair to try this approved invitation.`;
         }
         render();
       }

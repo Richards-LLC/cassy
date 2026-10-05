@@ -167,6 +167,11 @@ pub(crate) fn for_retirement(cas_root: &Path, worktree: &Path) -> io::Result<Opt
 fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lease>> {
     let worktree = worktree.canonicalize()?;
     let target = worktree.join("target");
+    if fs::symlink_metadata(&target)
+        .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
+    {
+        return Err(io::Error::other("private target must be a real directory"));
+    }
     let (record_path, lock_path) = paths(cas_root, &worktree)?;
     let file = OpenOptions::new()
         .create(true)
@@ -230,7 +235,12 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
         .and_then(|bytes| serde_json::from_slice(&bytes).map_err(io::Error::other))
     {
         Ok(record) => record,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            if target.join(MARKER).exists() {
+                return Err(error);
+            }
+            return Ok(None);
+        }
     };
     if record.worktree != worktree {
         return Ok(None);
@@ -243,6 +253,11 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
         builder: false,
     };
     if !lease.revalidate(&target).unwrap_or(false) {
+        if target.join(MARKER).exists() {
+            return Err(io::Error::other(
+                "target ownership changed or is unverifiable",
+            ));
+        }
         return Ok(None);
     }
     if !fresh && owner_live(&lease.record)? {

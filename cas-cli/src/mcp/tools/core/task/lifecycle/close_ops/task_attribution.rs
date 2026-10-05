@@ -940,6 +940,7 @@ pub(super) fn merge_tip_content_presence(
             }
         }
     }
+    let carries_source = std::cell::OnceCell::new();
     for commit in &commits {
         match super::delivery_content_presence_in_parent(repo, commit, target) {
             DeliveryContentPresence::Present { paths } => append_unique(&mut present_paths, paths),
@@ -949,6 +950,15 @@ pub(super) fn merge_tip_content_presence(
             }
             DeliveryContentPresence::Dropped { paths } => {
                 for path in paths {
+                    if super::artifact_left_to_regeneration_rule(
+                        repo,
+                        merge_tip,
+                        &path,
+                        &carries_source,
+                    ) {
+                        append_unique(&mut dropped_paths, vec![path]);
+                        continue;
+                    }
                     // A resolution may replace only the owned lines in its
                     // novel hunks, on a path whose final effect was proven.
                     // It never enters the later-commit list for other paths.
@@ -1117,7 +1127,12 @@ pub(super) fn ordinary_anchor_content_presence(
         let mut dropped = Vec::new();
         let mut proven_paths = Vec::new();
         let mut commits = Vec::new();
+        let carries_source = std::cell::OnceCell::new();
         for path in paths {
+            if super::artifact_left_to_regeneration_rule(repo, &anchor, path, &carries_source) {
+                dropped.push(path.clone());
+                continue;
+            }
             let authorized: Vec<_> = resolutions
                 .iter()
                 .filter(|(_, resolved)| resolved == path)
@@ -3054,6 +3069,54 @@ mod tests {
         assert_eq!(
             has_task_attributable_reviewable_changes(p, "main", &window()),
             Some(false)
+        );
+    }
+
+    /// cas-24d8: the ownership walk skips edges that leave the path's blob
+    /// unchanged (a long run of unrelated commits, a side merge that never
+    /// touches the file) without losing the edge that does change it.
+    #[test]
+    fn unrelated_history_is_skipped_but_a_later_deletion_is_still_caught_cas_24d8() {
+        let dir = fixture();
+        let repo = dir.path();
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let delivery = commit(
+            repo,
+            "copy.txt",
+            "old\ndelivered();\n",
+            "cas-taskb: delivery",
+        );
+        for index in 0..40 {
+            commit(
+                repo,
+                "other.txt",
+                &format!("{index}\n"),
+                &format!("unrelated {index}"),
+            );
+        }
+        git(repo, &["checkout", "-qb", "side"]);
+        commit(repo, "side.txt", "side\n", "side work");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(repo, &base, &delivery, "main", "copy.txt")
+                .unwrap(),
+            Some(DeliveryContentPresence::Present {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+        commit(repo, "copy.txt", "old\n", "drop the delivered line");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(repo, &base, &delivery, "main", "copy.txt")
+                .unwrap(),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
         );
     }
 }

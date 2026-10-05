@@ -12112,6 +12112,52 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
         })
 }
 
+/// cas-baf7: the delivery's own non-artifact paths (its source), measured
+/// against the anchor's first parent, or its second for a merge anchor.
+/// `None` when Git cannot say.
+pub(super) fn delivery_source_paths(
+    repo_path: &std::path::Path,
+    anchor: &str,
+) -> Option<Vec<String>> {
+    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
+        format!("{anchor}^2")
+    } else {
+        format!("{anchor}^1")
+    };
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "--no-renames", &base, anchor, "--"])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty() && !regenerable_build_artifact(repo_path, path))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// cas-24d8: a regenerable artifact need not be walked line by line when the
+/// delivery carries source. If it is dropped, cas-baf7's rule
+/// ([`regenerated_artifact_drop_note`]) accepts it exactly when every other
+/// dropped path is an artifact too. Walking a minified bundle through
+/// hundreds of rebuilt epic commits was most of a 35s+ child close (cas-cee5
+/// replay). Callers record the path as dropped and let that rule decide.
+pub(super) fn artifact_left_to_regeneration_rule(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    path: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) -> bool {
+    regenerable_build_artifact(repo_path, path)
+        && *carries_source.get_or_init(|| {
+            delivery_source_paths(repo_path, anchor).is_some_and(|source| !source.is_empty())
+        })
+}
+
 /// cas-baf7: when the only "dropped" paths are regenerable build artifacts,
 /// the integration rebuilt them from the merged source of several deliveries
 /// (the standard fix for bundle merge conflicts), so minified output can never
@@ -12130,23 +12176,7 @@ fn regenerated_artifact_drop_note(
     {
         return None;
     }
-    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
-        format!("{anchor}^2")
-    } else {
-        format!("{anchor}^1")
-    };
-    let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", "--no-renames", &base, anchor, "--"])
-        .current_dir(repo_path)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    let delivered = String::from_utf8_lossy(&output.stdout);
-    let source: Vec<&str> = delivered
-        .lines()
-        .map(str::trim)
-        .filter(|path| !path.is_empty() && !regenerable_build_artifact(repo_path, path))
-        .collect();
+    let source = delivery_source_paths(repo_path, anchor)?;
     if source.is_empty() {
         return None;
     }
@@ -12524,7 +12554,65 @@ fn validated_delivery_content_review(
     )))
 }
 
+/// cas-24d8: the child-close content gate's share of the 55s tool deadline.
+/// Its ownership walks are memoized and skip unchanged edges, but a long
+/// epic history under host load can still exceed this; then the close
+/// returns a typed, retryable refusal instead of timing out with an unknown
+/// outcome.
+const CHILD_CONTENT_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
+
 fn anchored_delivery_content_gate(
+    task: &Task,
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    content_window: Option<&TaskCommitReceiptWindow>,
+    content_identity: &TaskCommitIdentity,
+    commit_receipt: Option<&str>,
+    supervisor_override_reason: Option<&str>,
+) -> Option<MergeStateGateOutcome> {
+    // cas-24d8: an outer epic collection may already own a shorter deadline.
+    let budget = epic_measurement::deadline()
+        .map(|deadline| deadline.remaining())
+        .unwrap_or(std::time::Duration::MAX)
+        .min(CHILD_CONTENT_GATE_BUDGET);
+    let _scope = epic_measurement::Scope::new(budget);
+    let started = std::time::Instant::now();
+    let outcome = anchored_delivery_content_gate_unbounded(
+        task,
+        repo_path,
+        anchor,
+        parent_branch,
+        content_window,
+        content_identity,
+        commit_receipt,
+        supervisor_override_reason,
+    );
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let expired = epic_measurement::expired();
+    tracing::info!(
+        target: "cas::close",
+        stage = "delivery_content_gate",
+        task_id = %task.id,
+        anchor = %anchor,
+        elapsed_ms,
+        expired,
+        "cas-24d8: delivery content gate finished"
+    );
+    if expired {
+        // An expired probe surfaces as an error, and some callers read an
+        // error as dropped content. Never report a verdict measured past the
+        // budget: refuse with the retry instead.
+        return Some(MergeStateGateOutcome::Reject(format!(
+            "DELIVERY CONTENT CHECK TIMED OUT: proving task {}'s delivery {anchor} on {parent_branch} took longer than {}s ({elapsed_ms} ms measured), so Cassy made no decision and changed nothing. Retry the close when the host is less loaded; if it keeps timing out, the epic history is too long to measure inside one tool call — report it with this message.",
+            task.id,
+            budget.as_secs()
+        )));
+    }
+    outcome
+}
+
+fn anchored_delivery_content_gate_unbounded(
     task: &Task,
     repo_path: &std::path::Path,
     anchor: &str,
@@ -12599,6 +12687,13 @@ fn anchored_delivery_content_gate(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
+            // before the byte-identity proof walks those bundles again.
+            if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                )));
+            }
             let (identical, paths) = match target_identical_delivered_paths(
                 task,
                 repo_path,
@@ -28168,6 +28263,113 @@ mod merge_state_gate_tests {
         git(p, &["commit", "-qm", "delete delivered line"]);
         assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    /// cas-24d8: a content gate that runs out of its budget refuses with a
+    /// typed, retryable message. A probe that expired surfaces as an error,
+    /// which some callers read as dropped content, so no verdict measured past
+    /// the deadline may be reported.
+    #[test]
+    fn content_gate_past_its_budget_refuses_instead_of_guessing_cas_24d8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(delivery.clone());
+        let window = window_at(0, "expired budget");
+        let _outer = crate::git_evidence::measurement::Scope::new(std::time::Duration::ZERO);
+        let outcome = anchored_delivery_content_gate(
+            &task,
+            p,
+            &delivery,
+            "main",
+            Some(&window),
+            &window.identity,
+            None,
+            None,
+        );
+        assert!(
+            matches!(&outcome, Some(MergeStateGateOutcome::Reject(message))
+                if message.contains("DELIVERY CONTENT CHECK TIMED OUT")),
+            "{outcome:?}"
+        );
+    }
+
+    /// cas-24d8: the cas-cee5 shape. A delivered line followed by a long
+    /// ancestry of commits that never touch its file (built with one
+    /// fast-import) is proven present well inside a tight measurement budget.
+    /// Before the fix every edge spawned `git show` and `git diff`, about 2k
+    /// processes here, which exhausts the budget.
+    #[test]
+    fn long_unrelated_ancestry_is_measured_inside_a_tight_budget_cas_24d8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        let parent = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", &format!("{delivery}^")])
+                .current_dir(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let mut stream = String::new();
+        for index in 0..1000 {
+            let message = format!("unrelated {index}\n");
+            let content = format!("{index}\n");
+            stream.push_str("commit refs/heads/long-target\n");
+            stream.push_str("committer fixture <fixture@example.test> 1767225600 +0000\n");
+            stream.push_str(&format!("data {}\n{message}", message.len()));
+            if index == 0 {
+                stream.push_str(&format!("from {delivery}\n"));
+            }
+            stream.push_str(&format!(
+                "M 100644 inline other.txt\ndata {}\n{content}\n",
+                content.len()
+            ));
+        }
+        let mut import = std::process::Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(p)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            import
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stream.as_bytes())
+                .unwrap();
+        }
+        assert!(import.wait().unwrap().success(), "fast-import failed");
+        let _budget =
+            crate::git_evidence::measurement::Scope::new(std::time::Duration::from_secs(5));
+        let presence = super::delivery_evolution::line_content_presence(
+            p,
+            &parent,
+            &delivery,
+            "long-target",
+            "work.rs",
+        );
+        assert!(
+            !crate::git_evidence::measurement::expired(),
+            "the walk exhausted its budget"
+        );
+        assert_eq!(
+            presence.unwrap(),
+            Some(DeliveryContentPresence::Present {
+                paths: vec!["work.rs".into()]
+            })
+        );
     }
 
     /// Replays immutable production delivery anchors. Run explicitly in a

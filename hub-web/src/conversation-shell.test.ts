@@ -76,6 +76,15 @@ describe("cold-load list states (journey F14)", () => {
     expect(text(machineFooterMarkup([row, { ...row, id: "b", everConnected: true }], 0, "b"))).toBe("2 paired machinesReconnecting");
   });
 
+  it("footer never promises a reconnect for a machine whose failure will not retry (cas-0546, cas-99d7)", async () => {
+    const { machineFooterMarkup } = await import("./paired-machines");
+    const text = (markup: string) => { const node = document.createElement("div"); node.innerHTML = markup; return node.querySelector(".machine-badge-state")?.textContent; };
+    const fatal = { id: "a", label: "Atlas", address: "atlas.test", connection: "Unreachable", connected: false, lastSeen: "", everConnected: true };
+    expect(text(machineFooterMarkup([fatal], 0, "b"))).toBe("Unreachable");
+    // A retrying machine beside it still decides the word.
+    expect(text(machineFooterMarkup([fatal, { ...fatal, id: "b", connection: "Reconnecting" }], 0, "b"))).toBe("Reconnecting");
+  });
+
   it("footer names never-live machines that failed as unreachable, and its dot shows the worst machine (cas-b789)", async () => {
     const { CANT_REACH_RETRYING, machineFooterMarkup } = await import("./paired-machines");
     const row = { id: "a", label: "Atlas", address: "atlas.test", connection: CANT_REACH_RETRYING, connected: false, lastSeen: "" };

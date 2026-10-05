@@ -189,6 +189,16 @@ export class HubDouble {
   readonly launches: LaunchCall[] = [];
   /** Sessions started but still booting: listed after this many more session fetches. */
   private readonly booting = new Map<string, { machine: string; session: Session; polls: number }>();
+  /** Every session frame the page sent (SendMessage, InterruptPane, ...), in order (cas-0546). */
+  readonly frames: Array<{ machine: string; session: string; kind: string; body: unknown }> = [];
+  /**
+   * Sessions another device controls, by its label (cas-0546). As the real
+   * hub (hub/auth.rs acquire_or_force_lease): a take is refused while it
+   * holds, unless forced by a hub-admin pairing, which takes it over.
+   */
+  private readonly leaseHolders = new Map<string, string>();
+  /** POST /v1/sessions/<s>/lease calls, in order, with whether they forced. */
+  readonly leaseTakes: Array<{ machine: string; session: string; force: boolean; status: number }> = [];
   /** Turns pushed live, replayed in history like a real hub after a reload. */
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
@@ -234,6 +244,9 @@ export class HubDouble {
     }
     await this.waitFor(() => this.catalogFetchCount(machineId) > before);
   }
+
+  /** Another device (named `label`) holds control of the session until a take overrides it. */
+  holdLease(session: string, label: string): void { this.leaseHolders.set(session, label); }
 
   /** Resolve on the next matching wire observation, with no polling sleeps. */
   waitFor(observed: () => boolean): Promise<void> {
@@ -735,7 +748,23 @@ export class HubDouble {
       if (id.startsWith("art-offline")) return route.abort("connectionrefused");
       return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: this.stamp(600_000), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
     }
-    if (path.endsWith("/lease")) return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
+    const leased = /^\/v1\/sessions\/([^/]+)\/lease$/.exec(path);
+    if (leased) {
+      const session = decodeURIComponent(leased[1]!);
+      const holder = this.leaseHolders.get(session);
+      if (method === "POST") {
+        const force = (route.request().postDataJSON() as { force?: boolean } | null)?.force === true;
+        const status = !holder ? 200 : !force ? 409 : this.scopesFor(machineId).includes("hub-admin") ? 200 : 403;
+        this.leaseTakes.push({ machine: machineId, session, force, status });
+        this.observed();
+        if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
+        if (status === 403) return route.fulfill({ status, json: { error: "scope_denied", required_scope: "hub:admin" } });
+        this.leaseHolders.delete(session);
+      } else if (method === "GET" && holder) {
+        return route.fulfill({ json: { held_by_me: false, controller_label: holder } });
+      }
+      return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
+    }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");
       const fleet = this.options.fleet?.[session];
@@ -942,6 +971,9 @@ export class HubDouble {
   }
 
   private handleSessionFrame(machineId: string, session: string, ws: WebSocketRoute, message: Record<string, Record<string, unknown>>, pages: HistoryPage[]): void {
+    const kind = typeof message === "string" ? message : Object.keys(message)[0] ?? "";
+    this.frames.push({ machine: machineId, session, kind, body: typeof message === "string" ? message : message[kind] });
+    this.observed();
     if (message.SendMessage) {
       const m = message.SendMessage;
       this.sends.push({

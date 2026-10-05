@@ -28,6 +28,8 @@ export interface ConnectionSnapshot {
 /** A machine never live in this visit whose attempts have failed; retries continue. */
 export const CANT_REACH_RETRYING = "Can't reach · retrying";
 export const NEEDS_PAIRING = "Needs pairing";
+/** A machine connection failure that will not retry by itself. */
+export const UNREACHABLE = "Unreachable";
 /**
  * cas-a6f0 (journey F8/F9): heartbeats are going unanswered on a machine that
  * still reads live. Every surface uses this one word for it (header, row,
@@ -47,7 +49,7 @@ export function machineConnectionLabel(state: MachineConnectionLabelState | unde
   const retrying = state.phase === "backoff" || (state.phase === "failed" && state.fatal !== true && !state.authFailure);
   if (retrying && !everConnected) return CANT_REACH_RETRYING;
   if (state.phase === "backoff") return "Reconnecting";
-  if (state.phase === "failed") return state.authFailure ? NEEDS_PAIRING : "Unreachable";
+  if (state.phase === "failed") return state.authFailure ? NEEDS_PAIRING : UNREACHABLE;
   return "Connecting";
 }
 

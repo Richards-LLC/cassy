@@ -1,5 +1,5 @@
 import { cloudBrand, escapeHtml } from './cloud-brand';
-import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
+import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNREACHABLE, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
 import type { FleetControlGate } from './fleet-permissions';
 import { commandTokensMarkup } from './launch-session';
 import { FACTORY_MANAGE_CAPABILITY, FACTORY_OPERATE_CAPABILITY } from './pairing-scopes';
@@ -67,7 +67,9 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
     : row.connection);
   // Authorization loss needs a new pairing, so its live history must not make
   // another machine's first retry look like a reconnect (cas-f698).
-  const retryable = rows.filter((_row, index) => labels[index] !== NEEDS_PAIRING);
+  // Needs pairing and Unreachable (a failure that will not retry) never
+  // reconnect on their own, so neither may make the footer say Reconnecting.
+  const retryable = rows.filter((_row, index) => labels[index] !== NEEDS_PAIRING && labels[index] !== UNREACHABLE);
   const unreachable = retryable.length > 0 && retryable.every(row => row.connection === CANT_REACH_RETRYING);
   // cas-a6f0 (journey F8): machines still live with heartbeats unanswered
   // are unsteady, as the header and the row say, not reconnecting.
@@ -97,7 +99,7 @@ function shortMachineName(label: string): string {
 
 /** A machine's connection in the footer's words, put before its name: "Can't reach", "Reconnecting to", "Needs pairing:" (cas-0739). */
 function outageWords(connection: string): string {
-  if (connection === CANT_REACH_RETRYING || connection === 'Unreachable') return "Can't reach";
+  if (connection === CANT_REACH_RETRYING || connection === UNREACHABLE) return "Can't reach";
   if (connection === NEEDS_PAIRING) return 'Needs pairing:';
   if (connection === UNSTEADY) return 'Unsteady:';
   if (connection === 'Reconnecting') return 'Reconnecting to';

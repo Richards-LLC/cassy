@@ -1303,7 +1303,9 @@ repo="$(new_fixture train-proof)"
 cp -R "$script_dir/release-train.d" "$repo/scripts/"
 cp "$script_dir/release-train-resume.py" "$repo/scripts/"
 # This regression exercises assembly onward, with no GitHub/toolchain preflight.
-printf 'cut_stage_preflight() { return 0; }\n' >"$repo/scripts/release-train.d/preflight.sh"
+# Keep helper functions used by the nested integration fixtures while skipping
+# this train fixture's GitHub/toolchain stage.
+printf '\ncut_stage_preflight() { return 0; }\n' >>"$repo/scripts/release-train.d/preflight.sh"
 cat >"$repo/scripts/bump-release-version.sh" <<'EOF'
 #!/usr/bin/env bash
 python3 - "$1" <<'PY_BUMP'

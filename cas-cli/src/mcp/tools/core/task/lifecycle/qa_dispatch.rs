@@ -1031,8 +1031,7 @@ impl CasCore {
     /// a review for code already on trunk, and `qa_waive` then refused for
     /// lack of a parked tip. Now:
     /// - the delivered commit is the parked anchor, the close's
-    ///   `commit_receipt`, or the implementer's branch tip only when that tip
-    ///   is itself merged;
+    ///   `commit_receipt`, or a merged tip on this task's own per-task branch;
     /// - a live supervisor's override with a reason records a waiver against
     ///   that commit;
     /// - code already on trunk is never sent for review.
@@ -1056,11 +1055,7 @@ impl CasCore {
         }
         let classification_target = freshest_target_ref(repo, target_branch);
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-        let branch = task
-            .deliverables
-            .parked_branch
-            .clone()
-            .unwrap_or_else(|| format!("factory/{implementer}"));
+        let branch = super::close_ops::close_measured_factory_branch(repo, task, implementer);
         // A commit the task itself stands behind: the parked anchor or the
         // close's receipt.
         let recorded_head = task
@@ -1068,11 +1063,22 @@ impl CasCore {
             .factory_branch_anchor
             .clone()
             .or_else(|| commit_receipt.and_then(|receipt| resolve_commit(repo, receipt)));
+        let branch_tip = super::close_ops::resolve_branch_sha(repo, &branch);
+        // cas-de60: target containment proves integration, not ownership. A
+        // merged shared lane can still be a different task's old delivery.
+        // With no recorded head there is no anchor advance: check this tip
+        // against itself under the same per-task lineage rule as park/QA
+        // requests. Recorded anchors and explicit receipts remain authoritative.
+        let own_tip = recorded_head.is_some() || branch_tip.as_deref().is_some_and(|tip| {
+            self.open_task_store().is_ok_and(|store| {
+                self.tip_is_own_task_lineage(
+                    store.as_ref(), task, repo, Some(&branch), tip, Some(tip),
+                )
+            })
+        });
         let head = recorded_head.clone().or_else(|| {
-            // The live branch tip is the delivery only while it is itself
-            // merged: months later it carries unrelated work.
-            super::close_ops::resolve_branch_sha(repo, &branch)
-                .filter(|tip| is_ancestor(repo, tip, &classification_target))
+            branch_tip.clone()
+                .filter(|tip| own_tip && is_ancestor(repo, tip, &classification_target))
         });
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
@@ -1168,6 +1174,16 @@ impl CasCore {
         let remedy = "A live supervisor closes it with supervisor_override=true, a reason and \
              commit_receipt=<merged sha>; the waiver is recorded against that commit";
         let Some(head) = head else {
+            if branch_tip.is_some() && !own_tip {
+                return QaCloseGate::Refuse(format!(
+                    "INDEPENDENT QA REQUIRED: {} has no recorded delivery commit, and {branch} \
+                     is not this task's own per-task lineage. A shared worker lane cannot identify \
+                     this delivery, even when its tip is merged into {target_branch}. No QA round \
+                     was opened. Retry close with commit_receipt=<this task's delivered SHA>, \
+                     or restore its per-task delivery branch. {remedy}.",
+                    task.id,
+                ));
+            }
             return QaCloseGate::Refuse(unresolved_delivery_refusal(
                 &task.id,
                 target_branch,

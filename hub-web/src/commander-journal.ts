@@ -1,5 +1,5 @@
 import { MAX_PENDING_SENDS, validPendingSend, type PendingSend } from "./conversation-store";
-import type { OperatorReply, StoredMachine } from "./types";
+import type { MessageQueued, OperatorReply, StoredMachine } from "./types";
 
 /** Credentials rotate; this installation/conversation identity does not. */
 export type DeliveryScope = { hub: string; baseUrl: string; device: string; session: string; accountState?: "unenrolled" | "unsupported" };
@@ -16,7 +16,8 @@ export function deliveryScope(machine: StoredMachine, session: string): Delivery
 export function credentialFence(machine: StoredMachine): CredentialFence {
   return { credentialId: machine.credentialId, generation: (machine as StoredMachine & { credentialGeneration?: number }).credentialGeneration ?? 0 };
 }
-export type JournalSend = { key: string; scope: DeliveryScope; send?: PendingSend; revision: number; updatedAt: number; flight?: CredentialFence; owner?: string };
+export type JournalReceipt = MessageQueued & { sentAt: number };
+export type JournalSend = { key: string; scope: DeliveryScope; send?: PendingSend; receipt?: JournalReceipt; revision: number; updatedAt: number; flight?: CredentialFence; owner?: string };
 export type StoredReply = { key: string; scope: DeliveryScope; reply: OperatorReply; persistedAt: number };
 type Block = { key: string; credentialId: string };
 const itemKey = (scope: DeliveryScope, id: string | number) => JSON.stringify([scopeKey(scope), id]);
@@ -39,7 +40,14 @@ function validSendRow(value: unknown): value is JournalSend {
   return object(value) && validScope(value.scope) && typeof value.key === "string"
     && Number.isSafeInteger(value.revision) && (value.revision as number) > 0 && finiteTime(value.updatedAt)
     && (value.flight === undefined || validFence(value.flight)) && (value.owner === undefined || boundedText(value.owner, 2_000))
-    && (value.send === undefined || (Boolean(validPendingSend(value.send)) && value.key === itemKey(value.scope, (value.send as PendingSend).id)));
+    && (value.send === undefined || (Boolean(validPendingSend(value.send)) && value.key === itemKey(value.scope, (value.send as PendingSend).id)))
+    && (value.receipt === undefined || (validReceipt(value.receipt) && value.key === itemKey(value.scope, value.receipt.client_ref!)));
+}
+function validReceipt(value: unknown): value is JournalReceipt {
+  return object(value) && boundedText(value.client_ref, 2_000) && Boolean(value.client_ref)
+    && Number.isSafeInteger(value.notification_id) && (value.notification_id as number) > 0
+    && boundedText(value.target, 2_000) && Boolean(value.target) && typeof value.stamped === "boolean"
+    && finiteTime(value.sentAt) && (value.device_label === undefined || boundedText(value.device_label, 2_000));
 }
 function normalizedReply(value: unknown): OperatorReply | undefined {
   if (!object(value) || !Number.isSafeInteger(value.notification_id) || (value.notification_id as number) <= 0
@@ -139,24 +147,25 @@ export class CommanderJournal {
       try { run(tx, (next) => { value = next; }); } catch (error) { tx.abort(); cleanup(); reject(error); }
     });
   }
-  async read(scope: DeliveryScope): Promise<{ sends: PendingSend[]; replies: StoredReply[] }> {
-    if (!validScope(scope)) return { sends: [], replies: [] };
-    return this.transaction<{ sends: PendingSend[]; replies: StoredReply[] }>(["sends", "replies"], "readwrite", (tx, done) => {
+  async read(scope: DeliveryScope): Promise<{ sends: PendingSend[]; replies: StoredReply[]; receipts: JournalReceipt[] }> {
+    if (!validScope(scope)) return { sends: [], replies: [], receipts: [] };
+    return this.transaction<{ sends: PendingSend[]; replies: StoredReply[]; receipts: JournalReceipt[] }>(["sends", "replies"], "readwrite", (tx, done) => {
       const sendStore = tx.objectStore("sends"), replyStore = tx.objectStore("replies");
       const sends = sendStore.getAll(), replies = replyStore.getAll();
-      let pending: PendingSend[] = [], stored: StoredReply[] = [];
+      let pending: PendingSend[] = [], stored: StoredReply[] = [], receipts: JournalReceipt[] = [];
       sends.onsuccess = () => {
         for (const row of survivingRows(sendStore, sends.result, validSendRow, row => row.updatedAt, this.now())) {
           if (scopeKey(row.scope) !== scopeKey(scope)) continue;
           this.observed.set(row.key, row.revision);
-          if (row.send) pending.push(validPendingSend(row.send)!);
+          if (row.receipt) receipts.push(row.receipt);
+          else if (row.send) pending.push(validPendingSend(row.send)!);
         }
-        pending.sort((a, b) => a.at - b.at); done({ sends: pending, replies: stored });
+        pending.sort((a, b) => a.at - b.at); done({ sends: pending, replies: stored, receipts });
       };
       replies.onsuccess = () => {
         stored = survivingRows(replyStore, replies.result, validReplyRow, row => row.persistedAt, this.now())
           .filter(row => scopeKey(row.scope) === scopeKey(scope)).map(row => ({ ...row, reply: normalizedReply(row.reply)! }));
-        done({ sends: pending, replies: stored });
+        done({ sends: pending, replies: stored, receipts });
       };
     });
   }
@@ -198,11 +207,17 @@ export class CommanderJournal {
             for (const id of changes) {
               const key = itemKey(scope, id);
               const row = records.get(key);
+              if (row?.receipt) continue; // A late stale snapshot cannot undo delivery.
               if (row && row.revision !== this.observed.get(key)) continue;
               if (!row && prior.has(id)) continue;
               if (!prior.has(id) && row) continue;
               const send = next.get(id);
               if (send && row?.owner && row.owner !== this.owner) continue;
+              // A peer can read an explicit Retry's new revision while its
+              // existing bubble still says unconfirmed. Caption persistence
+              // cannot turn a definitely unsent item back into an uncertain
+              // write: only dispatch may advance held to sending.
+              if (row?.send?.state === "held" && (send?.state === "sending" || send?.state === "unconfirmed")) continue;
               if (send?.state === "held" && row?.send?.state !== "held" && row?.owner !== this.owner && row !== undefined) continue;
               const revision = (row?.revision ?? 0) + 1;
               const updated = { key, scope, ...(send ? { send } : {}), revision, updatedAt: this.now(), ...(row?.flight ? { flight: row.flight, owner: row.owner } : {}) } satisfies JournalSend;
@@ -233,6 +248,68 @@ export class CommanderJournal {
       for (const [key, revision] of committedVersions) this.observed.set(key, revision);
       if (committedVersions.size) this.changed();
       return rejected ? "not-saved" : "kept";
+    } catch { return "not-saved"; }
+  }
+  /** Store a verified wire receipt without retaining the message's private payload. */
+  async acknowledge(scope: DeliveryScope, receipt: MessageQueued, fence: CredentialFence): Promise<boolean> {
+    if (!validScope(scope) || !receipt.client_ref) return false;
+    const accepted = await this.current(scope);
+    if (!accepted || !sameFence(accepted, fence)) return false;
+    const key = itemKey(scope, receipt.client_ref);
+    let committed = false, modified = false;
+    try {
+      await this.transaction<void>(["sends", "blocks"], "readwrite", (tx, done) => {
+        done(undefined);
+        const blocked = tx.objectStore("blocks").get(blockKey(scope.hub, fence));
+        blocked.onsuccess = () => {
+          if (blocked.result) return;
+          const store = tx.objectStore("sends"), get = store.get(key);
+          get.onsuccess = () => {
+            const row = validSendRow(get.result) ? get.result : undefined;
+            if (!row || (!row.send && !row.flight) || (row.send && row.send.target !== receipt.target)) return;
+            const saved = { client_ref: receipt.client_ref, notification_id: receipt.notification_id, target: receipt.target,
+              stamped: receipt.stamped, sentAt: row.send?.sentAt ?? row.receipt?.sentAt ?? this.now(),
+              ...(receipt.device_label === undefined ? {} : { device_label: receipt.device_label }) };
+            if (!validReceipt(saved)) return;
+            // Duplicate receipts cannot replace the first confirmed queue identity.
+            if (row.receipt) { committed = row.receipt.notification_id === receipt.notification_id; return; }
+            store.put({ ...row, send: undefined, receipt: saved, revision: row.revision + 1, updatedAt: this.now() });
+            committed = true; modified = true;
+          };
+        };
+      });
+      if (modified) this.changed();
+      return committed;
+    } catch { return false; }
+  }
+  /** Explicit Retry reuses its original wire identity; never reset a confirmed ref. */
+  async retry(scope: DeliveryScope, id: string, fence: CredentialFence, expected: Pick<PendingSend, "target" | "text" | "replyTo">): Promise<"kept" | "delivered" | "not-saved"> {
+    if (!validScope(scope)) return "not-saved";
+    const accepted = await this.current(scope);
+    if (!accepted || !sameFence(accepted, fence)) return "not-saved";
+    const key = itemKey(scope, id);
+    let result: "kept" | "delivered" | "not-saved" = "not-saved", revision: number | undefined;
+    try {
+      await this.transaction<void>(["sends", "blocks"], "readwrite", (tx, done) => {
+        done(undefined);
+        const blocked = tx.objectStore("blocks").get(blockKey(scope.hub, fence));
+        blocked.onsuccess = () => {
+          if (blocked.result) return;
+          const store = tx.objectStore("sends"), get = store.get(key);
+          get.onsuccess = () => {
+            const row = validSendRow(get.result) ? get.result : undefined;
+            if (row?.receipt) { result = "delivered"; return; }
+            if (!row?.send || row.send.state === "held" || row.revision !== this.observed.get(key)) return;
+            if (row.send.target !== expected.target || row.send.text !== expected.text || row.send.replyTo !== expected.replyTo) return;
+            const send = { ...row.send, state: "held" as const, at: this.now(), heldAt: this.now(), sentAt: undefined, error: undefined };
+            revision = row.revision + 1;
+            store.put({ key, scope, send, revision, updatedAt: this.now() } satisfies JournalSend);
+            result = "kept";
+          };
+        };
+      });
+      if (revision !== undefined) { this.observed.set(key, revision); this.changed(); }
+      return result;
     } catch { return "not-saved"; }
   }
   /** Import-once by item identity, retaining cancellation tombstones. */
@@ -297,7 +374,7 @@ export class CommanderJournal {
           const get = store.get(key);
           get.onsuccess = () => {
             const row = validSendRow(get.result) ? get.result : undefined;
-            if (row?.send?.state !== "held") return;
+            if (row?.receipt || row?.send?.state !== "held") return;
             if (this.now() - (row.send.heldAt ?? row.send.at) >= 120_000) {
               expired = true;
               store.put({ ...row, revision: row.revision + 1, send: { ...row.send, state: "error", error: "This message was not sent before its wait expired. Retry to send it." } });
@@ -315,8 +392,30 @@ export class CommanderJournal {
     // replacement credential. The old claim remains uncertain, not replayable.
     const latest = await this.current(scope);
     if (!latest || !sameFence(latest, fence)) { this.changed(); return "stale"; }
-    let sent: boolean;
-    try { sent = write(); } catch { this.changed(); return "unconfirmed"; }
+    let sent: boolean | undefined;
+    try {
+      // A receipt may commit during the awaited catalog check. Read the
+      // current claim and perform the synchronous socket write in that same
+      // callback, so confirmation cannot slip between the check and write.
+      sent = await this.transaction<boolean | undefined>(["sends", "blocks"], "readonly", (tx, done) => {
+        done(undefined);
+        const block = tx.objectStore("blocks").get(blockKey(scope.hub, fence));
+        block.onsuccess = () => {
+          if (block.result) return;
+          const get = tx.objectStore("sends").get(key);
+          get.onsuccess = () => {
+            const row = validSendRow(get.result) ? get.result : undefined;
+            // Caption persistence may advance the revision without changing
+            // ownership. Fence by the claim and immutable wire content instead.
+            if (!row?.send || row.receipt || row.owner !== this.owner || !row.flight || !sameFence(row.flight, fence)
+              || row.send.target !== claimed!.send!.target || row.send.text !== claimed!.send!.text
+              || row.send.replyTo !== claimed!.send!.replyTo) return;
+            try { done(write()); } catch { done(undefined); }
+          };
+        };
+      });
+    } catch { this.changed(); return "unconfirmed"; }
+    if (sent === undefined) { this.changed(); return "unconfirmed"; }
     if (sent) { this.changed(); return "written"; }
     // Only a synchronous false proves no websocket write was made.
     await this.reconcile(scope, [claimed.send!], [{ ...claimed.send!, state: "held", sentAt: undefined }], fence);

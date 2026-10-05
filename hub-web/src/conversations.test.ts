@@ -21,6 +21,18 @@ it('another tab settles adjacent held sends without manufacturing unsent chips',
   expect(history.visibleEvents()).toEqual([]);
 });
 describe('conversation evidence', () => {
+  it('a later reply keeps explicit Send again available until that send is confirmed (cas-9dc6)', () => {
+    const history = new ConversationHistory();
+    history.submit('unknown', 'supervisor', 'Did the Mac tests start?', 1_000);
+    history.unconfirmSilent(16_000);
+    history.reply({ ...reply, reply_to: null }, 17_000, undefined, undefined, 17_000);
+    const event = history.events.find(event => event.kind === 'send')!;
+    if (event.kind !== 'send') throw new Error('Missing send');
+    expect(history.isFailedSend(event.value)).toBe(false);
+    expect(history.canRetrySend(event.value)).toBe(true);
+    history.acknowledge({ client_ref: 'unknown', notification_id: 99, target: 'supervisor', stamped: true });
+    expect(history.canRetrySend(event.value)).toBe(false);
+  });
   it('shows both paired devices and terminal input in the same history', () => {
     const history = new ConversationHistory();
     const row = (notification_id: number, text: string, device_id: string, operator_label: string, stamped = true) => ({

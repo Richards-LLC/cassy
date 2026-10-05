@@ -2,6 +2,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 import { CommanderJournal, deliveryScope, DELIVERY_DB, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import type { PendingSend } from "./conversation-store";
+import { ConversationHistory } from "./conversation-history";
 
 const scope: DeliveryScope = { hub: "hub-a", baseUrl: "https://hub.example", device: "phone", session: "session-a" };
 const fence: CredentialFence = { credentialId: "credential-a", generation: 1 };
@@ -14,6 +15,93 @@ function journals(now = () => 1_000) {
 }
 
 describe("atomic Commander journal", () => {
+  it("one confirmed ref settles both tab histories without retaining a private send payload (cas-9dc6)", async () => {
+    const { a, b, db } = journals();
+    const first = new ConversationHistory(), second = new ConversationHistory();
+    const item = send("shared");
+    await a.reconcile(scope, [], [item], fence);
+    first.restorePending((await a.read(scope)).sends, 1_000);
+    second.restorePending((await b.read(scope)).sends, 1_000);
+    await a.dispatch(scope, item.id, fence, () => true);
+    const receipt = { client_ref: item.id, notification_id: 99, target: item.target, stamped: true };
+    expect(await a.acknowledge(scope, receipt, fence)).toBe(true);
+    for (const [journal, history] of [[a, first], [b, second]] as const) {
+      const snapshot = await journal.read(scope);
+      expect(snapshot.sends).toEqual([]);
+      history.synchronizePending(snapshot.sends, 1_000, snapshot.receipts);
+      const event = history.events[0];
+      expect(event?.kind === "send" && history.showsDelivered(event.value)).toBe(true);
+      expect(event?.kind === "send" && history.isFailedSend(event.value)).toBe(false);
+    }
+    const request = db.open(DELIVERY_DB, 1);
+    const records = await new Promise<unknown[]>(resolve => { request.onsuccess = () => {
+      const database = request.result, tx = database.transaction("sends", "readonly"), read = tx.objectStore("sends").getAll();
+      tx.oncomplete = () => { database.close(); resolve(read.result); };
+    }; });
+    expect(JSON.stringify(records)).not.toContain(item.text);
+  });
+  it("a stale Retry or journal snapshot cannot create another write after confirmation (cas-9dc6)", async () => {
+    const { a, b } = journals();
+    const item = send("shared");
+    await a.reconcile(scope, [], [item], fence);
+    await b.read(scope);
+    let writes = 0;
+    await a.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    await a.acknowledge(scope, { client_ref: item.id, notification_id: 99, target: item.target, stamped: true }, fence);
+    expect(await b.retry(scope, item.id, fence, item)).toBe("delivered");
+    await b.reconcile(scope, [item], [item], fence);
+    await b.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    expect(writes).toBe(1);
+    expect((await b.read(scope)).receipts[0].notification_id).toBe(99);
+  });
+  it("explicit uncertain Retry retains the wire ref, while concurrent stale retries cannot re-claim it (cas-9dc6)", async () => {
+    const { a, b } = journals();
+    const item = send("shared");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    await b.read(scope);
+    const retries = await Promise.all([a.retry(scope, item.id, fence, item), b.retry(scope, item.id, fence, item)]);
+    expect(retries.filter(value => value === "kept")).toHaveLength(1);
+    expect((await a.read(scope)).sends[0].id).toBe(item.id);
+    expect(await b.retry(scope, item.id, fence, { ...item, text: "different content" })).toBe("not-saved");
+  });
+  it("a peer's unconfirmed caption cannot undo the writer's explicit Retry (cas-9dc6 F01)", async () => {
+    const { a, b } = journals();
+    const item = send("shared"), peerHistory = new ConversationHistory();
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    peerHistory.restorePending((await b.read(scope)).sends, 1_000);
+    expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
+    // The broadcast refreshes this tab's observed revision, but its existing
+    // unconfirmed bubble is still present when caption persistence runs.
+    const snapshot = await b.read(scope);
+    peerHistory.synchronizePending(snapshot.sends, 1_000, snapshot.receipts);
+    await b.reconcile(scope, snapshot.sends, peerHistory.pendingSends(), fence);
+    let writes = 0;
+    expect(await a.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");
+    expect(writes).toBe(1);
+    expect((await b.read(scope)).sends[0].id).toBe(item.id);
+  });
+  it("a retry stays dispatchable by a peer if the writer closes before dispatch (cas-9dc6 F01)", async () => {
+    const { a, b } = journals();
+    const item = send("shared");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
+    let writes = 0;
+    expect(await b.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");
+    expect(writes).toBe(1);
+  });
+  it("receipt persistence honours credential fences and revocation (cas-9dc6)", async () => {
+    const { a } = journals();
+    const item = send("shared"), receipt = { client_ref: item.id, notification_id: 99, target: item.target, stamped: true };
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    expect(await a.acknowledge(scope, receipt, { ...fence, generation: 2 })).toBe(false);
+    await a.purge(scope.hub, fence);
+    expect(await a.acknowledge(scope, receipt, fence)).toBe(false);
+    expect((await a.read(scope)).receipts).toEqual([]);
+  });
   it("two tabs insert different items without overwriting the other snapshot", async () => {
     const { a, b } = journals();
     await Promise.all([a.reconcile(scope, [], [send("a")], fence), b.reconcile(scope, [], [send("b")], fence)]);
@@ -92,6 +180,32 @@ describe("atomic Commander journal", () => {
     expect(writes).toBe(0);
     expect((await a.read(scope)).sends[0].state).toBe("sending");
   });
+  it("a receipt committed while the final credential check awaits prevents the retry wire write (cas-9dc6)", async () => {
+    const { db, b } = journals();
+    let reads = 0, writes = 0;
+    const a = new CommanderJournal(db, async () => {
+      if (++reads === 2) await b.acknowledge(scope, { client_ref: 'a', notification_id: 99, target: 'supervisor', stamped: true }, fence);
+      return fence;
+    }, () => 1_000, false);
+    await a.reconcile(scope, [], [send('a')], fence);
+    await a.dispatch(scope, 'a', fence, () => { writes++; return true; });
+    expect(writes).toBe(0);
+    expect((await a.read(scope)).receipts[0].notification_id).toBe(99);
+  });
+  it("an owner persisting its unconfirmed caption during the final check does not discard the wire claim (cas-9dc6)", async () => {
+    const { db } = journals();
+    let reads = 0, writes = 0;
+    const a = new CommanderJournal(db, async () => {
+      if (++reads === 2) {
+        const snapshot = await a.read(scope);
+        await a.reconcile(scope, snapshot.sends, snapshot.sends.map(send => ({ ...send, state: 'unconfirmed' })), fence);
+      }
+      return fence;
+    }, () => 1_000, false);
+    await a.reconcile(scope, [], [send('a')], fence);
+    expect(await a.dispatch(scope, 'a', fence, () => { writes++; return true; })).toBe('written');
+    expect(writes).toBe(1);
+  });
   it("revocation purges private content and fences stale writers, imports and ACKs", async () => {
     const { a, b } = journals();
     await a.reconcile(scope, [], [send("a")], fence);
@@ -100,14 +214,14 @@ describe("atomic Commander journal", () => {
     await b.reconcile(scope, [], [send("b")], fence);
     await b.importLegacy(scope, [send("c")], fence);
     expect(await b.persistReply(scope, reply, fence)).toBe(false);
-    expect(await b.read(scope)).toEqual({ sends: [], replies: [] });
+    expect(await b.read(scope)).toEqual({ sends: [], replies: [], receipts: [] });
   });
   it("device and origin scopes cannot read another installation's words", async () => {
     const { a } = journals();
     await a.reconcile(scope, [], [send("a")], fence);
     await a.persistReply(scope, reply, fence);
-    expect(await a.read({ ...scope, device: "new-key-device" })).toEqual({ sends: [], replies: [] });
-    expect(await a.read({ ...scope, baseUrl: "https://another.example" })).toEqual({ sends: [], replies: [] });
+    expect(await a.read({ ...scope, device: "new-key-device" })).toEqual({ sends: [], replies: [], receipts: [] });
+    expect(await a.read({ ...scope, baseUrl: "https://another.example" })).toEqual({ sends: [], replies: [], receipts: [] });
   });
   it("a committed reply is durable before ACK authorization and dedupes after lost ACK", async () => {
     const { a, make } = journals();
@@ -155,14 +269,14 @@ describe("journal privacy and immutable replay", () => {
   it("drops malformed stored rows without exposing or dispatching their payload", async () => {
     const { a, db } = journals(); await a.read(scope);
     await seedRows(db, { sends: [{ key: "corrupt", send: send("corrupt"), revision: 1, updatedAt: 1_000 }], replies: [{ key: "bad-reply", scope, reply: { ...reply, message: 1 }, persistedAt: 1_000 }] });
-    expect(await a.read(scope)).toEqual({ sends: [], replies: [] });
+    expect(await a.read(scope)).toEqual({ sends: [], replies: [], receipts: [] });
     expect(await a.scopes({ id: scope.hub, baseUrl: scope.baseUrl, deviceId: scope.device } as never)).toEqual([]);
   });
   it("deletes private payloads past retention when a quiet journal is reopened", async () => {
     let now = 1_000; const { a, make } = journals(() => now);
     await a.reconcile(scope, [], [send("old")], fence); await a.persistReply(scope, reply, fence);
     now += 91 * 24 * 60 * 60 * 1_000;
-    expect(await make().read(scope)).toEqual({ sends: [], replies: [] });
+    expect(await make().read(scope)).toEqual({ sends: [], replies: [], receipts: [] });
   });
   it("live/history defaults dedupe but changed attachments cannot authorize an ACK", async () => {
     const { a } = journals(); expect(await a.persistReply(scope, reply, fence)).toBe(true);
@@ -191,6 +305,6 @@ describe("journal privacy and immutable replay", () => {
     expect(await a.reconcile(future, [], [send("future")], fence)).toBe("not-saved");
     expect(await a.persistReply(future, reply, fence)).toBe(false);
     expect(await a.dispatch(future, "future", fence, () => { throw Error("must not send"); })).toBe("stale");
-    expect(await a.read(future)).toEqual({ sends: [], replies: [] });
+    expect(await a.read(future)).toEqual({ sends: [], replies: [], receipts: [] });
   });
 });

@@ -84,6 +84,42 @@ class AdmissionTests(unittest.TestCase):
         self.assertIn('verified-web-tests: PASS (1 vitest tests passed)', stdout)
         self.assertTrue(marker.exists())
 
+    def test_package_build_typecheck_and_visual_qa_wait_at_actual_entrypoints(self):
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py']:
+            shutil.copy(ROOT / 'scripts' / name, scripts / name)
+        (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
+            "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))
+        hub = self.root / 'hub'
+        hub.mkdir()
+        binaries = self.root / 'bin'
+        binaries.mkdir()
+        marker = self.root / 'started'
+        for name in ['npm', 'vite', 'tsc']:
+            stub = binaries / name
+            stub.write_text('#!' + sys.executable + "\nimport pathlib;pathlib.Path(" + repr(str(marker)) + ").write_text('started')\n")
+            stub.chmod(0o755)
+        env = dict(self.env, PATH=str(binaries)+os.pathsep+self.env['PATH'])
+        commands = json.loads((ROOT/'hub-web/package.json').read_text())['scripts']
+        for name in ['build', 'typecheck', 'visual-qa']:
+            with self.subTest(name=name):
+                marker.unlink(missing_ok=True)
+                with self.admit('proof'):
+                    child = subprocess.Popen(['sh', '-c', commands[name]], cwd=hub, env=env,
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    try:
+                        time.sleep(.25)
+                        self.assertFalse(marker.exists(), f'{name} bypassed proof budget')
+                    except BaseException:
+                        child.kill()
+                        child.communicate(timeout=3)
+                        raise
+                stdout, stderr = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 0, stdout+stderr)
+                self.assertIn('waiting for host memory (proof running)', stdout)
+                self.assertTrue(marker.exists())
+
     def test_worker_wait_has_deadline_without_starting_command(self):
         with self.admit('proof'):
             result = []

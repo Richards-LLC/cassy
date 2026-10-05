@@ -1,21 +1,27 @@
 # Brief: Local network access recovery
 
 ## Single idea
+
 Commander keeps the pairing while explaining how to allow browser access to a tailnet hub.
 
 ## Hero form
+
 A status sentence below the session header names the machine and the browser setting. With no conversation loaded, it sits in the conversation list, which remains visible on phones.
 
 ## Emotional register
+
 Calm and practical: reuse the existing compatibility notice typography and theme tokens, with one concrete next step.
 
 ## Distinctive move
+
 The same machine name used in the conversation and footer leads the permission guidance; transport errors stay in Details.
 
 ## Deliberately omitted
+
 No Re-pair action for a browser permission denial, because replacing the active credential cannot grant network permission.
 
 ## Critique
+
 Scored by proud-raven-98 on 2026-10-05 against the built-dist HUB-J12 permission journey at 1280×800 and 390×844, light and dark.
 
 | Dimension | Score | Evidence |

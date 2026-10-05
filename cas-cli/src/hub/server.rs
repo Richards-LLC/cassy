@@ -2278,24 +2278,11 @@ async fn proxy_socket(
                         continue;
                     }
                     trace_conversation_history_relay(&session, &frame.bytes);
-                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
                     }
-                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
-                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
-                    }) {
-                        let _ = connector
-                            .send(
-                                &session,
-                                ClientMessage::OperatorReplyDelivered {
-                                    notification_id,
-                                    device_id,
-                                },
-                            )
-                            .await;
-                    }
+
                 }
                 Err(ViewerRecvError::Lagged { skipped }) => {
                     let error = serde_json::json!({"error":"viewer_lagged","skipped":skipped});
@@ -2396,6 +2383,7 @@ async fn handle_client_message(
     let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let now = chrono::Utc::now();
     let read_message = is_pane_read_message(&message);
+    store.ensure_active_context(context, now)?;
     let allowed = if matches!(message, ClientMessage::ResizePane { .. }) {
         store.may_resize_panes(context, session, now)?
     } else if read_message {
@@ -2426,7 +2414,8 @@ async fn handle_client_message(
         // this message answers, cas-a8ea8) — is forwarded unchanged.
         *attribution = verified_attribution(context);
     }
-    if let ClientMessage::ConversationHistoryRequest { device_id, .. } = &mut message {
+    if let ClientMessage::ConversationHistoryRequest { device_id, .. }
+        | ClientMessage::OperatorReplyPersisted { device_id, .. } = &mut message {
         // History is private to the authenticated paired device. Do not trust
         // a browser-supplied selector, even though this is a read operation.
         *device_id = context.device_id.clone();
@@ -2507,6 +2496,7 @@ pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
         ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
+            | ClientMessage::OperatorReplyPersisted { .. }
     )
 }
 
@@ -3211,7 +3201,6 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         continue;
                     }
                     trace_conversation_history_relay(&session, &frame.bytes);
-                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
@@ -3223,20 +3212,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => break,
                     };
                     if result.is_err() { break; }
-                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
-                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
-                    }) {
-                        let _ = state
-                            .connector
-                            .send(
-                                &session,
-                                ClientMessage::OperatorReplyDelivered {
-                                    notification_id,
-                                    device_id,
-                                },
-                            )
-                            .await;
-                    }
+
                 }
                 Some(MachineOutbound::Lagged { session, skipped }) => {
                     let envelope = serde_json::json!({

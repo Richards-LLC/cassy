@@ -13,6 +13,7 @@ import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
+import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -351,6 +352,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // keeping its original in_reply_to; the refused bubble leaves the
       // thread only once the new send is actually on the wire.
       retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },
+      cancelMessage: (send) => { void cancelWaitingMessage(threadMachineId, threadSession, send.id); },
       // The refusal says "Take control, then retry"; the control is on the
       // refused message because the conversation header has none (cas-3433).
       takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },
@@ -751,7 +753,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
     },
-    onMessageQueued: (session, receipt) => {
+    onMessageQueued: (session, receipt, frameFence) => {
+      const accepted = machines.get(machine.id);
+      if (frameFence && (!accepted || accepted.deviceId !== machine.deviceId || accepted.baseUrl !== machine.baseUrl || accepted.credentialId !== frameFence.credentialId || credentialFence(accepted).generation !== frameFence.generation)) return;
       conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews(); renderConversationList();
@@ -784,22 +788,24 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // nothing about the lease and leave it alone.
       if (refusal(detail).action === "take-control") controlTakenAfterRefusal.delete(key);
       const onBubble = conversationHistory(key).reject(clientRef, detail);
-      if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
+      const trackedDelivery = messageDelivery?.session === key && messageDelivery.clientRef === clientRef;
+      if (trackedDelivery) {
         messageDelivery = undefined;
         document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
-        if (selectedMachineId === machine.id && selectedSession === session) {
-          // The refused bubble carries the reason and the next step; the
-          // composer only points at it, so the reason is said once (cas-4d92).
-          // Without a bubble to point at, the composer gives the whole sentence.
-          showComposerStatus(onBubble ? REFUSED_SEE_ABOVE : refusalSentence(detail), "error");
-        }
+      }
+      if (selectedMachineId === machine.id && selectedSession === session && (onBubble || trackedDelivery)) {
+        // The journal owns send state; this refusal need not have a legacy
+        // messageDelivery tracker. A refused message never promises a retry.
+        // The bubble names the reason once; the composer points at it (cas-4d92).
+        showComposerStatus(onBubble ? REFUSED_SEE_ABOVE : refusalSentence(detail), "error");
       }
       updateConversationViews(); renderConversationList();
     },
-    onOperatorReply: (session, reply) => {
+    onOperatorReply: (session, reply, frameFence) => {
+      void persistDeviceReply(machine, session, reply, frameFence);
       // cas-e829: a system notice goes to the attention lane, never the thread.
       if (isOperatorNotice(reply)) { applyOperatorNotice(machine, session, reply); return; }
-      conversationHistory(sessionKey(machine.id, session), session).receive(reply, Date.now(), session);
+      conversationHistory(sessionKey(machine.id, session), session).receive({ ...reply, device_persisted: false }, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
       scheduleReceiptCheck(sessionKey(machine.id, session));
       updateConversationViews(); renderConversationList();
@@ -822,7 +828,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onOperatorNoticeResolved: (session, resolved) => {
       resolveAttention(noticeFingerprint(machine.id, session, resolved.notification_id, resolved.subject));
     },
-    onConversationHistory: (session, page: ConversationHistoryPage) => {
+    onConversationHistory: (session, page: ConversationHistoryPage, frameFence) => {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
       applyHistoryCursor(cursor, page);
@@ -832,13 +838,18 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // older daemon) are filed beside it by session, never into it.
       for (const message of [...page.messages, ...(page.earlier_messages ?? [])]) history.hydrateSend(message);
       for (const reply of [...page.replies, ...(page.earlier_replies ?? [])]) {
+        if (reply.session === undefined || reply.session === session) void persistDeviceReply(machine, session, reply, frameFence);
         // cas-e829: this session's notices raise or retire attention; another
         // session's are its own business.
         if (isOperatorNotice(reply)) {
           if (reply.session === undefined || reply.session === session) applyOperatorNotice(machine, session, reply);
           continue;
         }
-        history.hydrateReply(reply);
+        // History has reached this device, but the asynchronous journal commit
+        // has not proved storage yet. Render its forwarded receipt immediately,
+        // as for live replies, so committing it does not insert a new line above
+        // the reader's position after Load earlier (HUB-J4).
+        history.hydrateReply(reply.session === undefined || reply.session === session ? { ...reply, device_persisted: false } : reply);
       }
       updateConversationViews();
       renderConversationList();
@@ -2302,6 +2313,8 @@ function rememberDraft(key: string, draft: Draft | undefined): void {
  */
 function purgeMachineConversations(machineId: string, options: { forgetInMemory: boolean }): void {
   conversationPersistenceBlocked.add(machineId);
+  const machine = machines.get(machineId);
+  if (machine) void sendJournal.purge(machineId, credentialFence(machine)).catch(() => { showComposerStatus("Browser storage refused to remove this machine's saved conversation. Retry removal before using it again.", "error"); });
   purgeConversations(conversationStorage, machineId);
   for (const key of [...storedSends.keys()]) if (key.startsWith(`${machineId}:`)) storedSends.delete(key);
   for (const key of [...storedArrivals.keys()]) if (key.startsWith(`${machineId}:`)) storedArrivals.delete(key);
@@ -2839,6 +2852,7 @@ function expireHeldSend(machine: StoredMachine, key: string, clientRef: string):
 }
 
 function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, supervisor: string, text: string, replyTo: number | undefined, expiresInMs: number): void {
+  if (heldSends.get(key)?.some((held) => held.clientRef === clientRef)) return;
   heldSince.set(clientRef, heldSince.get(clientRef) ?? Date.now());
   const expiry = setTimeout(() => {
     const queue = heldSends.get(key) ?? [];
@@ -2860,44 +2874,146 @@ function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, s
  * so a reload or a discarded tab does not lose them. `storedSends` holds what
  * the last page left until each machine's connection is set up here.
  */
-const sendStore = pendingSendStore(conversationStorage);
+const sendStore = pendingSendStore(conversationStorage); // one-time legacy import only
 const storedSends: Map<string, PendingSend[]> = sendStore.load();
-/** What was last written per conversation, so an unchanged thread is not rewritten. */
-const persistedSends = new Map<string, string>();
+const persistedSends = new Map<string, PendingSend[]>();
+const pendingThreadScopes = new Map<string, string>();
+const restoredMachines = new Map<string, Promise<void>>();
+let journalWrites = Promise.resolve();
+const sendJournal = new CommanderJournal(window.indexedDB, async (scope: DeliveryScope) => {
+  if (conversationPersistenceBlocked.has(scope.hub)) return undefined;
+  const snapshot = await catalog.snapshot();
+  const machine = snapshot.machines.find((item) => item.id === scope.hub && item.baseUrl === scope.baseUrl && item.deviceId === scope.device);
+  return machine && deliveryScope(machine, scope.session).accountState !== "unsupported" ? credentialFence(machine) : undefined;
+});
+let journalSync = Promise.resolve();
+sendJournal.onChange = () => {
+  journalSync = journalSync.then(async () => {
+    await journalWrites;
+    for (const machine of machines.values()) {
+      if (conversationPersistenceBlocked.has(machine.id)) continue;
+      await restoredMachines.get(machine.id);
+      for (const scope of await sendJournal.scopes(machine)) {
+        const key = sessionKey(machine.id, scope.session);
+        const snapshot = await sendJournal.read(scope);
+        pendingThreadScopes.set(key, scopeKey(scope));
+        persistedSends.set(key, snapshot.sends);
+        const history = conversationHistory(key, scope.session);
+        const current = new Map(snapshot.sends.map((send) => [send.id, send]));
+        const queue = heldSends.get(key) ?? [];
+        for (const held of [...queue]) if (current.get(held.clientRef)?.state !== "held") {
+          clearTimeout(held.expiry); queue.splice(queue.indexOf(held), 1);
+        }
+        if (!queue.length) heldSends.delete(key);
+        for (const held of history.synchronizePending(snapshot.sends)) {
+          const remaining = HELD_SEND_MS - (Date.now() - (held.heldAt ?? held.at));
+          if (remaining <= 0) expireHeldSend(machine, key, held.id);
+          else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
+        }
+        for (const row of snapshot.replies) history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+        if (sessionIsUp(machine.id, scope.session)) void flushHeldSends(machine, scope.session);
+      }
+    }
+    updateConversationViews(); renderConversationList();
+  }).catch(() => { /* a later broadcast retries; no storage failure grants dispatch */ });
+};
 
-function persistPendingSends(): void {
+function persistPendingSends(): Promise<void> {
   for (const [key, history] of conversationHistories) {
-    // Not restored yet: writing now would replace what the last page left.
     if (storedSends.has(key)) continue;
-    const machineId = key.slice(0, key.indexOf(":"));
-    const sends = conversationPersistenceBlocked.has(machineId) ? [] : history.pendingSends().map((send) => send.state === "held" ? { ...send, heldAt: heldSince.get(send.id) ?? send.at } : send);
-    const serialized = JSON.stringify(sends);
-    if (persistedSends.get(key) === serialized) continue;
-    persistedSends.set(key, serialized);
-    sendStore.save(key, sends);
+    const separator = key.indexOf(":");
+    const machine = machines.get(key.slice(0, separator));
+    if (!machine || conversationPersistenceBlocked.has(machine.id)) continue;
+    const session = key.slice(separator + 1);
+    if (pendingThreadScopes.has(key) && pendingThreadScopes.get(key) !== scopeKey(deliveryScope(machine, session))) continue;
+    const after = history.pendingSends().map((send) => send.state === "held" ? { ...send, heldAt: heldSince.get(send.id) ?? send.at } : send);
+    journalWrites = journalWrites.then(async () => {
+      // Revocation can occur while this write waits behind another transaction.
+      // The privacy fence is checked when it executes, not only when scheduled.
+      if (conversationPersistenceBlocked.has(machine.id)) return;
+      const before = persistedSends.get(key) ?? [];
+      if (JSON.stringify(before) === JSON.stringify(after)) return;
+      const result = await sendJournal.reconcile(deliveryScope(machine, session), before, after, credentialFence(machine));
+      // A revoked scope is deliberately refused, not a browser storage error.
+      if (conversationPersistenceBlocked.has(machine.id)) return;
+      if (result === "kept") persistedSends.set(key, after);
+      else if (selectedMachineId === machine.id && selectedSession === session) showComposerStatus(result === "too-long"
+        ? "This message is too long to keep in browser storage. Edit it before sending."
+        : "Browser storage could not keep this message. It has not been sent; keep this page open and retry.", "error");
+    }).catch(() => { /* the next explicit operation reports storage failure */ });
   }
+  return journalWrites;
 }
 
-/**
- * Put the machine's messages from before the reload back in their threads.
- * A held one goes out once, under its own client_ref, when its session is
- * live, or turns Not sent when its wait (from when it was first held) is over.
- */
 function restoreStoredSends(machine: StoredMachine): void {
-  const prefix = `${machine.id}:`;
-  const now = Date.now();
-  for (const [key, sends] of [...storedSends]) {
-    if (!key.startsWith(prefix)) continue;
-    storedSends.delete(key);
-    const history = conversationHistory(key);
-    for (const held of history.restorePending(sends, now)) {
-      const since = held.heldAt ?? held.at;
-      heldSince.set(held.id, since);
-      const remaining = HELD_SEND_MS - (now - since);
-      if (remaining <= 0) expireHeldSend(machine, key, held.id);
-      else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
+  if (restoredMachines.has(machine.id)) return;
+  const restore = (async () => {
+    for (const [key, sends] of [...storedSends]) {
+      if (!key.startsWith(`${machine.id}:`) || conversationPersistenceBlocked.has(machine.id)) continue;
+      const session = key.slice(machine.id.length + 1);
+      await sendJournal.importLegacy(deliveryScope(machine, session), sends, credentialFence(machine));
+      // Delete the legacy namespace only after the import transaction commits.
+      sendStore.save(key, []);
+      storedSends.delete(key);
     }
-  }
+    for (const scope of await sendJournal.scopes(machine)) {
+      if (conversationPersistenceBlocked.has(machine.id)) return;
+      const snapshot = await sendJournal.read(scope);
+      const key = sessionKey(machine.id, scope.session);
+      pendingThreadScopes.set(key, scopeKey(scope));
+      persistedSends.set(key, snapshot.sends);
+      const history = conversationHistory(key, scope.session);
+      for (const row of snapshot.replies) history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+      for (const held of history.restorePending(snapshot.sends, Date.now())) {
+        const since = held.heldAt ?? held.at;
+        heldSince.set(held.id, since);
+        const remaining = HELD_SEND_MS - (Date.now() - since);
+        if (remaining <= 0) expireHeldSend(machine, key, held.id);
+        else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
+      }
+    }
+  })().catch(() => { showComposerStatus("Browser storage could not restore kept messages. Retry before sending.", "error"); });
+  restoredMachines.set(machine.id, restore);
+  void restore.then(() => {
+    updateConversationViews(); renderConversationList();
+    for (const session of sessions.get(machine.id) ?? []) if (sessionIsUp(machine.id, session.name)) void flushHeldSends(machine, session.name);
+  });
+}
+
+async function persistDeviceReply(machine: StoredMachine, session: string, reply: OperatorReply, frameFence?: CredentialFence): Promise<void> {
+  try {
+  const fence = frameFence ?? credentialFence(machine);
+  const scope = deliveryScope(machine, session);
+  if (!await sendJournal.persistReply(scope, reply, fence)) return;
+  const current = (await catalog.snapshot()).machines.find((item) => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
+  if (!current || current.credentialId !== fence.credentialId || credentialFence(current).generation !== fence.generation || conversationPersistenceBlocked.has(machine.id)) return;
+  conversationHistory(sessionKey(machine.id, session)).markReplyPersisted(reply.notification_id);
+  // Device identity is derived by the hub, never trusted from this frame.
+  connections.get(machine.id)?.send(session, { OperatorReplyPersisted: { notification_id: reply.notification_id, device_id: "" } });
+  updateConversationViews();
+  } catch { /* Display remains forwarded; failed storage cannot authorize ACK. */ }
+}
+
+async function cancelWaitingMessage(machineId: string, session: string, id: string): Promise<void> {
+  const machine = machines.get(machineId);
+  if (!machine) return;
+  try {
+    await journalWrites;
+    if (!await sendJournal.cancel(deliveryScope(machine, session), id)) {
+      showComposerStatus("This message may already have been sent. Wait for its receipt before retrying.", "info");
+      return;
+    }
+    const key = sessionKey(machineId, session);
+    const queue = heldSends.get(key) ?? [];
+    for (const held of [...queue]) if (held.clientRef === id) { clearTimeout(held.expiry); queue.splice(queue.indexOf(held), 1); }
+    if (!queue.length) heldSends.delete(key);
+    heldSince.delete(id);
+    conversationHistory(key).reject(id, "Cancelled — not sent.");
+    conversationHistory(key).dismissSend(id);
+    updateConversationViews(); renderConversationList();
+    showComposerStatus("Waiting message cancelled. It was not sent.", "info");
+    document.querySelector<HTMLElement>("#message-text")?.focus({ preventScroll: true });
+  } catch { showComposerStatus("Browser storage could not cancel this waiting message. Keep this page open and retry.", "error"); }
 }
 
 /**
@@ -2979,6 +3095,8 @@ async function reclaimControlThenFlush(machine: StoredMachine, session: string):
 /** The session is back: send what was held, in order, each once. */
 async function flushHeldSends(machine: StoredMachine, session: string): Promise<void> {
   const key = sessionKey(machine.id, session);
+  await restoredMachines.get(machine.id);
+  await persistPendingSends();
   if (flushingHeldSends.has(key) || !heldSends.get(key)?.length) return;
   flushingHeldSends.add(key);
   try {
@@ -2996,10 +3114,16 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     const queue = heldSends.get(key) ?? [];
     while (queue.length) {
       const held = queue[0]!;
-      if (!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo))) break;
+      const accepted = machines.get(machine.id);
+      if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
+      const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
+        () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
+      if (result === "waiting" || result === "not-saved") break;
       queue.shift();
       clearTimeout(held.expiry);
       history.release(held.clientRef);
+      if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
+      else if (result !== "written") history.unconfirmInFlight(Date.now());
     }
     if (queue.length === 0) heldSends.delete(key);
     scheduleReceiptCheck(key);
@@ -3015,63 +3139,42 @@ function supervisorPhrase(machineId: string, session: string): string {
   return project ? `the ${project} supervisor` : "the supervisor";
 }
 
-function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): void {
+async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): Promise<void> {
+  await restoredMachines.get(machine.id);
+  if (!sessionIsUp(machine.id, session) && !machineWillReconnect(machine.id)) {
+    showComposerStatus(connectionStates.get(machine.id)?.authFailure ? `${pairingRefusal(machine.label)} Your message is kept; re-pair, then send it.` : outageRefusal(machine.label), "error", true);
+    return;
+  }
+  const key = sessionKey(machine.id, session);
+  const history = conversationHistory(key, session);
+  if (pendingThreadScopes.has(key) && pendingThreadScopes.get(key) !== scopeKey(deliveryScope(machine, session))) {
+    showComposerStatus("This conversation's kept messages belong to another pairing. Reopen it before sending from this device.", "error");
+    return;
+  }
+  pendingThreadScopes.set(key, scopeKey(deliveryScope(machine, session)));
   const clientRef = crypto.randomUUID();
-  // Earlier sends still held go first: a new message must not overtake them.
-  const queued = (heldSends.get(sessionKey(machine.id, session))?.length ?? 0) > 0;
-  const sent = !queued && sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
-  // Without an outcome the operator cannot tell a sent message from a lost
-  // one, and the natural response is to send it a second time.
-  if (!sent && !machineWillReconnect(machine.id)) {
-    // In the banner's words, naming the machine it names (journey F9); a
-    // refused pairing is not an outage (cas-a6f0).
-    const refused = connectionStates.get(machine.id)?.authFailure
-      ? `${pairingRefusal(machine.label)} Your message is kept; re-pair, then send it.`
-      : outageRefusal(machine.label);
-    showComposerStatus(refused, "error", true);
+  const at = Date.now();
+  const send: PendingSend = { id: clientRef, target: supervisor, text, state: "held", at, heldAt: at, session, ...(replyTo === undefined ? {} : { replyTo }) };
+  const result = await sendJournal.reconcile(deliveryScope(machine, session), [], [send], credentialFence(machine));
+  if (result !== "kept") {
+    showComposerStatus(result === "too-long" ? "This message is too long to keep in browser storage. Edit it before sending." : "Browser storage could not keep this message. It has not been sent; keep this page open and retry.", "error");
     return;
   }
-  const history = conversationHistory(sessionKey(machine.id, session), session);
+  if (conversationPersistenceBlocked.has(machine.id)) return;
   if (retryOf) history.discardRefused(retryOf);
-  // The edited version is on the wire: the refused original stays as a record
-  // but can no longer be retried.
   if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }
-  if (!sent) {
-    holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);
-    updateConversationViews(); renderConversationList();
-    if (selectedMachineId === machine.id && selectedSession === session) {
-      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-      if (composer && composer.value.trim() === text) composer.value = "";
-      rememberDraft(sessionKey(machine.id, session), undefined);
-      messageDraft = composer?.value ?? "";
-      messageDraftSelection = messageDraft.length;
-      // A transport status: it clears when the session is back (and the held
-      // message goes out then).
-      showHeldSendStatus(machine.id, session);
-      composer?.focus();
-    }
-    return;
-  }
-  history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);
-  scheduleReceiptCheck(sessionKey(machine.id, session));
+  holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);
   updateConversationViews(); renderConversationList();
-  const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
-  if (storedDraft?.text.trim() === text) rememberDraft(sessionKey(machine.id, session), undefined);
-  if (selectedMachineId !== machine.id || selectedSession !== session) return;
-  clearComposerStatus();
-  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-  if (composer && composer.value.trim() === text) composer.value = "";
-  rememberDraft(sessionKey(machine.id, session), undefined);
-  messageDraft = composer?.value ?? "";
-  messageDraftSelection = messageDraft.length;
-  messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };
-  // cas-71f4 (journey F20): the bubble's own "Sending…" is the one sending
-  // signal; the composer no longer repeats it with the supervisor's codename.
-  const delivery = document.querySelector<HTMLElement>("#message-delivery");
-  if (delivery) { delivery.hidden = true; delivery.textContent = ""; }
-  // A phone operator usually has a second sentence; keep the caret where they
-  // left it rather than dropping focus to the page body.
-  composer?.focus();
+  if (selectedMachineId === machine.id && selectedSession === session) {
+    const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+    if (composer && composer.value.trim() === text) composer.value = "";
+    rememberDraft(key, undefined);
+    messageDraft = composer?.value ?? "";
+    messageDraftSelection = messageDraft.length;
+    showHeldSendStatus(machine.id, session);
+    composer?.focus();
+  }
+  if (sessionIsUp(machine.id, session)) await flushHeldSends(machine, session);
 }
 
 /**
@@ -3119,7 +3222,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       return;
     }
   }
-  deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
+  await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
   } finally {
     pendingSubmissions.delete(submissionKey);
   }
@@ -4694,7 +4797,11 @@ function renderMachineRegister(): void {
 async function forgetPairedMachine(id: string): Promise<void> {
   const error = document.getElementById('paired-machines-error');
   if (error) error.hidden = true;
-  try { await catalog.remove(id); }
+  try {
+    const machine = machines.get(id);
+    if (machine) await sendJournal.purge(id, credentialFence(machine));
+    await catalog.remove(id);
+  }
   catch { if (error) { error.hidden = false; error.textContent = 'Could not remove this pairing. Try again.'; } else toast('Could not remove this pairing. Try again.'); return; }
   connections.get(id)?.stop(); firstConnections.forget(id);
   connections.delete(id); machines.delete(id); sessions.delete(id);

@@ -1,5 +1,6 @@
 import { installationLock, notifyInstallation } from "./installation-access";
 import { catalog, installationStore } from "./storage";
+import { credentialFence, type CredentialFence } from "./commander-journal";
 import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { CoalescedRefresh } from "./catalog-refresh";
@@ -74,13 +75,13 @@ export interface HubCallbacks {
   onMachineEvent(event: Record<string, unknown>): void;
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
-  onMessageQueued?(session: string, queued: MessageQueued): void;
+  onMessageQueued?(session: string, queued: MessageQueued, fence?: CredentialFence): void;
   onOperatorMessage?(session: string, message: ConversationHistoryMessage): void;
   onMessageRejected?(session: string, clientRef: string, detail: string, rejection?: MessageRejection): void;
-  onOperatorReply?(session: string, reply: OperatorReply): void;
+  onOperatorReply?(session: string, reply: OperatorReply, fence?: CredentialFence): void;
   /** A system notice delivered earlier is over (cas-e829): retire its attention item. */
   onOperatorNoticeResolved?(session: string, resolved: OperatorNoticeResolved): void;
-  onConversationHistory?(session: string, page: ConversationHistoryPage): void;
+  onConversationHistory?(session: string, page: ConversationHistoryPage, fence?: CredentialFence): void;
   /** The first history page was requested on attach; its answer is onConversationHistory. */
   onConversationHistoryRequested?(session: string): void;
   /** The session attached without durable history: no first page will come (cas-010f). */
@@ -1015,6 +1016,7 @@ export class HubConnectionSupervisor {
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
     const socket = new WebSocket(endpoint);
+    const frameFence = credentialFence(this.machine);
     this.transitionAttach(session, "dialing", "dialing");
     socket.binaryType = "arraybuffer";
     this.sockets.set(session, socket);
@@ -1025,7 +1027,9 @@ export class HubConnectionSupervisor {
       this.transitionAttach(session, "attaching", "attaching");
       this.startReadyTimeout(session, socket);
     };
-    socket.onmessage = (message) => this.handleDaemonMessage(session, message.data);
+    socket.onmessage = (message) => {
+      if (this.sockets.get(session) === socket) void this.handleDaemonMessage(session, message.data, frameFence);
+    };
     socket.onclose = (event) => {
       const timedOut = this.timedOutSockets.has(socket);
       const becameReady = this.readySockets.has(socket);
@@ -1080,6 +1084,7 @@ export class HubConnectionSupervisor {
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
     const socket = new WebSocket(endpoint);
+    const frameFence = credentialFence(this.machine);
     socket.binaryType = "arraybuffer";
     this.machineSocket = socket;
     for (const desired of this.desiredSessions) this.transitionAttach(desired, "dialing", "dialing");
@@ -1172,7 +1177,7 @@ export class HubConnectionSupervisor {
           for (const desired of this.desiredSessions) this.subscribeMachineSession(desired);
           return;
         }
-        void this.handleMachineMessage(event.data).catch(error => {
+        void this.handleMachineMessage(event.data, frameFence).catch(error => {
           if (!this.desired || this.machineSocket !== socket) return;
           if (error instanceof AuthenticationError) this.blockAuthentication(error.kind, error.message);
           else this.connectionLostNow(error instanceof Error ? error.message : "machine event failed");
@@ -1478,7 +1483,7 @@ export class HubConnectionSupervisor {
     });
   }
 
-  private async handleMachineMessage(input: string | ArrayBuffer | Blob): Promise<void> {
+  private async handleMachineMessage(input: string | ArrayBuffer | Blob, frameFence = credentialFence(this.machine)): Promise<void> {
     if (typeof input !== "string") {
       const bytes = new Uint8Array(input instanceof Blob ? await input.arrayBuffer() : input);
       if (bytes.length < 9 || new TextDecoder().decode(bytes.subarray(0, 4)) !== "CAS2") return;
@@ -1554,7 +1559,7 @@ export class HubConnectionSupervisor {
       else this.callbacks.onSocketError(session, detail);
       return;
     }
-    if (envelope.message) this.handleDaemonObject(session, envelope.message as Record<string, any>);
+    if (envelope.message) this.handleDaemonObject(session, envelope.message as Record<string, any>, frameFence);
   }
 
   private deliverMachineEvent(event: Record<string, unknown>): void {
@@ -1566,13 +1571,13 @@ export class HubConnectionSupervisor {
     this.callbacks.onMachineEvent(event);
   }
 
-  private async handleDaemonMessage(session: string, input: string | ArrayBuffer | Blob): Promise<void> {
+  private async handleDaemonMessage(session: string, input: string | ArrayBuffer | Blob, frameFence = credentialFence(this.machine)): Promise<void> {
     const text = typeof input === "string" ? input : input instanceof Blob ? await input.text() : new TextDecoder().decode(input);
     const message = JSON.parse(text) as Record<string, any>;
-    this.handleDaemonObject(session, message);
+    this.handleDaemonObject(session, message, frameFence);
   }
 
-  private handleDaemonObject(session: string, message: Record<string, any>): void {
+  private handleDaemonObject(session: string, message: Record<string, any>, frameFence = credentialFence(this.machine)): void {
     if (message.Welcome) {
       const socket = this.sockets.get(session);
       if (socket) {
@@ -1631,15 +1636,15 @@ export class HubConnectionSupervisor {
       // A send reached the daemon: the upstream is back, so the next
       // retryable refusal starts the backoff afresh (cas-a355).
       if (queued) this.clearUpstreamStreak(session);
-      if (queued) this.callbacks.onMessageQueued?.(session, queued);
+      if (queued) this.callbacks.onMessageQueued?.(session, queued, frameFence);
     } else if (message.OperatorReply) {
-      this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
+      this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply, frameFence);
     } else if (message.OperatorNoticeResolved) {
       this.callbacks.onOperatorNoticeResolved?.(session, message.OperatorNoticeResolved as OperatorNoticeResolved);
     } else if (message.OperatorMessage) {
       this.callbacks.onOperatorMessage?.(session, message.OperatorMessage as ConversationHistoryMessage);
     } else if (message.ConversationHistory) {
-      this.callbacks.onConversationHistory?.(session, message.ConversationHistory as ConversationHistoryPage);
+      this.callbacks.onConversationHistory?.(session, message.ConversationHistory as ConversationHistoryPage, frameFence);
     } else if (message.SessionSummary) {
       this.callbacks.onSessionSummary?.(session, message.SessionSummary.summary);
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {

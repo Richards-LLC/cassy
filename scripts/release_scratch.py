@@ -438,7 +438,7 @@ def sweep(repo, base, clean=False, env=None):
     for parent, prefixes in scratch_parents(base, env).items():
         if not parent.is_dir():
             continue
-        lock_path = parent / ".cas-scratch-sweep.lock"
+        lock_path = parent / f".cas-scratch-sweep-{os.getuid()}.lock"
         if lock_path.is_symlink():
             continue
         context = open_lock(lock_path, create=clean) if clean or lock_path.exists() else contextlib.nullcontext()

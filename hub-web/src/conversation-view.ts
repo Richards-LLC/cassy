@@ -119,6 +119,7 @@ export interface ConversationViewOptions {
   editMessage?: (text: string, send: ConversationSend) => void;
   /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
   retryMessage?: (send: ConversationSend) => void;
+  cancelMessage?: (send: ConversationSend) => void;
   /**
    * A send refused because this device does not control the session offers
    * Take control on the message itself, beside Retry (cas-3433): the refusal
@@ -1299,6 +1300,13 @@ export class ConversationView {
       // and it will be sent by itself, once, when the machine is back.
       state.textContent = send.held ? "Waiting for the connection — sends when it's back" : "Sending…";
       bubble.append(state);
+      if (send.held && this.options.cancelMessage) {
+        const cancel = document.createElement("button");
+        cancel.type = "button"; cancel.className = "conversation-edit";
+        cancel.textContent = "Cancel"; cancel.setAttribute("aria-label", "Cancel waiting message");
+        cancel.onclick = () => this.options.cancelMessage?.(send);
+        bubble.append(cancel);
+      }
     } else if (this.history.showsDelivered(send)) {
       // F5: the receipt is the difference between a delivered message and a
       // lost one, so a delivered send says so until the reply linked to it
@@ -1525,6 +1533,12 @@ export class ConversationView {
       if (sheets.length && !bubble.textContent?.trim() && !bubble.querySelector(".evi")) bubble.classList.add("bub-empty");
     }
     bubble.dataset.kind = kind;
+    if (reply.device_persisted !== undefined) {
+      const receipt = document.createElement("small");
+      receipt.className = "reply-storage-receipt";
+      receipt.textContent = reply.device_persisted ? "Stored on this device" : "Forwarded · not stored on this device";
+      bubble.append(receipt);
+    }
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
     // cas-e829: an answer to another session's turn stays in this thread and
     // only names what it answers; the earlier session itself is read-only.

@@ -3,6 +3,7 @@ import { test, expect, journeyPart } from "./journey";
 import { ATLAS, STUDIO, PELICAN } from "./world";
 import { HubDouble, SCOPES } from "./hub-double";
 import { ProtocolClock } from "./protocol-clock";
+import { journalRows } from "./commander-journal-storage";
 
 // Every independent page must remain free of unhandled app errors too.
 const pageErrors = new WeakMap<Page, string[]>();
@@ -777,7 +778,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
   const { hub, clock, held } = await connected(page);
   const log = page.getByRole("log");
   const bubble = (text: string) => log.locator(".bub").filter({ hasText: text });
-  const stored = () => page.evaluate(() => localStorage.getItem("cas-commander-conversation:sends:v1") ?? "");
+  const stored = async () => JSON.stringify(await journalRows(page, "sends"));
   await journey.stage("One message goes out and its receipt never comes; the next waits for the session", async () => {
     const first = hub.nextSend();
     await sendNow(page, "Did this one land?");
@@ -821,7 +822,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     await expect(page.locator("#conversation-connection")).toHaveText(" · Needs pairing");
     await expect(bubble("Did this one land?")).toContainText("Not confirmed");
     await clock.advance(15_000);
-    expect(await stored()).not.toContain("atlas:");
+    expect(await stored()).not.toContain('"hub":"atlas"');
   });
 });
 

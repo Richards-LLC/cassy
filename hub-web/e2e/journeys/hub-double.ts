@@ -132,6 +132,8 @@ export class HubDouble {
   /** The hub origin each pairing exchange was posted to, in order. */
   readonly exchangeOrigins: string[] = [];
   readonly historyRequests: Array<Record<string, unknown>> = [];
+  /** Browser application ACKs, separate from socket forwarding. */
+  readonly persistedReplies: Array<{ session: string; notification_id: number }> = [];
   /** Artifact ids Commander asked a signed view URL for (cassy#910). */
   readonly artifactRequests: string[] = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
@@ -942,6 +944,7 @@ export class HubDouble {
   }
 
   private handleSessionFrame(machineId: string, session: string, ws: WebSocketRoute, message: Record<string, Record<string, unknown>>, pages: HistoryPage[]): void {
+    if (message.OperatorReplyPersisted) this.persistedReplies.push({ session, notification_id: Number(message.OperatorReplyPersisted.notification_id) });
     if (message.SendMessage) {
       const m = message.SendMessage;
       this.sends.push({

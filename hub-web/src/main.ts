@@ -8,7 +8,7 @@ import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
-import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type DeliveryScope } from "./commander-journal";
+import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -719,7 +719,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
     },
-    onMessageQueued: (session, receipt) => {
+    onMessageQueued: (session, receipt, frameFence) => {
+      const accepted = machines.get(machine.id);
+      if (frameFence && (!accepted || accepted.deviceId !== machine.deviceId || accepted.baseUrl !== machine.baseUrl || accepted.credentialId !== frameFence.credentialId || credentialFence(accepted).generation !== frameFence.generation)) return;
       conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews(); renderConversationList();
@@ -764,8 +766,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       }
       updateConversationViews(); renderConversationList();
     },
-    onOperatorReply: (session, reply) => {
-      void persistDeviceReply(machine, session, reply);
+    onOperatorReply: (session, reply, frameFence) => {
+      void persistDeviceReply(machine, session, reply, frameFence);
       // cas-e829: a system notice goes to the attention lane, never the thread.
       if (isOperatorNotice(reply)) { applyOperatorNotice(machine, session, reply); return; }
       conversationHistory(sessionKey(machine.id, session), session).receive({ ...reply, device_persisted: false }, Date.now(), session);
@@ -791,7 +793,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onOperatorNoticeResolved: (session, resolved) => {
       resolveAttention(noticeFingerprint(machine.id, session, resolved.notification_id, resolved.subject));
     },
-    onConversationHistory: (session, page: ConversationHistoryPage) => {
+    onConversationHistory: (session, page: ConversationHistoryPage, frameFence) => {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
       applyHistoryCursor(cursor, page);
@@ -801,7 +803,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // older daemon) are filed beside it by session, never into it.
       for (const message of [...page.messages, ...(page.earlier_messages ?? [])]) history.hydrateSend(message);
       for (const reply of [...page.replies, ...(page.earlier_replies ?? [])]) {
-        if (reply.session === undefined || reply.session === session) void persistDeviceReply(machine, session, reply);
+        if (reply.session === undefined || reply.session === session) void persistDeviceReply(machine, session, reply, frameFence);
         // cas-e829: this session's notices raise or retire attention; another
         // session's are its own business.
         if (isOperatorNotice(reply)) {
@@ -2914,9 +2916,9 @@ function restoreStoredSends(machine: StoredMachine): void {
   });
 }
 
-async function persistDeviceReply(machine: StoredMachine, session: string, reply: OperatorReply): Promise<void> {
+async function persistDeviceReply(machine: StoredMachine, session: string, reply: OperatorReply, frameFence?: CredentialFence): Promise<void> {
   try {
-  const fence = credentialFence(machine);
+  const fence = frameFence ?? credentialFence(machine);
   const scope = deliveryScope(machine, session);
   if (!await sendJournal.persistReply(scope, reply, fence)) return;
   const current = (await catalog.snapshot()).machines.find((item) => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
@@ -3048,7 +3050,9 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     const queue = heldSends.get(key) ?? [];
     while (queue.length) {
       const held = queue[0]!;
-      const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(machine),
+      const accepted = machines.get(machine.id);
+      if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
+      const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
         () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
       if (result === "waiting" || result === "not-saved") break;
       queue.shift();
@@ -4724,7 +4728,11 @@ function renderMachineRegister(): void {
 async function forgetPairedMachine(id: string): Promise<void> {
   const error = document.getElementById('paired-machines-error');
   if (error) error.hidden = true;
-  try { await catalog.remove(id); }
+  try {
+    const machine = machines.get(id);
+    if (machine) await sendJournal.purge(id, credentialFence(machine));
+    await catalog.remove(id);
+  }
   catch { if (error) { error.hidden = false; error.textContent = 'Could not remove this pairing. Try again.'; } else toast('Could not remove this pairing. Try again.'); return; }
   connections.get(id)?.stop(); firstConnections.forget(id);
   connections.delete(id); machines.delete(id); sessions.delete(id);

@@ -6,3 +6,4 @@ cd "$repo_root"
 python3 scripts/ci_tiers/policy.py check
 bash scripts/ci_tiers/executable-contracts.sh
 python3 scripts/ci_tiers/test-policy.py
+bash scripts/test-ci-journey-evidence-upload.sh

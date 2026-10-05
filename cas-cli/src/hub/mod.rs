@@ -23,6 +23,7 @@ mod discovery;
 mod events;
 mod identity;
 pub mod launch_env;
+pub mod operator_inbox;
 pub mod projects;
 mod runtime;
 mod server;

@@ -1,10 +1,20 @@
 # Commander operator inbox: durable delivery across devices
 
-Task: cas-4c78; epic: cas-7ec4. Status: **Architecture seam accepted; Phase 2a
-approved (local recording/outbox only); Phase 2b held for operator decisions
-and a cloud owner**. Supervisor decisions: #3540158 and #3540204.
-Inspected 2026-10-05: cas-src b86ec0c2e; cloud local checkout
-bd2266fbb34cd6be4cd828cc5e32f562b8f09569 (read-only, not a deployment receipt).
+Task: cas-4c78; epic: cas-7ec4. Status: **Phase 2a local recording/outbox
+implemented, Rust proof pending supervisor assembly; Phase 2b contract adapter
+and fake server authorized, production enrollment/transport not enabled**.
+Supervisor decisions: #3540158, #3540204, #3540272 and #3540338.
+Operator decisions: pure account-permission recovery, 90-day history and
+attachments, 24-hour undelivered commands. Cloud owner: the
+[petra-stella-cloud team, issue #125](https://github.com/Richards-LLC/petra-stella-cloud/issues/125).
+
+Cloud wire version 1 is defined by
+`docs/specs/2026-10-05-operator-inbox-cloud-contract.md` in that repository,
+Unit 0 commit `5fd3f9a50dd4e9c20a126537b457847728a2ea64` on
+`epic/durable-operator-inbox-for-commander-cloud-half-gh-cas-8a96`.
+This is a contract receipt, not a deployed API receipt. Inspection of the
+original implementation seams used cas-src `b86ec0c2e`; the cloud contract
+inspected server source `8dbc59f`.
 
 The operator can read a retained reply on every enrolled device after its hub
 goes offline. Each device independently downloads and stores it, even when
@@ -68,14 +78,16 @@ Use an explicit account enrollment ceremony in addition to installation
 pairing. Cloud account authentication authorizes a one-use, expiring challenge.
 The browser proves possession of separate relay signing and encryption keys,
 and explicitly consents to retained content, recovery and the selected machine
-grants. An existing enrolled device approves the new key, or the operator
-unlocks recovery material. Bootstrap creates the initial content authority on
-the first device and pins it during this authenticated ceremony. No secret
+grants. Authenticated account permission authorizes enrollment even when every
+older
+device and hub is offline. Cloud custody supplies every retained epoch key to
+the newly enrolled device through an authenticated device-specific wrap. No
+recovery kit or approval from an older device is required. No secret
 account API key is copied into the browser's machine catalog.
 
 Cloud issues a signed, audience-specific enrollment assertion bound to account,
 hub, project grants, exact origin, installation signing-key thumbprint, relay
-device ID, grant generation, content-authority key, key epoch, challenge and
+device ID, grant generation, cloud issuer key ID, key epoch, challenge and
 expiry. The hub verifier checks the configured issuer key/audience, challenge,
 signature and possession proof before persisting its server-owned account
 binding. Challenges and generation fences prevent replay and substitution.
@@ -101,7 +113,8 @@ Cloud credentials are distinct from hub DPoP credentials:
 | Account enrollment authority | Explicit add/revoke/recovery/key-policy consent. Neither a read grant nor a machine upload grant can enroll devices. |
 
 Relay requests use short-lived proof-of-possession grants, exact relay audience,
-method/path, canonical request binding, expiry and replay protection. Check
+method/path, SHA-256 binding of the exact uncompressed request body bytes,
+expiry and replay protection. Check
 current grant generation/revocation on every page/mutation and renewed poll;
 never accept a requested account over the authenticated account. Prefer finite
 HTTPS replay polling compatible with Vercel; live hints are optional. Cloud ACKs
@@ -111,67 +124,56 @@ and hub DPoP proofs never go to cloud.
 
 ## Encryption, recovery and revocation
 
-Proposed cryptographic profile: random per-event AES-256-GCM content key;
-HPKE wraps using DHKEM(P-256, HKDF-SHA256), HKDF-SHA256 and AES-256-GCM
-(`0x0010/0x0001/0x0002`). Use a maintained RFC 9180 implementation in Rust and
-the browser, with interop vectors before choosing/pinning dependencies. Do not
-implement an ad hoc ECDH envelope or reuse ECDSA installation keys as encryption
-keys. HPKE base mode supplies encryption; separately sign producer envelopes
-and content-authority manifests. [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)
-defines these suites and explains recipient-key compromise/forward-secrecy
-limits; this design makes no forward-secrecy claim.
+The accepted security model is **cloud custody, not strict end-to-end
+encryption**. The cloud holds account epoch private keys under a KEK/KMS-style
+envelope and can decrypt history. Account authentication plus explicit device
+enrollment grants access; the operator accepted this trust boundary. There is
+no operator-held recovery secret, recovery kit, device-only content authority
+or requirement that an older enrolled device be online.
 
-Each epoch has a feed encryption key pair. Producers receive its signed public
-key, so a machine can encrypt replies without receiving the account's history
-decryption key. Enrolled devices receive the epoch private key wrapped to their
-separate encryption public keys. A content-authority key signs epoch manifests,
-device-key approvals and machine producer/command-key bindings; devices pin it
-at enrollment and verify manifest generations. A read grant alone cannot
-replace those keys. Management-capable devices hold explicitly delegated
-authority, scoped to enrollment/key policy. Private material is protected by
-device storage; export only inside authenticated wraps.
+The cloud generates each P-256 HPKE epoch key pair, encrypts its private key
+under its custody KEK, and signs the public epoch manifest and machine key
+bindings with its issuer. Machines receive only the epoch public key. Enrolled
+devices receive retained epoch private keys encrypted to their separate device
+encryption keys (`/api/operator/keys/wraps`). These device-specific transport
+wraps do not remove cloud custody. Account keys are not copied into the hub's
+DPoP credential, machine upload grant or browser machine catalog.
 
-AEAD authenticates version, account, hub/project/session, immutable event ID,
-epoch, content type and attachment identity. Producer signatures cover the
-complete canonical sealed envelope, including wraps. Relay sequence is assigned
-after sealing and is not fabricated as producer-authenticated metadata. Names,
-message bodies, summaries, artifact references/URLs and filenames are inside
-ciphertext. Cloud sees routing IDs, epoch, sequence, timestamps, sizes and
-retention metadata. The relay never receives content keys or plaintext bodies.
-Epoch policy signatures reduce key substitution; cloud authorization and the
-hosted application remain trusted for initial enrollment and delivery.
+The cloud contract pins HPKE DHKEM(P-256, HKDF-SHA256), HKDF-SHA256 and
+AES-256-GCM (`0x0010/0x0001/0x0002`), `@hpke/core` 1.9.0 and Rust `hpke`
+0.14.1 (`alloc,getrandom,nistp,aes`, default features off). Dependency
+compatibility and Rust/browser interop remain supervisor proof gates before
+adding or enabling crypto. Do not implement ad hoc ECDH or reuse ECDSA signing
+keys for encryption. [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)
+defines the profile; no forward-secrecy claim is made.
 
-**Recovery decision:** offer an explicit operator-held recovery kit during
-bootstrap. A random 256-bit recovery secret encrypts the content-authority
-recovery material and retained epoch private-key bundle; cloud stores only the
-encrypted bundle, version and integrity metadata. The secret is displayed or
-exported once with explicit save confirmation, never logged, uploaded or sent
-through analytics. No human password-derived key in this first profile.
-Authenticate the account again before recovery; the secret alone is not a
-relay membership grant. Bundle AEAD binds account, authority fingerprint and
-version with a fresh nonce on each update; signed policy versions fence stale
-bundle rollback. Test substituted account/bundle/key and interrupted updates.
+The encrypted event envelope binds version, account, hub/project/session,
+immutable event identity, epoch and attachment identity. Names, bodies,
+summaries, filenames and artifact references belong inside ciphertext. Cloud
+sees routing IDs, epochs, sequences, timestamps, sizes and retention metadata.
+Clients verify the producer signature against a cloud-signed machine binding;
+the cloud treats the encrypted envelope as opaque and authorizes its routing
+through the machine PoP grant. Relay sequence is assigned after sealing.
+Device key wraps bind account, feed generation, epoch and device ID, with HPKE
+info `psc-op-epoch-wrap-v1`. Substitution tests must cover each binding.
 
-With all old devices and hubs offline, a new phone can authenticate the account,
-unlock the recovery bundle locally, approve its new keys, receive its grant and
-replay retained history. Test this with independent empty profiles. Recovery
-bundle updates for new epochs must commit before those epochs become active.
-If the operator declines recovery, old-device approval is required. If both
-approved devices and recovery material are lost, old history is unrecoverable:
-show **Recovery required** and allow an explicit destructive new-feed reset.
-Account login alone never silently decrypts or resets old history. A recovery
-kit holder can recover retained past epochs; disclose that authority.
+With every older device and machine offline, the operator authenticates the
+account, approves enrollment of a new device and receives the retained keys
+and history. Losing device keys requires re-enrollment, not a destructive feed
+reset. An explicit account reset is a separate destructive operation, creates
+a new feed generation and requires account management permission. Key custody
+or issuer outage reports a safe refusal; it never invents an epoch or grants
+access from a label.
 
-Revocation immediately denies new relay operations, ends renewed subscriptions,
-and atomically activates an epoch excluding the revoked key. If no authorized
-device/recovery key can create that epoch, freeze new uploads pending key
-rotation; do not pretend revocation alone removes a previously shared key.
-Grant version and epoch transitions are serialized with append admission.
-Hubs refresh signed policy before publishing. Known duplicates can return their
-original storage receipt after rotation; novel old-epoch events are refused.
-Already-downloaded keys/plaintext cannot be erased. Hosted JS or an unlocked
-device compromise can read displayed content; ciphertext storage does not cure
-those threats.
+Revocation denies subsequent relay operations through fresh grant-generation
+checks and serializes epoch rotation with append admission. Cloud generates
+the new epoch; it does not depend on an older device creating it. If custody
+cannot rotate, uploads freeze with `503 uploads_frozen`; local recording stays
+available. A retained duplicate returns its original receipt even under a
+retired epoch; a novel retired-epoch event is rejected. Re-sealing requires
+authoritative retained/absent reconciliation before changing bytes under the
+same identity. Downloaded keys and plaintext cannot be remotely erased.
+Hosted JS, cloud custody and unlocked devices remain trusted surfaces.
 
 ## Atomic local recording and bounded drain
 
@@ -201,7 +203,7 @@ Outbox claims use bounded leases so process crashes permit recovery. Drain
 validates account/epoch, uploads a bounded batch, and records the matching relay
 receipt transactionally. A lost ACK leaves the same event for retry. Never
 delete an outbox row because a viewer or the local daemon acknowledged it.
-Initial budgets proposed: 100 events/1 MiB per request, 64 KiB message envelope,
+Contract budgets: 100 events/1 MiB per request, 64 KiB message envelope,
 10-second whole-request deadline, jittered retry from 1 to 60 seconds. Offline
 auth/revocation pauses its lane with a safe reason; unrelated local history
 continues. Disk-full commit failure reports a storage failure rather than a
@@ -219,8 +221,8 @@ detaching an account cannot relabel its pending events as a new account's data.
 ## Neon feed, order and retention
 
 Proposed cloud tables: `operator_accounts` (serialized feed counter and key
-policy), account-device/machine grants, epoch manifests/wraps and encrypted
-recovery bundles; `operator_events`; device cursors; conversation read
+policy), account-device/machine grants, cloud-held encrypted epoch keys and device transport wraps; `operator_events`;
+device cursors; conversation read
 watermarks; command intake/authorization/receipts; encrypted attachment objects
 and deletion jobs. Keep these separate from ephemeral pairing tables and
 generic project/team entity sync.
@@ -241,17 +243,20 @@ skipped forever. Notifications follow commit; replay queries are authoritative.
 Return sequence fields as decimal strings/BigInt-safe values. Across hubs this
 is relay arrival order; causal/session fields govern conversation display.
 
-Propose 30-day retained history and attachments, declared at enrollment;
-commands expire after 24 hours unless reserved by their machine. Cloud owner
-must approve cost/limits before implementation. Server policy bounds expiry;
+Retain history and attachments for **90 days**, declared at enrollment;
+undelivered commands expire after **24 hours** unless reserved by their machine.
+These are accepted operator decisions and fixed server policy. Server policy
+bounds expiry;
 a producer cannot request unlimited retention or re-date a delayed upload.
 Retention deletes event
 ciphertext, attachment ciphertext and obsolete wraps under bounded deletion
 jobs. Object deletion needs retryable durable jobs; do not report completion
 before blob deletion finishes. Shared blobs require account-scoped reference
-accounting. Preserve a minimal ID/digest/sequence tombstone through the feed
-generation so delayed retry cannot resurrect an expired event. Tombstones
-contain no body and have a separately documented metadata lifetime.
+accounting. Preserve a minimal ID/digest/sequence tombstone for **365 days after
+expiry**, per cloud contract §9.2, so delayed retry during
+that window cannot resurrect an expired event. Tombstones contain no body.
+The finite tombstone horizon must be respected by client retry/purge policy;
+it is not a lifetime deduplication promise.
 
 Replay returns feed generation, retained floor/head, ordered page, continuation
 and explicit expired intervals. A stale cursor produces **History expired**,
@@ -266,8 +271,9 @@ sign-out or expiry when the browser next runs. A suspended browser and exported
 plaintext cannot be remotely wiped. Existing published plaintext artifacts
 remain governed by their earlier publication; the new feed cannot retroactively
 make them encrypted. Copy future inbox attachments into encrypted, account-
-authorized object storage with random per-object keys and authenticated chunk
-metadata; encrypt references and filenames, enforce sizes and hash completion,
+authorized object storage with random per-object keys and authenticated envelope
+metadata; v1 uses one ciphertext object up to 25 MiB. Encrypt references and
+filenames, enforce sizes and hash completion,
 and make their decryption/read independent of the hub.
 
 ## Device replay, shared read and direct-path merging
@@ -364,15 +370,17 @@ source identities under one atomic backfill marker transaction.
 | cas-src / cas-5e53 | Installation identity, staged credential rotation, un-enrolled hook; consume verified extension after agreed contract. |
 | cas-src / cas-2b3a5 | Existing request deadlines/cause taxonomy/event diagnostics; reuse its transport conventions without concurrent connection.ts hunk ownership. |
 | cas-src / cas-e6d2, when assigned | Atomic browser sends and direct device-persisted receipts; use this event/cursor/read contract. |
-| petra-stella-cloud / supervisor-assigned owner | Enrollment account ceremony/issuer/grant verifier; Neon schema/counter/replay/read/commands; ciphertext attachments/recovery/wrap storage; revocation/retention jobs and SQL race/authorization tests. |
-| Supervisor | Approve decisions, appoint cloud owner, protocol/crypto review, full Rust assembly and independent real-build QA. |
+| petra-stella-cloud team / cas-8a96 / #125 | Enrollment account ceremony/issuer/grant verifier; Neon schema/counter/replay/read/commands; ciphertext attachments/cloud custody/device wrap storage; revocation/retention jobs and SQL race/authorization tests. |
+| Supervisor | Protocol/crypto review, full Rust assembly and independent real-build QA. |
 
-Phase 2 must have a named cloud owner and an agreed wire contract before any
-cloud edits. Library choice, exact account authentication ceremony, issuer-key
-rotation, retention cost and recovery consent copy require review before those
-parts are enabled. They are implementation admission gates, not claims of
-already-shipped capability. This Phase 1 changes documentation only; no cargo,
-cloud mutations, hub credential changes or deployment.
+The cloud owner and v1 contract are now named. The current authorization is
+for a contract-shaped client adapter behind an injected transport and an
+in-process fake server, with no live endpoint calls or automatic enrollment.
+Production enabling still requires implemented cloud routes, issuer/grant
+verification, custody/crypto interoperability, persisted authenticated audience
+bindings and stable sealed outbox envelopes. Existing Phase 2a unenrolled rows
+must not become account history through implicit backfill. Supervisor owns
+Rust execution, assembly and the eventual real-build acceptance proof.
 
 Verification matrix for the eventual delivery:
 
@@ -381,7 +389,7 @@ Verification matrix for the eventual delivery:
 | Atomic event | SQLite fault/crash before and after prompt+outbox commit, including stamps, mirror/notices/idempotent producers; exactly one committed event. |
 | ACK loss/idempotence/order | Cloud transaction tests for duplicate/conflict, reverse commit timing, epoch cutoff with unACKed event and command replay. |
 | Account/revocation | Cross-account machine/device uploads/replay/receipts/commands denied; current grant checks and origin/key substitution refusal. |
-| Encryption/recovery | Rust/browser vectors, metadata/wrap tamper refusal, no plaintext in DB/object/request/log snapshots, both old devices offline recovery, declined/lost recovery, epoch rotation. |
+| Encryption/recovery | Rust/browser vectors, metadata/wrap tamper refusal, no plaintext in DB/object/request/log snapshots, account-only new-device recovery with all old devices offline, custody outage, epoch rotation. |
 | Offline hub | Real changed hub uploads reply; stop hub after relay-storage ACK; two independent real browser profiles replay/store/render one bubble each. Protocol doubles alone do not meet this row. |
 | Cursor/read | Storage-failure crash leaves cursor unchanged; shared read on desktop does not suppress phone replay; concurrent tabs/pages and direct/live/cloud duplicates converge. |
 | Command | Offline command remains pending; real machine durable admission and receipt after return; replay/crash has one queue row and one observed dispatch, plus an explicit ambiguous-effect case. |
@@ -427,3 +435,33 @@ Worker evidence uses scoped script/npm checks on clean commits; supervisor
 owns Rust execution and assembly. Do not substitute source inspection for the
 real two-profile/hub-stopped acceptance gate. Record exact source/build/cloud
 revisions, measurements and uncertainties with each proof.
+
+## Phase 2b contract adapter boundary
+
+`cas-cli/src/hub/operator_inbox` adds role-specific `MachineRelay` and
+`DeviceInbox` operations over an injected authenticated transport. It does not
+supply a network implementation, enrollment, sealer, browser projection or
+scheduler. Requests bind exact body bytes for PSC-PoP, carry no account IDs or
+hub credentials, and have a ten-second whole-future deadline. Machine append
+accepts only already-sealed stable envelopes and validates storage receipts.
+Retained and expired acknowledgements remain different typed outcomes.
+
+Device replay validates the feed generation and every covered sequence as an
+event or an explicit non-overlapping interval before returning a page. Decimal
+strings preserve values beyond JavaScript's safe integer range. Persistence
+ACK, cursor write and human read write are separate methods; the caller must
+commit its projection before acknowledging. No method silently moves a local
+cursor or interprets an HTTP refusal as a successful empty feed. Routing uses
+opaque IDs within the published format; human names are never sanitized into
+identities. See the [client response](../requests/RESPONSE-operator-inbox-client-v1.md)
+for unresolved cloud wire details and admission gates.
+
+The in-process fake models account/role-scoped storage, lost storage responses,
+idempotent retry, revocation, independent device persistence/cursors and shared
+read state. Its bytes are opaque fixtures, not encrypted messages. Rust tests
+are written but unexecuted under the supervisor's no-cargo instruction. The
+existing Phase 2a `OperatorDeliveryTransport` cannot yet carry verified sealed
+audiences or distinguish expired cloud receipts; no bridge maps these outcomes
+onto its local fake storage receipt. That bridge requires a separately
+approved durable binding/envelope migration, and cannot upload an unenrolled
+snapshot or manufacture a retained receipt for expired history.

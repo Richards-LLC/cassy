@@ -62,9 +62,9 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeFocused();
     await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).tap();
-    await expect(sheet.getByText("Allow “Start new sessions” on Atlas · Linux?")).toBeVisible();
-    await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
-    await sheet.getByRole("button", { name: "Allow starting sessions", exact: true }).tap();
+    // cas-e123: this single deliberate Allow grants the named machine.
+    // A second consent would leave the project picker hidden.
+    await expect(sheet.getByRole("button", { name: /^Allow starting sessions/ })).toHaveCount(0);
     await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
     await expect(sheet.getByRole("searchbox", { name: "Filter projects" })).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
@@ -236,8 +236,10 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
       .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
       .map((animation) => animation.finished.catch(() => undefined))));
     await allow.tap({ timeout: 15_000 });
-    await expect(sheet.getByText(`Allow “Start new sessions” on ${ATLAS.label}?`)).toBeVisible();
-    await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
+    await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
+    await expect(sheet.getByRole("searchbox", { name: "Filter projects" })).toBeFocused();
+    await expect(sheet.getByRole("button", { name: /^Allow starting sessions/ })).toHaveCount(0);
+    await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
     ATLAS.label = originalLabel;
   });
 });

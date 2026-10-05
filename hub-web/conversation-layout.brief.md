@@ -27,7 +27,7 @@ The committed base at dacbfab93 reproduces scrollWidth634/clientWidth390 in both
 ## Critique
 
 | Dimension | Score | Evidence |
-|---|---:|---|
+| --- | ---: | --- |
 | Distinctiveness | 4 | Existing Pebble reading column, machine identity and quiet timestamps remain intact. |
 | Fit | 4 | The phone reader fits390px, while Terminal view retains its634px grid and horizontal pan. |
 | Hierarchy | 4 | Replies remain above the composer; hidden terminal chrome contributes no reading geometry. |

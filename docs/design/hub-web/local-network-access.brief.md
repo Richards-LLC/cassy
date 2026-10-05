@@ -1,21 +1,27 @@
 # Brief: Local network access recovery
 
 ## Single idea
+
 Commander keeps the pairing while explaining how to allow browser access to a tailnet hub.
 
 ## Hero form
+
 A status sentence below the session header names the machine and the browser setting. With no conversation loaded, it sits in the conversation list, which remains visible on phones, at the empty copy's 18px inset (cas-7c37f).
 
 ## Emotional register
+
 Calm and practical: reuse the existing compatibility notice typography and theme tokens, with one concrete next step.
 
 ## Distinctive move
+
 The same machine name used in the conversation and footer leads the permission guidance ("To reach soundwave, allow…"); transport errors stay in Details. The notice carries only the remedy: the list's empty copy or the reconnect banner owns the single "Can't reach…"/"Reconnecting…" sentence (cas-7c37f). Under forced colors it keeps a 1px CanvasText edge.
 
 ## Deliberately omitted
+
 No Re-pair action for a browser permission denial, because replacing the active credential cannot grant network permission.
 
 ## Critique
+
 Scored by proud-raven-98 on 2026-10-05 against the built-dist HUB-J12 permission journey at 1280×800 and 390×844, light and dark.
 
 | Dimension | Score | Evidence |

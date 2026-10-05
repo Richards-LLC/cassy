@@ -59,7 +59,7 @@ high-frequency vocabulary of the real corpus, *before* and independently of this
 task — they are not queries chosen to flatter or damn either side.
 
 | Query | knowledge (AND, production) | knowledge (OR) | legacy BM25 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | factory worker supervisor spawn | 7 | 55 | 5 |
 | task close verification merge branch | 0 | 53 | 6 |
 | worktree commit cas-src crates | 0 | 107 | 9 |
@@ -211,7 +211,7 @@ its default depth:
     cas knowledge search "<query>" --limit 10
 
 | Query | knowledge BEFORE (AND) | knowledge AFTER (OR) | legacy BM25 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | factory worker supervisor spawn | 7 | 10 | 5 |
 | task close verification merge branch | 0 | 10 | 6 |
 | worktree commit cas-src crates | 0 | 10 | 9 |
@@ -293,7 +293,7 @@ attempt to reindex the copy *with* 3,247 unrelated tasks timed out after 55 s;
 its preliminary BM25 order is retained in the artifact but excluded here.
 
 | M4 search case | Relevant grade 2 | Matches knowledge / legacy | nDCG@10 knowledge / legacy | Difference |
-|---|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: |
 | factory-workers | 30 | 45 / 43 | 1.000 / 0.958 | +0.042 |
 | task-close-verification | 23 | 41 / 38 | 0.934 / 0.931 | +0.003 |
 | worktree-commit | 6 | 65 / 25 | 0.764 / 0.794 | -0.031 |

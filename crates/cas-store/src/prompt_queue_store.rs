@@ -2296,7 +2296,9 @@ pub trait PromptQueueStore: Send + Sync {
     /// `processed_at` stays NULL, and the recipient's turn-start or
     /// tool-boundary surfacing injects it. `recheck_at` holds the row out of
     /// daemon selection until then, so a recheck costs one evaluation instead
-    /// of one per poll tick. A row already acked or processed is left as is.
+    /// of one per poll tick. The daemon's own transport claim is released so
+    /// the hooks may take the row. A row already acked or processed is left
+    /// as is.
     fn park_for_busy_recipient(
         &self,
         prompt_id: i64,
@@ -5736,6 +5738,16 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "UPDATE prompt_queue SET next_attempt_at = ? WHERE id = ?",
                 params![recheck_at.to_rfc3339(), prompt_id],
             )?;
+            // The daemon claims a row before writing it to a Claude inbox and
+            // keeps the claim while the wake is deferred. Hooks skip claimed
+            // rows, so a parked row that kept its claim would be as hidden as
+            // an abandoned one. Release it here, atomically with the park.
+            tx.execute(
+                "DELETE FROM prompt_queue_recipient_seen
+                 WHERE prompt_id = ?1 AND source = 'transport_claimed'
+                   AND recipient = (SELECT target FROM prompt_queue WHERE id = ?1)",
+                params![prompt_id],
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -8471,11 +8483,25 @@ mod tests {
         let message = store
             .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
             .unwrap();
+        // The daemon claimed the row and wrote it to the Claude inbox, then
+        // the busy pane declined every wake. While claimed, hooks skip it.
+        assert!(
+            store
+                .claim_recipient_transport(message, "busy-worker")
+                .unwrap()
+        );
         for _ in 0..3 {
             store
                 .record_wake_gate_decline(message, "pane has not been silent long enough")
                 .unwrap();
         }
+        assert!(
+            store
+                .surface_unseen_for_recipient("busy-worker", None, 10)
+                .unwrap()
+                .is_empty(),
+            "a claimed row is the daemon's to deliver"
+        );
         store
             .park_for_busy_recipient(
                 message,

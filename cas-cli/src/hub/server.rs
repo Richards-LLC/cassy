@@ -216,9 +216,15 @@ async fn connection_evidence(
         }
     }
     response.headers_mut().insert("x-cas-request-id", HeaderValue::from_str(&request_id).expect("UUID header"));
-    let expose = response.headers().get("access-control-expose-headers")
-        .and_then(|value| value.to_str().ok()).map(|value| format!("{value}, X-Cas-Request-Id"))
-        .unwrap_or_else(|| "X-Cas-Request-Id".to_owned());
+    let prior_expose = response.headers().get("access-control-expose-headers")
+        .and_then(|value| value.to_str().ok()).unwrap_or_default();
+    let expose = if prior_expose.split(',').any(|name| name.trim().eq_ignore_ascii_case("X-Cas-Request-Id")) {
+        prior_expose.to_owned()
+    } else if prior_expose.is_empty() {
+        "X-Cas-Request-Id".to_owned()
+    } else {
+        format!("{prior_expose}, X-Cas-Request-Id")
+    };
     response.headers_mut().insert("access-control-expose-headers", HeaderValue::from_str(&expose).expect("fixed header extension"));
     response
 }
@@ -1995,7 +2001,9 @@ async fn events<R: SessionReadModel>(
     let mut ticks = tokio::time::interval(Duration::from_millis(250));
     let termination = async move {
         loop {
-            ticks.tick().await;
+            // A newly-created timer may yield even on its first due tick.
+            // Check the grant before that yield: buffered metadata/replay
+            // must not escape before the live tail gets polled (cas-2b3a5).
             if let (Some(auth), Some(context)) = (&auth, &context) {
                 if auth
                     .ensure_active_context(context, chrono::Utc::now())
@@ -2004,6 +2012,7 @@ async fn events<R: SessionReadModel>(
                     break;
                 }
             }
+            ticks.tick().await;
         }
     };
     let complete = stream::iter(vec![Ok::<Event, Infallible>(Event::default().event("replay_complete")

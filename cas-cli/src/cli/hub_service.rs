@@ -25,6 +25,44 @@ const LAUNCHD_TEST_PORT_ENV: &str = "CAS_HUB_SERVICE_PORT";
 const LAUNCHD_CLI_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
 const SYSTEMCTL_PATH_ENV: &str = "CAS_HUB_SYSTEMCTL";
+const MANAGER_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+pub(super) const MANAGER_TIMEOUT_WARNING: &str =
+    "service manager unknown (timed out). Retry: cas hub status";
+pub(super) const MANAGER_UNAVAILABLE_WARNING: &str =
+    "service manager unknown (unavailable). Retry: cas hub status";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagerProbe {
+    Observed(bool),
+    TimedOut,
+    Unavailable,
+}
+
+impl ManagerProbe {
+    fn observed(self) -> Option<bool> {
+        match self {
+            Self::Observed(active) => Some(active),
+            Self::TimedOut | Self::Unavailable => None,
+        }
+    }
+
+    fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Observed(_) => None,
+            Self::TimedOut => Some(MANAGER_TIMEOUT_WARNING),
+            Self::Unavailable => Some(MANAGER_UNAVAILABLE_WARNING),
+        }
+    }
+
+    fn require_observed(self) -> Result<bool> {
+        self.observed().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}; refusing to change hub service ownership",
+                self.warning().unwrap_or(MANAGER_UNAVAILABLE_WARNING)
+            )
+        })
+    }
+}
 /// Signals that systemd classes as a clean exit, and so never restarts under
 /// `Restart=on-failure`, but that are never a deliberate stop of the hub.
 /// SIGTERM is left out on purpose: `systemctl stop` and `cas hub stop` both
@@ -52,6 +90,8 @@ struct ServiceReport {
     installed: bool,
     enabled: Option<bool>,
     active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manager_warning: Option<&'static str>,
     unit_path: Option<String>,
     log_path: Option<String>,
     hub_running: bool,
@@ -180,10 +220,13 @@ fn native_platform() -> ServicePlatform {
     }
     #[cfg(target_os = "linux")]
     {
-        if command_succeeds("systemctl", ["--user", "--version"]) {
-            ServicePlatform::Systemd
-        } else {
-            ServicePlatform::ManualLinux
+        match probe_manager("systemctl", ["--user", "--version"]) {
+            // A timeout is not evidence that systemd is absent. Diagnostic
+            // callers must retain the unknown outcome of the actual probe.
+            ManagerProbe::Observed(true) | ManagerProbe::TimedOut => ServicePlatform::Systemd,
+            ManagerProbe::Observed(false) | ManagerProbe::Unavailable => {
+                ServicePlatform::ManualLinux
+            }
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -294,12 +337,13 @@ pub(super) fn restart_supervised(
             if !path.is_file() {
                 return Ok(false);
             }
-            capture_launch_profiles_best_effort(cli);
             let domain = launchd_domain()?;
-            let active = command_succeeds(
+            let active = probe_manager(
                 "launchctl",
                 ["print", &format!("{domain}/{}", launchd_label())],
-            );
+            )
+            .require_observed()?;
+            capture_launch_profiles_best_effort(cli);
             let definition = fs::read_to_string(&path)?;
             let service_tailscale = definition.contains("--tailscale-serve");
             let rewritten = if service_publication_repair_needed(tailscale_serve, service_tailscale)
@@ -330,6 +374,11 @@ pub(super) fn restart_supervised(
             if !path.is_file() {
                 return Ok(false);
             }
+            let active = probe_manager(
+                "systemctl",
+                ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
+            )
+            .require_observed()?;
             capture_launch_profiles_best_effort(cli);
             let service_tailscale = service_file_requests_tailscale(&path)?;
             if service_publication_repair_needed(tailscale_serve, service_tailscale) {
@@ -337,10 +386,6 @@ pub(super) fn restart_supervised(
             }
             refresh_systemd_unit(&path)?;
             let paths = HubRuntimePaths::default_for_user()?;
-            let active = command_succeeds(
-                "systemctl",
-                ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
-            );
             stop_detached_hub_if_present(cli, &paths, active)?;
             let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
             run_manager("systemctl", ["--user", "restart", SYSTEMD_UNIT], None)?;
@@ -690,24 +735,29 @@ pub(super) fn inactive_detached_warning(
             let domain = launchd_domain()?;
             (
                 path.is_file(),
-                Some(command_succeeds(
+                probe_manager(
                     "launchctl",
                     ["print", &format!("{domain}/{}", launchd_label())],
-                )),
+                ),
             )
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
             (
                 path.is_file(),
-                Some(command_succeeds(
+                probe_manager(
                     "systemctl",
                     ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
-                )),
+                ),
             )
         }
-        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => (false, None),
+        ServicePlatform::ManualLinux => (systemd_path()?.is_file(), ManagerProbe::Unavailable),
+        ServicePlatform::Unsupported => return Ok(None),
     };
+    // A hung diagnostic cannot establish either service health or inactivity.
+    if let Some(warning) = active.warning() {
+        return Ok(Some(warning));
+    }
     let hub_live = match record {
         Some(record) => {
             super::hub::record_is_live(record)
@@ -722,7 +772,7 @@ pub(super) fn inactive_detached_warning(
     };
     Ok(inactive_detached_warning_for(
         installed,
-        active,
+        active.observed(),
         hub_live,
         record.and_then(|record| record.launched_by.as_deref()),
     ))
@@ -791,18 +841,22 @@ fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
             let installed = path.exists();
-            let active = launchd_domain().ok().map(|domain| {
-                command_succeeds(
-                    "launchctl",
-                    ["print", &format!("{domain}/{}", launchd_label())],
-                )
-            });
+            let active = Some(
+                launchd_domain()
+                    .map(|domain| {
+                        probe_manager(
+                            "launchctl",
+                            ["print", &format!("{domain}/{}", launchd_label())],
+                        )
+                    })
+                    .unwrap_or(ManagerProbe::Unavailable),
+            );
             print_report(cli, report(platform, installed, active, Some(path), None)?)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
             let installed = path.exists();
-            let active = Some(command_succeeds(
+            let active = Some(probe_manager(
                 "systemctl",
                 ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
             ));
@@ -840,7 +894,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                     .status();
                 fs::remove_file(&path).context("remove Cassy launchd agent")?;
             }
-            print_report(cli, report(platform, false, Some(false), Some(path), None)?)
+            print_report(cli, report(platform, false, Some(ManagerProbe::Observed(false)), Some(path), None)?)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
@@ -853,7 +907,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                 fs::remove_file(&path).context("remove Cassy systemd unit")?;
                 run_manager("systemctl", ["--user", "daemon-reload"], None)?;
             }
-            print_report(cli, report(platform, false, Some(false), Some(path), None)?)
+            print_report(cli, report(platform, false, Some(ManagerProbe::Observed(false)), Some(path), None)?)
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -874,7 +928,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
 fn report(
     platform: ServicePlatform,
     installed: bool,
-    active: Option<bool>,
+    active: Option<ManagerProbe>,
     path: Option<PathBuf>,
     instructions: Option<&'static str>,
 ) -> Result<ServiceReport> {
@@ -889,19 +943,29 @@ fn report(
         ServicePlatform::ManualLinux => ("linux", "manual"),
         ServicePlatform::Unsupported => ("unsupported", "none"),
     };
+    let enabled = match platform {
+        ServicePlatform::Launchd => Some(ManagerProbe::Observed(installed)),
+        ServicePlatform::Systemd => Some(probe_manager(
+            "systemctl",
+            ["--user", "is-enabled", "--quiet", SYSTEMD_UNIT],
+        )),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => None,
+    };
+    let manager_warning =
+        if active == Some(ManagerProbe::TimedOut) || enabled == Some(ManagerProbe::TimedOut) {
+            Some(MANAGER_TIMEOUT_WARNING)
+        } else {
+            active
+                .and_then(ManagerProbe::warning)
+                .or_else(|| enabled.and_then(ManagerProbe::warning))
+        };
     Ok(ServiceReport {
         platform: platform_name,
         supervision,
         installed,
-        enabled: match platform {
-            ServicePlatform::Launchd => Some(installed),
-            ServicePlatform::Systemd => Some(command_succeeds(
-                "systemctl",
-                ["--user", "is-enabled", "--quiet", SYSTEMD_UNIT],
-            )),
-            ServicePlatform::ManualLinux | ServicePlatform::Unsupported => None,
-        },
-        active,
+        enabled: enabled.and_then(ManagerProbe::observed),
+        active: active.and_then(ManagerProbe::observed),
+        manager_warning,
         unit_path: path.map(|path| path.display().to_string()),
         log_path: Some(paths.log_path().display().to_string()),
         hub_running,
@@ -949,6 +1013,9 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                     println!("  Logs: {log_path}");
                 }
             }
+        }
+        if let Some(warning) = report.manager_warning {
+            println!("  Warning: {warning}");
         }
         for readiness in &report.launch_readiness {
             println!(
@@ -1109,13 +1176,38 @@ fn run_manager_vec(command: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn command_succeeds<const N: usize>(command: &str, args: [&str; N]) -> bool {
-    manager_command(command)
+/// Read-only manager diagnostics have the same finite child deadline as the
+/// runtime receipt collector. Mutating manager operations retain their own
+/// lifecycle semantics; an unknown diagnostic is never an inactive service.
+fn probe_manager<const N: usize>(command: &str, args: [&str; N]) -> ManagerProbe {
+    let deadline = Instant::now() + MANAGER_PROBE_TIMEOUT;
+    let Ok(mut child) = manager_command(command)
         .args(args)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()
+    else {
+        return ManagerProbe::Unavailable;
+    };
+    loop {
+        let outcome = match child.try_wait() {
+            Ok(Some(status)) => return ManagerProbe::Observed(status.success()),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Ok(None) => ManagerProbe::TimedOut,
+            Err(_) => ManagerProbe::Unavailable,
+        };
+        // Only the child we created is killed. Reaping happens off the
+        // diagnostic deadline, including children stuck in kernel I/O.
+        let _ = child.kill();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        return outcome;
+    }
 }
 
 fn manager_command(command: &str) -> Command {
@@ -1327,6 +1419,78 @@ fn manual_linux_instructions() -> &'static str {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unknown_manager_refuses_restart_before_service_mutation_cas_8ee8() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let manager = fixture.path().join("systemctl");
+        let log = fixture.path().join("manager.log");
+        crate::test_paths::warm_stub(
+            &manager,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CAS_MANAGER_LOG"
+if [ "$2" = "is-active" ]; then exec /usr/bin/tail -f /dev/null; fi
+exit 0
+"#,
+        );
+        env.set(SYSTEMCTL_PATH_ENV, &manager);
+        env.set("CAS_MANAGER_LOG", &log);
+        let unit = systemd_path().unwrap();
+        write_service_file(&unit, LEGACY_SYSTEMD_UNIT).unwrap();
+        let cli = Cli {
+            json: false,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+        let started = Instant::now();
+        let error = restart_supervised(&cli, true, 443).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(error.to_string().contains("unknown (timed out)"));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to change hub service ownership")
+        );
+        assert_eq!(fs::read_to_string(&unit).unwrap(), LEGACY_SYSTEMD_UNIT);
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(calls.lines().any(|line| line.contains("is-active")));
+        assert!(
+            !calls
+                .lines()
+                .any(|line| line.contains("daemon-reload") || line.contains("restart"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_report_keeps_timed_out_enablement_unknown_cas_8ee8() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let manager = fixture.path().join("systemctl");
+        crate::test_paths::warm_stub(&manager, "#!/bin/sh\nexec /usr/bin/tail -f /dev/null\n");
+        env.set(SYSTEMCTL_PATH_ENV, &manager);
+        let report = report(
+            ServicePlatform::Systemd,
+            true,
+            Some(ManagerProbe::Observed(true)),
+            Some(systemd_path().unwrap()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.active, Some(true));
+        assert_eq!(report.enabled, None);
+        assert_eq!(report.manager_warning, Some(MANAGER_TIMEOUT_WARNING));
+        let json = serde_json::to_value(report).unwrap();
+        assert!(json["enabled"].is_null());
+        assert!(
+            json["manager_warning"]
+                .as_str()
+                .unwrap()
+                .contains("timed out")
+        );
+    }
     #[test]
     fn profile_capture_failure_is_reported_without_failing_service_lifecycle() {
         let warning =

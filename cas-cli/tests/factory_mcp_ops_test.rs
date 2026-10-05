@@ -37,6 +37,9 @@ use tempfile::TempDir;
 mod test_env_guard;
 use test_env_guard::TestEnvGuard;
 
+#[path = "factory_recycle_public_tests.rs"]
+mod factory_recycle_public_tests;
+
 // =============================================================================
 // Test Fixture
 // =============================================================================

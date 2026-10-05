@@ -938,11 +938,8 @@ fn visual_qa_selector(finding: &serde_json::Value) -> String {
 /// Newer producers may report textBounds or box. Historical canonical clipping
 /// reports carry textSample plus ancestorBox (the text's clipping rectangle).
 /// Never use an incomplete/non-finite/negative box as identity evidence.
-fn visual_qa_finding_bounds(finding: &serde_json::Value) -> Option<[f64; 4]> {
-    let bounds = finding
-        .get("textBounds")
-        .or_else(|| finding.get("box"))
-        .or_else(|| finding.get("ancestorBox"))?;
+fn visual_qa_finding_bounds(finding: &serde_json::Value, field: &str) -> Option<[f64; 4]> {
+    let bounds = finding.get(field)?;
     let coordinates = ["x", "y", "width", "height"]
         .map(|field| bounds.get(field).and_then(serde_json::Value::as_f64));
     let [Some(x), Some(y), Some(width), Some(height)] = coordinates else {
@@ -963,6 +960,19 @@ fn visual_qa_same_bounds(left: [f64; 4], right: [f64; 4]) -> bool {
         .all(|(left, right)| (left - right).abs() <= VISUAL_QA_IDENTITY_BOUNDS_TOLERANCE)
 }
 
+/// Compare the same kind of rectangle across report versions. A new textBounds
+/// field must not be compared to an old clipping ancestor's different box.
+fn visual_qa_common_bounds(left: &serde_json::Value, right: &serde_json::Value) -> Option<bool> {
+    ["textBounds", "box", "ancestorBox"]
+        .into_iter()
+        .find_map(|field| {
+            Some(visual_qa_same_bounds(
+                visual_qa_finding_bounds(left, field)?,
+                visual_qa_finding_bounds(right, field)?,
+            ))
+        })
+}
+
 fn visual_qa_same_element(left: &serde_json::Value, right: &serde_json::Value) -> bool {
     let semantic = |finding: &serde_json::Value| {
         let role = visual_qa_finding_text(finding, "role");
@@ -973,13 +983,7 @@ fn visual_qa_same_element(left: &serde_json::Value, right: &serde_json::Value) -
         if left_id != right_id {
             return false;
         }
-        return match (
-            visual_qa_finding_bounds(left),
-            visual_qa_finding_bounds(right),
-        ) {
-            (Some(left), Some(right)) => visual_qa_same_bounds(left, right),
-            _ => true,
-        };
+        return visual_qa_common_bounds(left, right).unwrap_or(true);
     }
     let left_text = visual_qa_finding_text(left, "textSample");
     let right_text = visual_qa_finding_text(right, "textSample");
@@ -987,11 +991,8 @@ fn visual_qa_same_element(left: &serde_json::Value, right: &serde_json::Value) -
         if left_text != right_text {
             return false;
         }
-        if let (Some(left), Some(right)) = (
-            visual_qa_finding_bounds(left),
-            visual_qa_finding_bounds(right),
-        ) {
-            return visual_qa_same_bounds(left, right);
+        if let Some(same_bounds) = visual_qa_common_bounds(left, right) {
+            return same_bounds;
         }
     }
     // Older minimal reports do not identify text or accessible elements. Retain

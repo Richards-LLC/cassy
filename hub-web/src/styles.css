@@ -1870,6 +1870,7 @@ main {
 .status-agent > .fleet-ops { justify-items: stretch; }
 .status-agent > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
 .status-agent .status-line { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+.status-agent > .fleet-ops > .fleet-ops-note { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
 .fleet-ops button:not(.primary), .fleet-ops-header button:not(.primary) { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
 .fleet-ops .fleet-ops-trigger { min-width: var(--rail-item-min); padding: 0; font-size: var(--fs-md); }
 .fleet-ops button[aria-disabled="true"], .fleet-ops-header button[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }

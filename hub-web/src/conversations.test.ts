@@ -11,6 +11,15 @@ import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
+it('another tab settles adjacent held sends without manufacturing unsent chips', () => {
+  const history = new ConversationHistory();
+  history.hold('a', 'supervisor', 'first', 1_000);
+  history.hold('b', 'supervisor', 'second', 1_001);
+  history.synchronizePending([]);
+  expect(history.pendingSends()).toEqual([]);
+  expect(history.dismissedSends()).toEqual([]);
+  expect(history.visibleEvents()).toEqual([]);
+});
 describe('conversation evidence', () => {
   it('shows both paired devices and terminal input in the same history', () => {
     const history = new ConversationHistory();

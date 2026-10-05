@@ -335,14 +335,14 @@ export class ConversationHistory {
   /** Reconcile another tab's committed journal, without making a claim replayable. */
   synchronizePending(sends: PendingSend[], now = Date.now()): PendingSend[] {
     const stored = new Map(sends.map((send) => [send.id, send]));
-    for (const event of this.events) {
+    for (const event of [...this.events]) {
       if (event.kind !== "send" || event.value.notificationId !== undefined || event.value.dismissed || event.value.replaced) continue;
       const current = stored.get(event.value.id);
       if (!current) {
-        delete event.value.held;
-        event.value.state = "error";
-        event.value.error = "This pending message was settled or removed in another tab.";
-        event.value.dismissed = true;
+        // A terminal journal row carries no private payload. An accepted
+        // send arrives through durable history/live fan-out; a cancelled one
+        // must not turn into a misleading "unsent" chip in another tab.
+        this.events.splice(this.events.indexOf(event), 1);
       } else if (current.state !== "held" && event.value.held) {
         delete event.value.held;
         event.value.state = current.state === "error" ? "error" : "unconfirmed";

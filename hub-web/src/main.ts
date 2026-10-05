@@ -2825,7 +2825,7 @@ const sendJournal = new CommanderJournal(window.indexedDB, async (scope: Deliver
   if (conversationPersistenceBlocked.has(scope.hub)) return undefined;
   const snapshot = await catalog.snapshot();
   const machine = snapshot.machines.find((item) => item.id === scope.hub && item.baseUrl === scope.baseUrl && item.deviceId === scope.device);
-  return machine ? credentialFence(machine) : undefined;
+  return machine && deliveryScope(machine, scope.session).accountState !== "unsupported" ? credentialFence(machine) : undefined;
 });
 let journalSync = Promise.resolve();
 sendJournal.onChange = () => {

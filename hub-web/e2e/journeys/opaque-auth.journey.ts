@@ -1,0 +1,117 @@
+import { test, expect, journeyPart } from "./journey";
+import { ATLAS, PELICAN } from "./world";
+import { HubDouble, type HistoryPage } from "./hub-double";
+import { ProtocolClock } from "./protocol-clock";
+
+test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a)", journeyPart, async ({ page, journey }) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const clock = new ProtocolClock(page);
+  const history: Record<string, HistoryPage[]> = {};
+  const hub = new HubDouble(page, { machines: [ATLAS], paired: ["atlas"], multiplex: true, time: clock, history });
+  await page.addInitScript(() => { Math.random = () => 0.5; });
+  await hub.install();
+  let blocked = false;
+  await page.route("https://atlas.test/v1/**", route => {
+    // Chrome exposes a blocked preflight/LNA request as an opaque fetch
+    // rejection. The credential-free health check can still succeed.
+    if (blocked && new URL(route.request().url()).pathname !== "/v1/health") return route.abort("failed");
+    return route.fallback();
+  });
+  await page.goto("./");
+  await hub.seedPaired();
+  await clock.start();
+  await page.goto("./");
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  const header = page.locator("#conversation-connection");
+  await expect(header).toHaveText(" · Live");
+  await journey.stage("A blocked authenticated route keeps the active pairing and retries", async () => {
+    blocked = true;
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(header).toHaveText(" · Reconnecting");
+    await expect(page.getByText(/needs pairing|was revoked|no longer paired/i).filter({ visible: true })).toHaveCount(0);
+  });
+  await journey.stage("Once the browser allows the route, the conversation comes back by itself", async () => {
+    history[PELICAN] = [{ messages: [], has_earlier: false, replies: [{
+      notification_id: 3539905, reply_to: null, session: PELICAN, kind: "status", attachments: [],
+      message: "Queued while the connection was down.", summary: "", device_id: "journey-device",
+      at: new Date(clock.now()).toISOString(),
+    }] }];
+    blocked = false;
+    await clock.advance(10_000);
+    await expect(header).toHaveText(" · Live");
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).not.toHaveText("Reconnecting");
+    await expect(page.getByRole("log").getByText("Queued while the connection was down.", { exact: true })).toBeVisible();
+    const accepted = hub.nextSend();
+    await page.getByRole("textbox", { name: "Your message" }).fill("After the browser block clears");
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    expect((await accepted).text).toBe("After the browser block clears");
+    hub.answerLatest(PELICAN, "The connection recovered.");
+    await expect(page.getByRole("log").getByText("The connection recovered.", { exact: true })).toBeVisible();
+    expect(hub.sends).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+});
+
+test("HUB-J12 denied Local network access explains site settings without re-pairing (cas-b85a)", journeyPart, async ({ page, journey }) => {
+  const hub = new HubDouble(page, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
+  await hub.install();
+  await page.goto("./");
+  await hub.seedPaired();
+  // Use the real stored base URL and permission name; block outgoing requests
+  // before any test credential can reach the actual hub.
+  await page.route("https://soundwave-linux.tailf5a734.ts.net/**", route => route.abort("failed"));
+  await page.evaluate(async () => {
+    const db: IDBDatabase = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("cas-commander-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction("machines", "readwrite");
+      const store = transaction.objectStore("machines");
+      const request = store.get("atlas");
+      request.onsuccess = () => store.put({ ...request.result, label: "soundwave", baseUrl: "https://soundwave-linux.tailf5a734.ts.net" });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    db.close();
+  });
+  await page.addInitScript(() => {
+    const query = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = descriptor => descriptor.name === "local-network" as PermissionName
+      ? Promise.resolve({ state: "denied" } as PermissionStatus) : query(descriptor);
+  });
+  await journey.stage("The browser permission has a visible next step, including without a conversation", async () => {
+    await page.goto("./");
+    await expect(page.locator("#network-access-help")).toHaveText("Can't reach soundwave. Allow Local network access for this page in your browser's site settings. Reconnecting…");
+    await expect(page.getByText(/needs pairing|was revoked/i).filter({ visible: true })).toHaveCount(0);
+  });
+  for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+    for (const scheme of ["light", "dark"] as const) {
+      await journey.stage(`Permission guidance at ${size.width}px in ${scheme}`, async () => {
+        await page.setViewportSize(size);
+        await page.emulateMedia({ colorScheme: scheme });
+        await expect(page.locator("html")).toHaveAttribute("data-scheme", scheme);
+        await expect(page.locator("#network-access-help")).toBeInViewport();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        const contrast = await page.locator("#network-access-help").evaluate(element => {
+          const luminance = (color: string) => {
+            const channels = color.match(/[\d.]+/g)!.slice(0, 3).map(Number).map(value => {
+              const channel = value / 255;
+              return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+            });
+            return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
+          };
+          const style = getComputedStyle(element);
+          const foreground = luminance(style.color);
+          const background = luminance(style.backgroundColor);
+          return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+        });
+        expect(contrast).toBeGreaterThanOrEqual(4.5);
+      });
+    }
+  }
+});

@@ -5974,7 +5974,118 @@ impl CasCore {
             .map(|claimed| claimed.timestamp())
     }
 
-    fn advance_awaiting_merge_anchor(
+    /// cas-00eb (cas-f1f4 regression): a recorded anchor may only move along
+    /// this task's own lineage. Commit messages alone cannot tell (cas-ba4a
+    /// catches only messages that name another task), so two structural
+    /// stops apply:
+    /// - the measured branch must be this task's per-task branch
+    ///   (`factory/<assignee>-<task>`). A plain `factory/<assignee>` is a
+    ///   mutable lane where the worker stacks the next task on this one;
+    /// - no other open task's anchor may sit between the recorded anchor and
+    ///   the tip, because that commit is another delivery's boundary.
+    pub(crate) fn tip_is_own_task_lineage(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        measured_branch: Option<&str>,
+        recorded: &str,
+        tip: Option<&str>,
+    ) -> bool {
+        let (Some(branch), Some(tip), Some(assignee)) =
+            (measured_branch, tip, task.assignee.as_deref())
+        else {
+            return false;
+        };
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        if branch != crate::factory_isolation::worker_task_branch(assignee, &task.id) {
+            return false;
+        }
+        let Ok(others) = task_store.list(None) else {
+            return false;
+        };
+        !others.iter().any(|other| {
+            other.id != task.id
+                && other.status != TaskStatus::Closed
+                && other
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref()
+                    .is_some_and(|anchor| {
+                        !commit_ids_match(anchor, recorded)
+                            && git_commit_is_ancestor(repo_path, recorded, anchor)
+                            && git_commit_is_ancestor(repo_path, anchor, tip)
+                    })
+        })
+    }
+
+    /// cas-00eb: the fresh-park counterpart of
+    /// [`Self::advance_awaiting_merge_anchor`]. cas-6e3a recorded `b65630c82`
+    /// mid-cycle, then pushed two more commits; the park kept `b656`, so its
+    /// QA round was bound two commits behind the tip that the accepted
+    /// evidence bundle named. Same attribution rule as the AwaitingMerge
+    /// advance (cas-ba4a: every commit since the anchor is this task's, none
+    /// after a sibling's lease), same container and already-integrated guards.
+    /// Returns the task to park; status is untouched so the park's lifecycle
+    /// push still reports the real transition.
+    pub(crate) fn advance_commit_time_anchor_before_park(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        parent_branch: &str,
+        measured_branch: Option<&str>,
+        measured_tip: Option<&str>,
+    ) -> Task {
+        let mut parking = task.clone();
+        let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
+            return parking;
+        };
+        if !self.tip_is_own_task_lineage(
+            task_store,
+            task,
+            repo_path,
+            measured_branch,
+            recorded,
+            measured_tip,
+        ) {
+            return parking;
+        }
+        let Some(tip) = measured_tip
+            .and_then(|tip| resolve_branch_sha(repo_path, &format!("{tip}^{{commit}}")))
+        else {
+            return parking;
+        };
+        let foreign_since = self.sibling_lease_boundary(task_store, task);
+        if !parked_anchor_advance_is_attributable(
+            repo_path,
+            recorded,
+            &tip,
+            &task.id,
+            foreign_since,
+        ) {
+            return parking;
+        }
+        let mut advanced = task.clone();
+        advanced.status = TaskStatus::AwaitingMerge;
+        if Self::apply_awaiting_merge_anchor_advance(
+            &mut advanced,
+            &tip,
+            chrono::Utc::now(),
+            Some(repo_path),
+            Some(parent_branch),
+        )
+        .is_some()
+        {
+            parking.deliverables.factory_branch_anchor =
+                advanced.deliverables.factory_branch_anchor;
+            parking.notes = advanced.notes;
+            parking.updated_at = advanced.updated_at;
+        }
+        parking
+    }
+
+    pub(crate) fn advance_awaiting_merge_anchor(
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
@@ -7473,13 +7584,30 @@ impl CasCore {
                         )
                     });
                     if task.status != TaskStatus::AwaitingMerge {
+                        // cas-00eb: a commit-time anchor recorded earlier in
+                        // this cycle survives the park (`record_park`). When
+                        // the measured tip descends from it through this
+                        // task's own commits only, the tip is the delivery:
+                        // advance first, so the park, its QA round and its
+                        // merge request all name the tip.
+                        let measured_branch = task.assignee.as_deref().map(|assignee| {
+                            close_measured_factory_branch(&close_project_root, &task, assignee)
+                        });
+                        let parking = self.advance_commit_time_anchor_before_park(
+                            task_store.as_ref(),
+                            &task,
+                            &close_project_root,
+                            &resolved_parent_branch,
+                            measured_branch.as_deref(),
+                            anchor.as_deref(),
+                        );
                         // cas-4b3f: snapshot the factory branch's current
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
                         self.park_task_awaiting_merge(
                             task_store.as_ref(),
-                            &task,
+                            &parking,
                             "MERGE REQUIRED",
                             &msg,
                             anchor.clone(),

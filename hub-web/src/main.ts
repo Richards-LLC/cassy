@@ -759,6 +759,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const accepted = machines.get(machine.id);
       if (frameFence && (!accepted || accepted.deviceId !== machine.deviceId || accepted.baseUrl !== machine.baseUrl || accepted.credentialId !== frameFence.credentialId || credentialFence(accepted).generation !== frameFence.generation)) return;
       conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
+      if (accepted) journalWrites = journalWrites.then(async () => {
+        await sendJournal.acknowledge(deliveryScope(accepted, session), receipt, credentialFence(accepted));
+      }).catch(() => { /* A failed save never authorizes another wire write. */ });
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews(); renderConversationList();
     },
@@ -2941,7 +2944,7 @@ sendJournal.onChange = () => {
           clearTimeout(held.expiry); queue.splice(queue.indexOf(held), 1);
         }
         if (!queue.length) heldSends.delete(key);
-        for (const held of history.synchronizePending(snapshot.sends)) {
+        for (const held of history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts)) {
           const remaining = HELD_SEND_MS - (Date.now() - (held.heldAt ?? held.at));
           if (remaining <= 0) expireHeldSend(machine, key, held.id);
           else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
@@ -2968,6 +2971,14 @@ function persistPendingSends(): Promise<void> {
       // The privacy fence is checked when it executes, not only when scheduled.
       if (conversationPersistenceBlocked.has(machine.id)) return;
       const before = persistedSends.get(key) ?? [];
+      for (const event of history.events) {
+        if (event.kind !== "send" || event.value.notificationId === undefined || !before.some(send => send.id === event.value.id)) continue;
+        await sendJournal.acknowledge(deliveryScope(machine, session), {
+          client_ref: event.value.id, notification_id: event.value.notificationId,
+          target: event.value.target, stamped: event.value.stamped ?? false,
+          ...(event.value.deviceLabel === undefined ? {} : { device_label: event.value.deviceLabel }),
+        }, credentialFence(machine));
+      }
       if (JSON.stringify(before) === JSON.stringify(after)) return;
       const result = await sendJournal.reconcile(deliveryScope(machine, session), before, after, credentialFence(machine));
       // A revoked scope is deliberately refused, not a browser storage error.
@@ -3000,7 +3011,7 @@ function restoreStoredSends(machine: StoredMachine): void {
       persistedSends.set(key, snapshot.sends);
       const history = conversationHistory(key, scope.session);
       for (const row of snapshot.replies) history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
-      for (const held of history.restorePending(snapshot.sends, Date.now())) {
+      for (const held of history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts)) {
         const since = held.heldAt ?? held.at;
         heldSince.set(held.id, since);
         const remaining = HELD_SEND_MS - (Date.now() - since);
@@ -3188,12 +3199,32 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     return;
   }
   pendingThreadScopes.set(key, scopeKey(deliveryScope(machine, session)));
-  const clientRef = crypto.randomUUID();
+  await journalWrites;
+  const scope = deliveryScope(machine, session);
+  if (retryOf) {
+    const snapshot = await sendJournal.read(scope);
+    history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
+    const previous = history.events.find(event => event.kind === "send" && event.value.id === retryOf);
+    if (previous?.kind !== "send" || !history.isFailedSend(previous.value)) {
+      updateConversationViews(); renderConversationList();
+      return;
+    }
+  }
+  const clientRef = retryOf ?? crypto.randomUUID();
   const at = Date.now();
   const send: PendingSend = { id: clientRef, target: supervisor, text, state: "held", at, heldAt: at, session, ...(replyTo === undefined ? {} : { replyTo }) };
-  const result = await sendJournal.reconcile(deliveryScope(machine, session), [], [send], credentialFence(machine));
+  const result = retryOf
+    ? await sendJournal.retry(scope, retryOf, credentialFence(machine), send)
+    : await sendJournal.reconcile(scope, [], [send], credentialFence(machine));
+  if (result === "delivered") {
+    const snapshot = await sendJournal.read(scope);
+    history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
+    updateConversationViews(); renderConversationList();
+    return;
+  }
   if (result !== "kept") {
-    showComposerStatus(result === "too-long" ? "This message is too long to keep in browser storage. Edit it before sending." : "Browser storage could not keep this message. It has not been sent; keep this page open and retry.", "error");
+    showComposerStatus(retryOf ? "This message's delivery state could not be confirmed for a retry. Wait for its receipt before retrying."
+      : result === "too-long" ? "This message is too long to keep in browser storage. Edit it before sending." : "Browser storage could not keep this message. It has not been sent; keep this page open and retry.", "error");
     return;
   }
   if (conversationPersistenceBlocked.has(machine.id)) return;

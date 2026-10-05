@@ -346,6 +346,7 @@ fn test_director_data_awaiting_merge_lease_carries_the_open_qa_round() {
     cas_store::resolve_qa_pass(
         cas_dir,
         "cas-0001",
+        &pass.id,
         "worker-2",
         cas_types::QaVerdict::Approved,
         "approved",

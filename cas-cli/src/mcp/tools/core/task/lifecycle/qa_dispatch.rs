@@ -296,6 +296,70 @@ fn qa_delivery_not_proven(task: &Task, pass: &QaPass, target: &str) -> String {
 }
 
 impl CasCore {
+    /// Refresh only an attributable continuation of the parked delivery.
+    /// Both close (including its first park) and qa_request use the persisted
+    /// result; a mutable factory ref alone is never QA authorization.
+    pub(crate) fn refresh_parked_qa_delivery(
+        &self,
+        store: &dyn cas_store::TaskStore,
+        task_id: &str,
+        repo: &Path,
+        target: &str,
+        candidate: Option<&str>,
+    ) -> Result<Task, String> {
+        let task = store
+            .get(task_id)
+            .map_err(|error| format!("could not read parked delivery {task_id}: {error}"))?;
+        if task.status != TaskStatus::AwaitingMerge {
+            return Err(format!("{task_id} is not parked awaiting merge"));
+        }
+        self.advance_awaiting_merge_anchor(store, &task, repo, target, candidate)?;
+        let refreshed = store
+            .get(task_id)
+            .map_err(|error| format!("could not read refreshed delivery {task_id}: {error}"))?;
+        if refreshed.status != TaskStatus::AwaitingMerge
+            || refreshed.deliverables.factory_branch_anchor.is_none()
+        {
+            return Err(format!("{task_id} no longer has a parked delivery anchor"));
+        }
+        let anchor = refreshed
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .expect("checked above");
+        if super::close_ops::resolve_branch_sha(repo, &format!("{anchor}^{{commit}}")).is_none() {
+            return Err(format!(
+                "parked delivery {task_id} @{anchor} does not resolve to a commit"
+            ));
+        }
+        Ok(refreshed)
+    }
+
+    /// Cancellation and its retry share this repair. Pass linkage is
+    /// authoritative; optional work-item labels are display metadata.
+    pub(super) fn repair_cancelled_qa_work_item(&self, task: &Task) -> Result<String, String> {
+        if task.status != TaskStatus::Cancelled {
+            return Ok(String::new());
+        }
+        let reason = task
+            .close_reason
+            .as_deref()
+            .unwrap_or("cancelled without delivery");
+        cas_store::withdraw_qa_pass_for_qa_task(
+            &self.cas_root, &task.id,
+            &format!("QA task {} cancelled: {reason}", task.id), chrono::Utc::now(),
+        ).map(|pass| match pass {
+            Some(pass) => format!(
+                " Independent QA round {} (pass {}) for {} @{} withdrawn.",
+                pass.round, pass.id, pass.task_id, pass.head8(),
+            ),
+            None => String::new(),
+        }).map_err(|error| format!(
+            "task {} is cancelled, but its independent QA round could not be withdrawn: {error}; retry cancel or qa_request",
+            task.id,
+        ))
+    }
+
     /// The caller's QA identity: its registered name (what `task.assignee`
     /// and therefore `implementer_agent_id` hold) plus its session id. The
     /// no-self-review comparison must see both spellings.
@@ -551,29 +615,32 @@ impl CasCore {
                 }
             };
         let branch = super::close_ops::close_measured_factory_branch(&repo_root, task, implementer);
-        let head = task
+        let live_tip = super::close_ops::resolve_branch_sha(&repo_root, &branch);
+        let store = self.open_task_store().map_err(|error| error.to_string())?;
+        let refreshed = self.refresh_parked_qa_delivery(
+            store.as_ref(),
+            &task.id,
+            &repo_root,
+            &target_branch,
+            live_tip.as_deref(),
+        )?;
+        let head = refreshed
             .deliverables
             .factory_branch_anchor
-            .clone()
-            .or_else(|| super::close_ops::resolve_branch_sha(&repo_root, &branch))
-            .ok_or_else(|| {
-                format!(
-                    "the parked tip of {} could not be resolved ({branch} does not resolve and no anchor is recorded)",
-                    task.id
-                )
-            })?;
+            .as_deref()
+            .expect("refresh validates a persisted delivery anchor");
         let changed = changed_paths_for_delivery(
             &repo_root,
             &freshest_target_ref(&repo_root, &target_branch),
-            &head,
+            head,
         )
         .ok();
         self.independent_qa_for_paths(
-            task,
+            &refreshed,
             &repo_root,
             &target_branch,
             &branch,
-            Some(&head),
+            Some(head),
             changed,
             QaDeliveryLocation::ParkedForMerge,
             Some(reason),
@@ -694,6 +761,28 @@ impl CasCore {
         // cas-ce39: a new tip retires the round open for the old one. Report
         // which, so its work item is cancelled and a reviewer who had claimed
         // it is told to stop, instead of reviewing a dead head.
+        // cas-54b0: repair a cancelled work item left linked by a crash
+        // before withdrawal. Otherwise a same-head request would forever
+        // report AlreadyOpen for a review that can no longer run.
+        let repair = (|| -> Result<(), String> {
+            if let Some(pass) = cas_store::latest_qa_pass(&self.cas_root, &task.id, now)
+                .map_err(|error| error.to_string())?
+                && pass.state.is_active()
+                && let Some(qa_task_id) = pass.qa_task_id.as_deref()
+            {
+                let store = self.open_task_store().map_err(|error| error.to_string())?;
+                let qa_task = store
+                    .get(qa_task_id)
+                    .map_err(|error| format!("could not inspect QA work item {qa_task_id}: {error}"))?;
+                self.repair_cancelled_qa_work_item(&qa_task)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = repair {
+            return Some(QaDispatchStatus::required(format!(
+                "\n\nINDEPENDENT QA REQUIRED: could not reconcile the previous round: {error}. No new round was dispatched."
+            )));
+        }
         let opened = cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
         let (outcome, superseded) = match opened {
             Ok(outcome) => outcome,
@@ -1576,10 +1665,11 @@ mod squash_close_tests {
                     now,
                 )
                 .unwrap();
-                cas_store::claim_qa_pass(&cas_dir, &task.id, "reviewer", now).unwrap();
+                let claimed = cas_store::claim_qa_pass(&cas_dir, &task.id, "reviewer", now).unwrap();
                 cas_store::resolve_qa_pass(
                     &cas_dir,
                     &task.id,
+                    &claimed.id,
                     "reviewer",
                     QaVerdict::Approved,
                     "Independent review passed",

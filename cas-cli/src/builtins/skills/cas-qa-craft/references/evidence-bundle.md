@@ -9,7 +9,7 @@ never substitute weaker evidence and call it PASS.
 ## Layout
 
 The bundle lives at `~/.cas/artifacts/<project-key>/<task-id>/qa/`. `LEDGER.md` stays one
-level up. An independent QA round uses `independent-qa/round-<n>/` and a
+level up. An independent QA round uses `independent-qa/round-<n>/<pass-id>/` and a
 journey uses `journeys/<journey-id>/`, each with the same shape and its own
 `bundle.json`. Extra files are allowed; a validator reads only what
 `bundle.json` lists.

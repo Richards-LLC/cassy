@@ -5974,23 +5974,23 @@ impl CasCore {
             .map(|claimed| claimed.timestamp())
     }
 
-    fn advance_awaiting_merge_anchor(
+    pub(super) fn advance_awaiting_merge_anchor(
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
         repo_path: &std::path::Path,
         parent_branch: &str,
         factory_branch_anchor: Option<&str>,
-    ) {
+    ) -> Result<(), String> {
         let Some(factory_branch_anchor) = factory_branch_anchor else {
-            return;
+            return Ok(());
         };
         // A worker can have an explicitly parked task while doing a later
         // task on the same mutable factory branch. Query task ownership, not
         // the caller's lease: a supervisor may be the one retrying A's close.
-        let Ok(in_progress) = task_store.list(Some(TaskStatus::InProgress)) else {
-            return;
-        };
+        let in_progress = task_store
+            .list(Some(TaskStatus::InProgress))
+            .map_err(|error| format!("could not inspect delivery ownership: {error}"))?;
         let same_worker = |other: &Task| {
             other.id != task.id
                 && task.assignee.as_deref().is_some_and(|assignee| {
@@ -6001,17 +6001,17 @@ impl CasCore {
                 })
         };
         if in_progress.iter().any(|other| same_worker(other)) {
-            return;
+            return Ok(());
         }
-        let Ok(other_parked) = task_store.list(Some(TaskStatus::AwaitingMerge)) else {
-            return;
-        };
+        let other_parked = task_store
+            .list(Some(TaskStatus::AwaitingMerge))
+            .map_err(|error| format!("could not inspect parked delivery ownership: {error}"))?;
         if other_parked.iter().any(|other| {
             same_worker(other)
                 && other.deliverables.factory_branch_anchor.as_deref()
                     == Some(factory_branch_anchor)
         }) {
-            return;
+            return Ok(());
         }
         // cas-ba4a: a tip that does not descend from the parked anchor, or
         // that carries another task's commits, never replaces it.
@@ -6021,7 +6021,7 @@ impl CasCore {
             repo_path,
             Some(factory_branch_anchor),
         ) else {
-            return;
+            return Ok(());
         };
         let factory_branch_anchor = factory_branch_anchor.as_str();
         let mut advanced = task.clone();
@@ -6032,18 +6032,16 @@ impl CasCore {
             now,
             Some(repo_path),
             Some(parent_branch),
-        )
-        else {
-            return;
+        ) else {
+            return Ok(());
         };
 
         match task_store.update(&advanced) {
             Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    error = %error,
-                    "failed to advance parked task delivery anchor after close retry"
-                );
+                return Err(format!(
+                    "could not persist the current delivery anchor for {}: {error}",
+                    task.id
+                ));
             }
             Ok(persisted_at) => {
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
@@ -6053,8 +6051,7 @@ impl CasCore {
                     .and_then(|store| store.get(&actor).ok())
                     .map(|agent| agent.name)
                     .unwrap_or_else(|| actor.clone());
-                let occurrence =
-                    super::supervisor_push::occurrence_from_updated_at(persisted_at);
+                let occurrence = super::supervisor_push::occurrence_from_updated_at(persisted_at);
                 if let Err(error) = self.push_task_lifecycle_with_branch_tip(
                     &task.id,
                     &task.title,
@@ -6074,6 +6071,7 @@ impl CasCore {
                 }
             }
         }
+        Ok(())
     }
 
     fn apply_awaiting_merge_anchor_advance(
@@ -7488,25 +7486,11 @@ impl CasCore {
                                 close_measured_factory_branch(&close_project_root, &task, assignee)
                             }),
                         );
-                    } else {
-                        // GH #744 / #743: a worker may push again after the
-                        // first park. Re-anchor before the retry returns its
-                        // merge-required refusal so the queued request and
-                        // supervisor status describe the current tip.
-                        self.advance_awaiting_merge_anchor(
-                            task_store.as_ref(),
-                            &task,
-                            &close_project_root,
-                            &resolved_parent_branch,
-                            anchor.as_deref(),
-                        );
-                        if merge_conflicted && !task.deliverables.merge_conflicted {
-                            // Already parked (a retry), but a fresh preflight now
-                            // shows a genuine conflict or cannot be evaluated.
-                            // Refresh the flag so the worker exit remains open
-                            // without duplicating the park audit note.
-                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
-                        }
+                    } else if merge_conflicted && !task.deliverables.merge_conflicted {
+                        // A fresh preflight now shows a genuine conflict or
+                        // cannot be evaluated. Refresh the retry flag without
+                        // duplicating the park audit note.
+                        self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                     }
 
                     // cas-619f: a user-facing delivery needs an independent
@@ -7516,16 +7500,24 @@ impl CasCore {
                     // cas-ba4a: bind the round to the delivery anchor the park
                     // or a guarded advance recorded, not to a live tip that
                     // may be another task's work.
-                    let qa_anchor = task_store
-                        .get(&task.id)
-                        .ok()
-                        .and_then(|stored| stored.deliverables.factory_branch_anchor)
-                        .or(anchor);
+                    // cas-8cfe: the first park can retain a commit-time
+                    // anchor from before the final fix. Apply the same guarded
+                    // refresh on the first park and on every retry, then use
+                    // the persisted delivery for both QA identity and routing.
+                    let qa_task = match self.refresh_parked_qa_delivery(
+                        task_store.as_ref(), &task.id, &close_project_root,
+                        &resolved_parent_branch, anchor.as_deref(),
+                    ) {
+                        Ok(task) => task,
+                        Err(error) => return Ok(Self::tool_error(format!(
+                            "{msg}\n\nINDEPENDENT QA REQUIRED: delivery identity could not be refreshed: {error}. No round was dispatched."
+                        ))),
+                    };
                     let msg = match self.dispatch_independent_qa(
-                        &task,
+                        &qa_task,
                         &close_project_root,
                         &resolved_parent_branch,
-                        qa_anchor.as_deref(),
+                        qa_task.deliverables.factory_branch_anchor.as_deref(),
                     ) {
                         Some(qa_status) => format!("{msg}{qa_status}"),
                         None => msg,
@@ -10285,8 +10277,12 @@ impl CasCore {
             )
         })?;
         if task.status == TaskStatus::Cancelled {
+            // Retry repairs a crash between task cancellation and pass
+            // withdrawal without rewriting the cancellation's audit history.
+            let qa_withdrawn = self.repair_cancelled_qa_work_item(&task)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
             return Ok(Self::success(format!(
-                "Already cancelled: {} - {}. This call did not rewrite its reason or history.",
+                "Already cancelled: {} - {}. This call did not rewrite its reason or history.{qa_withdrawn}",
                 task.id, task.title
             )));
         }
@@ -10361,31 +10357,11 @@ impl CasCore {
             let _ = agent_store.release_lease_for_task(&task.id, "Task cancelled without delivery");
         }
 
-        // cas-7877: cancelling a QA work item is the supervisor deciding the
-        // review will not happen. Withdraw its round too, so the delivery is
-        // no longer gated on it and the next park does not re-open it.
-        let qa_withdrawn = if task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL) {
-            match cas_store::withdraw_qa_pass_for_qa_task(
-                &self.cas_root,
-                &task.id,
-                &format!("QA task {} cancelled: {reason}", task.id),
-                now,
-            ) {
-                Ok(Some(pass)) => format!(
-                    " Independent QA round {} (pass {}) for {} @{} withdrawn.",
-                    pass.round,
-                    pass.id,
-                    pass.task_id,
-                    pass.head8()
-                ),
-                Ok(None) => String::new(),
-                Err(error) => format!(
-                    " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
-                ),
-            }
-        } else {
-            String::new()
-        };
+        // cas-54b0: the durable pass link identifies a QA work item, even
+        // if an old dispatch lacks its label. A failed withdrawal is retryable
+        // through cancel or qa_request; never report an unrepaired success.
+        let qa_withdrawn = self.repair_cancelled_qa_work_item(&task)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
 
         let pointer = superseded_by
             .as_deref()
@@ -14882,7 +14858,7 @@ mod awaiting_merge_anchor_tests {
                 temp.path(),
                 "main",
                 Some("task-b-tip"),
-            );
+            ).unwrap();
             assert_eq!(
                 store.get(&parked.id).unwrap().deliverables.factory_branch_anchor,
                 Some("task-a-tip".to_string()),
@@ -27477,7 +27453,7 @@ mod merge_state_gate_tests {
             next.id = "cas-b0b0".to_string();
             next.status = status;
             let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone(), next]);
-            core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&next_tip));
+            core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&next_tip)).unwrap();
             assert_eq!(
                 store
                     .get(&parked.id)
@@ -27492,7 +27468,7 @@ mod merge_state_gate_tests {
         git(p, &["reset", "-q", "--hard", &base]);
         let forced = commit_local(p, "c.rs", "untagged work");
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
-        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&forced));
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&forced)).unwrap();
         assert_eq!(
             store
                 .get(&parked.id)
@@ -27505,7 +27481,7 @@ mod merge_state_gate_tests {
 
         git(p, &["reset", "-q", "--hard", &parked_at]);
         let own = commit_local(p, "a2.rs", "fix(cas-a0a0): review follow-up");
-        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own));
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
         assert_eq!(
             store
                 .get(&parked.id)

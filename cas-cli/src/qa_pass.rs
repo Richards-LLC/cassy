@@ -1112,6 +1112,30 @@ pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
         .join(&pass.task_id)
         .join("independent-qa")
         .join(format!("round-{}", pass.round))
+        // Supersession and cancellation do not spend rejection budget, so
+        // their replacement can reuse the numeric round. Its evidence cannot.
+        .join(&pass.id)
+}
+
+/// The verdict must cite this pass's own ledger, including when cancellation
+/// opens another pass for the same head and rejection-budget round number.
+pub fn validate_round_ledger_path(
+    artifacts_root: &Path,
+    ledger: &Path,
+    pass: &QaPass,
+) -> Result<(), String> {
+    let expected = round_dir(artifacts_root, pass).join("LEDGER.md");
+    let actual = ledger
+        .canonicalize()
+        .map_err(|error| format!("ledger_path: {error}"))?;
+    if expected.canonicalize().ok().as_ref() != Some(&actual) {
+        return Err(format!(
+            "ledger_path must be {} for QA pass {}; a superseded pass's ledger cannot back this verdict",
+            expected.display(),
+            pass.id,
+        ));
+    }
+    Ok(())
 }
 
 /// The decision rule a reviewer applies (cas-6eb1). It lives in the generated
@@ -1568,6 +1592,54 @@ mod tests {
             requested_at: now,
             deadline_at: now,
             resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn replacement_passes_keep_their_evidence_separate_cas_8cfe() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        dispatch(dir.path(), "aaaa1111");
+        let old = cas_store::latest_qa_pass(dir.path(), "cas-ui1", now)
+            .unwrap()
+            .unwrap();
+        let old_dir = round_dir(dir.path(), &old);
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("LEDGER.md"), "original evidence").unwrap();
+
+        let mut previous_dir = old_dir.clone();
+        for head in ["bbbb2222", "bbbb2222"] {
+            // First a tip advance, then cancellation/re-request at the same
+            // head. Neither is a rejected round, but each needs its own files.
+            dispatch(dir.path(), head);
+            let current = cas_store::latest_qa_pass(dir.path(), "cas-ui1", now)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.round, old.round);
+            let current_dir = round_dir(dir.path(), &current);
+            assert_ne!(current_dir, old_dir);
+            assert_ne!(current_dir, previous_dir);
+            std::fs::create_dir_all(&current_dir).unwrap();
+            std::fs::write(current_dir.join("LEDGER.md"), "replacement evidence").unwrap();
+            assert!(
+                validate_round_ledger_path(dir.path(), &old_dir.join("LEDGER.md"), &current)
+                    .is_err()
+            );
+            validate_round_ledger_path(dir.path(), &current_dir.join("LEDGER.md"), &current)
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(old_dir.join("LEDGER.md")).unwrap(),
+                "original evidence"
+            );
+            previous_dir = current_dir;
+            cas_store::withdraw_open_qa_pass(
+                dir.path(),
+                "cas-ui1",
+                "cancelled review",
+                true,
+                chrono::Utc::now(),
+            )
+            .unwrap();
         }
     }
 

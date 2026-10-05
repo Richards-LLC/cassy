@@ -86,6 +86,27 @@ the reason, and appends a `✅ DECISION` note. From then on every merge gate
 waits for that round. It is supervisor-only and needs a reason. It refuses
 a task that is not parked awaiting merge.
 
+Both the first park and `qa_request` refresh a stale commit-time anchor
+only when the live tip is an attributable continuation of that task's
+unmerged delivery. Another task's commits, a force-push, or a delivery
+already integrated into the target do not move its anchor. The new pass
+binds the persisted SHA; any pending or claimed pass for the old SHA is
+superseded and its work item is cancelled. Requests at the same SHA are
+idempotent.
+
+Cancelling a QA work item withdraws its pending or claimed pass even when
+its `qa-pass` label is missing. Retrying cancellation repairs a crash
+between those writes without changing the original reason. `qa_request`
+also repairs a cancelled work item still linked to an active pass, then
+opens a replacement. Each new pass writes evidence under
+`independent-qa/round-<n>/<pass-id>/`, so an obsolete reviewer cannot overwrite
+its replacement even when the rejection-budget round number is reused.
+`qa_record` requires that pass's nested `LEDGER.md`, as named in its work
+item, and refuses a cancelled pass's path even when the SHA is unchanged.
+Recorded verdicts remain unchanged. Verdict recording
+checks the exact pass ID in its transaction, so evidence validated before
+an advance cannot approve a replacement pass.
+
 The park measures the task's own delivery branch, including a per-task
 `factory/<name>-<task>` branch. Before GH #1040 it measured
 `factory/<name>`, which is frozen for another parked task in that shape.
@@ -95,8 +116,9 @@ also cannot be created without a demo_statement.
 
 ## 2. Trigger: the QA dispatch
 
-When `park_task_awaiting_merge` parks an eligible task, Cassy does three
-things in one transaction.
+When an eligible task parks, Cassy records its pass transactionally, then
+materializes the work item and queues its dispatch. A retry completes an
+interrupted materialization. The steps are:
 
 1. **Creates a `qa_passes` row.** Its fields are:
    - `id`, `task_id`, `round` (1-based)
@@ -235,7 +257,7 @@ The QA worker never edits the delivery. Fixes belong to the implementer.
 
 ## 5. Finding format
 
-Everything goes in `~/.cas/artifacts/<delivery-task>/independent-qa/round-<n>/`, , as a
+Everything goes in `~/.cas/artifacts/<delivery-task>/independent-qa/round-<n>/<pass-id>/`, as a
 cas-c3b8 evidence bundle (contract v1). Its `bundle.json` must have
 `producer: "independent-qa"` and a `head_sha` equal to the reviewed tip, and
 `qa_record` refuses a verdict without it. Findings are `F01.png`…, each with

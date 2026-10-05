@@ -131,7 +131,8 @@ fn fixture_with_project(
 
 /// A round's LEDGER.md plus its cas-c3b8 `bundle.json` for `head`.
 fn round_evidence(dir: &Path, task_id: &str, head: &str) -> std::path::PathBuf {
-    std::fs::create_dir_all(dir).unwrap();
+    let dir = round_evidence_dir(dir, task_id);
+    std::fs::create_dir_all(&dir).unwrap();
     let ledger = dir.join("LEDGER.md");
     std::fs::write(&ledger, "# independent QA ledger\n").unwrap();
     std::fs::write(
@@ -146,6 +147,23 @@ fn round_evidence(dir: &Path, task_id: &str, head: &str) -> std::path::PathBuf {
     )
     .unwrap();
     ledger
+}
+
+fn round_evidence_dir(dir: &Path, task_id: &str) -> std::path::PathBuf {
+    let repo = dir
+        .ancestors()
+        .find(|path| path.join(".cas/cas.db").is_file())
+        .unwrap();
+    let cas_dir = repo.join(".cas");
+    let config = cas::config::Config::load(&cas_dir).unwrap();
+    let artifacts_root = cas::config::project_factory_artifacts_root(
+        &cas_dir,
+        &cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+    );
+    let pass = cas_store::latest_qa_pass(&cas_dir, task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    cas::qa_pass::round_dir(&artifacts_root, &pass)
 }
 
 fn qa_task_id(cas_dir: &Path, delivery: &str) -> String {
@@ -238,11 +256,16 @@ async fn cancelled_qa_link_is_repaired_on_request_or_cancel_retry_cas_54b0() {
         let old = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
             .unwrap()
             .unwrap();
+        let old_ledger = round_evidence(&repo, &id, &old.bound_head);
         let tasks = open_task_store(&root).unwrap();
         let mut qa = tasks.get(old.qa_task_id.as_deref().unwrap()).unwrap();
         // Crash after persisting cancellation but before withdrawing its pass;
         // linkage, rather than an optional label, identifies the QA work item.
         qa.status = TaskStatus::Cancelled;
+        qa.closed_at = Some(chrono::Utc::now());
+        qa.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Cancelled {
+            superseded_by: None,
+        });
         qa.labels.clear();
         qa.close_reason = Some("obsolete review".into());
         tasks.update(&qa).unwrap();
@@ -259,6 +282,26 @@ async fn cancelled_qa_link_is_repaired_on_request_or_cancel_retry_cas_54b0() {
                 .unwrap();
             assert_ne!(current.id, old.id);
             assert_eq!(current.bound_head, old.bound_head);
+            let reviewer = reviewer_core(&root, "reviewer");
+            let error = CasService::new(reviewer, None).verification(Parameters(verification(serde_json::json!({
+                "action": "qa_record", "task_id": id, "status": "approved",
+                "summary": "cancelled evidence cannot approve a replacement", "ledger_path": old_ledger.display().to_string()
+            })))).await.unwrap_err();
+            assert!(
+                error.message.contains("ledger_path must be"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains(&current.id), "{}", error.message);
+            let tasks = open_task_store(&root).unwrap();
+            let brief = tasks
+                .get(current.qa_task_id.as_deref().unwrap())
+                .unwrap()
+                .description;
+            assert!(
+                brief.contains(&format!("round-{}/{}/LEDGER.md", current.round, current.id)),
+                "{brief}"
+            );
         } else {
             supervisor
                 .cas_task_cancel(Parameters(TaskCancelRequest {
@@ -323,6 +366,38 @@ async fn cancelling_unlabelled_qa_withdraws_pending_and_claimed_passes_cas_54b0(
             .unwrap();
         assert!(withdrawn.is_withdrawn());
         assert!(!withdrawn.state.is_active());
+        let head = commit_file(
+            &repo,
+            "web/composer.css",
+            ".composer{gap:12px}\n",
+            "fix(cas-ui01): corrected bytes",
+        );
+        let requested = request_current_qa(&supervisor, &id).await;
+        assert!(
+            requested.contains("INDEPENDENT QA DISPATCHED"),
+            "{requested}"
+        );
+        let current = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        assert_ne!(current.id, old.id);
+        assert_eq!(current.bound_head, head);
+        let reviewer = reviewer_core(&root, "reviewer");
+        let stale_ledger = round_evidence(&repo.join("old-round"), &id, &old.bound_head);
+        let error = CasService::new(reviewer, None).verification(Parameters(verification(serde_json::json!({
+            "action": "qa_record", "task_id": id, "status": "approved",
+            "summary": "old evidence must not approve the fix", "ledger_path": stale_ledger.display().to_string()
+        })))).await.unwrap_err();
+        assert!(
+            error.message.contains("head_sha must be the reviewed tip"),
+            "{}",
+            error.message
+        );
+        assert!(
+            cas_store::satisfying_qa_pass_for_head(&root, &id, &head)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -517,7 +592,7 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
 
     // Reject with evidence: the delivery goes back to its implementer.
     // A verdict without its evidence bundle is refused.
-    let bare = repo.join("bare");
+    let bare = round_evidence_dir(&repo, &task_id);
     std::fs::create_dir_all(&bare).unwrap();
     std::fs::write(bare.join("LEDGER.md"), "# no bundle\n").unwrap();
     let unbacked = reviewer_service

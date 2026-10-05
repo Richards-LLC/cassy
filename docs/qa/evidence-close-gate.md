@@ -223,7 +223,7 @@ healer-only delivery is test-only, so eligibility alone would never see it.
 | --- | --- | --- |
 | Question | Did the implementer run it? | Did someone else confirm it? |
 | Moment | Every close, before the merge gate | Dispatch at park, gates at merge and re-close |
-| Evidence dir | `<task>/qa/` (or `<task>/journeys/<id>/`) | `<task>/independent-qa/round-<n>/` |
+| Evidence dir | `<task>/qa/` (or `<task>/journeys/<id>/`) | `<task>/independent-qa/round-<n>/<pass-id>/` |
 | Eligibility | The shared `user_facing_reasons` | The shared `user_facing_reasons` |
 | Waiver | `supervisor_override` on close, logged | `qa_waive`, logged |
 

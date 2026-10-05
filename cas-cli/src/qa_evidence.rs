@@ -167,7 +167,7 @@ struct ManifestFiles {
 
 /// Newest `qa-bundle: <path>` citation in the notes that is the
 /// implementer's own. cas-619f cites each independent round's bundle on the
-/// same delivery task (`<task>/independent-qa/round-<n>/bundle.json`); those
+/// same delivery task (`<task>/independent-qa/round-<n>/<pass-id>/bundle.json`); those
 /// are the reviewer's evidence and never stand in for, or shadow, the
 /// implementer's bundle.
 pub fn cited_bundle_path(notes: &str) -> Option<String> {

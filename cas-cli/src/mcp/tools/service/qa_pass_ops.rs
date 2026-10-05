@@ -62,6 +62,14 @@ impl CasService {
         let claimed = cas_store::claim_qa_pass(&cas_root, task_id, &reviewer, now).map_err(|error| {
             Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}"))
         })?;
+        let config = crate::config::Config::load(&cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let artifacts_root = crate::config::project_factory_artifacts_root(
+            &cas_root,
+            &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+        );
+        crate::qa_pass::validate_round_ledger_path(&artifacts_root, std::path::Path::new(ledger_path), &claimed)
+            .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
         // The verdict must be backed by the round's evidence bundle, built
         // against exactly the tip under review (cas-c3b8 contract v1).
         let bundle = crate::qa_pass::validate_round_bundle(std::path::Path::new(ledger_path), &claimed)
@@ -69,6 +77,7 @@ impl CasService {
         let pass = cas_store::resolve_qa_pass(
             &cas_root,
             task_id,
+            &claimed.id,
             &reviewer,
             verdict,
             summary,
@@ -663,4 +672,3 @@ fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, McpError>
         .filter(|value| !value.is_empty())
         .ok_or_else(|| CasService::error(ErrorCode::INVALID_PARAMS, format!("{name} is required")))
 }
-

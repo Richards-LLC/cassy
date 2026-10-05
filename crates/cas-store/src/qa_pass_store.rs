@@ -420,10 +420,13 @@ pub fn assert_may_review_qa_task(
     Ok(pass)
 }
 
-/// Record the reviewer's verdict on the open round for `task_id`.
+/// Record a verdict for the exact round whose evidence the caller validated.
+/// The round identity is checked in the verdict transaction, so an advance
+/// between bundle validation and recording cannot approve different bytes.
 pub fn resolve_qa_pass(
     cas_dir: &Path,
     task_id: &str,
+    expected_pass_id: &str,
     reviewer_agent_id: &str,
     verdict: QaVerdict,
     summary: &str,
@@ -454,6 +457,12 @@ pub fn resolve_qa_pass(
             "open independent QA pass for {task_id} (it may have timed out or been superseded)"
         ))
     })?;
+    if active.id != expected_pass_id {
+        return Err(StoreError::Parse(format!(
+            "QA pass {expected_pass_id} is no longer the active round for {task_id}; active pass {} binds {}; validate its evidence before recording a verdict",
+            active.id, active.bound_head,
+        )));
+    }
     reject_self_review(&active, reviewer_agent_id, "resolve")?;
     if active.reviewer_agent_id.as_deref() != Some(reviewer_agent_id) {
         return Err(StoreError::Parse(format!(
@@ -703,6 +712,60 @@ mod tests {
     }
 
     #[test]
+    fn stale_validated_round_cannot_approve_a_new_head_cas_8cfe() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let old = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        claim_qa_pass(dir.path(), "cas-ui1", "reviewer", now).unwrap();
+        // The old bundle was validated, then a close/request advanced the
+        // delivery before the verdict transaction, with the same reviewer.
+        let current = dispatched(open_qa_pass(dir.path(), &new("bbbb2222", now), now).unwrap());
+        claim_qa_pass(dir.path(), "cas-ui1", "reviewer", now).unwrap();
+        let error = resolve_qa_pass(
+            dir.path(),
+            "cas-ui1",
+            &old.id,
+            "reviewer",
+            QaVerdict::Approved,
+            "old bundle passed",
+            None,
+            "/qa/old/LEDGER.md",
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("no longer the active round"),
+            "{error}"
+        );
+        assert!(
+            satisfying_qa_pass_for_head(dir.path(), "cas-ui1", "bbbb2222")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            latest_qa_pass(dir.path(), "cas-ui1", now)
+                .unwrap()
+                .unwrap()
+                .state,
+            QaPassState::Claimed
+        );
+        let passed = resolve_qa_pass(
+            dir.path(),
+            "cas-ui1",
+            &current.id,
+            "reviewer",
+            QaVerdict::Approved,
+            "current bundle passed",
+            None,
+            "/qa/new/LEDGER.md",
+            now,
+        )
+        .unwrap();
+        assert_eq!(passed.bound_head, "bbbb2222");
+        assert_eq!(passed.state, QaPassState::Passed);
+    }
+
+    #[test]
     fn park_dispatches_once_per_head_and_supersedes_on_drift() {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
@@ -823,7 +886,7 @@ mod tests {
         assert!(!release_qa_claim_for_reviewer(dir.path(), "cas-qa1", "replacement").unwrap());
         assert!(!release_qa_claim_for_reviewer(dir.path(), "ordinary-task", "replacement").unwrap());
         claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap();
-        let resolved = resolve_qa_pass(dir.path(), "cas-ui1", "replacement", QaVerdict::Approved,
+        let resolved = resolve_qa_pass(dir.path(), "cas-ui1", &reclaimed.id, "replacement", QaVerdict::Approved,
             "passed", None, "/qa/LEDGER.md", now).unwrap();
         assert!(!release_qa_claim_for_reviewer(dir.path(), "cas-qa1", "replacement").unwrap());
         assert_eq!(latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap(), resolved);
@@ -863,7 +926,7 @@ mod tests {
     fn implementer_can_neither_claim_nor_resolve() {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
-        dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        let opened = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
 
         let claim = claim_qa_pass(dir.path(), "cas-ui1", "impl-worker", now).unwrap_err();
         assert!(claim.to_string().contains("no self-review"), "{claim}");
@@ -871,6 +934,7 @@ mod tests {
         let resolve = resolve_qa_pass(
             dir.path(),
             "cas-ui1",
+            &opened.id,
             "impl-worker",
             QaVerdict::Approved,
             "looks fine",
@@ -888,6 +952,7 @@ mod tests {
         let unclaimed = resolve_qa_pass(
             dir.path(),
             "cas-ui1",
+            &opened.id,
             "someone-else",
             QaVerdict::Approved,
             "ok",
@@ -903,11 +968,12 @@ mod tests {
     fn verdicts_bind_to_the_head_and_count_rounds() {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
-        dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        let first = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
         claim_qa_pass(dir.path(), "cas-ui1", "qa-worker", now).unwrap();
         let failed = resolve_qa_pass(
             dir.path(),
             "cas-ui1",
+            &first.id,
             "qa-worker",
             QaVerdict::Rejected,
             "empty state crashes",
@@ -929,6 +995,7 @@ mod tests {
         resolve_qa_pass(
             dir.path(),
             "cas-ui1",
+            &round2.id,
             "qa-worker",
             QaVerdict::Approved,
             "clean",
@@ -958,6 +1025,7 @@ mod tests {
             resolve_qa_pass(
                 dir.path(),
                 "cas-ui1",
+                &pass.id,
                 "qa-worker",
                 QaVerdict::Rejected,
                 "still broken",
@@ -1035,12 +1103,13 @@ mod tests {
     fn verdict_requires_summary_ledger_and_array_issues() {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
-        dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        let opened = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
         claim_qa_pass(dir.path(), "cas-ui1", "qa-worker", now).unwrap();
         let resolve = |summary: &str, issues: Option<&str>, ledger: &str| {
             resolve_qa_pass(
                 dir.path(),
                 "cas-ui1",
+                &opened.id,
                 "qa-worker",
                 QaVerdict::Approved,
                 summary,

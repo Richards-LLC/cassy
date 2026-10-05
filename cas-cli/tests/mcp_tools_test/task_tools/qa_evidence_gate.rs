@@ -41,11 +41,14 @@ async fn first_park_binds_qa_to_the_fresh_bundle_tip_cas_8cfe() {
     let mut task = tasks.get(TASK).unwrap();
     task.deliverables.factory_branch_anchor = Some(old_head.clone());
     tasks.update(&task).unwrap();
+    fx.write_bundle(&old_head);
     commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     fx.write_bundle(&head);
 
-    let parked = close_text(&fx.core, TASK).await;
+    let mut request = close_req(TASK);
+    request.commit_receipt = Some(head.clone());
+    let parked = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())

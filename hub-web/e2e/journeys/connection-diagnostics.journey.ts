@@ -36,10 +36,10 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await expect(page.locator("#connection-log")).toMatchAriaSnapshot(`- dialog "Connection log":
   - paragraph: Evidence ledger
   - heading "Connection log" [level=2]
-  - button "Close connection log"
-  - paragraph: /Network or browser policy blocked the request/
+  - button "Close connection log": ×
+  - paragraph: /Network or browser policy blocked the request.*/
   - button "Export safe diagnostics"
-  - generic: /schema_version/`);
+  - text: /.*schema_version.*/`);
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export safe diagnostics" }).click();
     const download = await downloadPromise;

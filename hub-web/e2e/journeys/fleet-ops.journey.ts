@@ -50,6 +50,14 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
           const range = document.createRange(); range.selectNodeContents(element.querySelector(".fleet-ops-note")!);
           return Array.from(range.getClientRects()).every((rect) => rect.bottom <= trigger.top || rect.top >= trigger.bottom || rect.right <= trigger.left);
         }), "the action button does not cover error text").toBe(true);
+        // cas-d2df: the note's text uses the row's full content width, not a
+        // column narrowed by the trigger's width on every line.
+        expect(await row.evaluate((element) => {
+          const style = getComputedStyle(element);
+          const content = element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+          const note = element.querySelector<HTMLElement>(".fleet-ops-note")!;
+          return Math.round(note.clientWidth - parseFloat(getComputedStyle(note).paddingRight) - content);
+        }), "the failure note spans the row").toBe(0);
         if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
         await expect(row.locator(".status-chip")).toHaveText("active");
       });

@@ -387,8 +387,26 @@ export class CommanderJournal {
     // replacement credential. The old claim remains uncertain, not replayable.
     const latest = await this.current(scope);
     if (!latest || !sameFence(latest, fence)) { this.changed(); return "stale"; }
-    let sent: boolean;
-    try { sent = write(); } catch { this.changed(); return "unconfirmed"; }
+    let sent: boolean | undefined;
+    try {
+      // A receipt may commit during the awaited catalog check. Read the
+      // current claim and perform the synchronous socket write in that same
+      // callback, so confirmation cannot slip between the check and write.
+      sent = await this.transaction<boolean | undefined>(["sends", "blocks"], "readonly", (tx, done) => {
+        done(undefined);
+        const block = tx.objectStore("blocks").get(blockKey(scope.hub, fence));
+        block.onsuccess = () => {
+          if (block.result) return;
+          const get = tx.objectStore("sends").get(key);
+          get.onsuccess = () => {
+            const row = validSendRow(get.result) ? get.result : undefined;
+            if (!row || row.receipt || row.revision !== claimed!.revision || row.owner !== this.owner) return;
+            try { done(write()); } catch { done(undefined); }
+          };
+        };
+      });
+    } catch { this.changed(); return "unconfirmed"; }
+    if (sent === undefined) { this.changed(); return "unconfirmed"; }
     if (sent) { this.changed(); return "written"; }
     // Only a synchronous false proves no websocket write was made.
     await this.reconcile(scope, [claimed.send!], [{ ...claimed.send!, state: "held", sentAt: undefined }], fence);

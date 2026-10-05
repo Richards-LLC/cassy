@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Require explicit, verifiable release-rescue lessons before receipts finish."""
 import os
+import json
 from pathlib import Path
 import re
 import shlex
@@ -14,7 +15,7 @@ LOG = 'cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 
 
 def git(root, *args):
-    return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+    return subprocess.check_output(['git', '-C', str(root), *args], text=True, stderr=subprocess.PIPE).strip()
 
 
 def executable_lessons(root):
@@ -27,13 +28,17 @@ def executable_lessons(root):
         return set()
 
 
-def task_open(root, identifier):
+def task_database(root):
     database = os.environ.get('CAS_RELEASE_LEARNING_TASK_DB')
     if not database:
         common = Path(git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
         database = common.parent / '.cas/cas.db'
+    return Path(database).resolve().as_uri() + '?mode=ro'
+
+
+def task_open(root, identifier):
     try:
-        with sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True) as connection:
+        with sqlite3.connect(task_database(root), uri=True) as connection:
             row = connection.execute('SELECT status FROM tasks WHERE id = ?', (identifier,)).fetchone()
         return bool(row and row[0] in ('open', 'in_progress', 'blocked', 'awaiting_merge'))
     except (sqlite3.Error, OSError):
@@ -102,31 +107,110 @@ def map_rows(root, run_dir, check_id, references, validate_only=False):
         temporary.replace(path)
 
 
+def live_task_refs(root):
+    """Return verified nonterminal task IDs and delivery branches, or unknown.
+
+    Factory tasks often have no tasks.branch: the parked delivery carries its
+    own branch. Branch names containing a task ID also cover in-progress work.
+    """
+    try:
+        with sqlite3.connect(task_database(root), uri=True) as connection:
+            rows = connection.execute(
+                "SELECT id, branch, deliverables FROM tasks WHERE status IN "
+                "('open', 'in_progress', 'blocked', 'awaiting_merge')").fetchall()
+        identifiers = {row[0] for row in rows}
+        branches = set()
+        for _, branch, delivery in rows:
+            if branch:
+                branches.add(branch)
+            parked = json.loads(delivery or '{}').get('parked_branch')
+            if parked:
+                branches.add(parked)
+        return identifiers, branches
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
+def branch_name(ref):
+    for prefix in ('refs/heads/', 'refs/remotes/origin/'):
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+    return ref
+
+
+def has_live_task(ref, tasks):
+    if tasks is None:
+        return False
+    identifiers, branches = tasks
+    return (branch_name(ref) in branches
+            or any(task in identifiers for task in re.findall(r'cas-[a-z0-9]+', branch_name(ref))))
+
+
+def ancestor(root, older, newer):
+    result = subprocess.run(['git', '-C', str(root), 'merge-base', '--is-ancestor', older, newer],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode not in (0, 1):
+        raise subprocess.CalledProcessError(result.returncode, result.args)
+    return result.returncode == 0
+
+
 def warn_tooling(root):
     try:
         main = git(root, 'rev-parse', '--verify', 'origin/main')
     except subprocess.CalledProcessError:
         main = git(root, 'rev-parse', '--verify', 'main')
-    refs = git(root, 'for-each-ref', f'--no-merged={main}', '--format=%(refname) %(objectname)',
-               'refs/heads/epic/', 'refs/heads/factory/',
-               'refs/remotes/origin/epic/', 'refs/remotes/origin/factory/').splitlines()
+    refs = [line.split() for line in git(
+        root, 'for-each-ref', '--format=%(refname) %(objectname) %(committerdate:unix)',
+        'refs/heads/epic/', 'refs/heads/factory/',
+        'refs/remotes/origin/epic/', 'refs/remotes/origin/factory/').splitlines()]
+    tasks = live_task_refs(root)
+    # Only published, main-reachable version tags establish the age cutoff.
+    # Annotated tags use tag creation time; lightweight tags use commit time.
+    releases = git(root, 'for-each-ref', f'--merged={main}', '--sort=-creatordate',
+                   '--format=%(creatordate:unix)', 'refs/tags/v[0-9]*').splitlines()
+    cutoff = int(releases[0]) if releases else 0
+    epics = {sha for ref, sha, _ in refs
+             if branch_name(ref).startswith('epic/') and has_live_task(ref, tasks)}
+    # Prefer the live epic's finding over an equal worker tip, and local refs
+    # over equal remote aliases. Prune stale refs before marking tips seen.
+    refs.sort(key=lambda row: (not (row[1] in epics and branch_name(row[0]).startswith('epic/')),
+                               not row[0].startswith('refs/heads/'), row[0]))
+    skipped = dict(merged=0, covered=0, stale=0, duplicate=0)
     seen = set()
-    for reference in refs:
-        ref, sha = reference.split()
+    for ref, sha, date in refs:
+        if ancestor(root, sha, main):
+            skipped['merged'] += 1
+            continue
+        if tasks is not None and int(date) < cutoff and not has_live_task(ref, tasks):
+            skipped['stale'] += 1
+            continue
+        if any(sha != epic and ancestor(root, sha, epic) for epic in epics):
+            skipped['covered'] += 1
+            continue
         if sha in seen:
+            skipped['duplicate'] += 1
             continue
         seen.add(sha)
         try:
-            introduced = git(root, 'diff', '--name-only', f'{main}...{sha}', '--',
-                             'scripts/release*.sh', 'scripts/release*.py', 'scripts/release-train.d',
-                             'cas-cli/src/builtins/skills/cas-cut-release').splitlines()
-            changed = set(git(root, 'diff', '--name-only', main, sha, '--', *introduced).splitlines()) if introduced else set()
+            # Criss-cross histories can have several equally valid bases. Use
+            # their path union instead of Git's arbitrary triple-dot choice.
+            introduced = set()
+            for base in git(root, 'merge-base', '--all', main, sha).splitlines():
+                introduced.update(git(root, 'diff', '--name-only', base, sha, '--',
+                                      'scripts/release*.sh', 'scripts/release*.py', 'scripts/release-train.d',
+                                      'cas-cli/src/builtins/skills/cas-cut-release').splitlines())
+            changed = set(git(root, 'diff', '--name-only', main, sha, '--',
+                              *sorted(introduced)).splitlines()) if introduced else set()
         except subprocess.CalledProcessError:
             print(f'preflight warning: unable to inspect unreleased release tooling on {ref}')
             continue
-        paths = [path for path in introduced if path in changed]
+        paths = sorted(introduced & changed)
         if paths:
             print(f'preflight warning: unreleased release tooling on {ref} @{sha[:12]} is off main: {", ".join(paths)}')
+    state = '; task state unavailable, old refs retained' if tasks is None else ''
+    print(f"preflight tooling: skipped {sum(skipped.values())} refs "
+          f"({skipped['merged']} merged into main, {skipped['covered']} covered by live epic, "
+          f"{skipped['stale']} stale, {skipped['duplicate']} duplicate){state}")
 
 
 def main():

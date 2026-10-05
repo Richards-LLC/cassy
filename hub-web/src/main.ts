@@ -3718,7 +3718,11 @@ function compatibilityWarning(machineId: string): string | undefined {
 }
 
 function attentionViewScope(): string {
-  return JSON.stringify([selectedMachineId, selectedSession]);
+  const view = [selectedMachineId, selectedSession];
+  // A changed roster is a structural rebuild: its new panel restores the
+  // corresponding notice/control. Transient lease/connection changes reuse it.
+  const roster = [...sessions].flatMap(([id, entries]) => entries.map(entry => [id, entry.name]));
+  return JSON.stringify([view, roster]);
 }
 
 function renderAttention(): void {

@@ -16,6 +16,48 @@ use crate::ui::factory::{
     SessionState, daemon_capabilities,
 };
 
+/// cas-5e53: an already-open SSE grant must end after another auth-store
+/// process revokes its device, even with no event traffic or browser heartbeat.
+#[tokio::test]
+async fn installation_revoke_ends_open_sse_and_refuses_inventory_credential() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let signing = SigningKey::random(&mut OsRng);
+    let now = Utc::now();
+    let invitation = auth.mint_pairing("https://controller.example", Scope::default_read_only(), now).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", Scope::default_read_only());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![fixture_session("factory-a")])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let request = |path: &str| Request::get(path)
+        .header("origin", "https://controller.example")
+        .header("authorization", format!("DPoP {}", credential.credential))
+        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", path, Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        .body(Body::empty()).unwrap();
+    let inventory = app.clone().oneshot(request("/v1/auth/devices")).await.unwrap();
+    assert_eq!(inventory.status(), StatusCode::OK);
+    let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(devices[0]["device_id"], credential.device_id);
+    assert_eq!(devices[0]["account_enrollment"]["state"], "unenrolled");
+    let opened = app.clone().oneshot(request("/v1/events")).await.unwrap();
+    assert_eq!(opened.status(), StatusCode::OK);
+    let mut stream = opened.into_body().into_data_stream();
+    let other_process = AuthStore::open(&root, "machine-test").unwrap();
+    other_process.revoke_device(&credential.device_id, Utc::now()).unwrap();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await.expect("SSE must terminate without a heartbeat");
+    assert!(ended.is_none());
+    assert_eq!(app.oneshot(request("/v1/auth/devices")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+}
+
 #[test]
 fn operator_reply_relay_reaches_another_authenticated_device() {
     let temp = private_tempdir();

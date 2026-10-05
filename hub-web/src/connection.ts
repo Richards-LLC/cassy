@@ -501,6 +501,7 @@ export class HubConnectionSupervisor {
     if (pending) throw new Error("Installation cleanup is pending. Retry cleanup before reconnecting.");
     const installed = (await catalog.snapshot()).machines.find((m) => m.id === this.machine.id && m.baseUrl === this.machine.baseUrl);
     if (!installed || installed.credentialId === this.machine.credentialId) return false;
+    if ((installed.credentialGeneration ?? 0) <= (this.machine.credentialGeneration ?? 0)) return false;
     Object.assign(this.machine, installed);
     this.expiredRefreshAttempted = false;
     return true;

@@ -22,4 +22,22 @@ No automatic duplicate cleanup or label matching: old rows remain until the oper
 
 ## Critique
 
-Pending real-build desktop and phone render; no merge claim before that review.
+Real production-bundle renders at 1280×800 and 390×844, light and dark, use
+Commander's existing sandstone sheet, ruled detail ledger and typography. The
+current browser's heading and exact identity lead; origin and signing key wrap
+on phone. The live journey proves keyboard Escape returns to its opener and
+exact-device revoke requires consent. The inventory is reachable from each row
+of Paired machines in the default conversation view as well as Terminal view.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Commander's ruled ledger, existing sheet tokens, current-browser identity above the full device ID |
+| Fit | 4 | Installation generation, origin, key fingerprint and last use distinguish equal display labels; account is explicitly un-enrolled |
+| Hierarchy | 4 | Hub title, current browser, exact identity, detail ledger, then explicit revoke and Close |
+| Craft | 4 | Four real-bundle renders; wrapping key/origin, bounded scrolling and sticky Close; strict inventory DOM-snapshot check passes four renders |
+| Accessibility | 4 | Named modal, status live region, keyboard focus restoration, reachable phone controls and forced-colors/reduced-motion/contrast captures |
+
+Evidence lives in the cas-5e53 task artifacts under `qa/`; the HTML snapshot
+contains the actual rendered inventory and built CSS, without network mocks or
+secrets. It proves the new surface's layout; the live browser journeys prove its
+navigation and behavior. It does not replace supervisor Rust or real-hub proof.

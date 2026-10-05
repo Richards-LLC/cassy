@@ -503,11 +503,15 @@ async function boot(): Promise<void> {
   const pendingHubs = new Set((await installationStore.list()).filter((r) => r.pending).map((r) => r.id.split("@")[0]));
   for (const machine of stored.machines) if (!pendingHubs.has(machine.id)) machines.set(machine.id, machine);
   watchInstallations((hubId) => {
-    void catalog.snapshot().then(({ machines: stored }) => {
-      const accepted = stored.find((m) => m.id === hubId);
+    // The same hub ID at another URL is a separate trust boundary. Never
+    // expose a staged prior while remote cancellation is still unresolved.
+    void installationStore.list().then(async (records) => {
+      if (records.some((r) => r.pending && r.id.split("@")[0] === hubId)) return;
+      const { machines: stored } = await catalog.snapshot();
       const current = machines.get(hubId);
+      const accepted = stored.find((m) => m.id === hubId && m.baseUrl === current?.baseUrl);
       if (accepted && current && (accepted.credentialGeneration ?? 0) >= (current.credentialGeneration ?? 0)) Object.assign(current, accepted);
-    });
+    }).catch(() => { /* Durable storage remains authoritative; refusal recovery retries adoption. */ });
   });
   machineCatalogLoaded = true;
   if (stored.pendingCleanup > 0 || remotePending > 0) {
@@ -1412,6 +1416,16 @@ async function retryPairingCleanup(): Promise<void> {
   const outcome = cleanupRetryOutcome(cleared, recovery);
   pairingStatus = outcome.status;
   if (outcome.done) {
+    // Boot quarantines hubs with uncertain remote rollback. Only confirmed
+    // recovery may repopulate them and restart their connections.
+    const restored = await catalog.snapshot();
+    for (const machine of restored.machines) {
+      if (!machines.has(machine.id)) {
+        machines.set(machine.id, machine);
+        ensureConnection(machine);
+      }
+    }
+    selectedMachineId ??= machines.keys().next().value;
     finishCancelledPairing();
     return;
   }
@@ -4651,6 +4665,14 @@ function renderMachineRegister(): void {
     reorder: !dialog.open,
     copy: (text) => navigator.clipboard.writeText(text),
     allowManagingWorkers: allowManagingWorkers,
+    installations: (id) => {
+      const machine = machines.get(id);
+      const connection = connections.get(id);
+      if (machine && connection) void openInstallationInventory(document, machine, connection, async () => {
+        await installationAccess.forgetRevoked(machine.id, machine.baseUrl, machine.deviceId);
+        await forgetPairedMachine(id);
+      });
+    },
   });
   if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the

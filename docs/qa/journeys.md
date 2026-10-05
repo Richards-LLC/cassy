@@ -221,7 +221,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Mic permission denied: voice turns off and typing still works.
 - No speech heard; a browser without speech recognition shows "Voice input unavailable".
 
-### HUB-J7 · Answer a pinned question
+### HUB-J7 · Answer a question in the thread
 
 - **Entry:** an open conversation where the supervisor asks a question with choices
 - **Goal:** I answer with one tap and the supervisor acts on it
@@ -233,21 +233,24 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the conversation — the thread is live
 2. A question from an ended session does not wait — the previous session's unanswered question is not in this session's thread: it sits in a collapsed "Earlier session patient-pelican-8" section with no choices, said by patient-pelican-8 (its own supervisor); nothing is pinned and the context rail lists only the live blocker
-3. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead and carrying no session, is this session's own turn: it sits above the question at its arrival time, labelled by this session's supervisor, with no "session … started" line below it, and is marked "machine clock ahead"
+3. The supervisor asks a question — the full question and its choices stay in the thread, and a compact bookmark above the composer points to it without duplicating the question or its choices; the machine's earlier blocker, stamped by a clock that runs ahead and carrying no session, is this session's own turn: it sits above the question at its arrival time, labelled by this session's supervisor, with no "session … started" line below it, and is marked "machine clock ahead"
 4. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 5. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
-6. Fold, open and dismiss a question — the supervisor posting an FYI and a status update while it waits leaves the question pinned with its choices; on a desktop the pinned question collapses to a one-line bar ("Waiting on you: open the PR…") and opens again, and writing in the composer leaves it open; on a phone (390px, dark) focusing the composer folds it to the bar, and with the keyboard up (about 440px of page) at least three lines of the latest conversation stay readable; a tap on the bar opens it; a swipe takes it off, and its copy in the thread says "Dismissed. You can still answer here." and keeps its choices
+6. Jump to a long question and dismiss its bookmark — the supervisor posting an FYI and a status update leaves the question waiting with its choices in the thread; its compact bookmark says "Waiting on you: open the PR to main and cut a release?" and carries no choices; on a phone (390px, dark), focusing the composer keeps the bookmark 44–48px tall, and with the keyboard up (about 440px of page) at least three lines of the conversation stay readable; a tap jumps to and focuses the full question without expanding a duplicate card; a swipe dismisses the bookmark, and its copy in the thread says "Dismissed. You can still answer here." and keeps its choices
 7. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it, with no session line between them
 8. Reopen the page — minutes later, the thread rebuilt from history keeps every turn where the visit showed it and at the same time (not the reload's), in the machine's order, under Today, with times reading in order
 9. The supervisor answers live — a separate part on a machine whose clock runs five minutes ahead, which nothing in the thread has shown yet: the answer shows its arrival, unmarked, and its row reads "now"
 10. Reload three minutes later — the answer shows the same time and still no mark, exactly as the visit showed it (cas-9e33), and its row reads "3m", not "now" (cas-24fe)
 11. Come back five minutes later — the row reads "8m"; the reload measured the machine's lead, so the next live answer is marked "machine clock ahead" and its row reads "now"
+12. Read a question on a short phone screen — at 390px by 440px, the waiting bookmark remains visible
+13. A double tap jumps without sending — the full question in the thread gains focus, no reply is sent, and no duplicate card opens above the composer
+14. Deliberately choose an option in the thread — the chosen answer is sent in reply to that question, and the bookmark clears
 
 #### Expected experience
 
-- The question is impossible to miss, and its choices are buttons.
-- A question never takes the whole screen: while the operator writes on a phone it is a one-line bar, and it can be dismissed.
-- A question from a session that has ended is not shown as "Waiting on you"; a question the supervisor is still waiting on keeps its pin and its choices while the supervisor posts progress.
+- The question is impossible to miss: a compact bookmark points to its full text and choice buttons in the thread.
+- The bookmark never takes the whole screen: while the operator writes on a phone it is a one-line bar, and it can be dismissed.
+- A question from a session that has ended is not shown as "Waiting on you"; a question the supervisor is still waiting on keeps its bookmark and its in-thread choices while the supervisor posts progress.
 - After answering, the question stays readable in the thread with the answer shown.
 - Turns read in time order under the right day, even when the machine's clock runs ahead: no future day header, and a quiet "machine clock ahead" instead of a time from the future.
 
@@ -255,7 +258,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - The hub refuses the answer: the question pins again.
 - Typing a free-text reply also answers the pinned question.
-- A question with no options offers "Yes, go ahead" and "Hold".
+- A question with no declared options leaves the reply to the composer; it does not invent choices.
 
 ### HUB-J8 · Switch between machines without losing my place
 

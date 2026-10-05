@@ -17,7 +17,7 @@ cd "$repo_root"
 
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
-    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
+    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
     version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
@@ -1285,6 +1285,10 @@ check_changelog_and_versions() {
     done
 }
 
+check_publish_toolchain() {
+    python3 "$repo_root/scripts/check-release-publish-toolchain.py" "$repo_root"
+}
+
 check_release_script() {
     [[ -f scripts/release.sh ]] || {
         printf 'release-script: scripts/release.sh is missing\n'
@@ -1441,6 +1445,9 @@ run_check epic-worktree-fresh \
 run_check epic-worktree-zig \
     'resolve and export an executable Zig from env, epic worktree, or main checkout' \
     check_epic_worktree_zig
+run_check publish-toolchain \
+    'python3 scripts/check-release-publish-toolchain.py (real zigbuild parser, no build)' \
+    check_publish_toolchain
 run_check failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log

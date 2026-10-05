@@ -134,6 +134,14 @@ jobs:
 EOF
     cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
     cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
+    cat >"$repo/scripts/check-release-publish-toolchain.py" <<'PY_ZIG_FIXTURE'
+import os, sys
+if os.environ.get('GATE_FIXTURE_ZIGBUILD_FAIL') == '1':
+    print('zigbuild rejects build.jobs config')
+    sys.exit(1)
+print('zigbuild config parsed (gate dispatch fixture)')
+PY_ZIG_FIXTURE
+
     cp -R "$script_dir/release-train.d" "$repo/scripts/"
     cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
     # The nested integration fixtures have their own release version. Keep it
@@ -396,6 +404,16 @@ run_scenario() {
     output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
     assert_named_failure "$3" "$output"
 }
+
+repo="$(new_fixture publish-toolchain)"
+output="$(GATE_FIXTURE_ZIGBUILD_FAIL=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only publish-toolchain 2>&1 || true)"
+assert_named_failure publish-toolchain "$output"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only publish-toolchain 2>&1)"
+if grep -qF 'PASS publish-toolchain' <<<"$output"; then
+    ok 'publish-toolchain is independently selectable and fail closed'
+else
+    bad "publish-toolchain row failed: $output"
+fi
 
 # 1-7. Each mechanical or command-backed failure is isolated in its own repo.
 repo="$(new_fixture release-notes-shell-injection)"

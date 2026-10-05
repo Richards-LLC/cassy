@@ -3203,5 +3203,11 @@ else
     bad 'rule-175 completion regression suite'
 fi
 
+if python3 "$script_dir/test-release-publish-toolchain.py"; then
+    ok 'publish-toolchain config parse and owned-tag failure cleanup fixtures'
+else
+    bad 'publish-toolchain config parse and owned-tag failure cleanup fixtures'
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

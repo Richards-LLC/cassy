@@ -176,10 +176,33 @@ if "$MANUAL_PUBLISH" && ! command -v gh &>/dev/null; then
     exit 1
 fi
 
+# Only this invocation's tag is eligible for failed-publication cleanup.
+# Never remove worker handoff tags, an existing tag, a replacement, or a tag
+# whose remote absence cannot be proven. update-ref makes deletion atomic.
+created_release_tag_object=''
+cleanup_failed_release_tag() {
+    local status="$?" remote_tags
+    trap - EXIT
+    if ((status != 0)) && [[ -n "$created_release_tag_object" ]] &&
+        [[ "$(git rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null || true)" == "$created_release_tag_object" ]]; then
+        if remote_tags="$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")" &&
+            [[ -z "$remote_tags" ]]; then
+            if git update-ref -d "refs/tags/$TAG" "$created_release_tag_object"; then
+                echo "Removed failed publish's local-only tag $TAG; resume can recreate it." >&2
+            fi
+        else
+            echo "Retained $TAG: remote tag exists or remote absence is unknown." >&2
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup_failed_release_tag EXIT
+
 ensure_release_tag() {
     if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
         echo "Creating annotated tag $TAG on HEAD before release audit..."
         git tag -a "$TAG" -m "$TAG"
+        created_release_tag_object="$(git rev-parse "refs/tags/$TAG")"
     fi
     # --local: this runs before the tag is pushed, so the guard must inspect the
     # local tag object instead of re-fetching one that cannot exist on origin

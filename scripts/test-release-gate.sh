@@ -67,6 +67,7 @@ import sys
 path = Path(sys.argv[1])
 path.write_text(path.read_text().replace("def memory_snapshot():", "def memory_snapshot():\n    return {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_MEMORY_GUARD_FIXTURE
+    cp "$script_dir/release_scratch.py" "$repo/scripts/release_scratch.py"
     # Cargo is fake here: bypass only durable-location classification in the
     # copied producer. Production guard behavior has its own Python regressions.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_SCRATCH'

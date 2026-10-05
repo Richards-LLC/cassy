@@ -227,6 +227,21 @@ export CAS_INIT_TIMEOUT_SECS
 readonly init_timeout_origin
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-release-gate.XXXXXX")"
+# A guardian owns every large scratch path, forwards graceful signals to the
+# entire child group, waits for it, then removes scratch and remap metadata.
+if [[ -z "${CAS_RELEASE_GATE_SCRATCH_RUN_DIR:-}" ]]; then
+    rm -rf "$tmp_dir"
+    exec python3 "$repo_root/scripts/release_scratch.py" --repo "$repo_root" \
+        --base "$scratch_base" guard -- bash "$repo_root/scripts/release-gate.sh" "$@"
+fi
+register_scratch() {
+    python3 "$repo_root/scripts/release_scratch.py" --owner-dir "$CAS_RELEASE_GATE_SCRATCH_RUN_DIR" \
+        --path "$1" register
+}
+register_scratch "$tmp_dir"
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 trap 'rm -rf "$tmp_dir"' EXIT
 
 # The train supplies a unique attempt directory. Successful logs survive just
@@ -1118,6 +1133,7 @@ check_archive_mode() {
     mkdir -p "$(dirname "$archive_base")"
     assert_no_cas_ancestor "$archive_base" || return 1
     archive_dir="$(mktemp -d "${archive_base}.XXXXXX")"
+    register_scratch "$archive_dir" || { rm -rf "$archive_dir"; return 1; }
     archive="$archive_dir/suite.tar.zst"
     remap="$archive_dir/workspace-remap"
     # The archive and extraction can be several GB: keep them on the checkout
@@ -1238,6 +1254,7 @@ check_snapshot_portability() {
     # everyone, including once per self-test fixture.
     local deep_root deep_tmp
     deep_root="$(mktemp -d "${deep_base}.snap.XXXXXX")"
+    register_scratch "$deep_root" || { rm -rf "$deep_root"; return 1; }
     deep_tmp="$deep_root/$(printf 'deep-temp-path-%.0s' {1..12})"
     mkdir -p "$deep_tmp"
     # COLUMNS must be absent, rather than merely empty: terminal-width probes

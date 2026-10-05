@@ -1,3 +1,6 @@
+import { InstallationAccess } from "./installation-access";
+import { installationStore } from "./storage";
+
 import { presentFleetSheet } from "./fleet-sheet";
 import { cloudBrand, projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
@@ -100,6 +103,7 @@ bindKeyboardViewport(window);
 // The keyboard coming up or going away resizes the window: the pinned question folds or opens with it (cas-16eed).
 window.addEventListener("resize", () => syncComposing());
 window.visualViewport?.addEventListener("resize", () => syncComposing());
+const installationAccess = new InstallationAccess(installationStore, catalog);
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
@@ -717,7 +721,8 @@ function layoutForPanes(key: string, panes: readonly PaneInfo[], fallbackPrimary
 }
 
 async function boot(): Promise<void> {
-  const stored = await catalog.recoverPending();
+  const remotePending = await installationAccess.recover(window.fetch.bind(window));
+  const stored = remotePending ? await catalog.snapshot() : await catalog.recoverPending();
   for (const machine of stored.machines) machines.set(machine.id, machine);
   machineCatalogLoaded = true;
   if (stored.pendingCleanup > 0) {
@@ -1314,11 +1319,11 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   const operation = pairingOperations.begin();
   pairingExchangeInFlight = true;
   exchangeOperationGeneration = operation.generation;
-  pairingStatus = "Creating this browser credential… Cancel stops local installation.";
+  pairingStatus = "Updating this browser installation… Cancel restores its previous access.";
   render();
   let machine: StoredMachine;
   try {
-    machine = await exchangePendingPairing({
+    machine = await installationAccess.pair({
       invitation,
       controllerOrigin: location.origin,
       legacyHubUrl: invitation.hubUrl ? undefined : String(values.get("url")),

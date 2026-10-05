@@ -254,6 +254,9 @@ impl SqlitePromptQueueStore {
                 "INSERT INTO operator_delivery_outbox (event_id,prompt_id,factory_session,payload_snapshot,created_at)
                  VALUES (?1,?2,?3,?4,?5)", params![event_id, id, turn.factory_session, snapshot, created_at],
             )?;
+            // cas-9b7d: the enrolled cloud lane, in this same transaction and
+            // only while a verified binding is active (no backfill).
+            Self::insert_cloud_outbox_row(conn, event_id, turn.factory_session, &created_at)?;
         }
         if let Some(ack_id) = metadata.acknowledge_prompt_id {
             // Missing/already-acked rows remain idempotent. A real stamp/DB

@@ -47,6 +47,12 @@ pub enum HubOperatorCommands {
     RevokeDevice(OperatorIdArgs),
     /// Revoke a machine (this hub when no ID is given)
     RevokeMachine(OperatorOptionalIdArgs),
+    /// Publish this project's future operator messages to the inbox
+    Bind,
+    /// Stop publishing this project's new operator messages (pending ones still drain)
+    Detach,
+    /// Upload this project's pending operator messages now
+    Drain,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -285,6 +291,21 @@ pub(super) fn execute(args: &HubOperatorArgs, cli: &Cli) -> Result<()> {
                 println!("Revoked device {}. The inbox key was rotated.", target.id)
             })
         }
+        HubOperatorCommands::Bind => bind(&store, http, cli),
+        HubOperatorCommands::Detach => {
+            let queue = project_queue()?;
+            let detached = queue.detach_operator_feed(chrono::Utc::now())?;
+            print(cli, &json!({"detached": detached}), || {
+                if detached {
+                    println!(
+                        "Detached. New operator messages from this project stay local; pending ones still upload."
+                    );
+                } else {
+                    println!("This project was not bound.");
+                }
+            })
+        }
+        HubOperatorCommands::Drain => drain_now(&store, http, cli),
         HubOperatorCommands::RevokeMachine(target) => {
             let authority = authority()?;
             let local = store.load()?;
@@ -303,4 +324,103 @@ pub(super) fn execute(args: &HubOperatorArgs, cli: &Cli) -> Result<()> {
             print(cli, &reply, || println!("Revoked machine {id}."))
         }
     }
+}
+
+fn project_queue() -> Result<cas_store::SqlitePromptQueueStore> {
+    use cas_store::PromptQueueStore as _;
+    let cas_root = crate::store::find_cas_root()
+        .context("Run this inside a Cassy project (no .cas directory found).")?;
+    let queue = cas_store::SqlitePromptQueueStore::open(&cas_root)?;
+    queue.init()?;
+    Ok(queue)
+}
+
+/// Bind this project's prompt database to the enrolled machine's audience.
+/// The project must be one of the machine's granted projects; if it is not,
+/// the account authority adds it (§5.6) before anything is bound.
+fn bind(store: &PrincipalStore, http: Arc<dyn HttpClient>, cli: &Cli) -> Result<()> {
+    let mut principal = store
+        .load()?
+        .context("This hub is not enrolled. Run `cas hub operator enroll` first.")?;
+    let cas_root = crate::store::find_cas_root()
+        .context("Run this inside a Cassy project (no .cas directory found).")?;
+    let project_id = crate::cloud::resolve_canonical_id(&cas_root)
+        .context("This project has no canonical project ID.")?;
+    if !cas_store::is_routing_id(&project_id) {
+        bail!(
+            "The project ID `{project_id}` has characters the inbox routing rules refuse (only A-Z a-z 0-9 . _ : @ / -)."
+        );
+    }
+    if !principal.projects.contains(&project_id) {
+        let authority = authority()?;
+        let mut projects = principal.projects.clone();
+        projects.push(project_id.clone());
+        crate::hub::operator_inbox::machine::set_machine_projects(
+            http.as_ref(),
+            &authority,
+            &principal.machine_id,
+            &projects,
+        )?;
+        principal.projects = projects;
+        store.save(&principal)?;
+    }
+    let queue = project_queue()?;
+    let binding = queue.bind_operator_feed(&cas_store::OperatorFeedBinding {
+        account_id: principal.account_id.clone(),
+        machine_id: principal.machine_id.clone(),
+        hub_id: principal.hub_id.clone(),
+        project_id: project_id.clone(),
+        bound_at: chrono::Utc::now().to_rfc3339(),
+    })?;
+    let value =
+        json!({"bound": true, "project_id": binding.project_id, "bound_at": binding.bound_at});
+    print(cli, &value, || {
+        println!(
+            "Bound {project_id}. Operator messages recorded from now on reach your signed-in devices; earlier ones stay local."
+        );
+    })
+}
+
+fn drain_now(store: &PrincipalStore, http: Arc<dyn HttpClient>, cli: &Cli) -> Result<()> {
+    use crate::hub::operator_inbox::drain::{drain_project, fetch_epoch_policy};
+    use crate::hub::operator_inbox::machine::MachineTransport;
+    let principal = store
+        .load()?
+        .context("This hub is not enrolled. Run `cas hub operator enroll` first.")?;
+    let queue = project_queue()?;
+    let transport =
+        MachineTransport::new(Arc::clone(&http), principal.clone(), Some(store.clone()))
+            .map_err(|error| anyhow::anyhow!("machine principal keys are unreadable: {error}"))?;
+    let issuer = issuer_keys(Arc::clone(&http), &principal.cloud_origin);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut total = crate::hub::operator_inbox::drain::DrainReport::default();
+    loop {
+        let policy = fetch_epoch_policy(&transport, &issuer, &principal)?;
+        let relay = crate::hub::operator_inbox::MachineRelay::new(transport.clone());
+        let report = runtime.block_on(drain_project(&queue, &relay, &policy, &principal))?;
+        total.claimed += report.claimed;
+        total.stored += report.stored;
+        total.parked += report.parked;
+        total.retry += report.retry;
+        total.frozen |= report.frozen;
+        if report.claimed == 0 || report.frozen || (report.stored == 0 && report.resealed == 0) {
+            break;
+        }
+    }
+    let backlog = queue.operator_cloud_backlog()?;
+    let value = json!({"uploaded": total.stored, "parked": total.parked, "retrying": total.retry,
+        "frozen": total.frozen, "pending": backlog.pending, "oldest_pending_at": backlog.oldest_pending_at});
+    print(cli, &value, || {
+        println!(
+            "Uploaded {} message(s); {} pending, {} parked.",
+            total.stored, backlog.pending, backlog.parked
+        );
+        if total.frozen {
+            println!(
+                "The cloud is holding uploads while it rotates keys; messages stay queued here."
+            );
+        }
+    })
 }

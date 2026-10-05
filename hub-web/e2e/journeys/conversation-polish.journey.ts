@@ -78,7 +78,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
           - text: Choose the
           - strong: next step
           - text: .
-        - text: Send for review
+        - text: Send for review Stored on this device
     `);
     for (const [name, query, media] of [
       ["forced-colors", "(forced-colors: active)", { forcedColors: "active" }],

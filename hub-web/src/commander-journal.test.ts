@@ -170,6 +170,13 @@ describe("journal privacy and immutable replay", () => {
     expect(await a.persistReply(scope, { ...reply, attachments: [{ artifact_id: "art-other", name: "changed", mime: "text/plain", size_bytes: 1, sha256: "a".repeat(64) }] }, fence)).toBe(false);
     expect((await a.read(scope)).replies).toHaveLength(1);
   });
+  it("notice replay canonicalizes defaults and field order without storing unknown fields", async () => {
+    const { a } = journals();
+    expect(await a.persistReply(scope, { ...reply, notice: { source: "relay-watchdog", subject: 7, private_extra: "discard" } } as never, fence)).toBe(true);
+    expect((await a.read(scope)).replies[0].reply.notice).toEqual({ source: "relay-watchdog", subject: 7, resolved: false });
+    expect(await a.persistReply(scope, { ...reply, notice: { resolved: false, subject: 7, source: "relay-watchdog" } }, fence)).toBe(true);
+    expect(await a.persistReply(scope, { ...reply, notice: { source: "relay-watchdog", subject: 7, resolved: true } }, fence)).toBe(false);
+  });
   it("the newly committed reply remains durable at the cap even when all timestamps tie", async () => {
     const { a } = journals();
     for (let id = 101; id <= 500; id++) expect(await a.persistReply(scope, { ...reply, notification_id: id }, fence)).toBe(true);

@@ -64,7 +64,11 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
     ...(value.operator_label === undefined ? {} : { operator_label: value.operator_label as string }),
     ...(value.options === undefined || !(value.options as string[]).length ? {} : { options: value.options as string[] }),
     ...(value.reply_to_session === undefined || value.reply_to_session === null ? {} : { reply_to_session: value.reply_to_session as string }),
-    ...(value.notice === undefined || value.notice === null ? {} : { notice: value.notice as unknown as OperatorReply["notice"] }),
+    ...(value.notice === undefined || value.notice === null ? {} : { notice: {
+      source: (value.notice as Record<string, unknown>).source as string,
+      ...((value.notice as Record<string, unknown>).subject === undefined ? {} : { subject: (value.notice as Record<string, unknown>).subject as number }),
+      resolved: (value.notice as Record<string, unknown>).resolved === true,
+    } }),
   };
   return JSON.stringify(reply).length <= 64_000 ? reply : undefined;
 }

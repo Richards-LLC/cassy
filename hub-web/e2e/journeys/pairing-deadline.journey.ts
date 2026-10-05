@@ -2,6 +2,37 @@ import type { Route } from "@playwright/test";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS } from "./world";
 
+test("HUB-J1 approved pairing health check has a deadline and keeps its invitation (cas-2b3a5)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], relay: { machine: "atlas", claimAfter: 1, authorizeAfter: 1 } });
+  let held: Route | undefined;
+  let block = true;
+  await page.route("https://atlas.test/v1/health", route => {
+    if (block) { held = route; return; }
+    return route.fallback();
+  });
+  await journey.open();
+  const dialog = page.locator("#pair-dialog");
+  await page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }).click();
+  await dialog.getByRole("button", { name: "Create pairing code" }).click();
+  await journey.stage("The approved browser probe finishes even when it is held", async () => {
+    await expect.poll(() => Boolean(held)).toBe(true);
+    await expect(dialog).toContainText("Checking that this device can reach the machine");
+    await page.clock.runFor(3_001);
+    await expect(dialog).toContainText("reachability check for Atlas · Linux failed");
+    await expect(dialog).toContainText("Local network access");
+    await expect(dialog).toContainText("press Pair to try this approved invitation");
+    await expect(dialog.getByRole("button", { name: "Pair", exact: true })).toBeEnabled();
+    expect(hub.exchanges).toHaveLength(0);
+  });
+  await journey.stage("The same approved invitation pairs once the route works", async () => {
+    block = false; await held!.abort("failed").catch(() => {});
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(dialog).toBeHidden(); expect(hub.exchanges).toHaveLength(1);
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible();
+  });
+});
+
 test("HUB-J2 unanswered pairing exchange times out safely and can be retried (cas-2b3a5)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS] });
   let blocked = true;

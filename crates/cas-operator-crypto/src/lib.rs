@@ -32,7 +32,7 @@ use hpke::{Deserializable as _, Kem as _, OpModeR, OpModeS, Serializable as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::convert::Infallible;
-use zeroize::Zeroizing;
+pub use zeroize::Zeroizing;
 
 type Kem = DhP256HkdfSha256;
 type PrivateKey = <Kem as hpke::Kem>::PrivateKey;

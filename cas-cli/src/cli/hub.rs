@@ -107,6 +107,8 @@ pub enum HubCommands {
     Authorize(HubAuthorizeArgs),
     /// List or revoke paired Commander devices
     Auth(HubAuthArgs),
+    /// Enroll this hub in your account's cloud operator inbox and approve devices
+    Operator(super::hub_operator::HubOperatorArgs),
     /// Internal reaper for a factory daemon in a separate service unit.
     #[command(hide = true)]
     ReapDaemon(HubReapDaemonArgs),
@@ -1060,6 +1062,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Pair(pair) => pair_device(&pair, cli),
         HubCommands::Authorize(authorize) => super::hub_reverse_pairing::authorize(&authorize, cli),
         HubCommands::Auth(auth) => manage_auth(&auth, cli),
+        HubCommands::Operator(operator) => super::hub_operator::execute(&operator, cli),
     }
 }
 

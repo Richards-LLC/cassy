@@ -1844,3 +1844,25 @@ fn scoped_visual_qa_ignores_per_render_random_ids_but_still_reports_new_findings
         "{refusal:?}"
     );
 }
+
+/// cas-1ca0: a valid pixel/trace bundle cannot cover a journey it never ran.
+#[test]
+fn cas_1ca0_close_refuses_a_hand_picked_journey_subset() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    let notes = fx.notes();
+    let ctx = EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes: &notes,
+        deployed_origins: &[],
+    };
+    let error = run_close_gate(
+        &ctx, EvidenceTier::Bundle,
+        &["affected-journeys".into(), "journeys:HUB-J7".into()], &[],
+    ).expect_err("selected HUB-J7 is missing even though the hand-picked evidence passes");
+    assert!(error.contains("HUB-J7"), "{error}");
+    assert!(error.contains("scripts/journey-eval.sh"), "{error}");
+}

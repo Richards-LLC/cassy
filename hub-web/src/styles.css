@@ -2861,4 +2861,4 @@ button.chip:disabled { cursor: default; }
 .operator-inbox-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--text-mid); font-size: var(--fs-xs); }
 .conversation-welcome-inbox { margin-top: var(--space-3); }
 .link-button { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
-.inbox-toggle { display: block; width: 100%; margin: 0 0 var(--space-2); padding: var(--space-1) 0; background: none; border: 0; color: var(--text-mid); text-align: left; font: inherit; font-size: var(--fs-xs); text-decoration: underline; cursor: pointer; }
+#inbox-toggle { white-space: nowrap; }

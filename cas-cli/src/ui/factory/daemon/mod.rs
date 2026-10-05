@@ -7,7 +7,7 @@
 //! - Receives input from clients and processes it
 //! - Persists across TUI attach/detach cycles
 
-use crate::ui::factory::app::{FactoryApp, FactoryConfig, WorkerSpawnResult};
+use crate::ui::factory::app::{FactoryApp, FactoryConfig};
 use crate::ui::factory::buffer_backend::BufferBackend;
 use crate::ui::factory::session::SessionManager;
 use ratatui::Terminal;
@@ -204,7 +204,7 @@ pub struct FactoryDaemon {
         Option<i64>,
         Option<cas_mux::WorkerSpec>,
         Option<String>,
-        JoinHandle<anyhow::Result<WorkerSpawnResult>>,
+        JoinHandle<anyhow::Result<crate::ui::factory::app::provisioning::ProvisionedWorker>>,
     )>,
     /// Workers whose CLI was launched but whose Cassy registration is not confirmed yet.
     spawn_verifications: HashMap<String, SpawnVerification>,
@@ -356,6 +356,8 @@ pub struct FactoryDaemon {
     /// background worktree build so a hung git process cannot wedge the spawn
     /// queue for the rest of the session (GH #59).
     spawn_started_at: Option<Instant>,
+    spawn_cancellation:
+        Option<std::sync::Arc<crate::ui::factory::app::provisioning::ProvisioningCancellation>>,
     /// cas-2702: last scan for queue rows this daemon never drained (GH #58).
     last_spawn_queue_stall_scan: Option<Instant>,
     /// Last bounded probe for durable external reminder conditions.
@@ -403,6 +405,24 @@ pub use process::{
     ForkResult, daemonize, fork_into_daemon, run_daemon, run_daemon_after_fork,
     run_daemon_with_boot_progress,
 };
+
+impl FactoryDaemon {
+    fn cancel_provisioning(&mut self) {
+        if let Some(cancellation) = self.spawn_cancellation.take() {
+            cancellation.cancel();
+        }
+        if let Some((_, _, _, _, handle)) = self.spawn_task.take() {
+            handle.abort();
+        }
+        self.spawn_started_at = None;
+    }
+}
+
+impl Drop for FactoryDaemon {
+    fn drop(&mut self) {
+        self.cancel_provisioning();
+    }
+}
 
 #[cfg(test)]
 mod tests {

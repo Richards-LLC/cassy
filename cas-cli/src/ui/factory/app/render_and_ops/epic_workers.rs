@@ -2,8 +2,8 @@ use crate::store::{open_agent_store, open_task_store};
 use crate::ui::factory::app::imports::*;
 use crate::worktree::RemoveOutcome;
 
-fn validate_live_spawn_repo_context(
-    manager: &WorktreeManager,
+fn validate_live_spawn_repo_root(
+    repo_root: &std::path::Path,
     project_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     use crate::worktree::GitOperations;
@@ -14,11 +14,11 @@ fn validate_live_spawn_repo_context(
              the factory started, restart the factory daemon before spawning isolated workers."
         )
     })?;
-    if live_root != manager.repo_root() {
+    if live_root != repo_root {
         anyhow::bail!(
             "Repository context changed after the factory daemon started (cached root: {}, \
              live root: {}). Restart the factory daemon so worker isolation uses the new repository.",
-            manager.repo_root().display(),
+            repo_root.display(),
             live_root.display(),
         );
     }
@@ -1243,6 +1243,7 @@ fn recorded_epic_parent_branch_for_resolved_base(
         })
 }
 
+#[cfg(test)]
 fn cleanup_cancelled_spawn_worktree_with_manager(
     manager: Option<&mut WorktreeManager>,
     result: &mut WorkerSpawnResult,
@@ -1793,230 +1794,42 @@ fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
     }
 }
 
-impl FactoryApp {
-    /// Get the current epic state
-    pub fn epic_state(&self) -> &EpicState {
-        &self.epic_state
-    }
 
-    /// Handle epic state transitions based on detected events
-    ///
-    /// Returns true if state changed (for branch management).
-    pub fn handle_epic_events(&mut self, events: &[DirectorEvent]) -> Vec<EpicStateChange> {
-        let mut changes = Vec::new();
-
-        for event in events {
-            match event {
-                DirectorEvent::EpicStarted {
-                    epic_id,
-                    epic_title,
-                } => {
-                    let source = self.source_for_detected_epic_started(epic_id);
-                    if !self.can_adopt_detected_epic_started(epic_id, source) {
-                        continue;
-                    }
-                    let previous = self.set_active_epic(epic_id, epic_title, source);
-
-                    changes.push(EpicStateChange::Started {
-                        epic_id: epic_id.clone(),
-                        epic_title: epic_title.clone(),
-                        previous_state: previous,
-                    });
+impl WorkerSpawnContext {
+    pub(crate) fn resolve(mut self) -> anyhow::Result<WorkerSpawnPrep> {
+        if self.isolate {
+            match DirectorData::load_fast(&self.cas_dir) {
+                Ok(data) => {
+                    let focus = self.factory_session.as_deref()
+                        .map(crate::ui::factory::app::preferred_epic_focus_from_session_metadata_named)
+                        .unwrap_or_default();
+                    let state =
+                        crate::ui::factory::app::resolve_epic_state_for_focus(&data, &focus);
+                    self.current_epic_id = state.epic_id().map(str::to_string);
+                    self.epic_branch =
+                        crate::ui::factory::app::epic_branch_for_state(&data, &state);
                 }
-
-                DirectorEvent::EpicCompleted { epic_id } => {
-                    // Check if this is our current epic
-                    if self.epic_state.epic_id() == Some(epic_id) {
-                        let title = self
-                            .epic_state
-                            .epic_title()
-                            .unwrap_or("Unknown")
-                            .to_string();
-
-                        // Transition to Completing state
-                        self.epic_state = EpicState::Completing {
-                            epic_id: epic_id.clone(),
-                            epic_title: title.clone(),
-                        };
-                        self.current_epic_id = None;
-                        self.current_epic_source = None;
-                        self.clear_persisted_current_epic_id();
-
-                        changes.push(EpicStateChange::Completed {
-                            epic_id: epic_id.clone(),
-                            epic_title: title,
-                        });
-                    }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to refresh spawn focus; using captured focus")
                 }
-
-                _ => {}
             }
         }
-
-        changes
-    }
-
-    /// Reset epic state to idle (after merge completes)
-    pub fn reset_epic_state(&mut self) {
-        self.epic_state = EpicState::Idle;
-        self.current_epic_id = None;
-        self.current_epic_source = None;
-        self.clear_persisted_current_epic_id();
-    }
-
-    /// Re-read the live `LlmConfig` from disk and update the mux's worker CLI,
-    /// model, and effort before a dynamic spawn.
-    ///
-    /// This ensures that `cas config set llm.worker.harness codex` is picked up
-    /// on the **next** `spawn_workers` call without restarting the daemon
-    /// (cas-9bc6 fix: the harness was previously cached at daemon boot).
-    ///
-    /// Also updates `self.worker_cli` on `FactoryApp` so the per-worker intro
-    /// prompt (`queue_codex_worker_intro_prompt`) uses the correct harness.
-    ///
-    /// On I/O or parse failure the existing cached values are retained —
-    /// degraded but not broken.
-    fn sync_worker_config_from_live_settings(&mut self) {
-        use std::str::FromStr;
-
-        let config = match Config::load(self.cas_dir()) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    "failed to re-read live config before spawn; \
-                     cached worker harness retained: {}",
-                    e
-                );
-                return;
-            }
-        };
-        let llm = config.llm();
-
-        // Harness — the field that was previously cached and never refreshed.
-        let live_cli = cas_mux::SupervisorCli::from_str(llm.harness_for_role("worker"))
-            .unwrap_or(cas_mux::SupervisorCli::Claude);
-        // Keep FactoryApp's own field in sync so queue_codex_worker_intro_prompt
-        // and generate_prompt pick up the updated harness as well.
-        self.worker_cli = live_cli;
-
-        // Re-read model and effort for consistency; these were already correct
-        // at startup but can drift if config changes mid-session.
-        let worker_model = llm.model_for_role("worker").map(ToOwned::to_owned);
-        let worker_effort = llm
-            .reasoning_effort_for_role("worker")
-            .and_then(|effort| effort.parse::<cas_mux::Effort>().ok());
-        self.mux.set_default_worker_spec(cas_mux::WorkerSpec {
-            name: None,
-            cli: live_cli,
-            model: worker_model,
-            effort: worker_effort,
-            config_dir: None,
-            requester_config_dir: None,
-            requester_secure_storage_dir: None,
-        });
-    }
-
-    /// Add a new worker at runtime (synchronous - blocks during worktree creation).
-    ///
-    /// Creates a worktree (if isolate is true and worktrees enabled) and spawns a Claude instance.
-    /// For non-blocking spawning, use `prepare_worker_spawn` + `finish_worker_spawn`.
-    pub fn spawn_worker(&mut self, name: Option<&str>, isolate: bool) -> anyhow::Result<String> {
-        let prep = self.prepare_worker_spawn(name, isolate, None)?;
-        let result = match prep.run() {
-            Ok(result) => result,
-            Err(e) => {
-                crate::telemetry::track(
-                    "factory_worker_spawn_result",
-                    vec![("success", "false"), ("reason", "worktree_prepare_failed")],
-                );
-                return Err(e);
-            }
-        };
-        self.finish_worker_spawn(result, None, None, None)
-    }
-
-    /// Remove a worktree created by a spawn generation that was cancelled
-    /// before its pane was registered. Reused worktrees predate this spawn and
-    /// are deliberately preserved.
-    pub(crate) fn cleanup_cancelled_spawn_worktree(
-        &mut self,
-        result: &mut WorkerSpawnResult,
-    ) -> anyhow::Result<bool> {
-        cleanup_cancelled_spawn_worktree_with_manager(self.worktree_manager.as_mut(), result)
-    }
-
-    /// Phase 1: Prepare spawn data (fast, runs on main thread).
-    ///
-    /// Resolves the worker name, computes paths, and returns a `WorkerSpawnPrep`
-    /// that can be sent to a background thread for the slow git operations.
-    ///
-    /// When `isolate` is true and worktrees are configured, each worker gets its
-    /// own git worktree and branch. When false, workers share the main working directory.
-    ///
-    /// `task_id` is the task the spawn was requested for (`spawn_workers
-    /// task_id=...`). cas-7587 (GH #122): when present, the worktree base is
-    /// resolved from *that task's* epic branch, not from the session's pinned
-    /// epic focus — the two can name different epics, and the task is right.
-    pub fn prepare_worker_spawn(
-        &mut self,
-        name: Option<&str>,
-        isolate: bool,
-        task_id: Option<&str>,
-    ) -> anyhow::Result<WorkerSpawnPrep> {
-        // focus_epic is persisted outside cas.db, so reconcile the task
-        // snapshot and session metadata synchronously at spawn time.
-        if let Err(error) = self.refresh_data() {
-            tracing::warn!(
-                error = %error,
-                "failed to refresh factory data before worker spawn; using cached task data"
-            );
-        }
-        self.apply_session_metadata_focus();
-
-        let spawn_type = if name.is_some() { "named" } else { "anonymous" };
-        crate::telemetry::track(
-            "factory_worker_spawn_requested",
-            vec![
-                ("spawn_type", spawn_type),
-                ("worktrees_enabled", bool_prop(self.worktrees_enabled())),
-                ("isolate", bool_prop(isolate)),
-            ],
-        );
-
-        // Generate a unique name if not provided
-        let worker_name = match name {
-            Some(n) => n.to_string(),
-            None => {
-                let existing: std::collections::HashSet<&str> =
-                    self.worker_names.iter().map(|s| s.as_str()).collect();
-                let mut candidate = generate_unique(1)[0].clone();
-                let mut attempts = 0;
-                while existing.contains(candidate.as_str()) && attempts < 100 {
-                    candidate = generate_unique(1)[0].clone();
-                    attempts += 1;
-                }
-                candidate
-            }
-        };
-
-        if self.worker_names.contains(&worker_name) {
-            crate::telemetry::track(
-                "factory_worker_spawn_result",
-                vec![("success", "false"), ("reason", "worker_exists")],
-            );
-            anyhow::bail!("Worker '{worker_name}' already exists");
-        }
-
+        let worker_name = self.worker_name.clone();
+        let task_id = self.task_id.as_deref();
+        let isolate = self.isolate;
         let (worktree_info, base_warnings, base_provenance) = if isolate {
-            if let Some(manager) = &self.worktree_manager {
+            if let Some(session_repo_root) = &self.worktree_repo_root {
                 // Re-resolve the repository on every request. A daemon started
                 // before `git init` may have latched an ancestor repository;
                 // continuing with that stale root would create worker branches
                 // in the wrong project. The verified-spawn lifecycle surfaces
                 // this per-request failure to the supervisor.
-                validate_live_spawn_repo_context(manager, self.project_path())?;
+                validate_live_spawn_repo_root(session_repo_root, &self.project_path)?;
                 // Verify repo has commits before trying to create worktrees
-                if !manager.git().has_commits().unwrap_or(false) {
+                if !crate::worktree::GitOperations::new(session_repo_root.clone())
+                    .has_commits()
+                    .unwrap_or(false)
+                {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
                         vec![("success", "false"), ("reason", "repo_has_no_commits")],
@@ -2026,7 +1839,7 @@ impl FactoryApp {
                     );
                 }
 
-                let session_repo_root = manager.repo_root().to_path_buf();
+                let session_repo_root = session_repo_root.clone();
                 let task_base = task_id
                     .map(|tid| task_epic_base(&self.cas_dir, &session_repo_root, tid))
                     .unwrap_or(TaskBase::Unresolved);
@@ -2050,9 +1863,12 @@ impl FactoryApp {
                 let worktree_path = if cross_repo {
                     repo_root.join(".cas/worktrees").join(&worker_name)
                 } else {
-                    manager.worktree_path_for_worker(&worker_name)
+                    self.worktree_root
+                        .as_ref()
+                        .expect("worktree root snapshot")
+                        .join(&worker_name)
                 };
-                let branch_name = manager.branch_name_for_worker(&worker_name);
+                let branch_name = format!("factory/{worker_name}");
                 // Dynamic spawns must match startup spawns: never the
                 // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
                 // is the pre-assigned task's epic branch first, pinned epic
@@ -2197,29 +2013,251 @@ impl FactoryApp {
             (None, Vec::new(), None)
         };
 
-        if let Some(provenance) = &base_provenance {
-            tracing::info!("{provenance}");
-        }
-
-        for notice in &base_warnings {
-            tracing::warn!("{notice}");
-            self.set_error(notice.clone());
-        }
-
-        crate::telemetry::track(
-            "factory_worker_spawn_prepared",
-            vec![
-                ("spawn_type", spawn_type),
-                ("worktrees_enabled", bool_prop(worktree_info.is_some())),
-            ],
-        );
-
         Ok(WorkerSpawnPrep {
             worker_name,
             worktree_info,
             warnings: base_warnings,
             base_provenance,
         })
+    }
+}
+
+impl FactoryApp {
+    /// Get the current epic state
+    pub fn epic_state(&self) -> &EpicState {
+        &self.epic_state
+    }
+
+    /// Handle epic state transitions based on detected events
+    ///
+    /// Returns true if state changed (for branch management).
+    pub fn handle_epic_events(&mut self, events: &[DirectorEvent]) -> Vec<EpicStateChange> {
+        let mut changes = Vec::new();
+
+        for event in events {
+            match event {
+                DirectorEvent::EpicStarted {
+                    epic_id,
+                    epic_title,
+                } => {
+                    let source = self.source_for_detected_epic_started(epic_id);
+                    if !self.can_adopt_detected_epic_started(epic_id, source) {
+                        continue;
+                    }
+                    let previous = self.set_active_epic(epic_id, epic_title, source);
+
+                    changes.push(EpicStateChange::Started {
+                        epic_id: epic_id.clone(),
+                        epic_title: epic_title.clone(),
+                        previous_state: previous,
+                    });
+                }
+
+                DirectorEvent::EpicCompleted { epic_id } => {
+                    // Check if this is our current epic
+                    if self.epic_state.epic_id() == Some(epic_id) {
+                        let title = self
+                            .epic_state
+                            .epic_title()
+                            .unwrap_or("Unknown")
+                            .to_string();
+
+                        // Transition to Completing state
+                        self.epic_state = EpicState::Completing {
+                            epic_id: epic_id.clone(),
+                            epic_title: title.clone(),
+                        };
+                        self.current_epic_id = None;
+                        self.current_epic_source = None;
+                        self.clear_persisted_current_epic_id();
+
+                        changes.push(EpicStateChange::Completed {
+                            epic_id: epic_id.clone(),
+                            epic_title: title,
+                        });
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        changes
+    }
+
+    /// Reset epic state to idle (after merge completes)
+    pub fn reset_epic_state(&mut self) {
+        self.epic_state = EpicState::Idle;
+        self.current_epic_id = None;
+        self.current_epic_source = None;
+        self.clear_persisted_current_epic_id();
+    }
+
+    /// Re-read the live `LlmConfig` from disk and update the mux's worker CLI,
+    /// model, and effort before a dynamic spawn.
+    ///
+    /// This ensures that `cas config set llm.worker.harness codex` is picked up
+    /// on the **next** `spawn_workers` call without restarting the daemon
+    /// (cas-9bc6 fix: the harness was previously cached at daemon boot).
+    ///
+    /// Also updates `self.worker_cli` on `FactoryApp` so the per-worker intro
+    /// prompt (`queue_codex_worker_intro_prompt`) uses the correct harness.
+    ///
+    /// On I/O or parse failure the existing cached values are retained —
+    /// degraded but not broken.
+    fn sync_worker_config_from_live_settings(&mut self) {
+        use std::str::FromStr;
+
+        let config = match Config::load(self.cas_dir()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to re-read live config before spawn; \
+                     cached worker harness retained: {}",
+                    e
+                );
+                return;
+            }
+        };
+        let llm = config.llm();
+
+        // Harness — the field that was previously cached and never refreshed.
+        let live_cli = cas_mux::SupervisorCli::from_str(llm.harness_for_role("worker"))
+            .unwrap_or(cas_mux::SupervisorCli::Claude);
+        // Keep FactoryApp's own field in sync so queue_codex_worker_intro_prompt
+        // and generate_prompt pick up the updated harness as well.
+        self.worker_cli = live_cli;
+
+        // Re-read model and effort for consistency; these were already correct
+        // at startup but can drift if config changes mid-session.
+        let worker_model = llm.model_for_role("worker").map(ToOwned::to_owned);
+        let worker_effort = llm
+            .reasoning_effort_for_role("worker")
+            .and_then(|effort| effort.parse::<cas_mux::Effort>().ok());
+        self.mux.set_default_worker_spec(cas_mux::WorkerSpec {
+            name: None,
+            cli: live_cli,
+            model: worker_model,
+            effort: worker_effort,
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        });
+    }
+
+    /// Add a new worker at runtime (synchronous - blocks during worktree creation).
+    ///
+    /// Creates a worktree (if isolate is true and worktrees enabled) and spawns a Claude instance.
+    /// For non-blocking spawning, use `prepare_worker_spawn` + `finish_worker_spawn`.
+    pub fn spawn_worker(&mut self, name: Option<&str>, isolate: bool) -> anyhow::Result<String> {
+        let prep = self.prepare_worker_spawn(name, isolate, None)?;
+        let result = match prep.run() {
+            Ok(result) => result,
+            Err(e) => {
+                crate::telemetry::track(
+                    "factory_worker_spawn_result",
+                    vec![("success", "false"), ("reason", "worktree_prepare_failed")],
+                );
+                return Err(e);
+            }
+        };
+        self.finish_worker_spawn(result, None, None, None)
+    }
+
+    /// Phase 1: Prepare spawn data (fast, runs on main thread).
+    ///
+    /// Resolves the worker name, computes paths, and returns a `WorkerSpawnPrep`
+    /// that can be sent to a background thread for the slow git operations.
+    ///
+    /// When `isolate` is true and worktrees are configured, each worker gets its
+    /// own git worktree and branch. When false, workers share the main working directory.
+    ///
+    /// `task_id` is the task the spawn was requested for (`spawn_workers
+    /// task_id=...`). cas-7587 (GH #122): when present, the worktree base is
+    /// resolved from *that task's* epic branch, not from the session's pinned
+    /// epic focus — the two can name different epics, and the task is right.
+    /// Capture only in-memory spawn state. All store, config and Git work is
+    /// resolved by the cancellable provisioner, never on the daemon loop.
+    pub(crate) fn snapshot_worker_spawn(
+        &self,
+        name: Option<&str>,
+        isolate: bool,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<WorkerSpawnContext> {
+        let spawn_type = if name.is_some() { "named" } else { "anonymous" };
+        crate::telemetry::track(
+            "factory_worker_spawn_requested",
+            vec![
+                ("spawn_type", spawn_type),
+                ("worktrees_enabled", bool_prop(self.worktrees_enabled())),
+                ("isolate", bool_prop(isolate)),
+            ],
+        );
+        let worker_name = match name {
+            Some(name) => name.to_string(),
+            None => {
+                let existing: std::collections::HashSet<&str> =
+                    self.worker_names.iter().map(String::as_str).collect();
+                let mut candidate = generate_unique(1)[0].clone();
+                let mut attempts = 0;
+                while existing.contains(candidate.as_str()) && attempts < 100 {
+                    candidate = generate_unique(1)[0].clone();
+                    attempts += 1;
+                }
+                candidate
+            }
+        };
+        if self.worker_names.contains(&worker_name) {
+            crate::telemetry::track(
+                "factory_worker_spawn_result",
+                vec![("success", "false"), ("reason", "worker_exists")],
+            );
+            anyhow::bail!("Worker '{worker_name}' already exists");
+        }
+        Ok(WorkerSpawnContext {
+            worker_name,
+            spawn_type: spawn_type.into(),
+            isolate,
+            task_id: task_id.map(str::to_string),
+            project_path: self.project_path().to_path_buf(),
+            cas_dir: self.cas_dir.clone(),
+            worktree_repo_root: self
+                .worktree_manager
+                .as_ref()
+                .map(|m| m.repo_root().to_path_buf()),
+            worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
+            epic_branch: self.epic_branch.clone(),
+            current_epic_id: self.current_epic_id.clone(),
+            factory_session: self
+                .factory_session
+                .clone()
+                .or_else(|| std::env::var("CAS_FACTORY_SESSION").ok()),
+        })
+    }
+
+    pub fn prepare_worker_spawn(
+        &mut self,
+        name: Option<&str>,
+        isolate: bool,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<WorkerSpawnPrep> {
+        let prep = self
+            .snapshot_worker_spawn(name, isolate, task_id)?
+            .resolve()?;
+        crate::telemetry::track(
+            "factory_worker_spawn_prepared",
+            vec![
+                (
+                    "spawn_type",
+                    if name.is_some() { "named" } else { "anonymous" },
+                ),
+                ("worktrees_enabled", bool_prop(prep.worktree_info.is_some())),
+            ],
+        );
+        for notice in &prep.warnings {
+            self.set_error(notice.clone());
+        }
+        Ok(prep)
     }
 
     /// Phase 3: Finish spawn on main thread (fast - adds pane to mux, updates tracking).
@@ -4277,7 +4315,7 @@ mod spawn_base_tests {
         // Simulate `git init` after daemon construction. The next spawn must
         // not silently keep using the ancestor root cached at startup.
         init_repo(&project);
-        let error = validate_live_spawn_repo_context(&manager, &project)
+        let error = validate_live_spawn_repo_root(manager.repo_root(), &project)
             .expect_err("changed repository context must fail this spawn loudly");
         assert!(error.to_string().contains("Repository context changed"));
         assert!(error.to_string().contains("Restart the factory daemon"));

@@ -11,6 +11,8 @@ pub(crate) mod loop_watchdog;
 pub(super) mod merge_sweep;
 mod output;
 pub(super) mod pane_size;
+#[cfg(test)]
+mod provisioning_tests;
 pub mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod send_dedupe;

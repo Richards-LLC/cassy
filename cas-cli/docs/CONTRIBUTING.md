@@ -673,6 +673,23 @@ only be removed during a maintenance window. Set
 `CAS_FACTORY_DISABLE_TARGET_SEED=1` to skip seeding. Do not replace this with a
 shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
 
+Worker provisioning (including store and Git base resolution) runs in a separate
+process group with a five-minute deadline. Timeout, targeted shutdown and
+`restart_spawn_queue` kill only that generation's provisioner and descendants;
+the daemon keeps processing shutdowns and messages. Reset drops already-dequeued
+spawn actions and reports them; persistent queue rows continue draining. Retirement cleans newly-created checkout/branch metadata and worker-specific
+Git locks best-effort; reused worktrees are preserved. Inspect any reported
+leftovers before retrying.
+
+Before creating or reusing a checkout, `factory.spawn_min_free_gib` checks
+available space on the worker filesystem (default 25 GiB; 0 disables the floor).
+Below the floor, the spawn fails with `spawn_disk_floor` before a checkout or
+branch is created. Set it with `cas config set factory.spawn_min_free_gib 30`.
+The target repository's config applies to cross-repository workers. Existing
+usable targets and `CAS_FACTORY_DISABLE_TARGET_SEED=1` bypass seeding, while
+all spawn paths still apply the disk floor. Seeding normally hardlinks artifacts;
+the floor reserves space for subsequent worker writes and builds.
+
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with
 `--remap-path-prefix`). Keep sccache enabled for same-path/CI reuse and for when

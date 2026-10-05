@@ -327,10 +327,14 @@ fn cancel_targeted_in_flight_spawn(
     cancelled_spawns: &mut std::collections::HashSet<String>,
     in_flight_worker: Option<&str>,
     shutdown_targets: &[String],
+    cancellation: Option<&crate::ui::factory::app::provisioning::ProvisioningCancellation>,
 ) {
     if let Some(worker) = in_flight_worker {
         if shutdown_targets.iter().any(|target| target == worker) {
             cancelled_spawns.insert(worker.to_string());
+            if let Some(cancellation) = cancellation {
+                cancellation.cancel();
+            }
         }
     }
 }
@@ -7011,6 +7015,9 @@ impl FactoryDaemon {
         if let Some((pending_name, request_id, _, pending_task_id, handle)) = self.spawn_task.take()
         {
             self.spawn_started_at = None;
+            if let Some(cancellation) = self.spawn_cancellation.take() {
+                cancellation.cancel();
+            }
             handle.abort();
             self.app.remove_pending_worker(&pending_name);
             take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
@@ -7328,6 +7335,9 @@ impl FactoryDaemon {
             let (pending_name, request_id, _, pending_task_id, handle) =
                 self.spawn_task.take().unwrap();
             self.spawn_started_at = None;
+            if let Some(cancellation) = self.spawn_cancellation.take() {
+                cancellation.cancel();
+            }
             handle.abort();
             self.app.remove_pending_worker(&pending_name);
             take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
@@ -7401,24 +7411,57 @@ impl FactoryDaemon {
             // shutdown may cancel the currently-building spawn, but a retired
             // name in dead_workers must not cancel a later independent spawn.
             let cancelled = take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
-            match handle.await {
-                Ok(Ok(mut result)) if cancelled => {
+            self.spawn_cancellation = None;
+            let outcome = handle.await.map(|outcome| {
+                outcome.map(|provisioned| {
+                    if !cancelled {
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&pending_name),
+                            "provision",
+                            "prepared",
+                            &provisioned.receipt,
+                        );
+                        if let Some(provenance) = &provisioned.base_provenance {
+                            append_spawn_audit(
+                                self.app.cas_dir(),
+                                &self.session_name,
+                                request_id,
+                                Some(&pending_name),
+                                "provision",
+                                "base",
+                                provenance,
+                            );
+                        }
+                        report_spawn_warnings(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &pending_name,
+                            &provisioned.warnings,
+                        );
+                        for warning in &provisioned.warnings {
+                            self.app.set_error(warning.clone());
+                        }
+                    }
+                    if cancelled {
+                        provisioned.retire();
+                    }
+                    provisioned.result
+                })
+            });
+            match outcome {
+                Ok(Ok(_)) if cancelled => {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
                         vec![("success", "false"), ("reason", "cancelled_by_shutdown")],
                     );
-                    let cleanup_status =
-                        match self.app.cleanup_cancelled_spawn_worktree(&mut result) {
-                            Ok(true) => {
-                                "The newly-created worktree and branch were removed.".to_string()
-                            }
-                            Ok(false) => {
-                                "No worktree created by this spawn required cleanup.".to_string()
-                            }
-                            Err(e) => {
-                                format!("Worktree cleanup failed and needs operator attention: {e}")
-                            }
-                        };
+                    // Dropping the cancelled provisioned envelope queues cleanup
+                    // off-loop, retaining its per-name lease until retirement ends.
+                    let cleanup_status = "Best-effort removal of the new worktree, branch and own Git locks is queued off-loop; reused worktrees are preserved.";
                     let visible_error = format!(
                         "Spawn for worker '{pending_name}' was cancelled by shutdown before its \
                          pane registered. {cleanup_status}"
@@ -7634,6 +7677,34 @@ impl FactoryDaemon {
                         }
                     }
                 }
+                Ok(Err(e)) if cancelled => {
+                    let detail = format!(
+                        "Spawn cancelled by targeted shutdown: {e}. Provisioner retirement performs best-effort cleanup; inspect any reported leftovers before retrying."
+                    );
+                    if let Some(ref task_id) = pending_task_id {
+                        crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
+                            self.app.cas_dir(), task_id, &pending_name,
+                        );
+                    }
+                    crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), &pending_name);
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        request_id,
+                        Some(&pending_name),
+                        "provision",
+                        "cancelled",
+                        &detail,
+                    );
+                    self.app.set_error(detail.clone());
+                    let _ = enqueue_spawn_cancelled_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        &pending_name,
+                        &detail,
+                    );
+                }
                 Ok(Err(e)) => {
                     crate::telemetry::track(
                         "factory_worker_spawn_result",
@@ -7730,7 +7801,7 @@ impl FactoryDaemon {
                 // epic branch), not the session's pinned epic focus.
                 match self
                     .app
-                    .prepare_worker_spawn(None, isolate, task_id.as_deref())
+                    .snapshot_worker_spawn(None, isolate, task_id.as_deref())
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
@@ -7741,31 +7812,7 @@ impl FactoryDaemon {
                             Some(&worker_name),
                             "provision",
                             "started",
-                            &crate::ui::factory::app::render_and_ops::epic_workers::spawn_provision_receipt(&prep),
-                        );
-                        // cas-7587 (GH #122): record which branch this worker
-                        // was cut from and why (task's epic / pinned focus /
-                        // trunk) so base provenance is never a guess.
-                        if let Some(provenance) = &prep.base_provenance {
-                            append_spawn_audit(
-                                self.app.cas_dir(),
-                                &self.session_name,
-                                request_id,
-                                Some(&worker_name),
-                                "provision",
-                                "base",
-                                provenance,
-                            );
-                        }
-                        // cas-ecf7 (GH #118): a base that is behind trunk must
-                        // be reported before the worker starts working on it.
-                        report_spawn_warnings(
-                            self.app.cas_dir(),
-                            self.app.supervisor_name(),
-                            &self.session_name,
-                            request_id,
-                            &worker_name,
-                            &prep.warnings,
+                            "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
                         // cas-7a94: bind task_id as soon as the worker name is
                         // known — before the isolate worktree finishes — so
@@ -7781,13 +7828,12 @@ impl FactoryDaemon {
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
-                        self.spawn_task = Some((
-                            worker_name,
-                            request_id,
-                            spec,
-                            task_id,
-                            tokio::task::spawn_blocking(move || prep.run()),
-                        ));
+                        let (handle, cancellation) = crate::ui::factory::app::provisioning::launch(
+                            prep,
+                            SPAWN_PROVISION_TIMEOUT,
+                        );
+                        self.spawn_cancellation = Some(cancellation);
+                        self.spawn_task = Some((worker_name, request_id, spec, task_id, handle));
                     }
                     Err(e) => {
                         crate::telemetry::track(
@@ -7838,7 +7884,7 @@ impl FactoryDaemon {
                 // branch outranks the pinned focus for base resolution.
                 match self
                     .app
-                    .prepare_worker_spawn(Some(&name), isolate, task_id.as_deref())
+                    .snapshot_worker_spawn(Some(&name), isolate, task_id.as_deref())
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
@@ -7849,30 +7895,7 @@ impl FactoryDaemon {
                             Some(&worker_name),
                             "provision",
                             "started",
-                            &crate::ui::factory::app::render_and_ops::epic_workers::spawn_provision_receipt(&prep),
-                        );
-                        // cas-7587 (GH #122): record which branch this worker
-                        // was cut from and why (task's epic / pinned focus /
-                        // trunk) so base provenance is never a guess.
-                        if let Some(provenance) = &prep.base_provenance {
-                            append_spawn_audit(
-                                self.app.cas_dir(),
-                                &self.session_name,
-                                request_id,
-                                Some(&worker_name),
-                                "provision",
-                                "base",
-                                provenance,
-                            );
-                        }
-                        // cas-ecf7 (GH #118): see the Anonymous arm.
-                        report_spawn_warnings(
-                            self.app.cas_dir(),
-                            self.app.supervisor_name(),
-                            &self.session_name,
-                            request_id,
-                            &worker_name,
-                            &prep.warnings,
+                            "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
                         if let Some(ref tid) = task_id {
@@ -7884,13 +7907,12 @@ impl FactoryDaemon {
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
-                        self.spawn_task = Some((
-                            worker_name,
-                            request_id,
-                            spec,
-                            task_id,
-                            tokio::task::spawn_blocking(move || prep.run()),
-                        ));
+                        let (handle, cancellation) = crate::ui::factory::app::provisioning::launch(
+                            prep,
+                            SPAWN_PROVISION_TIMEOUT,
+                        );
+                        self.spawn_cancellation = Some(cancellation);
+                        self.spawn_task = Some((worker_name, request_id, spec, task_id, handle));
                     }
                     Err(e) => {
                         crate::telemetry::track(
@@ -7961,6 +7983,7 @@ impl FactoryDaemon {
                     &mut self.cancelled_spawns,
                     cancellable_in_flight,
                     &workers_to_stop,
+                    self.spawn_cancellation.as_deref(),
                 );
 
                 // cas-7a94: drop still-queued spawns for these names and release
@@ -12706,7 +12729,7 @@ mod tests {
         assert!(!take_spawn_cancellation(&mut cancelled, worker));
 
         // Shutdown-all after completion has no in-flight generation to cancel.
-        cancel_targeted_in_flight_spawn(&mut cancelled, None, &[worker.to_string()]);
+        cancel_targeted_in_flight_spawn(&mut cancelled, None, &[worker.to_string()], None);
 
         // A later spawn reusing the same name is allowed to finish and come up.
         assert!(
@@ -12769,7 +12792,7 @@ mod tests {
         store.add(&task).unwrap();
 
         let mut cancelled = HashSet::new();
-        cancel_targeted_in_flight_spawn(&mut cancelled, Some(worker), &[worker.to_string()]);
+        cancel_targeted_in_flight_spawn(&mut cancelled, Some(worker), &[worker.to_string()], None);
 
         assert!(
             take_spawn_cancellation(&mut cancelled, worker),

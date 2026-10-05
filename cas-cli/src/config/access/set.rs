@@ -74,6 +74,14 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.spawn_min_free_gib" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.spawn_min_free_gib = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.spawn_min_free_gib: {value}"
+                    ))
+                })?;
+            }
             "factory.prompt_retention_days" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.prompt_retention_days = value.parse().map_err(|_| {

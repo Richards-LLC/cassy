@@ -1738,6 +1738,7 @@ impl FactoryDaemon {
             last_prompt_poison_sweep: Some(Instant::now()),
             resumed_epic_ids: std::collections::HashSet::new(),
             spawn_started_at: None,
+            spawn_cancellation: None,
             last_spawn_queue_stall_scan: None,
             last_external_wake_scan: None,
             reported_stalled_spawn_requests: std::collections::HashSet::new(),
@@ -2851,6 +2852,9 @@ impl FactoryDaemon {
 
     /// Cleanup on shutdown
     async fn cleanup(&mut self) -> anyhow::Result<()> {
+        // Stop the isolated provisioner before any asynchronous shutdown waits.
+        // This group never contains the supervisor or live worker harnesses.
+        self.cancel_provisioning();
         self.merge_sweep.shutdown().await;
 
         // Clean up notification socket

@@ -931,6 +931,11 @@ fn factory_epic_base_branch_is_registered_and_round_trips_cas_8d54() {
 /// registry or to `set` without `get`/`list` fails here.
 #[test]
 fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
+    assert_eq!(Config::default().factory().spawn_min_free_gib, 25);
+    assert_eq!(
+        Config::default().get("factory.spawn_min_free_gib"),
+        Some("25".into())
+    );
     // (key, value to set, value get returns)
     let table: &[(&str, &str, &str)] = &[
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
@@ -941,6 +946,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),
         ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.spawn_min_free_gib", "30", "30"),
         ("factory.prompt_retention_days", "14", "14"),
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),

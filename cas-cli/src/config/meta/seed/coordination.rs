@@ -94,6 +94,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.spawn_min_free_gib",
+        section: "factory",
+        name: "Worker Spawn Minimum Free Space (GiB)",
+        description: "Refuse worker spawns below this available-space floor before checkout or reuse, whether target seeding is enabled or not. Failure names spawn_disk_floor. 0 disables the floor.",
+        value_type: ConfigType::Int,
+        default: "25",
+        constraint: Constraint::Range(0, 65536),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "seed", "disk", "space", "workers"],
+        use_cases: &["Fail a low-disk spawn before creating or reusing its worktree"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.prompt_retention_days",
         section: "factory",
         name: "Prompt Queue Retention (days)",

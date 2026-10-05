@@ -360,6 +360,18 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
             self.assertIn('protected', json.loads(result.stdout)['caches'][0]['reason'])
             self.assertFalse((target / scratch.OWNER).exists())
 
+    def test_gc_cli_reclaims_over_bound_managed_cache_without_self_argv_false_positive(self):
+        target = self.parent / 'assembly-target'
+        self.idle_owner(target)
+        (target / 'output').write_bytes(b'x' * 2048)
+        env = dict(self.env, CAS_ASSEMBLY_TARGET_MAX_GIB='0.000001')
+        result = subprocess.run([sys.executable, scratch.__file__, '--repo', str(self.repo),
+                                 '--base', str(self.base), '--cache', str(target), 'clean'],
+                                env=env, text=True, capture_output=True, check=True)
+        report = json.loads(result.stdout)
+        self.assertFalse(target.exists(), report)
+        self.assertGreaterEqual(report['reclaimed_bytes'], 2048)
+
     def test_constructor_signal_unwinds_registered_resource_before_context_entry(self):
         original = scratch.owner_record
         def interrupt(path, lease):

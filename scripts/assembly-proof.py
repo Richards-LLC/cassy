@@ -576,7 +576,7 @@ def prove(root):
 def prove_owned(root):
     # Refuse an unusable clone context before tool probing or the native suite.
     scratch = clone_scratch(os.environ)
-    release_scratch.sweep(root, scratch, clean=True)
+    scratch_report = release_scratch.sweep(root, scratch, clean=True)
     expected, env = inputs(root)
     path = receipt_path(root, expected)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -587,7 +587,7 @@ def prove_owned(root):
             return found
         head = git(root, "rev-parse", "HEAD").decode().strip()
         record = {"inputs": expected, "status": "RUNNING", "head": head,
-                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {},
+                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {}, "scratch": scratch_report,
                   "environment_keys": {key: digest(value.encode())
                                        for key, value in environment_material(root, env).items()}}
         write(path, record)
@@ -598,7 +598,9 @@ def prove_owned(root):
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
         target = path.parent.parent / "assembly-target"
-        with release_scratch.BoundedCache(target, env, root) as clone_target, \
+        cache = release_scratch.BoundedCache(target, env, root)
+        record["cache"] = cache.events
+        with cache as clone_target, \
                 release_scratch.OwnedDirectory("assembly-clone-", scratch.parent) as directory:
             clone = Path(directory) / "repo"
             release_scratch.child_run(["git", "clone", "--quiet", "--shared", "--no-checkout",

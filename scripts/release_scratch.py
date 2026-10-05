@@ -23,6 +23,8 @@ LOCK = ".cas-scratch-owner.lock"
 CURRENT = None
 PROC_ROOT = Path("/proc")
 TEARDOWN_WAIT_SECS = 20
+PROTOCOL = "cas-scratch-v1"
+REGENERABLE = ("suite.tar.zst", "extract", "tmp", "cargo-home", "bin")
 
 
 def positive(env, key, default):
@@ -32,14 +34,101 @@ def positive(env, key, default):
     return value
 
 
-def alive(pid):
+def process_identity(pid):
+    """PID reuse must not make yesterday's directory belong to today's process."""
+    pid = int(pid)
+    if PROC_ROOT.is_dir():
+        fields = (PROC_ROOT / str(pid) / "stat").read_text().rsplit(") ", 1)[1].split()
+        if fields[0] in ("Z", "X"):
+            raise ProcessLookupError(pid)
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        return boot + ":" + fields[19]
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, check=True)
+    if not result.stdout.strip():
+        raise ProcessLookupError(pid)
+    return result.stdout.strip()
+
+
+def owner_record(path, lease):
+    stat = path.stat()
+    return {"protocol": PROTOCOL, "uid": os.getuid(), "pid": os.getpid(),
+            "start": process_identity(os.getpid()), "created": time.time(),
+            "path": str(path.resolve()), "device": stat.st_dev, "inode": stat.st_ino,
+            "lease": str(lease.absolute())}
+
+
+def read_owner(path):
+    file = path / OWNER
+    if file.is_symlink():
+        raise ValueError("symlink owner record")
+    if not file.exists():
+        return None
+    if file.stat().st_uid != os.getuid():
+        raise ValueError("foreign owner record")
+    owner = json.loads(file.read_text())
+    stat = path.stat()
+    if (owner.get("protocol") != PROTOCOL or owner.get("uid") != os.getuid()
+            or owner.get("path") != str(path.resolve()) or owner.get("device") != stat.st_dev
+            or owner.get("inode") != stat.st_ino or not owner.get("start")):
+        # Old pid-only records have unknown provenance, not permission to adopt.
+        return None
+    return owner
+
+
+def owner_live(owner):
     try:
-        os.kill(int(pid), 0)
-        return True
-    except ProcessLookupError:
+        return process_identity(owner["pid"]) == owner["start"]
+    except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
         return False
-    except (PermissionError, ValueError, TypeError):
-        return True  # Unknown identity fails closed.
+    except (OSError, ValueError, KeyError):
+        return True  # An unreadable recorded owner stays protected.
+
+
+def open_lock(path, create=False):
+    flags = os.O_RDWR if create else os.O_RDONLY
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    if create:
+        flags |= os.O_CREAT
+    fd = os.open(path, flags, 0o600)
+    stat = os.fstat(fd)
+    import stat as file_stat
+    if stat.st_uid != os.getuid() or not file_stat.S_ISREG(stat.st_mode):
+        os.close(fd)
+        raise ValueError("unsafe lease file")
+    return os.fdopen(fd, "a+" if create else "r")
+
+
+@contextlib.contextmanager
+def admitted(path, owner, clean):
+    lease = Path(owner["lease"]) if owner else path / LOCK
+    if owner and lease != path / LOCK:
+        # Registered children refer only to a real guardian's lease, with a
+        # matching owner identity. Never follow an arbitrary JSON lease path.
+        guardian = lease.parent
+        if lease.name != LOCK or not guardian.name.startswith("cas-release-gate."):
+            raise ValueError("unsafe guardian lease")
+        if guardian.exists():
+            guardian_owner = read_owner(guardian)
+            if (not guardian_owner or guardian_owner["pid"] != owner["pid"]
+                    or guardian_owner["start"] != owner["start"]):
+                raise ValueError("guardian identity mismatch")
+        else:
+            lease = path / LOCK  # Dead guardian; serialize this orphan locally.
+    if lease.is_symlink():
+        raise ValueError("symlink lease")
+    lock = open_lock(lease, create=clean) if clean or lease.exists() else None
+    try:
+        if lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if owner and owner_live(owner):
+            raise ValueError("live owner with matching start time")
+        # Only CAS-owned lease paths may ignore opaque unrelated processes.
+        if process_uses(path.resolve(), lock.fileno() if lock else None, lease_managed=bool(owner)):
+            raise ValueError("live process or unavailable process evidence")
+        yield
+    finally:
+        if lock:
+            lock.close()
 
 
 def size(path):
@@ -60,7 +149,7 @@ def contains(path, child):
     return path == child or path in child.parents
 
 
-def process_uses(path, own_lock_fd=None):
+def process_uses(path, own_lock_fd=None, lease_managed=False):
     if PROC_ROOT.is_dir():
         for process in PROC_ROOT.iterdir():
             if not process.name.isdigit():
@@ -90,24 +179,38 @@ def process_uses(path, own_lock_fd=None):
                     if len(fields) == 6 and fields[5].startswith("/") and contains(path, Path(fields[5])):
                         return True
             except FileNotFoundError:
-                if process.exists():
+                if process.exists() and not lease_managed:
                     return True  # Missing evidence of a still-present process is unknown.
             except PermissionError:
-                return True
+                if not lease_managed:
+                    return True
         return False
     try:
-        result = subprocess.run(["lsof", "-t", "+D", str(path)], capture_output=True)
-        return result.returncode != 1 or bool(result.stdout) or bool(result.stderr)
-    except OSError:
-        return True
+        result = subprocess.run(["lsof", "-nP", "-F0pfn", "+D", str(path)], capture_output=True)
+        if result.returncode not in (0, 1) or (result.stderr and not lease_managed):
+            return True
+        pid, fd = None, None
+        for field in result.stdout.replace(b"\n", b"\0").split(b"\0"):
+            if field.startswith(b"p"):
+                pid, fd = int(field[1:]), None
+            elif field.startswith(b"f"):
+                fd = field[1:].decode().rstrip("rwu")
+            elif field.startswith(b"n"):
+                if pid == os.getpid() and fd == str(own_lock_fd):
+                    continue
+                if contains(path, Path(os.fsdecode(field[1:]))):
+                    return True
+        return False
+    except (OSError, ValueError):
+        return not lease_managed
 
 
 class OwnedDirectory:
     def __init__(self, prefix, parent):
         self.path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
-        self.lock = (self.path / LOCK).open("a+")
+        self.lock = open_lock(self.path / LOCK, create=True)
         fcntl.flock(self.lock, fcntl.LOCK_EX)
-        (self.path / OWNER).write_text(json.dumps({"pid": os.getpid(), "created": time.time()}))
+        (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path / LOCK)))
         if CURRENT is not None:
             with CURRENT.lock:
                 CURRENT.leases.add(self.lock.fileno())
@@ -221,17 +324,25 @@ def child_run(command, **kwargs):
 
 
 def register(path, owner_dir):
-    # A child creates a directory then registers it before writing large data.
-    path, owner_dir = Path(path).absolute(), Path(owner_dir)
-    owner = json.loads((owner_dir / OWNER).read_text())
-    (path / OWNER).write_text(json.dumps(dict(owner, lease=str(owner_dir / LOCK))))
+    # Only the guardian may authorize removal of a fresh, direct scratch child.
+    path, owner_dir = Path(path).absolute(), Path(owner_dir).absolute()
+    owner = read_owner(owner_dir)
+    if not owner or not owner_live(owner) or path.is_symlink() or not path.is_dir():
+        raise ValueError("invalid scratch registration")
+    parents = scratch_parents(Path(os.environ.get("CAS_RELEASE_GATE_HOME_DIR") or "/var/tmp/cas-release-gate/base"), os.environ)
+    prefixes = parents.get(path.parent, ())
+    stat = path.stat()
+    if (not path.name.startswith(prefixes) or stat.st_uid != os.getuid()
+            or stat.st_mode & 0o077 or list(path.iterdir())):
+        raise ValueError("registration requires a fresh private recognized scratch directory")
+    record = owner_record(path, owner_dir / LOCK)
+    record.update(pid=owner["pid"], start=owner["start"], created=owner["created"])
+    (path / OWNER).write_text(json.dumps(record))
     with (owner_dir / "paths").open("a") as stream:
         stream.write(json.dumps(str(path)) + "\n")
 
 
-def sweep(repo, base, clean=False, env=None):
-    env = os.environ if env is None else env
-    cutoff = time.time() - positive(env, "CAS_RELEASE_SCRATCH_MAX_AGE_HOURS", 6) * 3600
+def scratch_parents(base, env):
     base = Path(base).absolute()
     parents = {base.parent: (base.name + ".", "assembly-clone-")}
     legacy = env.get("CAS_RELEASE_SCRATCH_EXTRA_BASES", "/home/cas-release-gate/base:/var/tmp/cas-release-gate:/Users/Shared/cas-release-gate")
@@ -242,18 +353,30 @@ def sweep(repo, base, clean=False, env=None):
     temp_parent = Path(env.get("TMPDIR") or tempfile.gettempdir()).absolute()
     parents.setdefault(temp_parent, tuple())
     parents[temp_parent] += ("cas-release-gate.",)
-    protected = worktrees(repo)
+    return parents
+
+
+def registered(path, protected):
+    remap = path / "workspace-remap/.git"
+    registry = path / "repo/.git/worktrees"
+    return (any(contains(path.resolve(), tree) for tree in protected)
+            or remap.is_file() or remap.is_symlink()
+            or (registry.is_dir() and any(registry.iterdir())))
+
+
+def sweep(repo, base, clean=False, env=None):
+    env = os.environ if env is None else env
+    cutoff = time.time() - positive(env, "CAS_RELEASE_SCRATCH_MAX_AGE_HOURS", 6) * 3600
     records = []
-    for parent, prefixes in parents.items():
+    protected = worktrees(repo)
+    for parent, prefixes in scratch_parents(base, env).items():
         if not parent.is_dir():
             continue
-        # Serialize allocators/sweepers in this parent. Missing-owner legacy
-        # directories are admitted only after the age and OS liveness checks.
         lock_path = parent / ".cas-scratch-sweep.lock"
         if lock_path.is_symlink():
             continue
-        lock_context = lock_path.open("a+" if clean else "r") if clean or lock_path.exists() else contextlib.nullcontext()
-        with lock_context as sweep_lock:
+        context = open_lock(lock_path, create=clean) if clean or lock_path.exists() else contextlib.nullcontext()
+        with context as sweep_lock:
             if sweep_lock:
                 fcntl.flock(sweep_lock, fcntl.LOCK_EX if clean else fcntl.LOCK_SH)
             for path in sorted(parent.iterdir()):
@@ -262,128 +385,192 @@ def sweep(repo, base, clean=False, env=None):
                 stat = path.stat()
                 if stat.st_uid != os.getuid():
                     continue
-                reason = "recent"
-                reclaimable = False
-                lock = None
+                row = {"path": str(path), "bytes": size(path), "reclaimable_bytes": 0,
+                       "reclaimed_bytes": 0, "retained_bytes": 0, "reclaimable": False,
+                       "reason": "recent", "removed": False, "retained_base": False}
                 try:
-                    remap_git = path / "workspace-remap/.git"
-                    clone_registry = path / "repo/.git/worktrees"
-                    if (any(contains(path.resolve(), tree) for tree in protected)
-                            or remap_git.is_file() or remap_git.is_symlink()
-                            or (clone_registry.is_dir() and any(clone_registry.iterdir()))):
-                        reason = "registered worktree"
-                    elif stat.st_mtime <= cutoff:
-                        owner_file = path / OWNER
-                        owner = json.loads(owner_file.read_text()) if owner_file.exists() else {}
-                        if owner and alive(owner.get("pid")):
-                            reason = "live owner"
-                        else:
-                            lease = Path(owner.get("lease", path / LOCK))
-                            safe_lease = lease == path / LOCK or (lease.name == LOCK and lease.parent.name.startswith("cas-release-gate."))
-                            if not safe_lease or lease.is_symlink() or (path / LOCK).is_symlink():
-                                reason = "unsafe lease"
-                            else:
-                                if not lease.exists():
-                                    lease = path / LOCK
-                                if clean or lease.exists():
-                                    lock = lease.open("a+" if clean else "r")
-                                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                                if process_uses(path.resolve(), lock.fileno() if lock else None):
-                                    reason = "live process"
-                                else:
-                                    reclaimable, reason = True, "dead owner past age bound"
-                    record = {"path": str(path), "bytes": size(path), "reclaimable": reclaimable,
-                              "reason": reason, "removed": False}
-                    if clean and reclaimable:
-                        # Recheck Git after lease admission; never recursively
-                        # erase a registered checkout embedded in old scratch.
-                        if not any(contains(path.resolve(), tree) for tree in worktrees(repo)):
-                            shutil.rmtree(path)
-                            record["removed"] = True
-                    records.append(record)
+                    if stat.st_mtime <= cutoff:
+                        owner = read_owner(path)
+                        with admitted(path, owner, clean):
+                            keep_base = registered(path, protected)
+                            # Partial reclamation requires CAS provenance. A registered
+                            # remap and its base always remain; only these siblings go.
+                            candidates = ([path / name for name in REGENERABLE
+                                           if (path / name).exists() and not (path / name).is_symlink()]
+                                          if keep_base and owner else ([] if keep_base else [path]))
+                            row["retained_base"] = keep_base
+                            row["reason"] = "registered worktree retained; regenerable siblings only" if keep_base else "dead owner past age bound"
+                            for candidate in candidates:
+                                if any(contains(candidate.resolve(), tree) for tree in protected):
+                                    continue
+                                used = size(candidate) if candidate.is_dir() else candidate.stat().st_size
+                                row["reclaimable_bytes"] += used
+                                if clean:
+                                    # Git identity is re-read immediately before mutation.
+                                    if any(contains(candidate.resolve(), tree) for tree in worktrees(repo)):
+                                        continue
+                                    if candidate.is_dir():
+                                        shutil.rmtree(candidate)
+                                    else:
+                                        candidate.unlink()
+                                    row["reclaimed_bytes"] += used
+                            row["reclaimable"] = row["reclaimable_bytes"] > 0
+                            row["removed"] = not path.exists()
                 except (OSError, ValueError) as exc:
-                    records.append({"path": str(path), "bytes": 0, "reclaimable": False,
-                                    "reason": "protected: " + str(exc), "removed": False})
-                finally:
-                    if lock:
-                        lock.close()
-    if clean and any(row["removed"] for row in records):
-        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], check=True)
-    return {"entries": records, "reclaimable_bytes": sum(row["bytes"] for row in records if row["reclaimable"]),
-            "reclaimed_bytes": sum(row["bytes"] for row in records if row["removed"])}
+                    row["reason"] = "protected: " + str(exc)
+                row["retained_bytes"] = size(path) if path.exists() else 0
+                records.append(row)
+    # Never prune/unregister a stale remap here; follow-up cas-638d owns that.
+    return {"entries": records,
+            "reclaimable_bytes": sum(row["reclaimable_bytes"] for row in records),
+            "reclaimed_bytes": sum(row["reclaimed_bytes"] for row in records),
+            "retained_bytes": sum(row["retained_bytes"] for row in records)}
 
 
 class BoundedCache:
     def __init__(self, path, env, repo=None):
-        self.path = Path(path)
+        self.path = Path(path).absolute()
         self.cap = int(positive(env, "CAS_ASSEMBLY_TARGET_MAX_GIB", 20) * 1024 ** 3)
         self.age = positive(env, "CAS_ASSEMBLY_TARGET_MAX_AGE_DAYS", 7) * 86400
         self.lock = None
         self.repo = repo
+        self.events = []
+        self.managed = False
 
-    def prune(self):
+    def inventory(self, clean=False, adopt=False):
+        row = {"path": str(self.path), "bytes": 0, "reclaimed_bytes": 0,
+               "retained_bytes": 0, "reclaimable_bytes": 0, "reason": "absent",
+               "cap_bytes": self.cap, "max_age_secs": self.age}
         if self.path.is_symlink():
             raise ValueError("assembly target must not be a symlink")
         if not self.path.exists():
-            return
+            self.events.append(row)
+            return row
+        row["bytes"] = row["retained_bytes"] = size(self.path)
         if self.repo and any(contains(self.path.resolve(), tree) for tree in worktrees(self.repo)):
             raise ValueError("assembly target contains a registered worktree")
-        used = size(self.path)
+        owner = read_owner(self.path)
+        if adopt and not owner:
+            # Explicit quiet-window operation; opaque evidence STILL refuses.
+            if process_uses(self.path.resolve(), self.lock.fileno()):
+                raise ValueError("legacy cache adoption refused: live users or unavailable process evidence")
+            (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path.with_name(self.path.name + ".lock"))))
+            owner = read_owner(self.path)
+            self.managed = True
+            row["adopted"] = True
+        if not owner:
+            row["reason"] = "legacy cache retained: no CAS owner record; explicit quiet-window adoption required"
+            self.events.append(row)
+            return row
+        if owner_live(owner) and not (self.managed and owner["pid"] == os.getpid()):
+            row["reason"] = "live cache owner with matching start time"
+            self.events.append(row)
+            return row
         stamp = self.path / ".cas-last-used"
         modified = stamp.stat().st_mtime if stamp.exists() else self.path.stat().st_mtime
-        if used > self.cap or time.time() - modified > self.age:
-            if process_uses(self.path.resolve()):
-                raise ValueError("over-bound assembly target still has live users; eviction refused")
-            print(f"assembly target eviction: {self.path} bytes={used} cap={self.cap} age_bound_s={self.age}", flush=True)
-            shutil.rmtree(self.path)
+        row["reason"] = "within size and age bounds"
+        if row["bytes"] > self.cap or time.time() - modified > self.age:
+            if process_uses(self.path.resolve(), self.lock.fileno() if self.lock else None, lease_managed=True):
+                row["reason"] = "over-bound cache retained: live users"
+            else:
+                row["reclaimable_bytes"] = row["bytes"]
+                row["reason"] = "over size or age bound"
+                if clean:
+                    # Never evict a newly registered checkout under an old snapshot.
+                    if self.repo and any(contains(self.path.resolve(), tree) for tree in worktrees(self.repo)):
+                        raise ValueError("assembly target contains a registered worktree")
+                    shutil.rmtree(self.path)
+                    row["reclaimed_bytes"] = row["bytes"]
+                    row["retained_bytes"] = 0
+        self.events.append(row)
+        return row
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = self.path.with_name(self.path.name + ".lock")
-        if lock_path.is_symlink():
-            raise ValueError("assembly target lease must not be a symlink")
-        self.lock = lock_path.open("a+")
+        self.lock = open_lock(self.path.with_name(self.path.name + ".lock"), create=True)
         fcntl.flock(self.lock, fcntl.LOCK_EX)
         if CURRENT is not None:
             with CURRENT.lock:
                 CURRENT.leases.add(self.lock.fileno())
         try:
-            self.prune()
+            self.inventory(clean=True)
+            if not self.path.exists():
+                self.path.mkdir(mode=0o700)
+                self.managed = True
+            elif read_owner(self.path):
+                # Do not overwrite a live stale-owner record after its flock
+                # was lost. Ownership requires both admission checks to pass.
+                owner = read_owner(self.path)
+                if owner_live(owner):
+                    raise ValueError("assembly target owner is still live")
+                self.managed = True
+            if self.managed:
+                (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path.with_name(self.path.name + ".lock"))))
         except BaseException:
-            if CURRENT is not None:
-                with CURRENT.lock:
-                    CURRENT.leases.discard(self.lock.fileno())
-            self.lock.close()
+            self.release()
             raise
         return self.path
 
+    def release(self):
+        if CURRENT is not None:
+            with CURRENT.lock:
+                CURRENT.leases.discard(self.lock.fileno())
+        self.lock.close()
+
     def __exit__(self, *exc):
         try:
-            self.prune()
-            if self.path.exists():
-                (self.path / ".cas-last-used").touch()
-        finally:
             if CURRENT is not None:
-                with CURRENT.lock:
-                    CURRENT.leases.discard(self.lock.fileno())
-            self.lock.close()
+                CURRENT.stop()
+            self.inventory(clean=True)
+            if self.path.exists() and self.managed:
+                (self.path / ".cas-last-used").touch()
+                # The lease continues to protect an exiting owner while the
+                # record is marked idle; descendants have already been reaped.
+                owner = read_owner(self.path)
+                owner.update(pid=0, start="idle")
+                (self.path / OWNER).write_text(json.dumps(owner))
+        finally:
+            self.release()
+
+
+def cache_report(repo, path, clean=False, adopt=False, env=None):
+    cache = BoundedCache(path, os.environ if env is None else env, repo)
+    lock_path = cache.path.with_name(cache.path.name + ".lock")
+    try:
+        if not lock_path.exists() and not clean:
+            return cache.inventory()
+        if clean:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        cache.lock = open_lock(lock_path, create=clean)
+        fcntl.flock(cache.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return cache.inventory(clean=clean, adopt=adopt)
+    except (OSError, ValueError) as exc:
+        used = size(cache.path) if cache.path.is_dir() and not cache.path.is_symlink() else 0
+        return {"path": str(cache.path), "bytes": used, "retained_bytes": used,
+                "reclaimable_bytes": 0, "reclaimed_bytes": 0, "reason": "protected: " + str(exc)}
+    finally:
+        if cache.lock:
+            cache.lock.close()
 
 
 def guard(command, repo, base):
     sweep(repo, base, clean=True)
-    lease = OwnedDirectory("cas-release-gate.", tempfile.gettempdir())
-    with ChildScope() as scope, lease as owner_dir:
+    with ChildScope() as scope, OwnedDirectory("cas-release-gate.", tempfile.gettempdir()) as owner_dir:
         try:
             env = dict(os.environ, CAS_RELEASE_GATE_SCRATCH_RUN_DIR=str(owner_dir))
             # Pass the lease through exec: surviving descendants keep scratch
             # protected even if the guardian itself receives SIGKILL.
-            return scope.run(command, env=env, pass_fds=(lease.lock.fileno(),)).returncode
+            return scope.run(command, env=env, pass_fds=tuple(scope.leases)).returncode
         finally:
             scope.stop()
             path_list = owner_dir / "paths"
             if path_list.exists():
                 for line in reversed(path_list.read_text().splitlines()):
                     path = Path(json.loads(line))
+                    owner = read_owner(path) if path.exists() and not path.is_symlink() else None
+                    current = read_owner(owner_dir)
+                    if not owner or owner["pid"] != current["pid"] or owner["start"] != current["start"] or owner["lease"] != str(owner_dir / LOCK):
+                        continue  # Poisoned or replaced registry entries are not deletion authority.
                     # Exact registered paths, not globbing across other runs.
                     remap = path / "workspace-remap"
                     if remap.exists():
@@ -399,6 +586,8 @@ def main():
     parser.add_argument("action", choices=("report", "clean", "register", "guard"))
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--base", type=Path, default=Path(os.environ.get("CAS_RELEASE_GATE_HOME_DIR") or "/var/tmp/cas-release-gate/base"))
+    parser.add_argument("--cache", type=Path)
+    parser.add_argument("--adopt-legacy-cache", action="store_true", help="explicit quiet-window adoption; clean only; live or opaque users refuse")
     parser.add_argument("--owner-dir", type=Path)
     parser.add_argument("--path", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -408,7 +597,12 @@ def main():
         return 0
     if args.action == "guard":
         return guard(args.command[1:] if args.command[:1] == ["--"] else args.command, args.repo, args.base)
-    print(json.dumps(sweep(args.repo, args.base, clean=args.action == "clean"), sort_keys=True))
+    if args.adopt_legacy_cache and (args.action != "clean" or args.cache is None):
+        raise ValueError("--adopt-legacy-cache requires clean and --cache")
+    report = sweep(args.repo, args.base, clean=args.action == "clean")
+    if args.cache:
+        report["cache"] = cache_report(args.repo, args.cache, clean=args.action == "clean", adopt=args.adopt_legacy_cache)
+    print(json.dumps(report, sort_keys=True))
     return 0
 
 

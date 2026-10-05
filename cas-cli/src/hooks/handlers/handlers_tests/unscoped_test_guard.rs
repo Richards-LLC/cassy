@@ -317,7 +317,9 @@ fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc
                 std::fs::create_dir(dir.path().join("scripts")).unwrap();
                 std::fs::write(dir.path().join("scripts/worker-memory.py"), "# fixture, never executed\n").unwrap();
             }
-            for command in ["npm test", "npm run test", "npx playwright test", "vitest run", "bash scripts/journey-eval.sh"] {
+            // cas-3ae7: an unfiltered Playwright suite is denied to workers by the
+            // browser tier guard first, so admission is exercised on a named spec.
+            for command in ["npm test", "npm run test", "npx playwright test e2e/journeys/answer-ask.journey.ts", "vitest run", "bash scripts/journey-eval.sh"] {
                 let mut request = input(command, "worker");
                 request.cwd = cwd.into();
                 let out = handle_pre_tool_use(&request, Some(&root)).unwrap();

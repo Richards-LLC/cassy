@@ -16,6 +16,8 @@ pub const MIGRATION: Migration = Migration {
         AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='operator_cloud_identity_immutable')
         AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='operator_cloud_receipt_final')
         AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='operator_cloud_follows_local_purge')
+        AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_command_admissions')
+        AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_operator_command_receipt_pending')
         THEN 1 ELSE 0 END"),
 };
 

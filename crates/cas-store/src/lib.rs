@@ -247,6 +247,7 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
+    AdmissionOutcome, OperatorCommandAdmission,
     OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
     OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
     session_routing_id,

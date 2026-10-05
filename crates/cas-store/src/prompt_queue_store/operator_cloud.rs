@@ -80,7 +80,48 @@ pub const OPERATOR_CLOUD_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TRIGGER IF NOT EXISTS operator_cloud_follows_local_purge
         AFTER DELETE ON operator_delivery_outbox
         BEGIN DELETE FROM operator_cloud_outbox WHERE event_id = OLD.event_id; END",
+    // Offline-command admission (§10.3): one durable queue admission per
+    // command ID, committed with its prompt row and the receipt to send.
+    "CREATE TABLE IF NOT EXISTS operator_command_admissions (
+        command_id TEXT PRIMARY KEY,
+        machine_digest TEXT NOT NULL,
+        history_event_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        prompt_id INTEGER NOT NULL UNIQUE,
+        admitted_at TEXT NOT NULL,
+        receipt_id TEXT NOT NULL UNIQUE,
+        receipt_sent_at TEXT
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_operator_command_receipt_pending
+        ON operator_command_admissions(admitted_at) WHERE receipt_sent_at IS NULL",
 ];
+
+/// A verified, decrypted command ready for admission (§10.3).
+pub struct OperatorCommandAdmission<'a> {
+    pub command_id: &'a str,
+    pub machine_digest: &'a str,
+    pub history_event_id: &'a str,
+    /// Submitting device from the verified admission authorization (`dev`).
+    pub device_id: &'a str,
+    pub device_label: &'a str,
+    pub factory_session: &'a str,
+    pub body: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionOutcome {
+    /// Newly admitted: exactly one queue row was written.
+    Admitted { prompt_id: i64, receipt_id: String },
+    /// The same command was already admitted (crash or duplicate delivery):
+    /// no second queue row; resend this receipt if it was not sent.
+    Existing {
+        prompt_id: i64,
+        receipt_id: String,
+        receipt_sent: bool,
+    },
+    /// Same command ID, different payload digest: never admitted twice.
+    Conflict,
+}
 
 /// The verified audience of this project database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +494,134 @@ impl SqlitePromptQueueStore {
             };
             Ok(changed > 0)
         })
+    }
+
+    /// Admit one offline command: its prompt row for the session's
+    /// supervisor, attributed to the submitting device, and the admission
+    /// with the receipt ID to send, in one IMMEDIATE transaction. The turn
+    /// records no new operator event: its account history already exists
+    /// as the command's `history_event`.
+    pub fn admit_operator_command(
+        &self,
+        admission: &OperatorCommandAdmission<'_>,
+    ) -> Result<AdmissionOutcome> {
+        if admission.body.trim().is_empty() || admission.factory_session.trim().is_empty() {
+            return Err(StoreError::Other(
+                "an offline command needs a body and a session".into(),
+            ));
+        }
+        let receipt_id = super::operator_delivery::new_event_identity();
+        let source = format!("commander:{}", admission.device_id);
+        let stamp = OperatorStamp {
+            operator: "operator".into(),
+            device_id: admission.device_id.to_owned(),
+            device_label: admission.device_label.to_owned(),
+            scopes: vec!["message:send".into()],
+            verified: true,
+        };
+        // A per-command dedupe key keeps the time-window duplicate filter
+        // from swallowing a repeated short reply ("yes" twice is two commands).
+        let dedupe_key = format!("operator-command:{}", admission.command_id);
+        let attribution = serde_json::json!({
+            "via": "operator_inbox_command",
+            "command_id": admission.command_id,
+            "history_event_id": admission.history_event_id,
+        });
+        let outcome = crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
+            let existing: Option<(String, i64, String, Option<String>)> = tx
+                .query_row(
+                    "SELECT machine_digest, prompt_id, receipt_id, receipt_sent_at
+                     FROM operator_command_admissions WHERE command_id = ?1",
+                    [admission.command_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            if let Some((digest, prompt_id, receipt_id, sent)) = existing {
+                return Ok(if digest == admission.machine_digest {
+                    AdmissionOutcome::Existing {
+                        prompt_id,
+                        receipt_id,
+                        receipt_sent: sent.is_some(),
+                    }
+                } else {
+                    AdmissionOutcome::Conflict
+                });
+            }
+            let turn = OperatorTurn {
+                source: &source,
+                target: "supervisor",
+                prompt: admission.body,
+                factory_session: Some(admission.factory_session),
+                metadata: OperatorTurnMetadata {
+                    attribution: Some(&attribution),
+                    operator: Some(&stamp),
+                    kind: Some("operator_message"),
+                    dedupe_key: Some(&dedupe_key),
+                    cloud_history_event_id: Some(admission.history_event_id),
+                    ..Default::default()
+                },
+            };
+            let event_id = super::operator_delivery::new_event_identity();
+            let prompt_id = match Self::insert_complete_operator_turn(&tx, &turn, &event_id)? {
+                EnqueueOutcome::Created(id) => id,
+                // A dedupe suppression would silently drop a command; refuse.
+                _ => {
+                    return Err(StoreError::Other(
+                        "offline command was suppressed as a duplicate prompt".into(),
+                    ));
+                }
+            };
+            tx.execute(
+                "INSERT INTO operator_command_admissions
+                    (command_id, machine_digest, history_event_id, device_id, prompt_id, admitted_at, receipt_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    admission.command_id,
+                    admission.machine_digest,
+                    admission.history_event_id,
+                    admission.device_id,
+                    prompt_id,
+                    Utc::now().to_rfc3339(),
+                    receipt_id
+                ],
+            )?;
+            tx.commit()?;
+            Ok(AdmissionOutcome::Admitted {
+                prompt_id,
+                receipt_id: receipt_id.clone(),
+            })
+        })?;
+        if matches!(outcome, AdmissionOutcome::Admitted { .. }) {
+            self.signal_inbox("supervisor");
+        }
+        Ok(outcome)
+    }
+
+    /// The cloud accepted (or already holds) this command's receipt.
+    pub fn mark_command_receipt_sent(&self, command_id: &str, now: DateTime<Utc>) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            Ok(conn.execute(
+                "UPDATE operator_command_admissions SET receipt_sent_at = ?1
+                 WHERE command_id = ?2 AND receipt_sent_at IS NULL",
+                params![now.to_rfc3339(), command_id],
+            )? > 0)
+        })
+    }
+
+    /// `history_event_id` of an admitted prompt, so direct history can carry
+    /// the account event ID and devices dedupe the two copies.
+    pub fn command_history_event(&self, prompt_id: i64) -> Result<Option<String>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        conn.query_row(
+            "SELECT history_event_id FROM operator_command_admissions WHERE prompt_id = ?1",
+            [prompt_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Backlog age and counts for `doctor` and the hub status (no silent loss).

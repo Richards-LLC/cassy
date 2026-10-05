@@ -19,6 +19,7 @@ use crate::{Result, StoreError};
 
 mod operator_cloud;
 pub use operator_cloud::{
+    AdmissionOutcome, OperatorCommandAdmission,
     OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
     OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
     session_routing_id,

@@ -465,6 +465,7 @@ pub fn spawn_drain_loop(hub_state_dir: std::path::PathBuf) -> tokio::task::JoinH
             .await
             .unwrap_or_default();
             let relay = MachineRelay::new(transport.clone());
+            let mut bound_roots: Vec<(String, std::path::PathBuf)> = Vec::new();
             for root in roots {
                 let Ok(queue) = SqlitePromptQueueStore::open(&root) else {
                     continue;
@@ -473,7 +474,9 @@ pub fn spawn_drain_loop(hub_state_dir: std::path::PathBuf) -> tokio::task::JoinH
                     continue;
                 }
                 match queue.operator_feed_binding() {
-                    Ok(Some(binding)) if binding.machine_id == principal.machine_id => {}
+                    Ok(Some(binding)) if binding.machine_id == principal.machine_id => {
+                        bound_roots.push((binding.project_id.clone(), root.clone()));
+                    }
                     _ => {
                         // Rows recorded under a binding that was later detached
                         // still drain to their original audience.
@@ -501,6 +504,43 @@ pub fn spawn_drain_loop(hub_state_dir: std::path::PathBuf) -> tokio::task::JoinH
                         return;
                     }
                     Err(error) => tracing::debug!(%error, "operator inbox: drain will retry"),
+                }
+            }
+            // Offline commands for this machine (§10): reserve, verify, admit
+            // once in the bound project, then receipt. Blocking I/O, so it
+            // runs on the blocking pool.
+            let (keys, transport, principal) = (
+                issuer.as_ref().map(|(_, keys)| Arc::clone(keys)),
+                transport.clone(),
+                principal.clone(),
+            );
+            if let Some(keys) = keys {
+                let processed = tokio::task::spawn_blocking(move || {
+                    let queue_for = |project: &str| {
+                        bound_roots
+                            .iter()
+                            .find(|(id, _)| id == project)
+                            .and_then(|(_, root)| SqlitePromptQueueStore::open(root).ok())
+                    };
+                    super::commands::process_commands(&transport, &keys, &principal, &queue_for)
+                })
+                .await;
+                match processed {
+                    Ok(Ok(report)) if report.admitted + report.rejected > 0 => {
+                        tracing::info!(
+                            admitted = report.admitted,
+                            rejected = report.rejected,
+                            "operator inbox: offline commands"
+                        );
+                    }
+                    Ok(Err(DrainError::GrantInvalid(code))) => {
+                        tracing::warn!(%code, "operator inbox: machine grant refused; re-enroll this hub");
+                        return;
+                    }
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "operator inbox: commands will retry")
+                    }
+                    _ => {}
                 }
             }
         }

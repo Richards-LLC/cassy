@@ -273,3 +273,102 @@ fn a_terminal_refusal_parks_the_row_visibly() {
             .is_empty()
     );
 }
+
+fn admission<'a>(
+    command_id: &'a str,
+    digest: &'a str,
+    body: &'a str,
+) -> OperatorCommandAdmission<'a> {
+    OperatorCommandAdmission {
+        command_id,
+        machine_digest: digest,
+        history_event_id: "hist-event-0001-AbCdEfGhIjKl",
+        device_id: "dev-phone",
+        device_label: "Pixel 9",
+        factory_session: "cas-src-quiet hawk ✦",
+        body,
+    }
+}
+
+fn queue_rows(store: &SqlitePromptQueueStore) -> i64 {
+    let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+    conn.query_row("SELECT COUNT(*) FROM prompt_queue", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn an_offline_command_is_admitted_exactly_once() {
+    let (_dir, store) = fixture();
+    store.bind_operator_feed(&binding()).unwrap();
+    let first = store
+        .admit_operator_command(&admission("cmd-1", "sha256:aa", "yes"))
+        .unwrap();
+    let AdmissionOutcome::Admitted {
+        prompt_id,
+        receipt_id,
+    } = first
+    else {
+        panic!("first delivery admits");
+    };
+    // Crash before the receipt upload: the replayed reservation returns the
+    // same admission and receipt, and no second queue row.
+    assert_eq!(
+        store
+            .admit_operator_command(&admission("cmd-1", "sha256:aa", "yes"))
+            .unwrap(),
+        AdmissionOutcome::Existing {
+            prompt_id,
+            receipt_id: receipt_id.clone(),
+            receipt_sent: false
+        }
+    );
+    assert_eq!(
+        store
+            .admit_operator_command(&admission("cmd-1", "sha256:bb", "no"))
+            .unwrap(),
+        AdmissionOutcome::Conflict
+    );
+    assert_eq!(queue_rows(&store), 1);
+    // The same short body under another command ID is a second command.
+    assert!(matches!(
+        store
+            .admit_operator_command(&admission("cmd-2", "sha256:cc", "yes"))
+            .unwrap(),
+        AdmissionOutcome::Admitted { .. }
+    ));
+    assert_eq!(queue_rows(&store), 2);
+
+    let row = store.queued_prompt(prompt_id).unwrap().unwrap();
+    assert_eq!(row.target, "supervisor");
+    assert_eq!(row.factory_session.as_deref(), Some("cas-src-quiet hawk ✦"));
+    let operator = row.operator.expect("verified operator attribution");
+    assert_eq!(operator.device_id, "dev-phone");
+    assert!(operator.verified);
+    // Its account history already exists; no second operator event.
+    assert!(store.operator_delivery_event(prompt_id).unwrap().is_none());
+    assert_eq!(store.operator_cloud_backlog().unwrap().pending, 0);
+    assert_eq!(
+        store.command_history_event(prompt_id).unwrap().as_deref(),
+        Some("hist-event-0001-AbCdEfGhIjKl")
+    );
+
+    assert!(
+        store
+            .mark_command_receipt_sent("cmd-1", Utc::now())
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_command_receipt_sent("cmd-1", Utc::now())
+            .unwrap()
+    );
+    assert!(matches!(
+        store
+            .admit_operator_command(&admission("cmd-1", "sha256:aa", "yes"))
+            .unwrap(),
+        AdmissionOutcome::Existing {
+            receipt_sent: true,
+            ..
+        }
+    ));
+}

@@ -60,6 +60,10 @@ pub struct OperatorTurnMetadata<'a> {
     pub dedupe_key: Option<&'a str>,
     /// Explicit reply confirmation, committed with the reply and its event.
     pub acknowledge_prompt_id: Option<i64>,
+    /// cas-9b7d: the turn already has durable account history under this
+    /// event ID (an offline command's `history_event`, appended by the cloud
+    /// with the command). No second local or cloud event is recorded.
+    pub cloud_history_event_id: Option<&'a str>,
 }
 
 /// Immutable local event. No account is claimed until Phase 2b verifies it.
@@ -237,8 +241,9 @@ impl SqlitePromptQueueStore {
                 metadata.kind, attachments, metadata.dedupe_key],
         )?;
         let id = conn.last_insert_rowid();
-        if turn.target.trim().eq_ignore_ascii_case("operator")
-            || operator.is_some_and(|stamp| stamp.verified)
+        if metadata.cloud_history_event_id.is_none()
+            && (turn.target.trim().eq_ignore_ascii_case("operator")
+                || operator.is_some_and(|stamp| stamp.verified))
         {
             let snapshot = serde_json::to_string(&serde_json::json!({
                 "schema_version": 1, "event_id": event_id, "prompt_id": id,

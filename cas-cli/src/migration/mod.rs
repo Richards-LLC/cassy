@@ -1802,6 +1802,7 @@ mod tests {
             "operator_delivery_outbox",
             "operator_feed_binding",
             "operator_cloud_outbox",
+            "operator_command_admissions",
             "worktrees",
             "code_files",
             "code_symbols",

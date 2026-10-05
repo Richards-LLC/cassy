@@ -1978,6 +1978,11 @@ fn scoped_visual_qa_matches_semantic_identity_but_preserves_rules_cas_f290() {
 #[test]
 fn scoped_visual_qa_does_not_pair_renames_without_identity_cas_f290() {
     let fx = scoped_fixture();
+    assert_ne!(
+        visual_qa_selector(&backlog_finding(TIP, r#"button[aria-label="Open  log"]"#)),
+        visual_qa_selector(&backlog_finding(BASE, r#"button[aria-label="Open log"]"#)),
+        "legacy CSS identity preserves significant quoted spaces",
+    );
     for invalid_bounds in [
         serde_json::Value::Null,
         serde_json::json!({"x":94,"y":32.31,"width":-1,"height":14.38}),

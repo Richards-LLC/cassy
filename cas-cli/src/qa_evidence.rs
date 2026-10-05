@@ -926,13 +926,19 @@ fn visual_qa_finding_context(finding: &serde_json::Value) -> String {
     .to_string()
 }
 
+fn visual_qa_finding_path(finding: &serde_json::Value, field: &str) -> String {
+    // Whitespace inside quoted CSS attribute values is significant.
+    normalize_random_ids(finding.get(field).and_then(serde_json::Value::as_str)
+        .unwrap_or_default())
+}
+
 fn visual_qa_selector(finding: &serde_json::Value) -> String {
-    let selector = visual_qa_finding_text(finding, "selector");
-    normalize_random_ids(&if selector.is_empty() {
-        visual_qa_finding_text(finding, "elementPath")
+    let selector = visual_qa_finding_path(finding, "selector");
+    if selector.is_empty() {
+        visual_qa_finding_path(finding, "elementPath")
     } else {
         selector
-    })
+    }
 }
 
 /// Newer producers may report textBounds or box. Historical canonical clipping
@@ -1007,8 +1013,8 @@ fn visual_qa_findings_match(left: &serde_json::Value, right: &serde_json::Value)
         && visual_qa_same_element(left, right)
         // Overlap findings must identify the same second element too. Legacy
         // reports have its selector, not enough evidence to pair its rename.
-        && normalize_random_ids(&visual_qa_finding_text(left, "otherElementPath"))
-            == normalize_random_ids(&visual_qa_finding_text(right, "otherElementPath"))
+        && visual_qa_finding_path(left, "otherElementPath")
+            == visual_qa_finding_path(right, "otherElementPath")
         && visual_qa_finding_text(left, "otherTextSample")
             == visual_qa_finding_text(right, "otherTextSample")
 }
@@ -1076,7 +1082,7 @@ fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
         "{} | {} | {}",
         visual_qa_finding_context(finding),
         visual_qa_selector(finding),
-        normalize_random_ids(&visual_qa_finding_text(finding, "otherElementPath"))
+        visual_qa_finding_path(finding, "otherElementPath")
     )
 }
 

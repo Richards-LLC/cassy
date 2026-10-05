@@ -2854,6 +2854,91 @@ async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
 /// cas-a622: unsaved work still refuses a recycle, and the refusal names what
 /// to do instead of suggesting a `force=true` that recycling never honours.
 #[tokio::test]
+async fn test_clear_context_refusal_names_requested_action_and_preserves_work_cas_2fe4() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-2fe4")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "reset-worker");
+    let worker_id = register_codex_worker_at(&env, "reset-worker", "session-2fe4", &worker_path);
+    let mut task = Task::new("cas-2fe4-test".into(), "Keep my working task".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("reset-worker".into());
+    env.task_store().add(&task).unwrap();
+    let before = serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap();
+    let worker_before = serde_json::to_value(env.agent_store().get(&worker_id).unwrap()).unwrap();
+    let dirty = worker_path.join("dirty.txt");
+    std::fs::write(&dirty, "work that must survive\n").unwrap();
+
+    for action in ["clear_context", "recycle_worker"] {
+        for force in [None, Some(true)] {
+            let mut req = factory_req(action);
+            req.target = Some("reset-worker".into());
+            req.force = force;
+            let error = env
+                .service
+                .factory_request(Parameters(req))
+                .await
+                .unwrap_err();
+            assert!(
+                error.message.starts_with(action),
+                "{action}: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("only in its worktree"),
+                "{}",
+                error.message
+            );
+            assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+            assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
+            assert_eq!(
+                std::fs::read_to_string(&dirty).unwrap(),
+                "work that must survive\n"
+            );
+            assert_eq!(
+                serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap(),
+                before
+            );
+            assert_eq!(
+                serde_json::to_value(env.agent_store().get(&worker_id).unwrap()).unwrap(),
+                worker_before
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_clear_context_unconfirmed_reset_names_action_without_claiming_success_cas_2fe4() {
+    let (guard, fixture) = clear_context_fixture("reset-claude", "claude", "0");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+    env.agent_store()
+        .register(&Agent::new("test-sup".into(), "supervisor".into()))
+        .unwrap();
+    env.agent_store().register(&fixture.worker).unwrap();
+    let mut req = factory_req("clear_context");
+    req.target = Some(fixture.worker.name.clone());
+    let error = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.starts_with("clear_context:"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("UNCONFIRMED"), "{}", error.message);
+    assert!(
+        error.message.contains("command is still queued"),
+        "{}",
+        error.message
+    );
+    assert_eq!(env.prompt_queue().peek_all(10).unwrap().len(), 1);
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+}
+
+/// cas-a622: unsaved work still refuses a recycle, and the refusal names what
+/// to do instead of suggesting a `force=true` that recycling never honours.
+#[tokio::test]
 async fn test_recycle_worker_refuses_unpushed_commits_without_suggesting_force_cas_a622() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
     let env = FactoryTestEnv::new();

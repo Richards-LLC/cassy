@@ -11,15 +11,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added — Commander cloud operator inbox
 
-- Commander can read and answer supervisors from any enrolled device while the
-  machine is off. Each enrolled browser keeps up to 90 days of conversation
-  history encrypted end to end (HPKE and AES-GCM through the new
+- Commander can read and answer supervisors from any signed-in browser while
+  the machine is off. The cloud keeps up to 90 days of conversation history,
+  encrypted when stored and sent (HPKE and AES-GCM through the new
   `cas-operator-crypto` crate and a byte-identical browser implementation).
-  Replies typed while the machine is offline show "Pending machine" and then
-  "Accepted by machine" once the hub drains them. Undelivered commands expire
-  after 24 hours.
-- An "Operator inbox" link in the conversation list subtitle opens a
-  sign-in-with-code dialog that lists the inbox threads.
+  The cloud holds the keys, so this is not end-to-end encryption, and the
+  sign-in screen says so. A newly signed-in browser, such as a new phone,
+  replays and decrypts that history; a message that can't be opened or
+  verified is never shown, and the thread says how many were withheld.
+- A reply typed while the machine is off is held as a command sealed to the
+  machine's key. It reads "Pending machine" until the machine admits it and
+  "Accepted by machine" after its signed receipt; the same command is resent
+  unchanged after an outage and admitted at most once. Undelivered commands
+  expire after 24 hours.
+- Sign-in is approved by the operator's Petra Stella Cloud account: the
+  "Operator inbox" dialog shows a code to confirm on the cloud, or to approve
+  from an enrolled machine with `cas hub operator approve <code>`.
 - The hub enrolls the machine with the cloud (`cas hub operator enroll`,
   `status`, `approve`, `deny`, `principals`, `revoke-device`,
   `revoke-machine`, `bind`, `detach`, `drain`). The machine key lives in
@@ -28,8 +35,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Every operator-visible turn (MCP reply, mirrored transcript, watchdog notice)
   is written together with an immutable outbox row in one SQLite transaction
   (migration m263 `operator_delivery_outbox`), so a turn can't be stored
-  without its delivery record. A 15-second drain loop sends pending rows; the
-  hub's content-security policy allows only the operator inbox API.
+  without its delivery record. A 15-second drain loop sends pending rows. The
+  hub's content-security policy names exactly the cloud's operator inbox API
+  origin, with no wildcard.
 - The hub verifies the cloud's signed enrollment assertion before marking an
   installation enrolled: `POST /v1/auth/account/challenge` and
   `/v1/auth/account/enrollment` (one-use challenge, 5-minute lifetime, at most
@@ -195,6 +203,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Each worktree's Rust proof builds into its own target directory
   (`scripts/proof_target.py`), and proof logs record the worktree, HEAD and
   target, so another worktree's build output can't produce a false result.
+- Proof and release scratch is removed on every exit path. An owner record,
+  process start-time identity and an inherited lock let TERM, INT and HUP reap
+  child groups before cleanup, and the next start sweeps verified dead owners,
+  including killed ones; paths of unknown origin are kept until
+  `CAS_RELEASE_SCRATCH_MAX_AGE_HOURS` (default 6). The shared assembly cache is
+  evicted whole above `CAS_ASSEMBLY_TARGET_MAX_GIB` (20 GiB) or after
+  `CAS_ASSEMBLY_TARGET_MAX_AGE_DAYS` (7 days). Worker shutdown reclaims the
+  worker's `target/` after copying its logs and test receipts to the task's
+  artifacts. `gc_report` lists reclaimable and retained bytes; scratch
+  `gc_cleanup` needs `force=true` and `dry_run=false`. On one host about
+  9.7 GB of leaked scratch and a 29 GB assembly cache had built up.
 - Merge-queue journeys cap session reattach delays at 10 s, wait for the retry
   and for animations to settle, run Playwright with 6 workers in CI, and
   upload the hidden `.results` traces on failure.

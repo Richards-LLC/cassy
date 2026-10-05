@@ -2285,7 +2285,7 @@ button.chip:disabled { cursor: default; }
   .conversation-header-actions { grid-column: -2 / -1; grid-row: 1; gap: 4px; margin: 0; }
   .conversation-topline .conversation-action { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 10px; font-size: var(--fs-xs); }
   #conversation-raw-output { padding: 0; }
-  #conversation-raw-output .action-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; } /* aria-label keeps the name */
+  #conversation-raw-output .action-label { display: none; } /* aria-label keeps the name */
   /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
   #conversation-interrupt { padding: 0 var(--space-2); }
   #conversation-interrupt .action-icon { display: none; }
@@ -2788,8 +2788,9 @@ button.chip:disabled { cursor: default; }
 @media (prefers-reduced-motion: no-preference) and (max-width: 53rem) {
   .raw-output-drawer[open] { animation-name: raw-output-up; }
 }
-@keyframes raw-output-in { from { transform: translateX(16px); opacity: 0; } to { transform: none; opacity: 1; } }
-@keyframes raw-output-up { from { transform: translateY(16px); opacity: 0; } to { transform: none; opacity: 1; } }
+/* Opacity only: the sheet is pinned to the viewport edge, so a slide would carry it past that edge. */
+@keyframes raw-output-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes raw-output-up { from { opacity: 0; } to { opacity: 1; } }
 @media (forced-colors: active) {
   .raw-output-drawer { border-color: CanvasText; }
   .conversation-topline .conversation-action { border-color: ButtonText; }

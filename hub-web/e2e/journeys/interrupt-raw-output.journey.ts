@@ -158,8 +158,8 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
           const box = (await action.boundingBox())!;
           expect(box.height, "a full-size target").toBeGreaterThanOrEqual(phone ? 44 : 36);
         }
-        // On a phone Raw output shows only its icon; the word is kept for its name.
-        if (phone) expect((await raw.locator(".action-label").boundingBox())!.width, "the word is visually hidden").toBeLessThanOrEqual(1);
+        // On a phone Raw output shows only its icon; aria-label keeps its name.
+        if (phone) await expect(raw.locator(".action-label")).toBeHidden();
         await expect(raw).toHaveAccessibleName("Raw output");
         // The two read apart in either scheme: Interrupt in the critical tone.
         const colours = await Promise.all([interrupt, raw].map((action) => action.evaluate((node) => getComputedStyle(node).color)));

@@ -214,13 +214,9 @@ ensure_release_tag() {
 # scoped release suites do not build that integration test.
 ./scripts/check-release-migration-snapshots.sh
 
-if [ ! -x ".context/zig/zig" ]; then
-    echo "Bootstrapping Zig..."
-    ./scripts/bootstrap-zig.sh
-fi
-export ZIG="$REPO_ROOT/.context/zig/zig"
-export PATH="$REPO_ROOT/.context/zig:$PATH"
-echo "Zig: $(zig version)"
+# shellcheck source=scripts/release-zig.sh
+source "$REPO_ROOT/scripts/release-zig.sh"
+release_zig_environment "$REPO_ROOT"
 
 if "$PUBLISH_TAG"; then
     ensure_release_tag

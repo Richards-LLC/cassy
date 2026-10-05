@@ -21,9 +21,9 @@ def main():
         delegate.write_text('''#!/usr/bin/env python3
 import os, sys
 from pathlib import Path
-expected = ['build', '-p', 'cas', '--release', '--target', 'x86_64-unknown-linux-gnu', '--locked']
-if sorted(sys.argv[1:]) != sorted(expected):
-    print('zigbuild config probe: unexpected delegate command; refusing execution', file=sys.stderr)
+expected = ['build', '--target', 'x86_64-unknown-linux-gnu', '--locked', '--release', '--package', 'cas']
+if sys.argv[1:] != expected:
+    print(f'zigbuild config probe: unexpected delegate argv {sys.argv[1:]!r}; refusing execution', file=sys.stderr)
     sys.exit(2)
 Path(os.environ['CAS_ZIGBUILD_CONFIG_SENTINEL']).write_text('parsed')
 ''')
@@ -34,7 +34,9 @@ Path(os.environ['CAS_ZIGBUILD_CONFIG_SENTINEL']).write_text('parsed')
         # and Cargo home/config environment. No Cargo build process can run.
         try:
             result = subprocess.run(
-                ['cargo-zigbuild', 'zigbuild', '-p', 'cas', '--release',
+                ['bash', '-c', 'source \"$1\"; release_zig_environment \"$2\" || exit $?; shift 2; exec cargo-zigbuild \"$@\"',
+                 'zigbuild-config-probe', str(Path(__file__).with_name('release-zig.sh')),
+                 str(worktree), 'zigbuild', '-p', 'cas', '--release',
                  '--target', 'x86_64-unknown-linux-gnu', '--locked'],
                 cwd=worktree, env=environment, timeout=60, check=False)
         except (OSError, subprocess.TimeoutExpired) as error:

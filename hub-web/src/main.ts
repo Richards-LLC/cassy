@@ -2,6 +2,7 @@ import { openInstallationInventory } from "./installation-inventory";
 import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
+import { statusClass, statusLabel, workerProgress } from "./progress-model";
 import { presentFleetSheet } from "./fleet-sheet";
 import { projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
@@ -4043,7 +4044,8 @@ function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
-  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
+  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -4098,8 +4100,9 @@ function renderStatus(status?: Record<string, unknown>): void {
     row.innerHTML = `<span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description">${escapeHtml(summary.description)}</small>`;
     container.append(row);
   }
-  const agents = (status.agents as any[]) ?? [];
-  const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
+  const agents = ((status.agents as FleetAgent[]) ?? []);
+  const tasks = [...((status.tasks_in_progress as FleetTask[]) ?? []), ...((status.tasks_ready as FleetTask[]) ?? [])];
+  const workers = workerProgress(session?.workers, agents, tasks, session?.supervisor);
   const identifier = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
     span.className = "status-identifier";
@@ -4108,9 +4111,8 @@ function renderStatus(status?: Record<string, unknown>): void {
   };
   const chip = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
-    const state = String(value ?? "").toLowerCase().replaceAll("_", "-");
-    span.className = `status-chip status-chip--${state.replaceAll(/[^a-z0-9-]/g, "") || "unknown"}`;
-    span.textContent = String(value ?? "").replaceAll("_", " ");
+    span.className = `status-chip status-chip--${statusClass(value)}`;
+    span.textContent = statusLabel(value);
     return span;
   };
   const sectionLabel = (text: string, count: number): HTMLParagraphElement => {
@@ -4132,20 +4134,16 @@ function renderStatus(status?: Record<string, unknown>): void {
     else if (undo) container.append(undo);
     container.append(headerControls(document, ops, fleetHeaderPanel));
   }
-  if (agents.length > 0) container.append(sectionLabel("Agents", agents.length));
-  for (const agent of agents) {
+  if (workers.length > 0) container.append(sectionLabel("Workers", workers.length));
+  for (const worker of workers) {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
-    line.append(identifier(agent.name), chip(agent.status));
-    if (agent.current_task) line.append(identifier(agent.current_task));
+    line.append(identifier(worker.name), chip(worker.agent?.status));
     row.append(line);
-    if (ops && agent.name && String(agent.role ?? "").toLowerCase() !== "supervisor") row.append(agentControls(document, ops, agent as FleetAgent));
-    if (agent.latest_activity?.summary) {
-      const activity = document.createElement("p");
-      activity.className = "status-activity";
-      activity.textContent = agent.latest_activity.summary;
-      row.append(activity);
-    }
+    if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
+    const work = document.createElement("p"); work.className = "status-activity";
+    if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
+    work.append(document.createTextNode(worker.work)); row.append(work);
     container.append(row);
   }
   if (tasks.length > 0) container.append(sectionLabel("Tasks", tasks.length));
@@ -4161,7 +4159,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (controls) row.append(controls);
     container.append(row);
   }
-  contextProgress = Boolean(summary) || agents.length > 0 || tasks.length > 0;
+  contextProgress = Boolean(summary) || workers.length > 0 || tasks.length > 0;
   if (!contextProgress) {
     const empty = document.createElement("p");
     empty.className = "status-empty";

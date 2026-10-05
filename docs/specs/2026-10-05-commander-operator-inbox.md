@@ -1,6 +1,8 @@
 # Commander operator inbox: durable delivery across devices
 
-Task: cas-4c78; epic: cas-7ec4. Status: **Phase 1 proposal, awaiting supervisor approval**.
+Task: cas-4c78; epic: cas-7ec4. Status: **Architecture seam accepted; Phase 2a
+approved (local recording/outbox only); Phase 2b held for operator decisions
+and a cloud owner**. Supervisor decisions: #3540158 and #3540204.
 Inspected 2026-10-05: cas-src b86ec0c2e; cloud local checkout
 bd2266fbb34cd6be4cd828cc5e32f562b8f09569 (read-only, not a deployment receipt).
 
@@ -385,6 +387,41 @@ Verification matrix for the eventual delivery:
 | Command | Offline command remains pending; real machine durable admission and receipt after return; replay/crash has one queue row and one observed dispatch, plus an explicit ambiguous-effect case. |
 | Outage/expiry/attachments | Cloud outage preserves local rows/outbox; drain resumes; expired intervals explicit; ciphertext and blobs deleted with receipts; attachments read after hub stop. |
 | Regression | Existing shared history, live fan-out, installation rotation, cause/deadline and direct command journeys remain green. |
+
+## Phase 2a implementation boundary
+
+The local implementation lives in
+`crates/cas-store/src/prompt_queue_store/operator_delivery.rs` with migration
+263. `record_operator_turn` commits the complete row, explicit reply ACK and
+an immutable, frozen snapshot together. Paired-message wrappers, generic
+operator enqueue compatibility, MCP replies, mirror suppression and watchdog
+notices use that recording helper. Identity is a random 128-bit store-owned
+event ID, with a unique prompt-to-event mapping. No old rows are backfilled.
+
+Claims limit event count, total snapshot bytes and lease duration; token and
+expiry checks fence stale completions/retries. A lost storage receipt schedules
+bounded backoff; expired leases can be reclaimed after reopening. Snapshot
+immutability is enforced by SQLite. Automatic prompt retention preserves
+pending local events; an explicit clear atomically purges both local records.
+
+Every Phase 2a event is explicitly **unenrolled**, including events with
+verified operator display/provenance. Snapshots contain local plaintext and
+attachment references, like existing prompt history. No account verifier,
+encryption, ciphertext attachment copy, daemon drain scheduling, remote adapter
+or user-visible cloud delivery state is enabled. The transport is exercised
+only by an in-process fake. A future remote adapter must enforce authenticated
+enrollment, sealing, whole-request deadlines and authenticated receipt binding.
+Enrollment cannot silently repurpose pre-consent events as account history.
+Terminal/control and the existing live/history wire protocol are unchanged.
+
+The written SQLite tests cover failed insertion and failed completion rollback,
+reopen after commit/before drain, lease expiry, stale ACK/retry, ACK loss,
+duplicate drain, independent-connection claims, byte/count limits, frozen
+metadata, retention and adapter dedupe. Existing MCP and watchdog regressions
+also inspect their real handler's frozen event. Migration tests exercise schema
+creation/detection/reconciliation; the migration bootstrap invariant includes
+the new table. These are proof obligations until the supervisor executes them;
+source inspection and syntax parsing do not establish runtime correctness.
 
 Worker evidence uses scoped script/npm checks on clean commits; supervisor
 owns Rust execution and assembly. Do not substitute source inspection for the

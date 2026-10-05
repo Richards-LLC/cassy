@@ -4701,6 +4701,15 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
         assert!(payload.attachments.is_empty());
         assert_eq!(payload.reply_to_session, None, "same-session answer quotes nothing");
+        let local = cas_store::SqlitePromptQueueStore::open(&cas_root).unwrap();
+        let event = local.operator_delivery_event(reply.id).unwrap().unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&event.payload_snapshot).unwrap();
+        assert_eq!(snapshot["prompt"], reply.prompt);
+        assert_eq!(snapshot["recipient_device_id"], "phone-7");
+        assert_eq!(snapshot["kind"], "answer");
+        assert_eq!(snapshot["acknowledge_prompt_id"], commander);
+        assert_eq!(event.audience_state, "unenrolled");
+        assert!(queue.queued_prompt(commander).unwrap().unwrap().acked_at.is_some());
     }
 
     /// cas-e829: an answer belongs to the session it is sent from. A row from

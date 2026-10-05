@@ -9533,6 +9533,12 @@ mod tests {
         );
         let payload: crate::ui::factory::OperatorReplyPayload =
             serde_json::from_str(&operator_rows[0].prompt).unwrap();
+        let local = cas_store::SqlitePromptQueueStore::open(&cas_dir).unwrap();
+        let event = local.operator_delivery_event(operator_rows[0].id).unwrap().unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&event.payload_snapshot).unwrap();
+        assert_eq!(snapshot["prompt"], operator_rows[0].prompt);
+        assert_eq!(snapshot["kind"], "blocker");
+        assert_eq!(event.audience_state, "unenrolled");
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
         assert_eq!(payload.device_id, "*");
         assert_eq!(

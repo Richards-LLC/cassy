@@ -279,9 +279,10 @@ test("HUB-J12 network switch: slow session attach keeps machine connected and se
     await expect(held).toHaveCount(1);
     await clock.advance(1_000);
     await hub.waitFor(() => hub.attaches.length > attaches);
-    await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.");
+    // The sentence is the banner's live words; its Details button sits beside them (cas-2b3a5).
+    await expect(banner.locator(".banner-text")).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.");
     await clock.advance(3_500); // crosses the session's 3 s state deadline
-    await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.");
+    await expect(banner.locator(".banner-text")).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.");
     await expect(banner).toHaveAttribute("data-scope", "session");
     await expect(footer).toHaveText("Connected");
     await expect(page.locator("#message-status")).toHaveText("cas-src on Atlas · Linux is reconnecting. Your message will go out by itself when it's back.");

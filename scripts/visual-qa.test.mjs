@@ -55,7 +55,11 @@ test('reports every planted visual defect and captures a screenshot', async () =
 
   assert.equal(result.status, 'FAIL');
   assert.ok(result.findings.some((finding) => finding.type === 'contrast'));
-  assert.ok(result.findings.some((finding) => finding.type === 'clipped-content'));
+  const clipped = result.findings.find((finding) => finding.type === 'clipped-content');
+  assert.ok(clipped);
+  assert.ok(clipped.textSample, 'renamed elements retain text identity');
+  assert.ok(['x', 'y', 'width', 'height'].every((field) => Number.isFinite(clipped.textBounds[field])));
+  assert.ok(clipped.textBounds.width > 0 && clipped.textBounds.height > 0);
   assert.ok(result.findings.some((finding) => finding.type === 'overlapping-text'));
   assert.ok(result.findings.some((finding) => finding.type === 'invisible-text'));
   assert.ok(result.findings.some((finding) => finding.type === 'truncated-container'));

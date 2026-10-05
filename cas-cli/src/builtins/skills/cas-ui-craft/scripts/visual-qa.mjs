@@ -372,7 +372,10 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       type,
       selector: item?.selector || item?.elementPath || 'document',
       elementPath: item?.elementPath || item?.selector || 'document',
-      textSample: item?.text,
+      // Identity evidence for cross-build comparison, independent of CSS names.
+      // Preserve ancestorBox as well so historical clipping reports still pair.
+      textSample: item?.text || (item?.element ? sample(item.element.textContent || '') : undefined),
+      textBounds: item?.box || (item?.element ? box(item.element.getBoundingClientRect()) : undefined),
       allowlistedBy: item?.element ? allowlistedBy(item.element, type) : [],
       ...details,
     });

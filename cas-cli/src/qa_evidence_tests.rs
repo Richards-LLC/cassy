@@ -1896,6 +1896,17 @@ fn scoped_visual_qa_pairs_exact_cas_a286_renamed_atlas_findings_cas_f290() {
     );
     fx.validate(&fx.notes())
         .expect("same Atlas clipping survives the ancestor class rename");
+    // A fresh producer adds glyph bounds; the old producer has only the
+    // clipping ancestor. Compare the shared ancestorBox, not different kinds.
+    let mut enriched = cas_f290_atlas_finding(TIP, "light", false);
+    enriched["textBounds"] = serde_json::json!({"x":94,"y":31.31,"width":34.5,"height":15});
+    cas_f290_reports(
+        &fx,
+        serde_json::json!([enriched]),
+        serde_json::json!([cas_f290_atlas_finding(BASE, "light", true)]),
+    );
+    fx.validate(&fx.notes())
+        .expect("old and new producers pair shared bounds");
 }
 
 #[test]

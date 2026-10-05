@@ -55,8 +55,12 @@ journey evaluation scores polish for it.
   needs `files.visual_qa_baseline_json`: the same strict script run against a
   local build of the base commit (`git merge-base <target> <head>`) over the
   same pages. Close accepts it when every finding in the delivered build's
-  report also appears in the base report, compared by type, element, page,
-  scheme and viewport, so the delivery added none. The delivered run must
+  report pairs once with a base finding by type, rule/reason, page, render
+  state, scheme and full viewport. Element identity uses role + accessible
+  name when supplied, or matching text + shared bounds within 0.5 CSS pixels.
+  CSS class renames do not add a finding when that identity agrees. Historical
+  reports without identity evidence require matching selectors; keep them
+  fail-closed. The delivered run must
   still be fresh, strict and local. List the base build's findings as
   follow-ups in the ledger; they are not this delivery's defects.
 - `files`: the keys above, with paths relative to the bundle

@@ -351,10 +351,12 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
 /// cas-5c7a closed external ops while the supervisor checkout carried other
 /// Rust work beyond the task's main target. No delivery receipt or lane was
 /// recorded for the chore; its portable external proof is the delivery.
-#[tokio::test]
-async fn no_code_chore_close_ignores_unrelated_scoped_rust_diff_cas_2d27() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (temp, _core) = setup_cas(&mut test_env);
+async fn no_code_scoped_close_fixture(
+    test_env: &mut TestEnvGuard,
+    own_commit: bool,
+    external_ref: Option<&str>,
+) -> (TempDir, String) {
+    let (temp, _core) = setup_cas(test_env);
     let repo = temp.path();
     let cas_dir = repo.join(".cas");
     std::fs::write(
@@ -383,14 +385,19 @@ async fn no_code_chore_close_ignores_unrelated_scoped_rust_diff_cas_2d27() {
     )
     .unwrap();
     proof_boundary_git(repo, &["add", "cas-cli/tests/ops_regression.rs"]);
-    proof_boundary_git(repo, &["commit", "-q", "-m", "test: unrelated epic proof"]);
+    let message = if own_commit {
+        "test(cas-5c7a): actual task delivery"
+    } else {
+        "test: unrelated epic proof"
+    };
+    proof_boundary_git(repo, &["commit", "-q", "-m", message]);
 
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = cas::types::Task::new("cas-5c7a".into(), "Repair cloud identity".into());
     task.status = TaskStatus::InProgress;
     task.task_type = TaskType::Chore;
     task.execution_note = Some("no-code".into());
-    task.external_ref = Some("petra-stella-cloud#82".into());
+    task.external_ref = external_ref.map(str::to_string);
     task.risk = vec![cas::types::TaskRisk::None];
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "project:cas-2d27-fixture".into(),
@@ -406,12 +413,61 @@ async fn no_code_chore_close_ignores_unrelated_scoped_rust_diff_cas_2d27() {
             .await
             .unwrap(),
     );
+    (temp, closed)
+}
+
+#[tokio::test]
+async fn no_code_chore_close_ignores_unrelated_scoped_rust_diff_cas_2d27() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, closed) =
+        no_code_scoped_close_fixture(&mut test_env, false, Some("petra-stella-cloud#82")).await;
     assert!(closed.contains("Closed task:"), "{closed}");
-    let stored = tasks.get(&task.id).unwrap();
+    let stored = open_task_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get("cas-5c7a")
+        .unwrap();
     assert_eq!(stored.status, TaskStatus::Closed);
     assert!(stored.notes.contains("petra-stella-cloud#82"));
     assert!(!stored.notes.contains("SCOPED_PROOF:"));
     assert!(stored.deliverables.factory_branch_anchor.is_none());
+}
+
+#[tokio::test]
+async fn no_code_chore_with_own_rust_commit_keeps_scoped_proof_gate_cas_2d27() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, refused) =
+        no_code_scoped_close_fixture(&mut test_env, true, Some("petra-stella-cloud#82")).await;
+    assert!(
+        refused.contains("scoped proof receipt has base None"),
+        "{refused}"
+    );
+    assert!(refused.contains("--test ops_regression"), "{refused}");
+    assert_eq!(
+        open_task_store(&temp.path().join(".cas"))
+            .unwrap()
+            .get("cas-5c7a")
+            .unwrap()
+            .status,
+        TaskStatus::InProgress
+    );
+}
+
+#[tokio::test]
+async fn no_code_chore_without_portable_external_proof_still_refuses_cas_2d27() {
+    for external_ref in [None, Some("/tmp/host-local-proof")] {
+        let mut test_env = TestEnvGuard::temp_home();
+        let (temp, refused) =
+            no_code_scoped_close_fixture(&mut test_env, false, external_ref).await;
+        assert!(refused.contains("NO-CODE PROOF REQUIRED"), "{refused}");
+        assert_eq!(
+            open_task_store(&temp.path().join(".cas"))
+                .unwrap()
+                .get("cas-5c7a")
+                .unwrap()
+                .status,
+            TaskStatus::InProgress
+        );
+    }
 }
 
 #[tokio::test]

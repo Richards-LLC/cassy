@@ -35,7 +35,22 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
         &artifacts.join(label),
         None,
         process_uses_many,
+        registered_live_owner,
     )
+}
+
+fn registered_live_owner(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
+    let store = crate::store::open_agent_store(cas_root).map_err(io::Error::other)?;
+    let agents = store.list(None).map_err(io::Error::other)?;
+    Ok(agents.iter().any(|agent| {
+        agent
+            .metadata
+            .get("clone_path")
+            .and_then(|path| Path::new(path).canonicalize().ok())
+            .is_some_and(|path| path == worktree)
+            && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent)
+                .is_live()
+    }))
 }
 
 fn retire(
@@ -44,10 +59,15 @@ fn retire(
     artifacts: &Path,
     expected_head: Option<&str>,
     probe: impl Fn(&Path, &Path, &[i32]) -> bool,
+    registry: impl Fn(&Path, &Path) -> io::Result<bool>,
 ) -> io::Result<bool> {
     let worktree = worktree.canonicalize()?;
     let workers = cas_root.join("worktrees").canonicalize()?;
     if worktree.parent() != Some(workers.as_path()) {
+        return Ok(false);
+    }
+    if registry(cas_root, &worktree)? {
+        tracing::warn!(target = %worktree.join("target").display(), "retired target deferred: registered owner is live");
         return Ok(false);
     }
     let Some(repo) = cas_root.parent() else {
@@ -144,7 +164,8 @@ fn retire(
     }
     copy_evidence(&target, &destination)?;
     // Recheck identity/liveness after potentially large evidence copies.
-    if probe(&target, &target, &descriptors)
+    if registry(cas_root, &worktree)?
+        || probe(&target, &target, &descriptors)
         || !list_validated_git_worktrees(repo).iter().any(|tree| {
             tree.path.canonicalize().ok().as_ref() == Some(&worktree)
                 && tree.commit.as_deref() == Some(head)
@@ -307,7 +328,17 @@ mod tests {
     #[test]
     fn retirement_relocates_evidence_and_removes_whole_target_keeps_checkout_cas_72f4() {
         let (_temp, root, worker, artifacts) = fixture();
-        assert!(retire(&root, &worker, &artifacts, None, |_, _, _| false).unwrap());
+        assert!(
+            retire(
+                &root,
+                &worker,
+                &artifacts,
+                None,
+                |_, _, _| false,
+                |_, _| Ok(false)
+            )
+            .unwrap()
+        );
         assert!(!worker.join("target").exists());
         assert_eq!(fs::read_to_string(worker.join("source")).unwrap(), "keep");
         let paths: Vec<_> = WalkDir::new(&artifacts).into_iter().flatten().collect();
@@ -329,16 +360,58 @@ mod tests {
     #[test]
     fn retirement_preserves_live_lane_output_and_failed_evidence_copy_cas_72f4() {
         let (_temp, root, worker, artifacts) = fixture();
+        assert!(
+            !retire(
+                &root,
+                &worker,
+                &artifacts,
+                None,
+                |_, _, _| false,
+                |_, _| Ok(true)
+            )
+            .unwrap()
+        );
+        assert!(worker.join("target/worker-check.log").exists());
         let lane = crate::factory_worker_check::try_lock_lane(&root, &worker)
             .unwrap()
             .unwrap();
-        assert!(!retire(&root, &worker, &artifacts, None, |_, _, _| false).unwrap());
+        assert!(
+            !retire(
+                &root,
+                &worker,
+                &artifacts,
+                None,
+                |_, _, _| false,
+                |_, _| Ok(false)
+            )
+            .unwrap()
+        );
         drop(lane);
-        assert!(!retire(&root, &worker, &artifacts, None, |_, _, _| true).unwrap());
+        assert!(
+            !retire(
+                &root,
+                &worker,
+                &artifacts,
+                None,
+                |_, _, _| true,
+                |_, _| Ok(false)
+            )
+            .unwrap()
+        );
         fs::create_dir_all(&artifacts).unwrap();
         std::os::unix::fs::symlink(worker.join("source"), worker.join("target/unsafe-evidence"))
             .unwrap();
-        assert!(retire(&root, &worker, &artifacts, None, |_, _, _| false).is_err());
+        assert!(
+            retire(
+                &root,
+                &worker,
+                &artifacts,
+                None,
+                |_, _, _| false,
+                |_, _| Ok(false)
+            )
+            .is_err()
+        );
         assert!(worker.join("target/worker-check.log").exists());
     }
 }

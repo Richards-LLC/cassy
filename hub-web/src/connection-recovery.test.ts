@@ -72,6 +72,7 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
     let active = 0, peak = 0, calls = 0;
     const refresh = new CoalescedRefresh(() => { active++; peak = Math.max(peak, active); calls++; return new Promise<void>(resolve => releases.push(() => { active--; resolve(); })); }, () => {});
     const result = refresh.request();
+    await Promise.resolve(); // The lane publishes its shared flight first.
     for (let i = 0; i < 1000; i++) void refresh.request();
     expect(calls).toBe(1);
     releases.shift()!(); await Promise.resolve(); await Promise.resolve();

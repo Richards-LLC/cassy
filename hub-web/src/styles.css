@@ -1084,10 +1084,11 @@ main {
 }
 
 .connection-log header button {
-  width: var(--space-8);
-  min-height: var(--space-8);
+  width: 44px;
+  min-height: 44px;
   padding: 0;
 }
+.connection-log header form { display: block; container-type: normal; overflow: visible; flex: 0 0 auto; padding: 0; margin: 0; }
 
 .connection-log pre {
   max-height: var(--connection-log-max-height);

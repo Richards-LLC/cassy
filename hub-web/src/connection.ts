@@ -273,6 +273,13 @@ export class HubConnectionSupervisor {
   private readonly diagnostics = new ConnectionDiagnostics();
   private connectionGeneration = 0;
   private catalogRequest?: Promise<HubSession[]>;
+  /** Shared SSE/multiplex lane: at most one event-driven catalog start/s. */
+  private readonly eventCatalog = new CoalescedRefresh(async () => {
+    if (!this.desired) return;
+    const stream = this.eventAbort;
+    try { await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)])); }
+    catch (error) { if (stream === this.eventAbort && !stream?.signal.aborted) stream?.abort(error); }
+  }, () => {});
   /**
    * The connection was lost (heartbeats failed, the network went offline, a
    * reconnect failed) since it was last live. Sockets from before the loss may

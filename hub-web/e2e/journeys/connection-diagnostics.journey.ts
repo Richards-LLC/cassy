@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS } from "./world";
 import { HubDouble } from "./hub-double";
@@ -33,6 +34,9 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await expect(page.locator(".connection-log-summary")).toContainText("Next retry in");
     await expect(page.locator(".connection-log-summary")).toContainText("Last successful connection:");
     await expect(page.getByRole("button", { name: "Export safe diagnostics" })).toBeEnabled();
+    const close = page.getByRole("button", { name: "Close connection log" });
+    await expect(close).toBeVisible();
+    expect((await close.boundingBox())!.width).toBeGreaterThanOrEqual(44);
     await expect(page.locator("#connection-log")).toMatchAriaSnapshot(`- dialog "Connection log":
   - paragraph: Evidence ledger
   - heading "Connection log" [level=2]
@@ -49,6 +53,11 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     const report = JSON.parse(json);
     expect(report.transitions.some((row: { cause?: { code: string } }) => row.cause?.code === "network_or_browser_policy_unknown")).toBe(true);
     expect(report.hub.counts[0].request_id).toBe("a1111111-1111-4111-8111-111111111111");
+    // Static capture of the real built dialog and exact dist CSS; interaction
+    // stays in the journey. Scope polish checks away from the app behind it.
+    const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
+    const markup = await page.locator("#connection-log").evaluate(element => element.outerHTML);
+    await writeFile(join(process.env.JOURNEY_RECEIPTS!, "connection-log-snapshot.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Built Commander connection log snapshot</title><style>${css}</style><body>${markup}<script>document.documentElement.dataset.scheme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';const dialog=document.querySelector('dialog');dialog.removeAttribute('open');dialog.showModal();</script></body></html>`);
   });
   for (const width of [1280, 390]) for (const scheme of ["light", "dark"] as const) {
     await journey.stage(`Named evidence at ${width}px ${scheme}`, async () => {

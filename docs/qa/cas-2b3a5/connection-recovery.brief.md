@@ -27,7 +27,8 @@ to cas-5e53. Pairing exchange/install persistence also belongs to that task;
 this task does not race a partially installed credential against a new timer.
 
 Events continue while one shared catalog request runs; a burst requests one
-trailing refresh. Sequence/revision dedupe retains 1024 ids, accepts enriched
+trailing refresh. SSE and multiplex share that lane, with at least 1s between
+event-driven request starts (heartbeat is independently every 5s). Sequence/revision dedupe retains 1024 ids, accepts enriched
 revisions, and resets for the hub process epoch. Explicit replay boundaries
 prevent a retained-history replay from appearing as a live gap. Retention loss
 refreshes current state; it cannot recover expired history. SSE broadcast lag

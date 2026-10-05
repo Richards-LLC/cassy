@@ -288,6 +288,7 @@ fn skew_from(date: Option<&str>) -> Option<i64> {
 /// request finish; that is safe because every machine mutation is idempotent
 /// by its client-chosen ID (append by `event_id`, reserve by command, receipt
 /// by `receipt_id`).
+#[derive(Clone)]
 pub struct MachineTransport {
     inner: Arc<TransportInner>,
 }

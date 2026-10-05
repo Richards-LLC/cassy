@@ -19,6 +19,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 pub mod assertion;
+pub mod commands;
+pub mod drain;
 pub mod jws;
 pub mod machine;
 mod wire;

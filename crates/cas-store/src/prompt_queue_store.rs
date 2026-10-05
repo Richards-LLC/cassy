@@ -17,6 +17,13 @@ mod device_receipts;
 pub use device_receipts::OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS;
 use crate::{Result, StoreError};
 
+mod operator_cloud;
+pub use operator_cloud::{
+    AdmissionOutcome, OperatorCommandAdmission,
+    OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
+    OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
+    session_routing_id,
+};
 mod operator_delivery;
 pub use operator_delivery::{
     OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OperatorDeliveryClaim, OperatorDeliveryEvent,
@@ -3182,6 +3189,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
             conn.execute_batch(PROMPT_QUEUE_SESSION_HISTORY_INDEX)?;
             for statement in OPERATOR_DELIVERY_SCHEMA_STATEMENTS {
+                conn.execute_batch(statement)?;
+            }
+            for statement in OPERATOR_CLOUD_SCHEMA_STATEMENTS {
                 conn.execute_batch(statement)?;
             }
             Ok(())

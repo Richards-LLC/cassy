@@ -1704,6 +1704,11 @@ fn serve_foreground_logged(
             }
         });
 
+        // cas-9b7d: upload bound projects' operator messages to the account
+        // inbox, independent of viewer presence. Idle until enrolled.
+        let operator_inbox_task =
+            crate::hub::operator_inbox::drain::spawn_drain_loop(paths.root().to_path_buf());
+
         lock.set_phase("running")?;
         let result = if let Some(proxy_listener) = tailscale_listener {
             serve_with_trusted_tls_proxy(listener, state, proxy_listener).await
@@ -1711,6 +1716,7 @@ fn serve_foreground_logged(
             serve_with_bounded_connection_drain(listener, router(state)).await
         };
         event_task.abort();
+        operator_inbox_task.abort();
         if let Some(task) = attention_task {
             task.abort();
         }

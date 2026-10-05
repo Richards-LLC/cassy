@@ -181,9 +181,9 @@ pub fn validate_control_bind(addr: SocketAddr, transport: TransportSecurity) -> 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Public health keeps its two-key readiness contract. Installation capability
+// discovery requires an invitation commitment at /v1/auth/pairing/protocol.
 pub struct HealthResponse {
-    #[serde(default)]
-    pub installation_protocol: u32,
     pub schema_version: u32,
     pub ready: bool,
 }
@@ -191,7 +191,6 @@ pub struct HealthResponse {
 impl HealthResponse {
     pub fn ready() -> Self {
         Self {
-            installation_protocol: 1,
             schema_version: HUB_SCHEMA_VERSION,
             ready: true,
         }

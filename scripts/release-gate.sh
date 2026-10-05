@@ -1359,14 +1359,25 @@ check_builtin_doc_hygiene() {
     python3 scripts/check-builtin-contract-phrases.py
 }
 
-check_ci_script_tests() {
+check_ci_script_tests() (
     # This is the queue's script-only preflight, not a Cargo test target.
+    # Nested gate self-tests own their receipts and synchronization. Otherwise
+    # they truncate this row's timing.tsv and append synthetic failed rows.
+    # Keep the outer gate's controls intact by scrubbing only this subshell.
+    local key
+    while IFS= read -r key; do
+        case "$key" in
+            CAS_RELEASE_GATE_*|CAS_RELEASE_ARTIFACTS_ROOT|CAS_RELEASE_RECEIPTS_RUN_DIR|VERIFIED_TEST_COUNT_FILE|VERIFIED_TEST_LOG)
+                unset "$key"
+                ;;
+        esac
+    done < <(compgen -e)
     # Also discard inherited make modes: -n/-t/-i can manufacture a PASS.
     env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID -u CAS_SESSION_ID -u CAS_ROOT \
         -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKELEVEL \
         make -C cas-cli test-ci-tiers
-}
+)
 
 check_working_tree() {
     local untracked

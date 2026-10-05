@@ -315,6 +315,28 @@ class ReceiptTests(unittest.TestCase):
                 self.save()
                 self.assertIsNone(proof.matching(self.root, self.expected))
 
+    def test_row_timing_rejects_a_nested_failed_self_test_row(self):
+        logs = self.root / "row-logs"
+        logs.mkdir()
+        real_run = proof.subprocess.run
+
+        def gate(command, **kwargs):
+            if command[0] == "git":
+                return real_run(command, **kwargs)
+            rows = Path(kwargs["env"]["CAS_RELEASE_GATE_LOG_DIR"])
+            rows.mkdir()
+            (rows / "ci-script-tests.log").write_text("self-tests passed\n")
+            (rows / "timing.tsv").write_text(
+                "row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n"
+                "hub-web-tests\tstart\tend\t1\t1\t0\t1\tsynthetic\n"
+                "ci-script-tests\tstart\tend\t2\t1\t0\t0\touter\n")
+            kwargs["stdout"].write("PASS ci-script-tests script fixtures\n")
+            return proof.subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(proof.subprocess, "run", side_effect=gate):
+            with self.assertRaisesRegex(ValueError, "invalid timing.tsv"):
+                proof.run_row(self.root, "ci-script-tests", {}, logs)
+
     def run_producer(self, failure=None, serial=False, deny_test=False):
         self.path.unlink()
         scratch = tempfile.TemporaryDirectory()

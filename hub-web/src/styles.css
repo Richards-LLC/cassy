@@ -1050,7 +1050,7 @@ main {
 }
 
 /* == Unit 5: connection evidence ledger == */
-.connection-log {
+.connection-log, .connection-log[open] {
   width: min(var(--dialog-width), calc(100vw - var(--space-6)));
   max-height: calc(100dvh - var(--space-6));
   overflow: auto;

@@ -706,7 +706,12 @@ stay intact; only dead owned bases' `suite.tar.zst`, `extract`, `tmp`,
 `RELEASE_SCRATCH_STATUS_JSON`; scratch `gc_cleanup` requires both `force=true`
 and `dry_run=false`. Reports never create locks or owner records.
 
-`CAS_RELEASE_SCRATCH_MAX_AGE_HOURS` defaults to 6. The shared assembly cache is
+Verified dead owners are swept on the next start, including fresh SIGKILL
+leftovers; age only protects unknown provenance. A surviving descendant's
+inherited flock defers cleanup even after its parent exits. The guardian owns
+Bash temporary directories too, so an EXIT trap cannot outrun child teardown.
+`CAS_RELEASE_SCRATCH_MAX_AGE_HOURS` defaults to 6 for unknown paths.
+The shared assembly cache is
 exclusively leased and evicted whole before or after a proof above
 `CAS_ASSEMBLY_TARGET_MAX_GIB` (20 GiB), or after
 `CAS_ASSEMBLY_TARGET_MAX_AGE_DAYS` (7 days). Receipts record cache decisions.
@@ -720,8 +725,9 @@ python3 scripts/release_scratch.py --repo "$PWD" \
 ```
 
 On soundwave, opaque `systemd --user` evidence makes adoption refuse. The
-supervisor must remove the reported legacy 29 GB cache by hand in a quiet
-window, after confirming no Cargo process is running and no cache lease is held.
+supervisor must remove the reported legacy cache by hand in a quiet window,
+after confirming no Cargo process is running and no cache lease is held. It was
+29 GB at discovery; use the inventory receipt for its current byte count.
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
 Lane compile previews carry provenance and a lifetime owner lock. Explicit

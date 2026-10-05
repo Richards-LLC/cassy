@@ -44,7 +44,7 @@ def process_identity(pid):
             raise ProcessLookupError(pid)
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         return boot + ":" + fields[19]
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, check=True)
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], env=dict(os.environ, LC_ALL="C"), capture_output=True, text=True, check=True)
     if not result.stdout.strip():
         raise ProcessLookupError(pid)
     return result.stdout.strip()
@@ -240,12 +240,37 @@ def inherited_leases(env=None):
     return descriptors
 
 
+def finish_lease(resource):
+    """Drop our own open-file description before testing for surviving heirs."""
+    if resource.finished:
+        return not resource.deferred
+    resource.finished = True
+    if CURRENT is not None:
+        with CURRENT.lock:
+            CURRENT.leases.discard(resource.lock.fileno())
+    lease_path = resource.lease_path
+    resource.lock.close()
+    resource.lock = open_lock(lease_path, create=False)
+    try:
+        fcntl.flock(resource.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        resource.deferred = True
+        resource.lock.close()
+        print(json.dumps({"scratch_retained": str(resource.path),
+                          "retained_bytes": size(resource.path),
+                          "reason": "surviving descendant holds inherited lifetime lease"}), file=sys.stderr)
+        return False
+
+
 class OwnedDirectory:
     def __init__(self, prefix, parent):
         # Pending graceful signals may arrive as soon as masking is lifted.
         # Register a fallback cleanup with the enclosing scope first.
         with defer_signals():
             self.path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+            self.lease_path = self.path / LOCK
+            self.finished = self.deferred = False
             try:
                 self.lock = open_lock(self.path / LOCK, create=True)
                 fcntl.flock(self.lock, fcntl.LOCK_EX)
@@ -269,12 +294,15 @@ class OwnedDirectory:
         try:
             if CURRENT is not None:
                 CURRENT.stop()  # Reap before clone/base finally-cleanup unwinds.
+            if not finish_lease(self):
+                return
             if self.path.exists():
                 shutil.rmtree(self.path)
         finally:
             if CURRENT is not None:
                 with CURRENT.lock:
-                    CURRENT.leases.discard(self.lock.fileno())
+                    if not self.lock.closed:
+                        CURRENT.leases.discard(self.lock.fileno())
                     CURRENT.directories.discard(self)
             self.lock.close()
 
@@ -457,8 +485,8 @@ def sweep(repo, base, clean=False, env=None):
                        "reclaimed_bytes": 0, "retained_bytes": 0, "reclaimable": False,
                        "reason": "recent", "removed": False, "retained_base": False}
                 try:
-                    if stat.st_mtime <= cutoff:
-                        owner = read_owner(path)
+                    owner = read_owner(path)
+                    if owner is not None or stat.st_mtime <= cutoff:
                         with admitted(path, owner, clean):
                             keep_base = registered(path, protected)
                             # Partial reclamation requires CAS provenance. A registered
@@ -467,7 +495,7 @@ def sweep(repo, base, clean=False, env=None):
                                            if (path / name).exists() and not (path / name).is_symlink()]
                                           if keep_base and owner else ([] if keep_base else [path]))
                             row["retained_base"] = keep_base
-                            row["reason"] = "registered worktree retained; regenerable siblings only" if keep_base else "dead owner past age bound"
+                            row["reason"] = "registered worktree retained; regenerable siblings only" if keep_base else ("dead verified owner" if owner else "unknown provenance past age bound")
                             for candidate in candidates:
                                 if any(contains(candidate.resolve(), tree) for tree in protected):
                                     continue
@@ -504,6 +532,8 @@ class BoundedCache:
         self.repo = repo
         self.events = []
         self.managed = False
+        self.finished = self.deferred = False
+        self.lease_path = self.path.with_name(self.path.name + ".lock")
 
     def inventory(self, clean=False, adopt=False):
         row = {"path": str(self.path), "bytes": 0, "reclaimed_bytes": 0,
@@ -589,7 +619,8 @@ class BoundedCache:
     def release(self):
         if CURRENT is not None:
             with CURRENT.lock:
-                CURRENT.leases.discard(self.lock.fileno())
+                if not self.lock.closed:
+                    CURRENT.leases.discard(self.lock.fileno())
                 CURRENT.caches.discard(self)
         self.lock.close()
 
@@ -599,6 +630,12 @@ class BoundedCache:
         try:
             if CURRENT is not None:
                 CURRENT.stop()
+            if not finish_lease(self):
+                used = size(self.path)
+                self.events.append({"path": str(self.path), "bytes": used,
+                                    "retained_bytes": used, "reclaimed_bytes": 0,
+                                    "reason": "surviving descendant holds cache lease"})
+                return
             self.inventory(clean=True)
             if self.path.exists() and self.managed:
                 (self.path / ".cas-last-used").touch()
@@ -641,30 +678,32 @@ def select_cache(path):
 
 def guard(command, repo, base):
     sweep(repo, base, clean=True)
-    with ChildScope() as scope, OwnedDirectory("cas-release-gate.", tempfile.gettempdir()) as owner_dir:
-        try:
-            env = dict(os.environ, CAS_RELEASE_GATE_SCRATCH_RUN_DIR=str(owner_dir))
-            # Pass the lease through exec: surviving descendants keep scratch
-            # protected even if the guardian itself receives SIGKILL.
-            return scope.run(command, env=env, pass_fds=tuple(scope.leases)).returncode
-        finally:
-            scope.stop()
-            path_list = owner_dir / "paths"
-            if path_list.exists():
-                for line in reversed(path_list.read_text().splitlines()):
-                    path = Path(json.loads(line))
-                    owner = read_owner(path) if path.exists() and not path.is_symlink() else None
-                    current = read_owner(owner_dir)
-                    if not owner or owner["pid"] != current["pid"] or owner["start"] != current["start"] or owner["lease"] != str(owner_dir / LOCK):
-                        continue  # Poisoned or replaced registry entries are not deletion authority.
-                    # Exact registered paths, not globbing across other runs.
-                    remap = path / "workspace-remap"
-                    if remap.exists():
-                        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(remap)],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if path.exists() and not path.is_symlink():
-                        shutil.rmtree(path)
-                subprocess.run(["git", "-C", str(repo), "worktree", "prune"], check=True)
+    with ChildScope() as scope:
+        lease = OwnedDirectory("cas-release-gate.", tempfile.gettempdir())
+        with lease as owner_dir:
+            try:
+                env = dict(os.environ, CAS_RELEASE_GATE_SCRATCH_RUN_DIR=str(owner_dir))
+                return scope.run(command, env=env).returncode
+            finally:
+                scope.stop()
+                # Escaped descendants retaining the lease preserve all their
+                # paths. Cleanup never outruns even a detached surviving heir.
+                if finish_lease(lease):
+                    path_list = owner_dir / "paths"
+                    if path_list.exists():
+                        for line in reversed(path_list.read_text().splitlines()):
+                            path = Path(json.loads(line))
+                            owner = read_owner(path) if path.exists() and not path.is_symlink() else None
+                            current = read_owner(owner_dir)
+                            if not owner or owner["pid"] != current["pid"] or owner["start"] != current["start"] or owner["lease"] != str(owner_dir / LOCK):
+                                continue
+                            remap = path / "workspace-remap"
+                            if remap.exists():
+                                subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(remap)],
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            if path.exists() and not path.is_symlink():
+                                shutil.rmtree(path)
+                        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], check=True)
 
 
 def main():

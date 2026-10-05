@@ -89,7 +89,7 @@ class ScratchTests(unittest.TestCase):
         abandoned = Path(ready.read_text())
         process.kill()
         process.communicate(timeout=5)
-        self.old(abandoned)
+        # Fresh SIGKILL debris is eligible immediately; no artificial ageing.
         with scratch.OwnedDirectory('base.', self.parent) as live:
             self.old(live)
             result = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
@@ -115,15 +115,45 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
             directory = Path(info['directory'])
             parent.kill()
             parent.wait(timeout=5)  # Child still owns inherited stderr and lease.
-            self.old(directory)
             result = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
             self.assertTrue(directory.exists(), result)
             os.kill(child_pid, signal.SIGTERM)
             parent.communicate(timeout=5)
             child_pid = None
-            self.old(directory)
             result = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
             self.assertFalse(directory.exists(), result)
+        finally:
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_normal_parent_exit_retains_escaped_lease_holder_until_child_exit(self):
+        ready = self.root / 'escaped-ready'
+        program = r'''import importlib.util,subprocess,sys,json
+from pathlib import Path
+s=importlib.util.spec_from_file_location('s',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory:
+    child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],start_new_session=True,pass_fds=tuple(scope.leases))
+    Path(sys.argv[3]).write_text(json.dumps({'pid':child.pid,'directory':str(directory)}))
+'''
+        parent = self.spawn([sys.executable, '-c', program, scratch.__file__, str(self.parent), str(ready)])
+        child_pid = None
+        try:
+            self.wait_until(ready.exists)
+            info = json.loads(ready.read_text())
+            child_pid = info['pid']
+            parent.wait(timeout=5)
+            directory = Path(info['directory'])
+            self.assertTrue(directory.exists(), 'live inherited lease path was removed')
+            report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+            self.assertTrue(directory.exists(), report)
+            os.kill(child_pid, signal.SIGTERM)
+            parent.communicate(timeout=5)
+            child_pid = None
+            report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+            self.assertFalse(directory.exists(), report)
         finally:
             if child_pid is not None:
                 try:

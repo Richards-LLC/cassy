@@ -13,6 +13,7 @@ import fcntl
 import fnmatch
 import hashlib
 import json
+import importlib.util
 import math
 import os
 from pathlib import Path
@@ -504,6 +505,18 @@ def admit_phase(env, execution, phase, compile_phase=False):
 
 
 def run_contexts(root, clone, env, log_dir, clone_target, execution):
+    # Worker suites and proofs use one host/user budget across worktrees and
+    # clones. This is independent of the link-specific admission pool.
+    spec = importlib.util.spec_from_file_location("host_memory", Path(__file__).with_name("host_memory.py"))
+    host = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(host)
+    wait = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS") or 600
+    poll = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 1
+    with host.admission("proof", env, memory_budget, wait, poll) as (admitted_env, _):
+        return _run_contexts(root, clone, admitted_env, log_dir, clone_target, execution)
+
+
+def _run_contexts(root, clone, env, log_dir, clone_target, execution):
     # Builds and script fixtures have independent checkouts/targets/logs. Test
     # groups only constrain one nextest process, and host ports/hub processes
     # are not all globally locked: serialize consumers after script admission.

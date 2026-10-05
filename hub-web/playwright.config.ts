@@ -25,6 +25,7 @@ export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
   outputDir: process.env.JOURNEY_OUTPUT ?? "./e2e/.results",
+  workers: 1, // Host admission serializes suites; bound browser workers within each suite.
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   // cas-4ce5/cas-84a2: the merge queue runs on the factory host's self-hosted

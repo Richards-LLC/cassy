@@ -15,6 +15,66 @@ pub fn handle_pre_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
+    // Admission must compose with the original command's permission decision.
+    // Shell wrapping can hide a write from a parser, so it is never a substitute
+    // for evaluating the unwrapped command through every existing guard.
+    let mut output = handle_pre_tool_use_inner(input, cas_root)?;
+    if !worker_suite_rewrite_allowed(&output) {
+        return Ok(output);
+    }
+    if crate::harness_policy::is_factory_agent(input)
+        && crate::harness_policy::is_worker(input)
+        && input.tool_name.as_deref() == Some("Bash")
+        && let Some(command) = input.tool_input.as_ref().and_then(|value| value.get("command"))
+            .and_then(|value| value.as_str()).filter(|command| worker_suite_command(command, 0))
+    {
+        if let Some(helper) = worker_suite_helper(&input.cwd) {
+            let rewritten = format!("python3 {} -- bash -c {}",
+                shell_quote_path(&helper), shell_quote_path(Path::new(command)));
+            let mut updated = input.tool_input.clone().unwrap_or_default();
+            updated["command"] = serde_json::Value::String(rewritten);
+            let mut rewritten_input = input.clone();
+            rewritten_input.tool_input = Some(updated.clone());
+            let rewritten_output = handle_pre_tool_use_inner(&rewritten_input, cas_root)?;
+            if !worker_suite_rewrite_allowed(&rewritten_output) {
+                return Ok(rewritten_output);
+            }
+            // Preserve the original allow/context; the helper cannot replace a
+            // deny from either guard pass. Codex needs allow plus updatedInput.
+            output.rewrite_pre_tool_input(updated);
+        } else {
+            let warning = "Worker browser/JS suite has no scripts/worker-memory.py in this checkout; shared host memory admission is unavailable. Use an admitted checkout for suites sharing the assembly host.";
+            output.system_message = Some(match output.system_message {
+                Some(message) => format!("{message}\n{warning}"),
+                None => warning.to_string(),
+            });
+        }
+    }
+    Ok(output)
+}
+
+fn worker_suite_rewrite_allowed(output: &HookOutput) -> bool {
+    use cas_core::hooks::types::HookSpecificOutput;
+    match output.hook_specific_output.as_ref() {
+        Some(HookSpecificOutput::PreToolUse { permission_decision: Some(decision), .. }) => decision == "allow",
+        // The captured Codex schema represents an ordinary allow by no body.
+        None => cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("codex")),
+        _ => false,
+    }
+}
+
+fn worker_suite_helper(cwd: &str) -> Option<std::path::PathBuf> {
+    Path::new(cwd).ancestors()
+        .map(|root| root.join("scripts/worker-memory.py"))
+        .find(|path| path.is_file())
+}
+
+fn handle_pre_tool_use_inner(
+    input: &HookInput,
+    cas_root: Option<&Path>,
+) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
         None => return Ok(HookOutput::empty()),
@@ -1123,6 +1183,108 @@ pub fn handle_pre_tool_use(
 
     // No rule matched, no protection triggered - let Claude ask the user
     Ok(HookOutput::empty())
+}
+
+/// Inspect actual executable positions; prose and quoted arguments are not
+/// executions. Shell payloads and common wrappers retain the same admission.
+fn worker_suite_command(command: &str, depth: usize) -> bool {
+    if depth > 4 { return false; }
+    for words in shell_statement_words(command) {
+        let Some(mut index) = executable_word_index(&words) else { continue; };
+        while index < words.len() {
+            let name = shell_word_basename(&words[index]);
+            let args = &words[index + 1..];
+            match name {
+                "python3" | "python" if args.first().is_some_and(|arg| {
+                    shell_word_basename(arg) == "worker-memory.py"
+                }) && args.get(1).is_some_and(|arg| arg == "--") => break,
+                "npm" | "pnpm" | "yarn" | "bun" => {
+                    let args = suite_runner_args(args);
+                    if args.first().is_some_and(|arg| matches!(arg.as_str(), "exec" | "x" | "dlx")) {
+                        if worker_suite_command(&suite_runner_args(&args[1..]).iter().map(|arg| shell_quote_path(Path::new(arg))).collect::<Vec<_>>().join(" "), depth + 1) {
+                            return true;
+                        }
+                    } else {
+                        let script = if args.first().is_some_and(|arg| matches!(arg.as_str(), "run" | "run-script")) {
+                            args.get(1)
+                        } else {
+                            args.first()
+                        };
+                        if script.is_some_and(|script| worker_suite_script(script)) { return true; }
+                    }
+                    break;
+                }
+                "npx" => {
+                    let args = suite_runner_args(args);
+                    if worker_suite_command(&args.iter().map(|arg| shell_quote_path(Path::new(arg))).collect::<Vec<_>>().join(" "), depth + 1) {
+                        return true;
+                    }
+                    break;
+                }
+                "playwright" if args.first().is_some_and(|arg| arg == "test") => return true,
+                "vitest" if !args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h"))
+                    && !args.first().is_some_and(|arg| matches!(arg.as_str(), "list" | "init")) => return true,
+                "vite" if args.first().is_some_and(|arg| arg == "build") => return true,
+                "journey-eval.sh" => return true,
+                "tsc" if !args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h" | "--showConfig")) => return true,
+                "node" | "nodejs" => {
+                    // Inline JS and arbitrary scripts can read credentials or
+                    // print text. Only known suite entry points imply admission.
+                    if let Some(script) = args.first() {
+                        let base = shell_word_basename(script);
+                        let runner = match base {
+                            "vitest.mjs" => Some("vitest"),
+                            "cli.js" if script.split('/').any(|part| matches!(part, "playwright" | "playwright-core" | "@playwright")) => Some("playwright"),
+                            "run-verified-tests.mjs" if args.get(1).is_some_and(|arg| matches!(arg.as_str(), "vitest" | "playwright")) => return true,
+                            "visual-qa.mjs" => return true,
+                            _ => None,
+                        };
+                        if let Some(runner @ ("playwright" | "vitest")) = runner {
+                            let command = std::iter::once(runner.to_string()).chain(args[1..].iter().map(|arg| shell_quote_path(Path::new(arg)))).collect::<Vec<_>>().join(" ");
+                            if worker_suite_command(&command, depth + 1) { return true; }
+                        }
+                    }
+                    break;
+                }
+                "sh" | "bash" | "zsh" | "dash" => {
+                    if let Some(script) = args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
+                        .and_then(|flag| args.get(flag + 1)) {
+                        if worker_suite_command(script, depth + 1) { return true; }
+                    } else if args.first().is_some_and(|arg| shell_word_basename(arg) == "journey-eval.sh") {
+                        return true;
+                    }
+                    break;
+                }
+                "nohup" | "setsid" | "exec" | "time" => index += 1,
+                "nice" | "timeout" => {
+                    index += 1;
+                    while index < words.len() && words[index].starts_with('-') {
+                        if words[index] == "-n" || words[index] == "-s" || words[index] == "-k" { index += 1; }
+                        index += 1;
+                    }
+                    if name == "timeout" { index += 1; }
+                }
+                _ => break,
+            }
+        }
+    }
+    false
+}
+
+/// Skip package-manager options before its subcommand/runner, including
+/// options whose next argument is a package or working directory.
+fn suite_runner_args(mut args: &[String]) -> &[String] {
+    while let Some(arg) = args.first().filter(|arg| arg.starts_with('-')) {
+        let takes_value = matches!(arg.as_str(), "--prefix" | "--cwd" | "--dir" | "-C" | "-w" | "--workspace" | "-p" | "--package" | "--cache" | "--registry");
+        args = &args[1..];
+        if takes_value && !args.is_empty() { args = &args[1..]; }
+    }
+    args
+}
+
+fn worker_suite_script(script: &str) -> bool {
+    matches!(script, "test" | "build" | "typecheck" | "journeys" | "visual-qa")
+        || script.starts_with("test:") || script.starts_with("journeys:")
 }
 
 /// Accept a literal check/targeted nextest plus a simple log/background suffix, never compound
@@ -3928,6 +4090,36 @@ mod workspace_contract_tests {
     use crate::test_support::TestEnvGuard;
 
     #[cfg(unix)]
+    #[test]
+    fn worker_suites_require_admission_without_matching_prose_or_reentering_wrapper() {
+        for command in [
+            "npm test", "cd hub-web && npx playwright test", "env X=1 pnpm build",
+            "nice -n 10 vitest run", "timeout 30 npm run build", "bash -lc 'npm run journeys'",
+            "node node_modules/vitest/vitest.mjs run", "bash scripts/journey-eval.sh /artifacts", "scripts/journey-eval.sh /artifacts",
+            "npm --prefix hub-web run typecheck", "npx --yes --package=playwright playwright test",
+            "npm exec --yes --package=playwright -- playwright test", "pnpm exec vitest run",
+            "yarn test", "bun run test:unit", "pnpm dlx playwright test", "tsc --noEmit", "vite build",
+            "node node_modules/@playwright/test/cli.js test", "node scripts/run-verified-tests.mjs playwright --project=journeys",
+            "node scripts/visual-qa.mjs", "npx vitest src/connection.test.ts",
+        ] {
+            assert!(worker_suite_command(command, 0), "{command}");
+        }
+        for command in [
+            "git commit -m 'npm test'", "echo 'playwright test'", "node --check scripts/qa.mjs",
+            "python3 /repo/scripts/worker-memory.py -- bash -c 'npm test'",
+            "node -e 'require(\"fs\").readFileSync(\"secrets.json\")'",
+            "node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'",
+            "node /artifacts/qa.mjs", "node scripts/generate-tokens.mjs", "node --version",
+            "npm --version", "npm config get registry", "npm view playwright version", "npm ls",
+            "npm run tokens", "npx --yes prettier --check .", "pnpm list", "yarn info vitest",
+            "bun --version", "playwright --version", "playwright install", "vitest list",
+            "vitest --help", "vite --version", "tsc --showConfig", "tsc --help",
+        ] {
+            assert!(!worker_suite_command(command, 0), "{command}");
+        }
+        assert!(worker_suite_command("python3 /repo/scripts/worker-memory.py -- npm test; npm run build", 0));
+    }
+
     #[test]
     fn harness_file_memory_canonicalizes_home_without_allowing_symlink_escape() {
         use std::os::unix::fs::symlink;

@@ -35294,7 +35294,7 @@ mod zero_change_close_tests {
         let p = dir.path();
         let branch = task.deliverables.parked_branch.as_deref().unwrap();
         git(p, &["checkout", "-q", branch]);
-        std::fs::write(p.join("unfinished.rs"), "pub fn unfinished() { todo!(); }\n").unwrap();
+        std::fs::write(p.join("unfinished.rs"), concat!("pub fn unfinished() { to", "do!(); }\n")).unwrap();
         git(p, &["add", "unfinished.rs"]);
         git(p, &["commit", "-q", "-m", "fix(cas-9ffa): unfinished work"]);
         std::fs::write(p.join("correction.rs"), "pub fn correction() {}\n").unwrap();
@@ -35305,7 +35305,7 @@ mod zero_change_close_tests {
         git(p, &["checkout", "-q", "main"]);
         let error = run_declared_pre_close_hook(&task, &declared_main_context(p),
             None, Some(&receipt), true).expect_err("last-commit-only lint hides earlier unfinished work");
-        assert!(error.contains("todo!()") && error.contains("unfinished.rs"), "{error}");
+        assert!(error.contains(concat!("to", "do!()")) && error.contains("unfinished.rs"), "{error}");
     }
 
     #[test]

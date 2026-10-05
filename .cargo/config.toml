@@ -1,8 +1,14 @@
 # CAS Build Configuration
 
-# Cargo uses the host's available cores by default. Factory workers receive
-# their separate CARGO_BUILD_JOBS throttle from cas-pty; assembly splits its
-# two concurrent producers with CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS.
+# Nested .cas worktrees inherit Cargo configs from their parent checkout.
+# Explicitly reset jobs so a stale parent jobs=16 cap cannot survive here.
+# Soundwave i9-13900K (32 threads), cold build on b86ec0c2e: jobs=16 took
+# 107.0s (deps 53.5s, cas lib 52.8s); jobs=32 took 94.6s (deps 44.0s,
+# cas lib 49.9s), 1156% CPU, max RSS 5.3 GB: 12% faster overall, 18% on deps.
+# CARGO_BUILD_JOBS still overrides this default: cas-pty throttles workers,
+# and assembly splits producers with CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS.
+[build]
+jobs = "default"
 
 # Prefer setting RUSTC_WRAPPER=sccache in shell/CI so builds don't hard-fail
 # on machines without sccache installed.

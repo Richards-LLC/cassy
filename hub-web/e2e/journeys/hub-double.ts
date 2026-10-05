@@ -377,6 +377,8 @@ export class HubDouble {
     if (kind === "recycle_worker" && agent) { agent.generation += 1; agent.status = "active"; }
     if (kind === "shutdown_workers" && agent) {
       fleet.agents.splice(fleet.agents.indexOf(agent), 1);
+      const catalog = this.options.machines.find(machine => machine.id === machineId)?.sessions.find(item => item.name === session);
+      if (catalog) catalog.workers = catalog.workers.filter(name => name !== agent.name);
       // Its work in progress goes back to ready; a delivery waiting for merge stays where it is.
       for (const owned of fleet.tasks) if (owned.assignee === agent.name && owned.status === "in_progress") { owned.assignee = null; owned.status = "open"; }
     }
@@ -392,6 +394,8 @@ export class HubDouble {
     if (kind === "spawn_workers") {
       const names = fleet.spawnNames.splice(0, Number(body.op.count ?? 1));
       for (const name of names) fleet.agents.push({ name, status: "active", generation: 1, current_task: (body.op.task_id as string | undefined) ?? null });
+      const catalog = this.options.machines.find(machine => machine.id === machineId)?.sessions.find(item => item.name === session);
+      if (catalog) catalog.workers = [...new Set([...catalog.workers, ...names])];
       outcome = { kind, workers: names };
     }
     if (kind === "request_merge") outcome = { kind, notification_id: 7000 + this.operations.length };

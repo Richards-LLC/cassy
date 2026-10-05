@@ -385,10 +385,10 @@ export function sessionReconnectingBanner(sessionLabel: string, machineLabel: st
     : `Reconnecting to ${sessionLabel}… ${machineLabel} is still connected.`;
 }
 
-/** What a session-only drop means for the controls, without restating the drop. */
-export const SESSION_OUTAGE_CONTROLS_RETURN = "Control and interrupts return when it's back.";
+/** What a session-only drop means for Interrupt and Raw output (cas-0546), without restating the drop. */
+export const SESSION_OUTAGE_CONTROLS_RETURN = "Interrupt and raw output return when it's back.";
 
-/** Why the session's controls wait while only its own link reconnects (cas-d15c). */
+/** Why the conversation's actions wait while only its own link reconnects (cas-d15c). */
 export function sessionOutageControlsReason(sessionLabel: string): string {
   return `Reconnecting to ${sessionLabel}. ${SESSION_OUTAGE_CONTROLS_RETURN}`;
 }
@@ -399,30 +399,20 @@ export function outageRefusal(machineLabel: string): string {
 }
 
 /**
- * cas-7b31 (journey F2): why the controls wait while the pairing is refused.
- * Nothing reconnects or comes back by itself; re-pairing is the step.
+ * cas-7b31 (journey F2): why the conversation's actions wait while the
+ * pairing is refused. Nothing reconnects or comes back by itself; re-pairing
+ * is the step.
  */
-export const PAIRING_CONTROLS_RETURN = "Re-pair it to take control and interrupt.";
+export const PAIRING_CONTROLS_RETURN = "Re-pair it to interrupt the supervisor or read its raw output.";
 
 export function pairingControlsReason(machineLabel: string): string {
   return `${pairingLostBanner(machineLabel)} ${PAIRING_CONTROLS_RETURN}`;
 }
 
-/** What a machine outage means for the controls, without restating the outage. */
-export const OUTAGE_CONTROLS_RETURN = "Control and interrupts return when it reconnects.";
+/** What a machine outage means for the conversation's actions, without restating the outage. */
+export const OUTAGE_CONTROLS_RETURN = "Interrupt and raw output return when it reconnects.";
 
-/** Why Take control, Release control and Interrupt are unavailable during an outage. */
+/** Why Interrupt and Raw output are unavailable during an outage (cas-0546). */
 export function outageControlsReason(machineLabel: string): string {
   return `Lost connection to ${machineLabel}. ${OUTAGE_CONTROLS_RETURN}`;
-}
-
-/**
- * The visible line under the header while an outage disables its controls
- * (journey F42). The banner already says what was lost, in one live
- * announcement, so the line says only what it means for the controls. The
- * controls' own descriptions keep the whole sentence, since they are read
- * on their own.
- */
-export function outageControlsNotice(kind: "machine" | "session" | "pairing"): string {
-  return kind === "pairing" ? PAIRING_CONTROLS_RETURN : kind === "session" ? SESSION_OUTAGE_CONTROLS_RETURN : OUTAGE_CONTROLS_RETURN;
 }

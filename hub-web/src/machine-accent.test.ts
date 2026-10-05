@@ -220,35 +220,22 @@ describe("Pebble accent contrast", () => {
   });
 });
 
-/** Composite a token over an opaque hex surface: hex passes through, rgba() is alpha-blended. */
-const flatten = (value: string, surface: string) => {
-  const rgba = value.match(/^rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)$/);
-  if (!rgba) return value;
-  const alpha = Number(rgba[4]);
-  return "#" + [1, 2, 3].map((i) => Math.round(Number(rgba[i]) * alpha + channel(surface, 2 * i - 1) * 255 * (1 - alpha)).toString(16).padStart(2, "0")).join("").toUpperCase();
-};
-
 describe("selected and active states carry a >= 3:1 edge cue (WCAG 1.4.11, cas-08b4)", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 
-  it("draws an accent edge bar on the selected conversation row and the active machine", () => {
+  it("draws an accent edge bar on the selected conversation row", () => {
     expect(css).toContain('.conversation-row[aria-current="true"]::before { content: ""; position: absolute;');
     expect(css).toMatch(/\.conversation-row\[aria-current="true"\]::before \{[^}]*background: var\(--accent\);/);
-    expect(css).toMatch(/\.machine-icon\.active::before \{[^}]*background: var\(--accent\);/);
     expect(css).toContain(".conversation-row { position: relative;");
   });
 
   it("measures each bar at or above 3:1 against the fill it sits on, in light and dark", () => {
     for (const scheme of ["light", "dark"]) {
-      const root = scope(`html[data-scheme="${scheme}"]`);
       for (let index = 0; index < MACHINE_ACCENT_COUNT; index += 1) {
         const machine = scope(`html[data-scheme="${scheme}"] .machine-accent-${index}`);
         const ratio = contrast(machine["--accent"], machine["--accent-soft"]);
         expect(ratio, `${scheme} · selected-row bar · accent ${index}: ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
       }
-      const active = flatten(root["--bg-active"], root["--bg-panel"]);
-      const ratio = contrast(root["--accent"], active);
-      expect(ratio, `${scheme} · active machine bar: ${root["--accent"]} on ${active} = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
     }
   });
 });
@@ -328,8 +315,8 @@ describe("dark tints instead of floods (P9, cas-9616)", () => {
 describe("one thread surface and one selection colour (journey F11)", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 
-  it("keeps the main-action button styles off the primary terminal pane", () => {
-    // pane-layout marks the primary pane .primary; an unscoped .primary:hover
+  it("keeps the main-action button styles off anything but controls", () => {
+    // The old primary pane carried .primary; an unscoped .primary:hover
     // brightened the whole thread from cream to white under the pointer.
     expect(css).not.toMatch(/^\.primary[\s:{,]/m);
     expect(css).toContain(":where(button, a).primary {");

@@ -2,7 +2,7 @@ import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { replaceMachineConnection } from "./connection-lifecycle";
 import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
-import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS, headerConnectionChip } from "./connection-state";
+import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
 import type { StoredMachine } from "./types";
 
@@ -274,19 +274,17 @@ describe("Commander live connection lifecycle", () => {
     expect(old.snapshot().phase).toBe("idle");
   });
 
-  it("shows Checking before the first heartbeat, then the measured round trip", async () => {
+  it("has no latency before the first heartbeat, then the measured round trip", async () => {
     const hub = transport();
     const connection = supervisor(await storedMachine("latency"));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(connection.snapshot().latencyMs).toBeUndefined();
-    expect(headerConnectionChip(connection.snapshot(), "live", "Live")).toEqual({ state: "checking", text: "Checking…" });
     const boundary = hub.requests.length;
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     await vi.waitFor(() => expect(connection.snapshot().latencyMs).toBe(41));
     expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
-    expect(headerConnectionChip(connection.snapshot(), "live", "Live")).toEqual({ state: "live", text: "41ms" });
   });
 
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {
@@ -318,6 +316,5 @@ describe("Commander live connection lifecycle", () => {
     socket.receive({ channel: "health", pong: ping });
     // 17ms for the catalog refresh plus 24ms for the socket's answer.
     expect(connection.snapshot().latencyMs).toBe(41);
-    expect(headerConnectionChip(connection.snapshot(), "live", "Live")).toEqual({ state: "live", text: "41ms" });
   });
 });

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  composerFocusWinner,
   planSupervisorSend,
   sendsOnEnter,
   supervisorMessage,
@@ -167,19 +166,5 @@ describe("Cassy Cloud supervisor send plan", () => {
       if (plan.kind !== "blocked") continue;
       expect(plan.reason.length).toBeGreaterThan(20);
     }
-  });
-});
-
-describe("Cassy Cloud focus arbitration after a render", () => {
-  it("keeps the composer focused when both the terminal and the composer were focused", () => {
-    // Every render replaces app.innerHTML, so both restores race. A terminal
-    // that wins swallows the rest of the sentence being typed.
-    expect(composerFocusWinner({ composerWasFocused: true, terminalWasFocused: true })).toBe("composer");
-  });
-
-  it("restores the terminal only when the composer was not being typed into", () => {
-    expect(composerFocusWinner({ composerWasFocused: false, terminalWasFocused: true })).toBe("terminal");
-    expect(composerFocusWinner({ composerWasFocused: true, terminalWasFocused: false })).toBe("composer");
-    expect(composerFocusWinner({ composerWasFocused: false, terminalWasFocused: false })).toBe("none");
   });
 });

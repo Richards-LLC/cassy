@@ -50,9 +50,9 @@ export function applePlatform(nav: PlatformNavigator | undefined = typeof naviga
 }
 
 /** The palette shortcut as this keyboard prints it: every surface that names
- * it (the list search, the Terminal view button, the Appearance tooltip)
- * reads the same one, so a Linux browser never shows ⌘K beside Ctrl K
- * (journey F16). Both chords work everywhere. */
+ * it (the list search, the Appearance tooltip) reads the same one, so a Linux
+ * browser never shows ⌘K beside Ctrl K (journey F16). Both chords work
+ * everywhere. */
 export function paletteShortcutLabel(apple = applePlatform()): string {
   return apple ? "⌘K" : "Ctrl K";
 }
@@ -84,18 +84,18 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  * The one header above the thread (cas-5b2d): the Pebble thead — machine
  * monogram in the accent, the project bold as the title (once: journey F7),
  * machine · supervisor codename · connection in mono beneath (same order as a
- * list row) — with the cas-11b01 back link and
- * Terminal view control on the row above it. Elevated with --lift-head; the
- * thread view itself renders no header inside this shell.
+ * list row) — with the cas-11b01 back link and the conversation's actions
+ * (Raw output, Interrupt: cas-0546) on the row above it. Elevated with
+ * --lift-head; the thread view itself renders no header inside this shell.
  *
  * On phone the two rows fold into one (cas-1776): the back link shows only its
- * "‹" glyph and the Terminal control only "Terminal"; each button's aria-label
- * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
- * every width. The project ellipsises (its title carries it whole) and the
- * host line ellipsises its machine · codename part while the connection state
- * after it stays visible. The machine name has priority over the generated
- * codename (cas-766c): its OS word goes first, then the codename ellipsises
- * and, with no room left, steps aside (fitMachineLine).
+ * "‹" glyph and Raw output only its icon; each button's aria-label keeps its
+ * accessible name ("‹ Conversations", "Raw output") the same at every width,
+ * and Interrupt keeps its word. The project ellipsises (its title carries it
+ * whole) and the host line ellipsises its machine · codename part while the
+ * connection state after it stays visible. The machine name has priority over
+ * the generated codename (cas-766c): its OS word goes first, then the codename
+ * ellipsises and, with no room left, steps aside (fitMachineLine).
  */
 /** A machine label's trailing operating-system word, as in "Studio Mac · macOS". */
 const HOST_OS = /^(.*\S)(\s·\s(?:macOS|Linux|Windows|FreeBSD|OpenBSD|NetBSD|ChromeOS|iPadOS|iOS|Android|Ubuntu|Debian|Fedora|WSL))$/i;
@@ -122,13 +122,31 @@ export function conversationAttentionBadge(count: number): { hidden: boolean; te
   return { hidden: count < 1, text: String(count), label: `Attention: ${count} item${count === 1 ? "" : "s"} for this session` };
 }
 
+const RAW_OUTPUT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>';
+const INTERRUPT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+
+/** "Interrupt the cas-src supervisor": the project's supervisor, never the codename (journey F20). */
+export function interruptLabel(project: string | undefined): string {
+  return project ? `Interrupt the ${project} supervisor` : "Interrupt the supervisor";
+}
+
+/**
+ * The conversation's own actions (cas-0546): Raw output opens a read-only
+ * drawer over the supervisor's terminal text, Interrupt stops what the
+ * supervisor is doing. Each names its reason when it is unavailable, in a
+ * description beside it (applyActionAvailability), instead of disappearing.
+ */
+export function conversationActionsMarkup(project: string | undefined): string {
+  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><span id="conversation-raw-output-reason" class="sr-only"></span><span id="conversation-interrupt-reason" class="sr-only"></span></span>`;
+}
+
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
   // No project named: the codename is the title and the host line names only the machine (cas-1ca1 F03).
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button><button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
@@ -153,7 +171,6 @@ const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentCol
  */
 export function dressComposer(composer: HTMLElement, supervisor?: string, project?: string): void {
   composer.classList.add("conversation-composer");
-  composer.querySelector(".operator-thread")?.remove();
   const label = composer.querySelector("label"); if (label) label.textContent = "Your message";
   composer.querySelector("h2")?.classList.add("sr-only");
   const input = composer.querySelector("textarea");
@@ -334,7 +351,6 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   </div>`;
 }
 
-/** Rehouse existing owned regions; retain terminal surfaces and composer APIs. */
 /** The room a machine name keeps on a "machine · codename" line, in ch (cas-766c). */
 export const MACHINE_KEEP_CH = 16;
 /** The least a codename shows before it steps aside for the machine, in ch (cas-766c). */
@@ -387,54 +403,93 @@ export function fitConversationHost(root: ParentNode): void {
 }
 
 /**
- * cas-6b75 (journey F03): while the connection is lost, the header's
- * Terminal view says why it can't open, as the empty card stops offering it,
- * instead of offering a terminal it cannot reach. It stays focusable; a
- * click or Enter says the reason.
+ * cas-0546: a conversation action that can't run says why instead of
+ * vanishing. It stays focusable and in the tab order, is marked
+ * aria-disabled, and is described by its reason, which a click or Enter also
+ * shows; with no reason it is an ordinary button again.
  */
-export function applyTerminalOffer(root: Document, reason: string | undefined): void {
-  const button = root.querySelector<HTMLButtonElement>("#conversation-terminal");
+export function applyActionAvailability(button: HTMLButtonElement | null, note: HTMLElement | null, reason: string | undefined): void {
   if (!button) return;
-  const note = root.querySelector<HTMLElement>("#conversation-terminal-reason");
   if (reason === undefined) {
     if (button.dataset.disabledReason === undefined) return;
     delete button.dataset.disabledReason;
     button.removeAttribute("aria-disabled");
     button.removeAttribute("aria-describedby");
     button.removeAttribute("title");
-    note?.remove();
+    if (note) note.textContent = "";
     return;
   }
-  if (button.dataset.disabledReason === reason && note) return;
+  if (button.dataset.disabledReason === reason && note?.textContent === reason) return;
   button.dataset.disabledReason = reason;
   button.setAttribute("aria-disabled", "true");
-  button.setAttribute("aria-describedby", "conversation-terminal-reason");
+  if (note?.id) button.setAttribute("aria-describedby", note.id);
   button.title = reason;
-  const line = note ?? root.createElement("span");
-  line.id = "conversation-terminal-reason"; line.className = "sr-only";
-  if (line.textContent !== reason) line.textContent = reason;
-  if (!note) button.after(line);
+  if (note && note.textContent !== reason) note.textContent = reason;
 }
 
-export function arrangeConversationShell(app: HTMLElement, model: ConversationShellModel): void {
-  const old = app.querySelector<HTMLElement>(".shell");
-  if (!old) return;
-  const grid = old.querySelector<HTMLElement>("#pane-grid");
-  const composer = old.querySelector<HTMLElement>(".message");
-  const status = old.querySelector<HTMLElement>("#status-view");
-  const attention = old.querySelector<HTMLElement>("#attention-panel");
-  const template = app.ownerDocument.createElement("template"); template.innerHTML = conversationShellMarkup(model);
-  const shell = template.content.firstElementChild!;
-  if (model.selected) {
-    if (grid) shell.querySelector("#conversation-pane-slot")!.append(grid);
-    if (composer) {
-      dressComposer(composer, model.supervisor, projectTitle(model.projectDir));
-      shell.querySelector("#conversation-composer-slot")!.append(composer);
-    }
-    if (status) shell.querySelector("#conversation-status-slot")!.append(status);
-    if (attention) { attention.hidden = false; shell.querySelector("#conversation-attention-slot")!.append(attention); }
+/**
+ * The host a session's pane surface lives in (cas-0546). The surface is
+ * internal plumbing — it keeps the attach, the keyframes and the raw text the
+ * Raw output drawer reads — so its host renders nothing: hidden (display
+ * none, also pinned in styles.css), inert, and out of the accessibility tree.
+ */
+export function createPaneHost(document: Document): HTMLElement {
+  const host = document.createElement("div");
+  host.className = "pane-host";
+  host.hidden = true;
+  host.setAttribute("inert", "");
+  host.setAttribute("aria-hidden", "true");
+  return host;
+}
+
+/**
+ * The open thread's stage inside the grid: a visible slot the conversation
+ * mounts in, and beside it — never around it — the hidden pane host. Existing
+ * nodes are kept, so a heartbeat never remounts the thread.
+ */
+export function ensureConversationStage(grid: HTMLElement): { slot: HTMLElement; host: HTMLElement } {
+  let slot = grid.querySelector<HTMLElement>(":scope > .conversation-thread-slot");
+  let host = grid.querySelector<HTMLElement>(":scope > .pane-host");
+  if (!slot || !host) {
+    slot = grid.ownerDocument.createElement("div");
+    slot.className = "conversation-mount conversation-thread-slot";
+    host = createPaneHost(grid.ownerDocument);
+    grid.replaceChildren(slot, host);
   }
-  old.replaceWith(shell);
+  return { slot, host };
+}
+
+/** The Raw output drawer's contents; main.ts mounts the transcript in its body. */
+export function rawOutputDrawerMarkup(): string {
+  return '<header class="raw-output-header"><div class="raw-output-heading"><h2 id="raw-output-title">Raw output</h2><p id="raw-output-subject" class="raw-output-subject"></p></div><button type="button" class="raw-output-close" aria-label="Close raw output">×</button></header><div class="raw-output-body"><p class="raw-output-empty" role="status" hidden>The supervisor\'s output appears here once the conversation is connected.</p></div>';
+}
+
+/** The regions an open conversation's shell holds; each keeps the id its updater reads. */
+export interface ConversationRegions {
+  readonly grid?: HTMLElement;
+  readonly composer?: HTMLElement;
+  readonly status?: HTMLElement;
+  readonly attention?: HTMLElement;
+}
+
+/**
+ * The conversation shell, with an open thread's regions in their slots: the
+ * grid (thread, connection card and hidden pane host), the composer, the
+ * session's status and its attention.
+ */
+export function arrangeConversationShell(document: Document, model: ConversationShellModel, regions: ConversationRegions = {}): HTMLElement {
+  const template = document.createElement("template"); template.innerHTML = conversationShellMarkup(model);
+  const shell = template.content.firstElementChild as HTMLElement;
+  if (model.selected) {
+    if (regions.grid) shell.querySelector("#conversation-pane-slot")!.append(regions.grid);
+    if (regions.composer) {
+      dressComposer(regions.composer, model.supervisor, projectTitle(model.projectDir));
+      shell.querySelector("#conversation-composer-slot")!.append(regions.composer);
+    }
+    if (regions.status) shell.querySelector("#conversation-status-slot")!.append(regions.status);
+    if (regions.attention) { regions.attention.hidden = false; shell.querySelector("#conversation-attention-slot")!.append(regions.attention); }
+  }
+  return shell;
 }
 
 /* ---- Phone keyboard (cas-edc9) --------------------------------------------

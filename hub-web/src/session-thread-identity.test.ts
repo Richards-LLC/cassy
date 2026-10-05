@@ -5,8 +5,8 @@
 // sessions are grouped with the most recent one marked.
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
-import { applyTerminalOffer, conversationHeaderMarkup } from "./conversation-shell";
-import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy, terminalOfferReason } from "./conversation-view";
+import { applyActionAvailability, conversationHeaderMarkup } from "./conversation-shell";
+import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
 import { activityTime, ConversationList, conversationRowMarkup, ENDED_NOTICE_MS, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
@@ -79,30 +79,27 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(section.querySelector<HTMLDetailsElement>("details.earlier-session")!.open).toBe(true);
   });
 
-  it("says a session has not written yet, shows its last activity, and offers its Terminal view", () => {
+  it("says a session has not written yet and shows its last activity", () => {
     const history = new ConversationHistory();
     history.currentSession = "gabber-studio-calm-puma-34";
     history.hydrateReply(said(2, "Old answer", "gabber-studio-noble-cheetah-84", at(29, 21, 41)));
-    const openTerminal = vi.fn();
     const now = Date.now();
     let activity: { at: number; label?: string; terminal?: boolean } = { at: now - 3 * 60_000, label: "supervisor → wild-shark-68" };
-    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", project: "gabber-studio", header: false, activity: () => activity, openTerminal });
+    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", project: "gabber-studio", header: false, activity: () => activity });
     document.body.replaceChildren(view.element);
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     expect(empty.hidden).toBe(false);
     expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
-    // cas-010f: no product codename and no queue jargon; one line holds the
-    // activity and Terminal view, named as the header names it.
+    // cas-010f: no product codename and no queue jargon; one quiet line
+    // holds the activity, and nothing offers a terminal (cas-0546).
     expect(empty.textContent).not.toContain("Commander");
     expect(empty.textContent).not.toContain("→");
     expect(empty.querySelector(".empty-activity")?.textContent).toBe("Last active 3m ago");
-    expect(empty.querySelector(".empty-foot")?.textContent).toBe("Last active 3m ago·Terminal view");
-    const terminal = empty.querySelector<HTMLButtonElement>(".empty-foot > button.empty-terminal")!;
-    expect(terminal.textContent).toBe("Terminal view");
-    terminal.click();
-    expect(openTerminal).toHaveBeenCalledOnce();
-    // Terminal output is the time Terminal view's pane header shows.
+    expect(empty.querySelector(".empty-foot")?.textContent).toBe("Last active 3m ago");
+    expect(empty.querySelector("button")).toBeNull();
+    expect(empty.textContent).not.toMatch(/terminal view/i);
+    // The supervisor's own terminal output, when that is newest.
     activity = { at: now - 60_000, label: "terminal output", terminal: true }; view.update();
     expect(empty.querySelector(".empty-activity")?.textContent).toBe("Terminal output 1m ago");
     // The other session's thread is not shown as this one's: it is the
@@ -117,41 +114,37 @@ describe("session-bound thread history (cas-55a4)", () => {
     const history = new ConversationHistory();
     let connection = "Live";
     let loading = true;
-    const openTerminal = vi.fn();
-    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", machine: "Atlas · Linux", project: "gabber-studio", header: false, connection: () => connection, loadingHistory: () => loading, openTerminal });
+    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", machine: "Atlas · Linux", project: "gabber-studio", header: false, connection: () => connection, loadingHistory: () => loading });
     document.body.replaceChildren(view.element);
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     // Live, page on its way: the loading line, never "No messages".
     expect(empty.dataset.state).toBe("loading");
     expect(empty.textContent).not.toContain("No messages");
-    // Not live and the page cannot come: say why, offer no Terminal view.
+    // Not live and the page cannot come: say why.
     connection = "Needs pairing"; view.update();
     expect(empty.dataset.state).toBe("waiting");
     expect(empty.querySelector(".said")?.textContent).toBe("Atlas · Linux needs pairing again before messages from the gabber-studio supervisor can load.");
     expect(empty.textContent).not.toContain("No messages");
-    expect(empty.querySelector(".empty-terminal")).toBeNull();
     connection = "Live"; loading = false; view.update();
     expect(empty.dataset.state).toBe("empty");
     expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
-    expect(empty.querySelector(".empty-terminal")?.textContent).toBe("Terminal view");
+    expect(empty.querySelector(".empty-terminal")).toBeNull();
     connection = "Reconnecting"; view.update();
     expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
-    expect(empty.querySelector(".empty-terminal")).toBeNull();
     connection = "Degraded"; view.update();
     expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet. The connection is unsteady, so a new one may arrive late.");
-    expect(empty.querySelector(".empty-terminal")).not.toBeNull();
   });
 
   it("words every connection state for the empty thread", () => {
     const base = { project: "cas-src", machine: "Atlas · Linux" };
-    expect(emptyThreadCopy({ ...base, connection: "Live", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet — nothing is waiting on you.", terminal: true });
-    expect(emptyThreadCopy({ ...base, connection: undefined, resolved: true }).terminal).toBe(true);
-    expect(emptyThreadCopy({ ...base, connection: "Needs pairing", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet. Atlas · Linux needs pairing again before new ones can arrive.", terminal: false });
+    expect(emptyThreadCopy({ ...base, connection: "Live", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet — nothing is waiting on you." });
+    expect(emptyThreadCopy({ ...base, connection: undefined, resolved: true }).state).toBe("empty");
+    expect(emptyThreadCopy({ ...base, connection: "Needs pairing", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet. Atlas · Linux needs pairing again before new ones can arrive." });
     expect(emptyThreadCopy({ ...base, connection: "Unreachable · message pending", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. Atlas · Linux can't be reached — anything new will show here once it's back.");
     expect(emptyThreadCopy({ ...base, connection: "Can't reach · retrying", resolved: true }).said).toContain("Reconnecting to Atlas · Linux");
     for (const connection of ["Live", "Degraded", "Connecting", "Idle", undefined]) expect(emptyThreadCopy({ ...base, connection, resolved: false }).state).toBe("loading");
-    expect(emptyThreadCopy({ ...base, connection: "Reconnecting", resolved: false })).toEqual({ state: "waiting", said: "Reconnecting to Atlas · Linux — messages from the cas-src supervisor will load once it's back.", terminal: false });
+    expect(emptyThreadCopy({ ...base, connection: "Reconnecting", resolved: false })).toEqual({ state: "waiting", said: "Reconnecting to Atlas · Linux — messages from the cas-src supervisor will load once it's back." });
     expect(emptyThreadCopy({ ...base, connection: "Unreachable", resolved: false }).said).toBe("Atlas · Linux can't be reached — messages from the cas-src supervisor will load once it's back.");
     expect(emptyThreadCopy({ connection: "Needs pairing", resolved: false }).said).toBe("This machine needs pairing again before messages from this supervisor can load.");
     expect(emptyThreadCopy({ connection: "Reconnecting", resolved: true }).said).toContain("Reconnecting to this machine");
@@ -481,45 +474,36 @@ describe("grouped project sessions (cas-55a4)", () => {
   });
 });
 
-describe("cas-6b75: the header's Terminal view while the connection is lost", () => {
-  it("is offered whenever the empty card would offer it, and says why when it is not", () => {
-    for (const live of [undefined, "Live", "Degraded"]) {
-      expect(terminalOfferReason(live, "Atlas · Linux")).toBeUndefined();
-      expect(emptyThreadCopy({ machine: "Atlas · Linux", connection: live, resolved: true }).terminal).toBe(true);
-    }
-    expect(terminalOfferReason("Reconnecting", "Atlas · Linux")).toBe("Reconnecting to Atlas · Linux — Terminal view opens once it's back.");
-    expect(terminalOfferReason("Needs pairing", "Atlas · Linux")).toBe("Atlas · Linux needs pairing again before Terminal view can open.");
-    expect(terminalOfferReason("Unreachable · message pending", "Atlas · Linux")).toBe("Atlas · Linux can't be reached — Terminal view opens once it's back.");
-    expect(terminalOfferReason("Reconnecting", undefined)).toBe("Reconnecting to this machine — Terminal view opens once it's back.");
-    for (const lost of ["Reconnecting", "Needs pairing", "Unreachable · message pending"]) {
-      expect(emptyThreadCopy({ machine: "Atlas · Linux", connection: lost, resolved: true }).terminal).toBe(false);
-    }
-  });
-
-  it("is still offered on a first connection, which is on its way rather than lost", () => {
-    expect(terminalOfferReason("Connecting", "Atlas · Linux")).toBeUndefined();
-    expect(terminalOfferReason("Idle", "Atlas · Linux")).toBeUndefined();
-  });
-});
-
-describe("cas-6b75: applyTerminalOffer", () => {
-  it("marks the header's Terminal view unavailable with a spoken reason, and restores it", () => {
+describe("cas-0546: the header's Interrupt and Raw output say why they can't run", () => {
+  it("marks an action unavailable with a spoken reason, keeps it focusable, and restores it", () => {
     document.body.innerHTML = conversationHeaderMarkup({ supervisor: "patient-pelican-9", projectDir: "/projects/cas-src", host: "Atlas · Linux", selected: true, loaded: true, paired: true });
-    const button = document.querySelector<HTMLButtonElement>("#conversation-terminal")!;
-    const reason = terminalOfferReason("Reconnecting", "Atlas · Linux")!;
-    applyTerminalOffer(document, reason);
-    applyTerminalOffer(document, reason);
+    const button = document.querySelector<HTMLButtonElement>("#conversation-interrupt")!;
+    const note = document.querySelector<HTMLElement>("#conversation-interrupt-reason")!;
+    const reason = "Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.";
+    applyActionAvailability(button, note, reason);
+    applyActionAvailability(button, note, reason);
     expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.disabled).toBe(false);
     expect(button.dataset.disabledReason).toBe(reason);
     expect(button.title).toBe(reason);
-    expect(document.querySelectorAll("#conversation-terminal-reason")).toHaveLength(1);
     expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(reason);
-    expect(button.getAttribute("aria-label")).toBe("Terminal view");
-    applyTerminalOffer(document, undefined);
+    expect(note.classList.contains("sr-only")).toBe(true);
+    expect(button.getAttribute("aria-label")).toBe("Interrupt the cas-src supervisor");
+    expect(button.textContent).toBe("Interrupt");
+    applyActionAvailability(button, note, undefined);
     expect(button.hasAttribute("aria-disabled")).toBe(false);
     expect(button.hasAttribute("aria-describedby")).toBe(false);
     expect(button.hasAttribute("title")).toBe(false);
     expect(button.dataset.disabledReason).toBeUndefined();
-    expect(document.querySelector("#conversation-terminal-reason")).toBeNull();
+    expect(note.textContent).toBe("");
+  });
+
+  it("offers no Terminal view anywhere in the header", () => {
+    document.body.innerHTML = conversationHeaderMarkup({ supervisor: "patient-pelican-9", projectDir: "/projects/cas-src", host: "Atlas · Linux", selected: true, loaded: true, paired: true });
+    expect(document.querySelector("#conversation-terminal")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/terminal/i);
+    const raw = document.querySelector<HTMLButtonElement>("#conversation-raw-output")!;
+    expect(raw.getAttribute("aria-label")).toBe("Raw output");
+    expect(raw.getAttribute("aria-haspopup")).toBe("dialog");
   });
 });

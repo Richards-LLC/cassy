@@ -31,7 +31,7 @@ async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") 
   const css = await readFile("dist/app.css", "utf8");
   await writeFile(join(qa, `${state}.html`), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body>${html}</body></html>`);
   for (const [name, query, media] of [["forced-colors", "(forced-colors: active)", { forcedColors: "active" }], ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }], ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }]] as const) {
-    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
+    await page.emulateMedia(Object.assign({ forcedColors: null, reducedMotion: null, contrast: null }, media));
     expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
     await page.screenshot({ path: join(qa, `${state}-a11y-${name}.png`) });
   }

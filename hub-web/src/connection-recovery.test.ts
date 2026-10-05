@@ -52,6 +52,7 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
   it("processes a flood without parallel catalog requests or dropping the trailing refresh", async () => {
+    vi.useFakeTimers();
     const releases: (() => void)[] = [];
     let active = 0, peak = 0, calls = 0;
     const refresh = new CoalescedRefresh(() => { active++; peak = Math.max(peak, active); calls++; return new Promise<void>(resolve => releases.push(() => { active--; resolve(); })); }, () => {});
@@ -59,9 +60,19 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
     for (let i = 0; i < 1000; i++) void refresh.request();
     expect(calls).toBe(1);
     releases.shift()!(); await Promise.resolve(); await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1000);
     expect(calls).toBe(2);
     releases.shift()!(); await result;
     expect(peak).toBe(1); expect(calls).toBe(2);
+  });
+  it("caps a sustained event flood to one catalog start per second", async () => {
+    vi.useFakeTimers();
+    const starts: number[] = [];
+    const refresh = new CoalescedRefresh(async () => { starts.push(Date.now()); }, () => {});
+    for (let i = 0; i < 100; i++) { void refresh.request(); await vi.advanceTimersByTimeAsync(10); }
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(starts.length).toBeLessThanOrEqual(3);
+    expect(starts.every((at, i) => i === 0 || at - starts[i - 1]! >= 1000)).toBe(true);
   });
   it("dedupes replay, accepts enrichment revisions, detects gaps and resets on epoch change", () => {
     const cursor = new EventRecovery();

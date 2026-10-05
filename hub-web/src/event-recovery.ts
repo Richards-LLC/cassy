@@ -2,7 +2,8 @@
 export class CoalescedRefresh {
   private running?: Promise<void>;
   private pending = false;
-  constructor(private readonly refresh: () => Promise<unknown>, private readonly failed: (error: unknown) => void) {}
+  private nextStart = 0;
+  constructor(private readonly refresh: () => Promise<unknown>, private readonly failed: (error: unknown) => void, private readonly intervalMs = 1000) {}
   request(): Promise<void> {
     this.pending = true;
     if (!this.running) this.running = this.drain().finally(() => { this.running = undefined; });
@@ -10,7 +11,10 @@ export class CoalescedRefresh {
   }
   private async drain(): Promise<void> {
     do {
+      const wait = this.nextStart - Date.now();
+      if (wait > 0) await new Promise<void>(resolve => setTimeout(resolve, wait));
       this.pending = false;
+      this.nextStart = Date.now() + this.intervalMs;
       try { await this.refresh(); } catch (error) { this.failed(error); }
     } while (this.pending);
   }

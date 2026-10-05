@@ -1001,9 +1001,22 @@ wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
 
-Use `npm test` and `npm run journeys -- <args>` in `hub-web`, or
-`scripts/journey-eval.sh` for journey bundles. These runners refuse successful
-zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
+Workers and independent QA run `npm test`, `npm run typecheck` in `hub-web`,
+and `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected
+journeys at four workers. The wrapper resolves the task's declared target;
+`--affected <base>` binds an explicit base. No browser runs for an empty impact
+selection; it emits an explicit receipt. Caller spec/grep filters are refused.
+
+Factory PreToolUse denies worker/reviewer `--full`, unfiltered Playwright and
+unfiltered journey npm scripts. Named spec or canonical-ID runs remain allowed
+for iteration; a failing spec may be rerun at one worker, retaining the original
+failure. Reuse implementer exact-tip receipts in independent QA and do not
+rerun browsers for doc/ledger-only commits with unchanged evaluated inputs.
+The supervisor runs `scripts/journey-eval.sh <epic-artifact-dir> --full --workers=4`
+once at epic assembly; merge queue runs the full suite again. Receipts fold all
+native parts by actual catalog ID and record full base/head, pass/fail/skip
+counts, Playwright version and the native exit code. Native runners refuse
+successful zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
 when requested. Rust re-exec helpers require the exact child name, one selected
 test, and one passing result; intentional signal/atexit children instead prove
 entry into the test body before their early exit.

@@ -25,7 +25,7 @@ command, the URL, and `npx playwright --version` in the ledger header.
 
 ```bash
 scripts/journeys-for-diff.py <base> <bound_head>   # JSON: id, title, suite, reason
-scripts/journey-eval.sh <ledger-dir> --grep <selected-ID-pattern> --workers=4
+scripts/journey-eval.sh <ledger-dir> --affected <base> --workers=4
 ```
 
 For hub-web source or dist changes, derive selection at the exact bound tip

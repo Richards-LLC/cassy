@@ -35,6 +35,10 @@ pub fn handle_pre_tool_use(
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
+    if let Some(reason) = super::browser_tier_guard::denial(input) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", reason));
+    }
+
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================

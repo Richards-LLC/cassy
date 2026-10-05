@@ -102,6 +102,15 @@ supervisor runs the full suite once on the assembled epic at four workers,
 and the merge queue runs it again. A failure control may rerun the failing
 spec at one worker, retaining the original failure.
 
+Produce it with `scripts/journey-eval.sh <task-artifact-dir>` (default affected,
+four workers), or `--affected <base>`. No arguments resolve the single active
+task and its configured artifact namespace; when assignment is ambiguous,
+provide the delivery artifact directory or `--task <id>`. The producer calls
+the selector itself and owns the native filters. Empty impact writes explicit
+empty `selection_ids` and `results` without a browser run. Full epic proof uses
+`--full --workers=4`, reserved for supervisor/CI. The hook denies factory worker
+and QA full/unfiltered runs.
+
 The receipt uses this shape:
 
 ```json

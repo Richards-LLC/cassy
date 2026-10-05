@@ -178,6 +178,24 @@ print(json.dumps({'journeys': rows}))
         old = next((self.artifacts / 'journey-runs').glob('*/journey-receipt.json'))
         self.assertEqual(json.loads(old.read_text())['suite_exit'], 7)
 
+    def test_writer_recomputes_selection_and_refuses_hand_picked_plan(self):
+        (self.repo / 'hub-web/src').mkdir()
+        (self.repo / 'hub-web/src/ask.ts').write_text('ask')
+        self.git('add', '.')
+        self.git('commit', '-q', '-m', 'ask (cas-fixture)')
+        run = json.loads(self.plan('--affected', self.base).stdout)
+        self.artifacts.mkdir(parents=True)
+        plan_file = self.artifacts / 'plan.json'
+        run['selection_ids'] = []
+        plan_file.write_text(json.dumps(run))
+        output = self.artifacts / 'forged.json'
+        out = subprocess.run(['python3', self.repo / 'scripts/journey-receipt.py', 'write', '--plan', plan_file,
+                              '--report', self.artifacts / 'absent.json', '--suite-exit', '0', '--tool-version', '1.63',
+                              '--output', output], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn('caller IDs cannot substitute', out.stderr)
+        self.assertFalse(output.exists())
+
     def test_no_arguments_resolve_task_and_configured_artifacts(self):
         base = Path(self.temp.name) / 'configured-artifacts'
         (self.repo / '.cas/config.toml').write_text(f'[factory]\nartifacts_root = "{base}"\n')

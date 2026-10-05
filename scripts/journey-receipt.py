@@ -140,6 +140,8 @@ def fold(plan: dict, report: dict | None, suite_exit: int, version: str) -> tupl
     ids = plan['selection_ids']
     rows = {i: {'id': i, 'status': 'PASS', 'passed': 0, 'failed': 0, 'skipped': 0} for i in ids}
     errors = []
+    if not version.strip():
+        errors.append('native tool version absent')
     if ids and report is None:
         errors.append('native Playwright report absent; execution is unproven')
     if report:
@@ -177,6 +179,12 @@ def fold(plan: dict, report: dict | None, suite_exit: int, version: str) -> tupl
 
 def write(args: argparse.Namespace) -> int:
     run = json.loads(args.plan.read_text())
+    repo = Path(run['repo'])
+    if git(repo, 'rev-parse', 'HEAD^{commit}') != run['head_sha']:
+        raise ValueError('checkout advanced during the run; retain execution proof and rebind only unchanged documentation inputs')
+    actual = [r['id'] for r in selection(repo, run['base_sha'], run['head_sha'], run['scope'] == 'full')]
+    if actual != run['selection_ids']:
+        raise ValueError('plan selection differs from journeys-for-diff; caller IDs cannot substitute for affected proof')
     report = json.loads(args.report.read_text()) if args.report.is_file() else None
     receipt, status = fold(run, report, args.suite_exit, args.tool_version)
     args.output.write_text(json.dumps(receipt, indent=2) + '\n')

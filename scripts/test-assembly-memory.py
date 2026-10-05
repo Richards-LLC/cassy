@@ -99,6 +99,27 @@ class GuardTests(unittest.TestCase):
                 self.assertEqual(guard.compile_guard([sys.executable, '-c', program], '{}', self.events, self.root), 0)
         self.assertTrue(result.exists())
 
+    def test_parallel_link_child_inherits_scratch_lease_cas_72f4(self):
+        # The link pool adds its own descriptor without dropping the lifetime
+        # lease protecting scratch from the sweeper while a linker is alive.
+        import fcntl
+        result = self.root / 'link-inherited'
+        with (self.root / 'scratch.lock').open('a+') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            program = ('import os,pathlib;pathlib.Path(' + repr(str(result))
+                       + ').write_text(str(os.fstat(' + str(lease.fileno()) + ').st_ino))')
+            env = dict(self.env, CAS_RELEASE_GATE_SCRATCH_LEASE_FDS=str(lease.fileno()),
+                       CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG=str(self.events))
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(guard, 'LINK_LEASE_ROOT', self.root), \
+                    mock.patch.object(guard.proof, 'memory_snapshot', return_value=self.high):
+                self.assertEqual(guard.link([sys.executable, '-c', program]), 0)
+            self.assertEqual(int(result.read_text()), os.fstat(lease.fileno()).st_ino)
+        completed = [event for event in map(json.loads, self.events.read_text().splitlines())
+                     if event['phase'] == 'link-complete']
+        self.assertEqual(len(completed), 1)
+        self.assertIn('slot_index', completed[0])
+
     def test_signal_during_compile_spawn_reaps_child_cas_72f4(self):
         original = guard.subprocess.Popen
         spawned = []

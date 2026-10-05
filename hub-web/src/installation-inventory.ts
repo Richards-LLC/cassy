@@ -39,7 +39,7 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
   dialog.showModal();
   try {
     const devices = await client.request<InstallationSummary[]>("GET", "/v1/auth/devices");
-    status.textContent = machine.scopes.includes("hub-admin") ? `${devices.length} installations, ${devices.filter((device) => device.account_enrollment?.state === "enrolled").length} in your operator inbox.` : "This browser's access. Viewing other installations requires hub admin permission.";
+    status.textContent = machine.scopes.includes("hub-admin") ? `${devices.length} installations. ${devices.filter((device) => device.account_enrollment?.state === "enrolled").length} in your operator inbox.` : "This browser's access. Viewing other installations requires hub admin permission.";
     devices.sort((a, b) => Number(b.device_id === machine.deviceId) - Number(a.device_id === machine.deviceId));
     for (const device of devices) {
       const row = doc.createElement("section"); row.className = "installation-inventory-row";

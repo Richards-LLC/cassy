@@ -51,6 +51,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the hub, device and session, so two tabs can no longer both send the same
   message. Waiting and uncertain sends survive a reload and are never resent
   automatically.
+- A message sent from two tabs, or across a reload, goes out exactly once: a
+  delivery receipt seen in either tab settles the send in both, and Retry
+  works from either tab, resending under the message's original reference so
+  a late receipt can't produce a second copy or leave Retry stuck.
+- The composer's "will go out by itself" line shows only while a message is
+  actually held, and clears once it is delivered, including when another tab
+  delivered it.
 - A reply counts as delivered to a device only after that browser stores it:
   the browser sends `OperatorReplyPersisted` and the hub records a per-device
   receipt (migration m264 `operator_reply_device_receipts`). Reply captions

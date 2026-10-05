@@ -8,6 +8,7 @@ export interface CauseEvidence {
   closeCode?: number;
   permission?: "denied" | "prompt" | "granted" | "unknown";
   requestId?: string;
+  reason_code?: ConnectionCause;
 }
 export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string }> = {
   browser_offline: { title: "Browser reports offline", action: "Restore this device's network; Commander retries when it returns." },
@@ -41,7 +42,7 @@ export class ConnectionDiagnostics {
   build(version: string): void { if (/^[a-zA-Z0-9.+-]{1,64}$/.test(version)) this.hubBuild = version; }
   record(snapshot: ConnectionSnapshot, generation: number, source = "machine"): void {
     const c = snapshot.cause;
-    const cause: CauseEvidence | undefined = c ? { code: c.code, layer: c.layer, retryable: c.retryable,
+    const cause: CauseEvidence | undefined = c ? { code: c.code, reason_code: c.code, layer: c.layer, retryable: c.retryable,
       status: c.status, closeCode: c.closeCode, permission: c.permission,
       requestId: c.requestId && /^[a-f0-9-]{36}$/.test(c.requestId) ? c.requestId : undefined } : undefined;
     const recovered = snapshot.phase === "live" && !snapshot.degraded && !cause ? this.failed.get(source) : undefined;
@@ -64,7 +65,8 @@ export class ConnectionDiagnostics {
     }) : [];
     const refusals = typeof summary.refusals === "object" && summary.refusals !== null
       ? Object.fromEntries(Object.entries(summary.refusals).filter(([key, value]) => /^(expired|revoked|unknown_credential|scope_mismatch|stale_proof|proof_replay|invalid_proof|other|viewer_lagged)$/.test(key) && typeof value === "number").slice(0, 16)) : {};
-    return { schema_version: 1, client_protocol: 2, client_build: typeof __HUB_BUILD__ === "undefined" ? "unknown" : __HUB_BUILD__, hub_build: this.hubBuild ?? "unknown", browser: { online: online ?? "unknown", local_permission: "unknown" },
+    const permission = [...this.records].reverse().find(row => row.cause?.permission !== undefined)?.cause?.permission ?? "unknown";
+    return { schema_version: 1, client_protocol: 2, client_build: typeof __HUB_BUILD__ === "undefined" ? "unknown" : __HUB_BUILD__, hub_build: this.hubBuild ?? "unknown", browser: { online: online ?? "unknown", local_permission: permission },
       transitions: this.records, hub: { measured: counts.length > 0, counts, refusals },
       limits: { transitions: 64, hub_buckets: 64, bytes: 65_536 },
       uncertainty: "Browser fetch failures do not distinguish DNS, TLS, CORS or local-network policy. A healthy health probe does not prove authenticated routes work." };

@@ -4,7 +4,10 @@ import type { PairingInstallIdentity, Scope, StoredMachine } from "./types";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-interface ExchangeOptions {
+export interface ExchangeOptions {
+  installation?: {operation_id: string; credential: string; device_id: string | null; expected_generation: number; proof: string; previous_proof: string | null};
+  commitPrepared?: () => Promise<void>;
+  abortPrepared?: () => Promise<void>;
   invitation: PendingInvitation;
   controllerOrigin: string;
   legacyHubUrl?: string;
@@ -90,6 +93,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       credentials: "omit",
       signal: options.signal,
       body: JSON.stringify({
+        ...(options.installation ? { installation: options.installation } : {}),
         token: invitation.token,
         hub_id: invitation.hubId,
         controller_origin: options.controllerOrigin,
@@ -127,6 +131,8 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     throw new PairingExchangeError("The paired hub returned invalid credential scopes.");
   }
   const machine: StoredMachine = {
+    credentialGeneration: typeof credential.credential_generation === "number" ? credential.credential_generation : undefined,
+    accountEnrollment: { state: "unenrolled" },
     id: invitation.hubId,
     label: invitation.machineLabel ?? options.machineLabel ?? invitation.hubId.slice(0, 8),
     baseUrl,
@@ -167,6 +173,8 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       ensureCurrent(options);
     }
     ensureCurrent(options);
+    await options.commitPrepared?.();
+    ensureCurrent(options);
     if (!await persist(() => options.activatePersisted(identity, options.signal))) {
       throw new PairingExchangeError("This pairing credential was superseded before installation completed.");
     }
@@ -174,6 +182,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
   } catch (error) {
     if (staged) {
       try {
+        await options.abortPrepared?.();
         await options.rollbackPersisted(identity);
       } catch (cleanupError) {
         throw new PairingCleanupError(cleanupError);

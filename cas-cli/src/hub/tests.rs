@@ -1052,6 +1052,7 @@ async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&PairingExchange {
+                        installation: None,
                         controller_origin: "https://evil.example".into(),
                         ..refused_exchange.clone()
                     })
@@ -1182,6 +1183,7 @@ async fn h2_pair_02_bound_sixth_exchange_is_throttled_without_disclosing_unbound
     assert!(auth.list_devices().unwrap().is_empty());
 
     let unbound_exchange = PairingExchange {
+                        installation: None,
         token: "unknown-pairing-capability".into(),
         ..refused_exchange
     };

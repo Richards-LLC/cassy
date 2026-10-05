@@ -1,13 +1,14 @@
 import type { AttentionItem, PairingInstallIdentity, StoredMachine } from "./types";
 
 const DB_NAME = "cas-commander-v1";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
+      if (!db.objectStoreNames.contains("installations")) db.createObjectStore("installations", { keyPath: "id" });
       if (!db.objectStoreNames.contains("machines")) db.createObjectStore("machines", { keyPath: "id" });
       if (!db.objectStoreNames.contains("attention")) db.createObjectStore("attention", { keyPath: "id" });
     };
@@ -16,7 +17,7 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
-async function transact<T>(storeName: "machines" | "attention", mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>, signal?: AbortSignal): Promise<T> {
+async function transact<T>(storeName: "machines" | "attention" | "installations", mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>, signal?: AbortSignal): Promise<T> {
   const db = await openDatabase();
   if (signal?.aborted) {
     db.close();
@@ -191,7 +192,12 @@ export class MachineCatalog {
   }
 
   put(machine: StoredMachine, signal?: AbortSignal): Promise<void> {
-    return this.backend.update(machine.id, () => machine, signal);
+    return this.backend.update(machine.id, (current) => {
+      const prior = visibleMachine(current);
+      if (pairingEnvelope(current)?.state === "staged") return current;
+      if (prior?.deviceId === machine.deviceId && (prior.credentialGeneration ?? 0) > (machine.credentialGeneration ?? 0)) return current;
+      return machine;
+    }, signal);
   }
 
   remove(id: string): Promise<void> {
@@ -249,4 +255,10 @@ export const catalog = new MachineCatalog(indexedDbMachineBackend);
 export const attentionStore = {
   list: () => transact<AttentionItem[]>("attention", "readonly", (store) => store.getAll()),
   put: (item: AttentionItem) => transact<IDBValidKey>("attention", "readwrite", (store) => store.put(item)),
+};
+
+export const installationStore: import("./installation-access").InstallationStore = {
+  get: (id) => transact("installations", "readonly", (store) => store.get(id)),
+  put: (record) => transact("installations", "readwrite", (store) => store.put(record)),
+  list: () => transact("installations", "readonly", (store) => store.getAll()),
 };

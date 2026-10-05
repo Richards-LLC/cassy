@@ -11,6 +11,8 @@ export type Scope =
   | "hub-admin";
 
 export interface StoredMachine {
+  credentialGeneration?: number;
+  accountEnrollment?: import("./installation-access").AccountEnrollment;
   id: string;
   label: string;
   baseUrl: string;

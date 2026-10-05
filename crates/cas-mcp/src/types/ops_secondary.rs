@@ -457,9 +457,9 @@ pub struct VerificationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_path: Option<String>,
 
-    /// Explicit pre-park waiver binding, checked against the live pushed tip.
+    /// Explicit waiver or reopened QA binding, checked against the live pushed task tip.
     #[schemars(
-        description = "qa_waive: full SHA of the delivery's pushed factory branch tip; allows a waiver before parking. Must match the live origin branch exactly."
+        description = "qa_waive or qa_request: full SHA of the delivery's pushed task branch tip. qa_request with head_sha can review Open or InProgress work without bypassing close/merge gates. Must match the live origin branch exactly."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_sha: Option<String>,

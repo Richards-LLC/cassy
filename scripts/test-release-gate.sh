@@ -268,6 +268,25 @@ if [[ "$*" == 'nextest run '* && "${GATE_FIXTURE_EMPTY_SUITE:-}" != 1 ]]; then
   printf 'Summary [0.001s] 1 test run: 1 passed, 0 skipped\n'
 fi
 if [[ "$*" == 'nextest run --archive-file '* ]]; then
+  extract_to='' previous=''
+  for arg in "$@"; do
+    [[ "$previous" != --extract-to ]] || extract_to="$arg"
+    previous="$arg"
+  done
+  python3 - "$extract_to" <<'PY_ARCHIVE_EXTRACT'
+from pathlib import Path
+import stat
+import sys
+assert sys.argv[1], 'archive fixture: --extract-to is missing'
+extract = Path(sys.argv[1]).resolve(strict=True)
+assert extract.is_dir(), 'archive fixture: extraction destination is not a directory'
+destination, base = extract.stat(), extract.parent.stat()
+assert (destination.st_uid, destination.st_gid) == (base.st_uid, base.st_gid)
+assert stat.S_IMODE(destination.st_mode) == stat.S_IMODE(base.st_mode) == 0o700
+(extract / 'fixture-extracted-test').write_text('extracted archive fixture\n')
+PY_ARCHIVE_EXTRACT
+  printf 'EXTRACT_DIR_READY=%s :: %s\n' "$extract_to" "$*" \
+    >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
   [[ "${RUSTC_WRAPPER:-}" == /nonexistent/sccache ]] || { printf 'archive fixture: wrapper=%s\n' "${RUSTC_WRAPPER:-unset}" >&2; exit 1; }
   [[ -d "${CARGO_HOME:-}" ]] || { printf 'archive fixture: CARGO_HOME is not a directory: %s\n' "${CARGO_HOME:-unset}" >&2; exit 1; }
   [[ -z "$(find "$CARGO_HOME" -mindepth 1 -print -quit)" ]] || { printf 'archive fixture: CARGO_HOME is not empty: %s\n' "$CARGO_HOME" >&2; exit 1; }
@@ -995,6 +1014,7 @@ output="$(cd "$repo" && GATE_FIXTURE_ARCHIVE_ENV_LOG="$archive_env_log" \
     GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
     CARGO="$repo/scripts/cargo-stub" CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$archive_receipt" \
     "$repo/scripts/release-gate.sh" 9.99.7 --only archive-mode 2>&1 || true)"
+archive_gate_output="$output"
 if [[ "$(cat "$archive_receipt" 2>/dev/null)" == 7 ]] \
     && grep -qF "per-run=$archive_receipt" <<<"$output"; then
     ok 'archive-mode records the measured archive size in the per-run receipt source'
@@ -1014,6 +1034,13 @@ if grep -qE '^RUSTC_WRAPPER=/nonexistent/sccache CARGO_HOME=.*/cargo-home :: nex
     ok 'archive-mode runs the extracted suite with a missing wrapper and empty CARGO_HOME'
 else
     bad "archive-mode did not reproduce the shard environment: $(cat "$archive_env_log") (output: $output)"
+fi
+
+if grep -qF 'PASS archive-mode' <<<"$archive_gate_output" \
+    && grep -qE '^EXTRACT_DIR_READY=.*/extract :: nextest run --archive-file ' "$archive_env_log"; then
+    ok 'archive extraction exists with the base owner and private mode before nextest runs'
+else
+    bad "archive extraction was not ready before nextest: $archive_gate_output"
 fi
 
 if python3 - "$archive_env_log" "$CAS_RELEASE_GATE_HOME_DIR" <<'PY_TEMP_PLACEMENT'

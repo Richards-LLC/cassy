@@ -1154,6 +1154,15 @@ check_archive_mode() {
         rm -rf "$archive_dir"
         return "$status"
     fi
+    # nextest canonicalizes --extract-to before extracting, so it must exist.
+    # Match the private 0700 mktemp base, with the same process owner/group.
+    # The whole archive_dir (including extracted files) is removed below.
+    mkdir -p -m 700 "$archive_dir/extract" || {
+        status=$?
+        git worktree remove --force "$remap" >/dev/null 2>&1 || true
+        rm -rf "$archive_dir"
+        return "$status"
+    }
     printf 'archive-mode: test TMPDIR=%s; extraction=%s; workspace-remap=%s\n' \
         "$archive_tmp" "$archive_dir/extract" "$remap"
     # --extract-to decouples the large disk extraction from test-time TMPDIR.

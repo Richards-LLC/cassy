@@ -2147,21 +2147,25 @@ pub(super) fn escalate_undelivered_supervisor_relays(
                 continue;
             }
         };
-        match queue.enqueue_idempotent(
-            "relay-watchdog",
-            "operator",
-            &payload,
-            Some(factory_session),
-            Some(summary.as_str()),
-            Some(cas_store::NotificationPriority::High),
-            &format!(
-                "{}{}",
-                cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX,
-                queued.id
-            ),
-            Some(&cas_store::QueueOrigin::Daemon),
-        ) {
-            Ok(cas_store::EnqueueIdempotentResult::Created(alert_id)) => {
+        match queue.record_operator_turn(&cas_store::OperatorTurn {
+            source: "relay-watchdog",
+            target: "operator",
+            prompt: &payload,
+            factory_session: Some(factory_session),
+            metadata: cas_store::OperatorTurnMetadata {
+                summary: Some(summary.as_str()),
+                priority: Some(cas_store::NotificationPriority::High),
+                origin: Some(&cas_store::QueueOrigin::Daemon),
+                kind: Some("blocker"),
+                dedupe_key: Some(&format!(
+                    "{}{}",
+                    cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX,
+                    queued.id
+                )),
+                ..Default::default()
+            },
+        }) {
+            Ok(cas_store::EnqueueOutcome::Created(alert_id)) => {
                 alerts.push(RelayOperatorAlert {
                     relay_id: queued.id,
                     alert_id,

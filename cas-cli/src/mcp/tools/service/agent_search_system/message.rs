@@ -1327,52 +1327,30 @@ impl CasService {
                 )
             })?;
             let reply = queue
-                .enqueue_urgent_with_outcome(
-                    "supervisor",
-                    "operator",
-                    &payload,
-                    Some(factory_session),
-                    Some(summary.as_str()),
-                    Some(cas_store::NotificationPriority::Normal),
-                    false,
-                    Some(&cas_store::QueueOrigin::Daemon),
-                )
+                .record_operator_turn(&cas_store::OperatorTurn {
+                    source: "supervisor",
+                    target: "operator",
+                    prompt: &payload,
+                    factory_session: Some(factory_session),
+                    metadata: cas_store::OperatorTurnMetadata {
+                        summary: Some(summary.as_str()),
+                        priority: Some(cas_store::NotificationPriority::Normal),
+                        origin: Some(&cas_store::QueueOrigin::Daemon),
+                        recipient_device_id: device_id.as_deref(),
+                        kind: Some(kind.as_str()),
+                        attachments: &attachments,
+                        acknowledge_prompt_id: req.in_reply_to,
+                        ..Default::default()
+                    },
+                })
                 .map_err(|error| {
                     Self::error(
                         ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to queue Commander reply: {error}"),
+                        format!("Failed to atomically record Commander reply: {error}"),
                     )
                 })?;
             let reply_id = reply.id();
             crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
-            if let Some(device_id) = device_id.as_deref() {
-                queue.stamp_recipient_device(reply_id, device_id).map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!(
-                            "Commander turn {reply_id} queued but device receipt could not be stamped: {error}"
-                        ),
-                    )
-                })?;
-            }
-            queue
-                .stamp_operator_reply(reply_id, kind.as_str(), &attachments)
-                .map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("Commander turn {reply_id} metadata could not be stamped: {error}"),
-                    )
-                })?;
-            if let Some(notification_id) = req.in_reply_to {
-                queue.ack(notification_id).map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!(
-                            "Commander turn {reply_id} queued but notification {notification_id} could not be confirmed: {error}"
-                        ),
-                    )
-                })?;
-            }
             return Ok(Self::success(format!(
                 "Commander {} queued\n\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: queued for {wire_device_id}",
                 kind.as_str(),

@@ -278,7 +278,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       }
       return false;
     };
-    // cas-861c: content the engine skips rendering (an ancestor with
+    // Content the engine skips rendering (an ancestor with
     // `content-visibility: hidden`, which is also how Chromium folds a closed
     // <details>) keeps a layout box but draws nothing. checkVisibility() is
     // the engine's own answer; `content-visibility: auto` off-screen content
@@ -303,7 +303,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         opacity *= Number.parseFloat(style.opacity || '1');
         hidden ||= style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse';
       }
-      // A skipped subtree is neither drawn nor focusable (cas-861c).
+      // A skipped subtree is neither drawn nor focusable.
       hidden ||= skippedContent(element);
       return { opacity, hidden: hidden || opacity <= 0 };
     };

@@ -1163,8 +1163,6 @@ check_archive_mode() {
     }
     archive_path="$(make_archive_path)" || {
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     }
     local -a compile_command=(env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
@@ -1177,8 +1175,6 @@ check_archive_mode() {
         :
     else
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     fi
     [[ -s "$archive" ]] || {
@@ -1200,17 +1196,13 @@ check_archive_mode() {
         :
     else
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     fi
     # nextest canonicalizes --extract-to before extracting, so it must exist.
     # Match the private 0700 mktemp base, with the same process owner/group.
-    # The whole archive_dir (including extracted files) is removed below.
+    # The guardian removes the whole archive_dir after all descendants exit.
     mkdir -p -m 700 "$archive_dir/extract" || {
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     }
     printf 'archive-mode: test TMPDIR=%s; extraction=%s; workspace-remap=%s\n' \
@@ -1235,8 +1227,6 @@ check_archive_mode() {
     else
         status=$?
     fi
-    git worktree remove --force "$remap" >/dev/null 2>&1 || true
-    rm -rf "$archive_dir"
     return "$status"
 }
 
@@ -1264,7 +1254,6 @@ check_snapshot_portability() {
     env -u COLUMNS INSTA_UPDATE=no TMPDIR="$deep_tmp" \
         "$cargo_bin" nextest run -p cas --test component_output_test
     status=$?
-    rm -rf "$deep_root"
     # Never leave insta's pending-snapshot artifacts behind: they would fail
     # the working-tree row of this same gate.
     find . -path ./target -prune -o -name '*.snap.new' -print0 2>/dev/null | xargs -0 rm -f --

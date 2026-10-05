@@ -147,6 +147,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await hub.announceCatalog("atlas");
     expect(await focused(), "focus stays on Copy across a minute").toBe(copy);
     await expect(notice.locator("details")).toHaveAttribute("open", "");
+    await notice.getByRole("button", { name: "Copy", exact: true }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy still copies the displayed Details after refresh").toBe(await notice.locator("pre").textContent());
     // cas-f486: a phone that wakes after ten minutes, with the session list
     // changed meanwhile, rebuilds the whole page. The rebuilt sheet has the
     // same Details open and the same Copy focused, in new elements.

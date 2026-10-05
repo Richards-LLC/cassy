@@ -3419,6 +3419,13 @@ function render(captureDraft = true): void {
     return;
   }
   deferredRender.settled();
+  // A lease/connection change can rebuild the shell while the same notice
+  // is being copied. Keep that view's panel so payload reconciliation can
+  // retain its actual Details and Copy nodes, not only restore their focus.
+  const attentionPanel = document.querySelector<HTMLElement>("#attention-panel");
+  const preservedAttention = attentionPanel?.dataset.viewScope === attentionViewScope() ? attentionPanel : undefined;
+  const attentionFocus = preservedAttention?.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
+  preservedAttention?.remove();
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
   const pairedDialogWasOpen = machineDialog?.open === true;
@@ -3473,6 +3480,7 @@ function render(captureDraft = true): void {
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
   app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability() }, regions));
+  if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
   const visibleToast = document.querySelector<HTMLElement>("#toast.visible");
@@ -3490,6 +3498,7 @@ function render(captureDraft = true): void {
   }
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
+  if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
   // markup until its region shows it (the phone Attention badge, cas-a5c6),
   // and focus() on a hidden control does nothing, so a rebuild left focus on
@@ -3820,9 +3829,14 @@ function compatibilityWarning(machineId: string): string | undefined {
   return undefined;
 }
 
+function attentionViewScope(): string {
+  return JSON.stringify([selectedMachineId, selectedSession]);
+}
+
 function renderAttention(): void {
   const container = document.querySelector<HTMLElement>("#attention-panel");
   if (!container) return;
+  container.dataset.viewScope = attentionViewScope();
   // The open conversation's own attention: its machine's alarms and its session's events.
   const visibleAttention = attention.filter((item) => item.machineId === selectedMachineId && (!item.session || item.session === selectedSession));
   contextAttention = groupAttention(visibleAttention).length;

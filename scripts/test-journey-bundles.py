@@ -75,6 +75,19 @@ class BundleTests(unittest.TestCase):
         self.fold()
         self.assertEqual(json.loads((main / "bundle.json").read_text())["verdict"], "FAIL")
 
+    def test_real_hub_part_preserves_transport_and_its_already_scrubbed_trace(self):
+        part = self.receipt("HUB-J11", "real disposable hub", part="real-hub-run-0")
+        result = json.loads((part / "result.json").read_text())
+        result.update(label="real-bundle, real-hub, real-factory-daemon", output_dir=str(part))
+        (part / "result.json").write_text(json.dumps(result))
+        (part / "trace.zip").write_bytes(b"scrubbed real trace")
+        self.assertEqual(self.fold(), 0)
+        data = json.loads((part.parent.parent / "bundle.json").read_text())
+        self.assertIn("real-hub", data["label"])
+        self.assertNotIn("protocol-double", data["label"])
+        self.assertEqual((part / "trace.zip").read_bytes(), b"scrubbed real trace")
+        self.assertIn("real-hub", data["files"]["parts"][0]["label"])
+
 
 if __name__ == "__main__":
     unittest.main()

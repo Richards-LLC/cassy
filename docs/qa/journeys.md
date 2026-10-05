@@ -22,7 +22,7 @@ calendar-day fixtures use `journeyDay()` rather than subtracting hours.
 sources before running the suite. Use `performance.now()` for elapsed time.
 To exercise early-morning boundaries, run with
 `HUB_JOURNEY_NOW=2026-09-30T00:30:00Z` or `2026-09-30T05:59:00Z`.
-Every journey also watches each animation frame and fails if an open
+The protocol-double journeys also watch each animation frame and fails if an open
 conversation shows the terminal canvas or sits on a bare panel for more than
 250 ms (`frame_defects` in `result.json`).
 
@@ -353,8 +353,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Entry:** an open conversation when the network to the machine drops
 - **Goal:** I see what is happening, and it recovers without me doing anything
 - **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/session-connection.ts`, `hub-web/src/abort-signals.ts`, `hub-web/src/deferred-render.ts`, `hub-web/src/browser-support.ts`
-- **Suite:** `hub-web/e2e/journeys/reconnect.journey.ts`
-- **Gaps:** a real network loss (heartbeat misses, offline) is simulated by closing the socket
+- **Suite:** `hub-web/e2e/journeys/reconnect.journey.ts`, `hub-web/e2e/journeys/real-hub.journey.ts`
+- **Gaps:** the regular suite uses a protocol double; the separate real-hub part proves Linux recovery with a real disposable hub and real operator queue (see [local run instructions](real-hub-journey.md)); macOS remains follow-up
 
 #### Steps
 

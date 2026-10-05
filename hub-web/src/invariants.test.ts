@@ -1041,25 +1041,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows)");
   });
 
-  // Contract: turns a reachable revoked hub into a terminal auth stop.
-  // Consumer: HubConnectionSupervisor and Commander connection view.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("turns a reachable revoked hub into a terminal auth stop", async () => {
-    const source = await readFile(new URL("connection.ts", import.meta.url), "utf8");
-    expect(source).toContain('new URL("/v1/health", this.machine.baseUrl)');
-    expect(source).toContain('mode: "no-cors"');
-    expect(source).toContain("const reachable = await this.hubIsReachable()");
-    expect(source).toContain("if (reachable)");
-    expect(source).toContain("this.desired = false");
-    expect(source).toContain("this.eventAbort?.abort()");
-    expect(source).toContain('this.transition("failed", "auth", { reason: detail, authFailure: kind })');
-    expect(source).toContain("this.callbacks.onAuthFailure?.(kind, detail)");
-  });
-
-  // Contract: turns a reachable hub with opaque authenticated reads into a re-pair stop.
+  // Contract: keeps retrying opaque authenticated reads without claiming a pairing refusal.
   // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("turns a reachable hub with opaque authenticated reads into a re-pair stop", async () => {
+  it("keeps retrying opaque authenticated reads without claiming a pairing refusal", async () => {
     vi.stubGlobal("window", globalThis);
     const { privateKey, publicKey } = await createDeviceKey();
     const machine = {
@@ -1082,20 +1067,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     supervisor.start();
 
-    await vi.waitFor(() => {
-      expect(callbacks.onAuthFailure).toHaveBeenCalledWith(
-        "needs-pairing",
-        "Hub is reachable but this Cassy Cloud is no longer paired. Re-pair to continue.",
-      );
-    });
-    expect(supervisor.snapshot()).toMatchObject({
-      phase: "failed", stage: "auth", authFailure: "needs-pairing",
-    });
-    expect(callbacks.onState).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
-    // cas-d636: an opaque failure is confirmed before it ends the pairing: the
-    // hub still answers its health probe and an authenticated read still fails.
+    await vi.waitFor(() => expect(supervisor.snapshot()).toMatchObject({ phase: "backoff", stage: "auth" }));
+    expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+    expect(supervisor.snapshot().authFailure).toBeUndefined();
+    expect(callbacks.onState).toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
+    // A successful public probe does not classify an opaque fetch rejection.
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
-      "/v1/health", "/v1/machine", "/v1/sessions", "/v1/health", "/v1/machine",
+      "/v1/health", "/v1/machine", "/v1/sessions",
     ]);
     const [main, connectionView] = await Promise.all([
       readSource("main.ts"),

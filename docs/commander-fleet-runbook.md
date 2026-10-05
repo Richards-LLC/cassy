@@ -10,6 +10,7 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 - Choose one machine URL as the browser profile's controller origin. Pair every other machine to that exact origin; changing it requires re-pairing.
 - The default controller origin is a paired hub. The hosted static origin is `https://hub.petrastella.io`, an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes (see [Hub promotion](#hub-promotion-hosted-commander-at-hubpetrastellaio)), then create new invitations with `cas hub pair --origin https://hub.petrastella.io` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
 - Do not expose port 4173 on a LAN interface. The Cassy hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
+- In Chrome, allow **Local network access** for `https://hub.petrastella.io` in the page's site settings when connecting to a tailnet hub; Tailscale's `100.64.0.0/10` addresses are [classified as local by Chromium](https://chromium.googlesource.com/chromium/src/+/d1e9879b75be1e3ef0f9b9991f6831dca5a618f8), so a denied permission blocks requests before they reach the hub and does not mean the browser needs pairing again.
 
 ## Hub promotion (hosted Commander at hub.petrastella.io)
 

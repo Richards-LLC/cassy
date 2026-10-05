@@ -98,17 +98,30 @@ test("HUB-J12 denied Local network access explains site settings without re-pair
         await expect(page.locator("#network-access-help")).toBeInViewport();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         const contrast = await page.locator("#network-access-help").evaluate(element => {
-          const luminance = (color: string) => {
-            const channels = color.match(/[\d.]+/g)!.slice(0, 3).map(Number).map(value => {
+          const rgba = (color: string) => {
+            const channels = color.match(/[\d.]+/g)!.map(Number);
+            return [channels[0]!, channels[1]!, channels[2]!, channels[3] ?? 1];
+          };
+          const over = (foreground: number[], background: number[]) => foreground.slice(0, 3)
+            .map((channel, index) => channel * foreground[3]! + background[index]! * (1 - foreground[3]!));
+          // The warning tint is translucent. Compare rendered colors after
+          // compositing it over its actual ancestors, not the tint's raw RGB.
+          const layers: number[][] = [];
+          for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+            layers.push(rgba(getComputedStyle(ancestor).backgroundColor));
+          }
+          const background = layers.reverse().reduce((surface, layer) => over(layer, surface), [255, 255, 255]);
+          const foreground = over(rgba(getComputedStyle(element).color), background);
+          const luminance = (color: number[]) => {
+            const channels = color.map(value => {
               const channel = value / 255;
               return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
             });
             return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
           };
-          const style = getComputedStyle(element);
-          const foreground = luminance(style.color);
-          const background = luminance(style.backgroundColor);
-          return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+          const front = luminance(foreground);
+          const back = luminance(background);
+          return (Math.max(front, back) + 0.05) / (Math.min(front, back) + 0.05);
         });
         expect(contrast).toBeGreaterThanOrEqual(4.5);
       });

@@ -156,6 +156,209 @@ fn qa_task_id(cas_dir: &Path, delivery: &str) -> String {
         .expect("its work item")
 }
 
+async fn request_current_qa(core: &CasCore, task_id: &str) -> String {
+    extract_text(
+        CasService::new(core.clone(), None)
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_request", "task_id": task_id,
+                "summary": "review the corrected delivery"
+            }))))
+            .await
+            .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn qa_request_advances_the_parked_tip_and_retires_old_work_cas_54b0() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, id) = fixture(&mut env);
+    let root = repo.join(".cas");
+    assert!(
+        close_text(&core, &id)
+            .await
+            .contains("INDEPENDENT QA DISPATCHED")
+    );
+    let old = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    let new_head = commit_file(
+        &repo,
+        "web/composer.css",
+        ".composer{gap:12px}\n",
+        "fix(cas-ui01): clipping",
+    );
+    let supervisor = supervisor_core(&root);
+    let _role = SupervisorRole::enter(&mut env);
+    let requested = request_current_qa(&supervisor, &id).await;
+    assert!(
+        requested.contains("INDEPENDENT QA DISPATCHED"),
+        "{requested}"
+    );
+    let current = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.bound_head, new_head);
+    assert_ne!(current.id, old.id);
+    let passes = cas_store::list_qa_passes(&root, &id).unwrap();
+    assert_eq!(
+        passes.iter().filter(|pass| pass.state.is_active()).count(),
+        1
+    );
+    assert_eq!(
+        passes.iter().find(|pass| pass.id == old.id).unwrap().state,
+        cas_types::QaPassState::Superseded
+    );
+    assert_eq!(
+        open_task_store(&root)
+            .unwrap()
+            .get(old.qa_task_id.as_deref().unwrap())
+            .unwrap()
+            .status,
+        TaskStatus::Cancelled
+    );
+    assert!(
+        request_current_qa(&supervisor, &id)
+            .await
+            .contains("INDEPENDENT QA PENDING")
+    );
+    assert_eq!(cas_store::list_qa_passes(&root, &id).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn cancelled_qa_link_is_repaired_on_request_or_cancel_retry_cas_54b0() {
+    for repair_by_request in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let (_temp, core, repo, id) = fixture(&mut env);
+        let root = repo.join(".cas");
+        assert!(
+            close_text(&core, &id)
+                .await
+                .contains("INDEPENDENT QA DISPATCHED")
+        );
+        let old = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        let mut qa = tasks.get(old.qa_task_id.as_deref().unwrap()).unwrap();
+        // Crash after persisting cancellation but before withdrawing its pass;
+        // linkage, rather than an optional label, identifies the QA work item.
+        qa.status = TaskStatus::Cancelled;
+        qa.labels.clear();
+        qa.close_reason = Some("obsolete review".into());
+        tasks.update(&qa).unwrap();
+        let supervisor = supervisor_core(&root);
+        let _role = SupervisorRole::enter(&mut env);
+        if repair_by_request {
+            let requested = request_current_qa(&supervisor, &id).await;
+            assert!(
+                requested.contains("INDEPENDENT QA DISPATCHED"),
+                "{requested}"
+            );
+            let current = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+                .unwrap()
+                .unwrap();
+            assert_ne!(current.id, old.id);
+            assert_eq!(current.bound_head, old.bound_head);
+        } else {
+            supervisor
+                .cas_task_cancel(Parameters(TaskCancelRequest {
+                    id: qa.id.clone(),
+                    reason: "retry cancellation".into(),
+                    superseded_by: None,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                tasks.get(&qa.id).unwrap().close_reason.as_deref(),
+                Some("obsolete review")
+            );
+        }
+        let passes = cas_store::list_qa_passes(&root, &id).unwrap();
+        assert!(
+            passes
+                .iter()
+                .find(|pass| pass.id == old.id)
+                .unwrap()
+                .is_withdrawn()
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelling_unlabelled_qa_withdraws_pending_and_claimed_passes_cas_54b0() {
+    for claimed in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let (_temp, core, repo, id) = fixture(&mut env);
+        let root = repo.join(".cas");
+        assert!(
+            close_text(&core, &id)
+                .await
+                .contains("INDEPENDENT QA DISPATCHED")
+        );
+        let old = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        if claimed {
+            cas_store::claim_qa_pass(&root, &id, "reviewer", chrono::Utc::now()).unwrap();
+        }
+        let tasks = open_task_store(&root).unwrap();
+        let mut qa = tasks.get(old.qa_task_id.as_deref().unwrap()).unwrap();
+        qa.labels.clear();
+        tasks.update(&qa).unwrap();
+        let supervisor = supervisor_core(&root);
+        let _role = SupervisorRole::enter(&mut env);
+        let text = extract_text(
+            supervisor
+                .cas_task_cancel(Parameters(TaskCancelRequest {
+                    id: qa.id,
+                    reason: "obsolete review".into(),
+                    superseded_by: None,
+                }))
+                .await
+                .unwrap(),
+        );
+        assert!(text.contains("withdrawn"), "{text}");
+        let withdrawn = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(withdrawn.is_withdrawn());
+        assert!(!withdrawn.state.is_active());
+    }
+}
+
+#[tokio::test]
+async fn qa_request_does_not_adopt_a_sibling_tasks_live_tip_cas_8cfe() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, id) = fixture(&mut env);
+    let root = repo.join(".cas");
+    assert!(
+        close_text(&core, &id)
+            .await
+            .contains("INDEPENDENT QA DISPATCHED")
+    );
+    let old = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    commit_file(
+        &repo,
+        "web/composer.css",
+        ".composer{gap:20px}\n",
+        "fix(cas-ab12): another task",
+    );
+    let supervisor = supervisor_core(&root);
+    let _role = SupervisorRole::enter(&mut env);
+    assert!(
+        request_current_qa(&supervisor, &id)
+            .await
+            .contains("INDEPENDENT QA PENDING")
+    );
+    let current = cas_store::latest_qa_pass(&root, &id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.id, old.id);
+    assert_eq!(current.bound_head, old.bound_head);
+}
+
 #[tokio::test]
 async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_review() {
     let mut test_env = TestEnvGuard::temp_home();

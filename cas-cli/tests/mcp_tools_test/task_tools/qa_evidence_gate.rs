@@ -18,6 +18,58 @@ use std::process::Command;
 
 const TASK: &str = "cas-ev01";
 
+/// cas-8cfe: commit-time ownership and the first park must agree with the
+/// fresh bundle's delivery. The later fix was never parked on its own.
+#[tokio::test]
+async fn first_park_binds_qa_to_the_fresh_bundle_tip_cas_8cfe() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut test_env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let contents = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        contents.replace("independent_pass = false", "independent_pass = true"),
+    )
+    .unwrap();
+    let old_head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.factory_branch_anchor = Some(old_head.clone());
+    tasks.update(&task).unwrap();
+    commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    fx.write_bundle(&head);
+
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pass.bound_head, head,
+        "fresh evidence must not dispatch the previous bytes"
+    );
+    assert_eq!(
+        tasks
+            .get(TASK)
+            .unwrap()
+            .deliverables
+            .factory_branch_anchor
+            .as_deref(),
+        Some(head.as_str())
+    );
+    assert!(
+        tasks.get(TASK).unwrap().notes.contains(&old_head),
+        "retain the old ownership anchor for audit"
+    );
+}
+
 fn git(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)

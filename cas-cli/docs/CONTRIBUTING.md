@@ -114,9 +114,13 @@ it reports the symbol index fixed only after deferred work and errors are clear.
 
 ### Worker browser and JS memory admission
 
-Worker npm/npx, browser, Vitest and JS commands run through
+Worker browser/Vitest suites, npm test/build/typecheck/journey scripts and
+known Node suite entry points run through
 `python3 scripts/worker-memory.py -- <command>`. The worker PreToolUse hook
-routes those commands automatically; the hub-web build, typecheck, visual-QA
+routes those commands automatically when the checkout has that helper.
+Without it the hook warns and retains the existing permission guards.
+Plain npm reads, inline Node code and arbitrary Node scripts retain their
+existing permission decisions. The hub-web build, typecheck, visual-QA
 and verified test entry points also acquire admission when run directly.
 
 Admission uses `assembly-proof.py`'s fresh host memory snapshot and reserve

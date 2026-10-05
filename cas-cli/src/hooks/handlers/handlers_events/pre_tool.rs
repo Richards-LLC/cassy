@@ -15,6 +15,33 @@ pub fn handle_pre_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
+    let mut output = handle_pre_tool_use_inner(input, cas_root)?;
+    if crate::harness_policy::is_factory_agent(input)
+        && crate::harness_policy::is_worker(input)
+        && input.tool_name.as_deref() == Some("Bash")
+        && input.tool_input.as_ref().and_then(|value| value.get("command"))
+            .and_then(|value| value.as_str()).is_some_and(|command| worker_suite_command(command, 0))
+        && worker_suite_helper(&input.cwd).is_none()
+    {
+        let warning = "Worker browser/JS suite has no scripts/worker-memory.py in this checkout; shared host memory admission is unavailable. Use an admitted checkout for suites sharing the assembly host.";
+        output.system_message = Some(match output.system_message {
+            Some(message) => format!("{message}\n{warning}"),
+            None => warning.to_string(),
+        });
+    }
+    Ok(output)
+}
+
+fn worker_suite_helper(cwd: &str) -> Option<std::path::PathBuf> {
+    Path::new(cwd).ancestors()
+        .map(|root| root.join("scripts/worker-memory.py"))
+        .find(|path| path.is_file())
+}
+
+fn handle_pre_tool_use_inner(
+    input: &HookInput,
+    cas_root: Option<&Path>,
+) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
         None => return Ok(HookOutput::empty()),
@@ -130,15 +157,11 @@ pub fn handle_pre_tool_use(
     if is_factory_agent && crate::harness_policy::is_worker(input) && tool_name == "Bash" {
         let command = input.tool_input.as_ref()
             .and_then(|value| value.get("command")).and_then(|value| value.as_str());
-        if command.is_some_and(|command| worker_suite_command(command, 0)) {
-            let helper = Path::new(&input.cwd).ancestors()
-                .map(|root| root.join("scripts/worker-memory.py"))
-                .find(|path| path.is_file());
-            let Some(helper) = helper else {
-                return Ok(HookOutput::with_pre_tool_permission("deny",
-                    "Worker browser/JS suite needs scripts/worker-memory.py for shared host memory admission; run from a checkout with that helper."));
-            };
-            let command = command.expect("suite command exists");
+        if let Some(command) = command.filter(|command| worker_suite_command(command, 0))
+            && let Some(helper) = worker_suite_helper(&input.cwd)
+        {
+            // The repository helper is an opt-in admission surface. Ordinary
+            // projects without it still reach all existing permission guards.
             let rewritten = format!("python3 {} -- bash -c {}",
                 shell_quote_path(&helper), shell_quote_path(Path::new(command)));
             let mut updated = input.tool_input.clone().unwrap_or_default();
@@ -1165,9 +1188,55 @@ fn worker_suite_command(command: &str, depth: usize) -> bool {
                 "python3" | "python" if args.first().is_some_and(|arg| {
                     shell_word_basename(arg) == "worker-memory.py"
                 }) && args.get(1).is_some_and(|arg| arg == "--") => break,
-                "npm" | "npx" | "pnpm" | "yarn" | "bun" | "playwright" | "vitest" | "vite" | "tsc" => return true,
-                "node" | "nodejs" if !args.first().is_some_and(|arg| matches!(arg.as_str(),
-                    "--version" | "-v" | "--help" | "--check" | "-c" | "--print" | "-p")) => return true,
+                "npm" | "pnpm" | "yarn" | "bun" => {
+                    let args = suite_runner_args(args);
+                    if args.first().is_some_and(|arg| matches!(arg.as_str(), "exec" | "x" | "dlx")) {
+                        if worker_suite_command(&suite_runner_args(&args[1..]).iter().map(|arg| shell_quote_path(Path::new(arg))).collect::<Vec<_>>().join(" "), depth + 1) {
+                            return true;
+                        }
+                    } else {
+                        let script = if args.first().is_some_and(|arg| matches!(arg.as_str(), "run" | "run-script")) {
+                            args.get(1)
+                        } else {
+                            args.first()
+                        };
+                        if script.is_some_and(|script| worker_suite_script(script)) { return true; }
+                    }
+                    break;
+                }
+                "npx" => {
+                    let args = suite_runner_args(args);
+                    if worker_suite_command(&args.iter().map(|arg| shell_quote_path(Path::new(arg))).collect::<Vec<_>>().join(" "), depth + 1) {
+                        return true;
+                    }
+                    break;
+                }
+                "playwright" if args.first().is_some_and(|arg| arg == "test") => return true,
+                "vitest" if args.is_empty() || args.first().is_some_and(|arg| {
+                    matches!(arg.as_str(), "run" | "watch" | "dev") || arg.starts_with('-') && !matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h")
+                }) => return true,
+                "vite" if args.first().is_some_and(|arg| arg == "build") => return true,
+                "journey-eval.sh" => return true,
+                "tsc" if !args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h" | "--showConfig")) => return true,
+                "node" | "nodejs" => {
+                    // Inline JS and arbitrary scripts can read credentials or
+                    // print text. Only known suite entry points imply admission.
+                    if let Some(script) = args.first() {
+                        let base = shell_word_basename(script);
+                        let runner = match base {
+                            "vitest.mjs" => Some("vitest"),
+                            "cli.js" if script.split('/').any(|part| matches!(part, "playwright" | "playwright-core" | "@playwright")) => Some("playwright"),
+                            "run-verified-tests.mjs" if args.get(1).is_some_and(|arg| matches!(arg.as_str(), "vitest" | "playwright")) => return true,
+                            "visual-qa.mjs" => return true,
+                            _ => None,
+                        };
+                        if let Some(runner @ ("playwright" | "vitest")) = runner {
+                            let command = std::iter::once(runner.to_string()).chain(args[1..].iter().map(|arg| shell_quote_path(Path::new(arg)))).collect::<Vec<_>>().join(" ");
+                            if worker_suite_command(&command, depth + 1) { return true; }
+                        }
+                    }
+                    break;
+                }
                 "sh" | "bash" | "zsh" | "dash" => {
                     if let Some(script) = args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
                         .and_then(|flag| args.get(flag + 1)) {
@@ -1191,6 +1260,22 @@ fn worker_suite_command(command: &str, depth: usize) -> bool {
         }
     }
     false
+}
+
+/// Skip package-manager options before its subcommand/runner, including
+/// options whose next argument is a package or working directory.
+fn suite_runner_args(mut args: &[String]) -> &[String] {
+    while let Some(arg) = args.first().filter(|arg| arg.starts_with('-')) {
+        let takes_value = matches!(arg.as_str(), "--prefix" | "--cwd" | "--dir" | "-C" | "-w" | "--workspace" | "-p" | "--package" | "--cache" | "--registry");
+        args = &args[1..];
+        if takes_value && !args.is_empty() { args = &args[1..]; }
+    }
+    args
+}
+
+fn worker_suite_script(script: &str) -> bool {
+    matches!(script, "test" | "build" | "typecheck" | "journeys" | "visual-qa")
+        || script.starts_with("test:") || script.starts_with("journeys:")
 }
 
 /// Accept a literal check/targeted nextest plus a simple log/background suffix, never compound
@@ -3998,10 +4083,29 @@ mod workspace_contract_tests {
     #[cfg(unix)]
     #[test]
     fn worker_suites_require_admission_without_matching_prose_or_reentering_wrapper() {
-        for command in ["npm test", "cd hub-web && npx playwright test", "env X=1 pnpm build", "nice -n 10 vitest run", "timeout 30 npm run build", "bash -lc 'npm run journeys'", "node /artifacts/qa.mjs", "bash scripts/journey-eval.sh /artifacts"] {
+        for command in [
+            "npm test", "cd hub-web && npx playwright test", "env X=1 pnpm build",
+            "nice -n 10 vitest run", "timeout 30 npm run build", "bash -lc 'npm run journeys'",
+            "node node_modules/vitest/vitest.mjs run", "bash scripts/journey-eval.sh /artifacts", "scripts/journey-eval.sh /artifacts",
+            "npm --prefix hub-web run typecheck", "npx --yes --package=playwright playwright test",
+            "npm exec --yes --package=playwright -- playwright test", "pnpm exec vitest run",
+            "yarn test", "bun run test:unit", "pnpm dlx playwright test", "tsc --noEmit", "vite build",
+            "node node_modules/@playwright/test/cli.js test", "node scripts/run-verified-tests.mjs playwright --project=journeys",
+            "node scripts/visual-qa.mjs",
+        ] {
             assert!(worker_suite_command(command, 0), "{command}");
         }
-        for command in ["git commit -m 'npm test'", "echo 'playwright test'", "node --check scripts/qa.mjs", "python3 /repo/scripts/worker-memory.py -- bash -c 'npm test'"] {
+        for command in [
+            "git commit -m 'npm test'", "echo 'playwright test'", "node --check scripts/qa.mjs",
+            "python3 /repo/scripts/worker-memory.py -- bash -c 'npm test'",
+            "node -e 'require(\"fs\").readFileSync(\"secrets.json\")'",
+            "node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'",
+            "node /artifacts/qa.mjs", "node scripts/generate-tokens.mjs", "node --version",
+            "npm --version", "npm config get registry", "npm view playwright version", "npm ls",
+            "npm run tokens", "npx --yes prettier --check .", "pnpm list", "yarn info vitest",
+            "bun --version", "playwright --version", "playwright install", "vitest list",
+            "vitest --help", "vite --version", "tsc --showConfig", "tsc --help",
+        ] {
             assert!(!worker_suite_command(command, 0), "{command}");
         }
         assert!(worker_suite_command("python3 /repo/scripts/worker-memory.py -- npm test; npm run build", 0));

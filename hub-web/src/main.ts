@@ -1584,7 +1584,7 @@ function openConnectionLog(machineId: string): void {
   const update = () => {
     const connection = connections.get(machineId);
     const machineState = connection?.snapshot();
-    const state = machineState?.phase !== "live" ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
+    const state = machineState?.phase !== "live" || machineState.degraded ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
     const cause = state?.cause;
     const retry = state?.nextRetryAt === undefined ? "No retry scheduled." : `Next retry in ${Math.max(0, Math.ceil((state.nextRetryAt - Date.now()) / 1000))}s.`;
     const evidence = cause ? `${cause.status === undefined ? "" : ` Measured HTTP status: ${cause.status}.`}${cause.closeCode === undefined ? "" : ` Measured socket close: ${cause.closeCode}.`}${cause.permission === undefined || cause.permission === "unknown" ? "" : ` Measured local-network permission: ${cause.permission}.`}` : "";

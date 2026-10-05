@@ -110,7 +110,20 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
       const failed = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
       await clock.advance(5_000);
       await failed;
-      if (beat === 1) await expect(header).toHaveText(" · Live");
+      if (beat === 1) {
+        await expect(header).toHaveText(" · Live");
+        // cas-eefe: Chromium can revise throughput/RTT estimates under load
+        // without changing the route. That hint cannot promote the next
+        // failed heartbeat from Unsteady straight to Reconnecting.
+        await page.evaluate(() => {
+          const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
+          if (!connection) throw new Error("Chromium NetworkInformation is required for this regression");
+          for (const [name, value] of Object.entries({ rtt: 250, downlink: 1, effectiveType: "3g" })) {
+            Object.defineProperty(connection, name, { value, configurable: true });
+          }
+          connection.dispatchEvent(new Event("change"));
+        });
+      }
       if (beat === 2) {
         // cas-a6f0 (journey F8/F9): heartbeats unanswered on a machine that
         // still reads live. Header, row, footer, Tasks panel and rail all say

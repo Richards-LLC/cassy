@@ -7,8 +7,11 @@
 # cas lib 49.9s), 1156% CPU, max RSS 5.3 GB: 12% faster overall, 18% on deps.
 # CARGO_BUILD_JOBS still overrides this default: cas-pty throttles workers,
 # and assembly splits producers with CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS.
+# Use -1 (all CPUs but one), not "default": cargo-zigbuild 0.23.x, used by
+# scripts/release.sh for the Linux release asset, parses build.jobs as an
+# integer and rejects the string form.
 [build]
-jobs = "default"
+jobs = -1
 
 # Prefer setting RUSTC_WRAPPER=sccache in shell/CI so builds don't hard-fail
 # on machines without sccache installed.

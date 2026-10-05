@@ -68,6 +68,8 @@ def read_owner(path):
         raise ValueError("foreign owner record")
     owner = json.loads(file.read_text())
     stat = path.stat()
+    if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+        return None  # The lease protocol requires a private, same-user directory.
     if (owner.get("protocol") != PROTOCOL or owner.get("uid") != os.getuid()
             or owner.get("path") != str(path.resolve()) or owner.get("device") != stat.st_dev
             or owner.get("inode") != stat.st_ino or not owner.get("start")):
@@ -81,7 +83,7 @@ def owner_live(owner):
         return process_identity(owner["pid"]) == owner["start"]
     except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
         return False
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, IndexError):
         return True  # An unreadable recorded owner stays protected.
 
 
@@ -156,8 +158,8 @@ def process_uses(path, own_lock_fd=None, lease_managed=False):
             if not process.name.isdigit():
                 continue
             try:
-                if process.stat().st_uid != os.getuid():
-                    continue  # Owned 0700 scratch is not accessible to other users.
+                if process.stat().st_uid != os.getuid() and lease_managed:
+                    continue  # Verified private lease scratch excludes other users.
                 state = (process / "stat").read_text().rsplit(") ", 1)[1].split()[0]
                 if state in ("Z", "X"):
                     continue  # Exited tasks have no live cwd, mappings or file handles.
@@ -188,7 +190,7 @@ def process_uses(path, own_lock_fd=None, lease_managed=False):
             except FileNotFoundError:
                 if process.exists() and not lease_managed:
                     return True  # Missing evidence of a still-present process is unknown.
-            except PermissionError:
+            except (PermissionError, ValueError, IndexError):
                 if not lease_managed:
                     return True
         return False
@@ -512,6 +514,8 @@ class BoundedCache:
         if not self.path.exists():
             self.events.append(row)
             return row
+        if self.path.stat().st_uid != os.getuid():
+            raise ValueError("assembly target belongs to another user")
         row["bytes"] = row["retained_bytes"] = size(self.path)
         if self.repo and any(contains(self.path.resolve(), tree) for tree in worktrees(self.repo)):
             raise ValueError("assembly target contains a registered worktree")
@@ -520,10 +524,13 @@ class BoundedCache:
             # Explicit quiet-window operation; opaque evidence STILL refuses.
             if process_uses(self.path.resolve(), self.lock.fileno()):
                 raise ValueError("legacy cache adoption refused: live users or unavailable process evidence")
+            self.path.chmod(0o700)
             (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path.with_name(self.path.name + ".lock"))))
             owner = read_owner(self.path)
             self.managed = True
             row["adopted"] = True
+        if owner and Path(owner["lease"]) != self.path.with_name(self.path.name + ".lock"):
+            raise ValueError("cache owner references an unexpected lease")
         if not owner:
             row["reason"] = "legacy cache retained: no CAS owner record; explicit quiet-window adoption required"
             self.events.append(row)

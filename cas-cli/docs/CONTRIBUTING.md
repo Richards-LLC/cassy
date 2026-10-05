@@ -503,9 +503,13 @@ positive integer). A count of 1 still waits if one link cannot fit. All active
 leases count, including higher slots after memory shrinks or a different cap
 is chosen. Queued children reserve a full estimate before starting; the pool
 is host/user-wide under `/var/tmp`, independent of producer `TMPDIR`.
-Every attempt records capacity and occupancy, every admission records its slot,
-and every invocation records child peak RSS in `link-rss.jsonl`. The producer
-start budget reserves one link; additional links require fresh pool admission.
+Every memory-sampled attempt records capacity and occupancy; every admission
+records its slot. `execution.link_jobs` is the configured maximum, while
+`link_slots` in each admission is the fresh capacity. Each invocation records
+`peak_waited_driver_rss_bytes` in `link-rss.jsonl`: waited driver RSS, excluding
+mold workers. It is not a whole-link peak and must not size capacity; the
+external 2.1 GiB measurement above sizes links. The producer start budget
+reserves one link; additional links require fresh pool admission.
 Supervisor memory/PSI samples must validate the estimates on each host.
 Insufficient concurrent capacity selects sequential legs with a fresh memory
 admission before each phase. `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS`

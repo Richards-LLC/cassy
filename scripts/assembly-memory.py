@@ -2,7 +2,7 @@
 """Memory guard and stable linker admission for assembly producers.
 
 Linkers share memory-bounded host/user slots, independent of Cargo job counts.
-The wrapper preserves the selected native linker and records child peak RSS.
+The wrapper preserves the selected native linker and records waited-driver RSS separately from the external link estimate.
 """
 import argparse
 from contextlib import ExitStack
@@ -148,12 +148,13 @@ def link(command):
         peak_bytes = int(peak if platform.system() == "Darwin" else peak * 1024)
         append(receipt, {"phase": "link-complete", "status": child.returncode,
                          "slot_index": event["slot_index"], "link_slots": event["link_slots"],
-                         "peak_child_rss_bytes": peak_bytes, "estimate_bytes": proof.LINK_BYTES,
+                         "peak_waited_driver_rss_bytes": peak_bytes, "estimate_bytes": proof.LINK_BYTES,
+                         "rss_scope": "waited driver RSS; excludes mold workers",
                          "estimate_exceeded": peak_bytes > proof.LINK_BYTES,
                          "wall_s": round(time.monotonic() - started, 3),
-                         "measurement_source": "waited linker-driver child ru_maxrss (Linux KiB, macOS bytes); includes waited descendants"})
+                         "measurement_source": "waited driver ru_maxrss (Linux KiB, macOS bytes); excludes unwaited mold workers; not whole-link peak"})
         if peak_bytes > proof.LINK_BYTES:
-            print("assembly linker exceeded memory estimate; recalibration required", file=sys.stderr)
+            print("assembly linker driver exceeded memory estimate; recalibration required", file=sys.stderr)
             return 1
         return child.returncode
 

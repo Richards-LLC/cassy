@@ -130,7 +130,9 @@ sys.exit(m.link([sys.executable, '-c', "import pathlib,time; p=pathlib.Path("+re
         self.assertEqual([line.split()[1] for line in log.read_text().splitlines()], ["start", "end", "start", "end"])
         completed = [item for item in map(json.loads, self.events.read_text().splitlines()) if item["phase"] == "link-complete"]
         self.assertEqual(len(completed), 2)
-        self.assertTrue(all(item["peak_child_rss_bytes"] > 0 and not item["estimate_exceeded"] for item in completed))
+        self.assertTrue(all(item["peak_waited_driver_rss_bytes"] > 0 and not item["estimate_exceeded"] for item in completed))
+        self.assertTrue(all("excludes mold workers" in item["rss_scope"] for item in completed))
+        self.assertTrue(all("peak_child_rss_bytes" not in item for item in completed))
 
     def wait_until(self, predicate):
         until = time.monotonic() + 5

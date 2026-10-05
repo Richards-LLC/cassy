@@ -338,6 +338,29 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid timing.tsv"):
                 proof.run_row(self.root, "ci-script-tests", {}, logs)
 
+    def test_run_row_uses_checkout_target_and_logs_source_identity(self):
+        logs = self.root / '.cas/isolation-logs'
+        logs.mkdir(parents=True)
+        actual_run = proof.subprocess.run
+        captured = {}
+
+        def gate(command, **kwargs):
+            if command[0] == 'git':
+                return actual_run(command, **kwargs)
+            captured.update(kwargs['env'])
+            rows = Path(kwargs['env']['CAS_RELEASE_GATE_LOG_DIR'])
+            rows.mkdir()
+            (rows / 'nextest.log').write_text('PASS: 1 test(s) passed\n')
+            kwargs['stdout'].write('PASS nextest fixture\n')
+            return proof.subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(proof.subprocess, 'run', side_effect=gate):
+            result = proof.run_row(self.root, 'nextest', {'CARGO_TARGET_DIR': '/other/worktree/target'}, logs)
+        self.assertEqual(captured['CARGO_TARGET_DIR'], str(self.root / 'target'))
+        self.assertEqual(result['head'], self.git('rev-parse', 'HEAD'))
+        self.assertIn(str(self.root), (logs / 'nextest.log').read_text())
+        self.assertIn(self.git('rev-parse', 'HEAD'), (logs / 'nextest.log').read_text())
+
     def run_producer(self, failure=None, serial=False, deny_test=False, recover_test=False):
         self.path.unlink()
         scratch = tempfile.TemporaryDirectory()
@@ -351,6 +374,8 @@ class ReceiptTests(unittest.TestCase):
         def run(root, row, env, logs):
             rows.append(row)
             self.assertFalse(proof.IDENTITY & env.keys())
+            self.assertEqual(env['CARGO_TARGET_DIR'], str(root / 'target'))
+            self.assertEqual(env['CARGO_BUILD_TARGET_DIR'], str(root / 'target'))
             if not serial:
                 producers.wait(timeout=5)  # all three legs must overlap
             if row == "ci-script-tests":

@@ -58,6 +58,7 @@ new_fixture() {
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
+    cp "$script_dir/proof_target.py" "$repo/scripts/proof_target.py"
     cp "$script_dir/assembly-memory.py" "$repo/scripts/assembly-memory.py"
     # The producer and its guard share deterministic physical-memory fixtures.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_MEMORY_GUARD_FIXTURE'

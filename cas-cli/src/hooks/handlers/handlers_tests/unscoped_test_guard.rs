@@ -351,7 +351,7 @@ fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc
         request.cwd = cwd.into();
         let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
         let reason = deny_reason(&out).expect("credential write remains denied");
-        assert!(reason.contains("secrets.json"), "{reason}");
+        assert!(reason.contains("credentials"), "the credential guard's own reason survives admission: {reason}");
         let value = serde_json::to_value(&out).unwrap();
         assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "deny cannot be rewritten into allow: {out:?}");
     }

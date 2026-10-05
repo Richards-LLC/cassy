@@ -3192,7 +3192,15 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     return;
   }
   if (conversationPersistenceBlocked.has(machine.id)) return;
-  if (retryOf) history.discardRefused(retryOf);
+  if (retryOf) {
+    // A live receipt can arrive while the Retry transaction commits.
+    const previous = history.events.find(event => event.kind === "send" && event.value.id === retryOf);
+    if (previous?.kind !== "send" || !history.isFailedSend(previous.value)) {
+      updateConversationViews(); renderConversationList();
+      return;
+    }
+    history.discardRefused(retryOf);
+  }
   if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }
   holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);
   updateConversationViews(); renderConversationList();

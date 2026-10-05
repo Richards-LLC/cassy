@@ -503,6 +503,28 @@ test('text folded inside a closed <details> is not clipped; an open disclosure t
   assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '') && !finding.elementPath.endsWith('div.clip')), [], JSON.stringify(clipped, null, 2));
 });
 
+test('text the engine skips (content-visibility: hidden) is not clipped; a visible clip still is (cas-861c)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-content-visibility-'));
+  const result = await runVisualQa({
+    urls: [fixture('content-visibility.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  });
+  // Skipped text keeps a box past the scroller's range but is not drawn:
+  // neither clipped nor invisible-text.
+  assert.deepEqual(result.findings.filter((finding) => /Skipped line/.test(finding.textSample ?? '')), [], JSON.stringify(result.findings, null, 2));
+  // The drawn text around it is still checked, and the real clip still fails.
+  assert.equal(result.status, 'FAIL');
+  const clipped = result.findings.filter((finding) => finding.type === 'clipped-content');
+  assert.ok(clipped.some((finding) => /lost below the edge/.test(finding.textSample ?? '')), JSON.stringify(result.findings, null, 2));
+  assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '') && !finding.elementPath.endsWith('div.clip')), [], JSON.stringify(clipped, null, 2));
+});
+
 test('visually hidden helpers, an intentional ellipsis and closed drawers pass strict; real defects still fail (GH #1081)', async () => {
   const run = (name) => mkdtemp(join(tmpdir(), `visual-qa-${name}-`)).then((artifactDir) => runVisualQa({
     urls: [fixture(`${name}.html`)],

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      /* cas-861c: a scroller holding a section whose content the page skips
+         with content-visibility: hidden (a collapsed panel). Chromium keeps
+         no rendering for it, but its text still has a box past the range. */
+      .log { height: 120px; overflow-x: hidden; overflow-y: auto; margin: 0; padding: 0 8px; }
+      .collapsed { content-visibility: hidden; contain-intrinsic-size: auto 0; }
+      .collapsed p { margin: 0; }
+      /* A visible box that really loses its third line. */
+      .clip { height: 48px; overflow: hidden; }
+      .clip p { margin: 0; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Collapsed panels</h1>
+      <section class="log" id="log">
+        <p>The newest turn is on screen.</p>
+        <p>An earlier turn is on screen too.</p>
+        <h2>Collapsed panel</h2>
+        <div class="collapsed">
+          <p>Skipped line one: not rendered until the panel opens.</p>
+          <p>Skipped line two: not rendered until the panel opens.</p>
+          <p>Skipped line three: not rendered until the panel opens.</p>
+          <p>Skipped line four: not rendered until the panel opens.</p>
+          <p>Skipped line five: not rendered until the panel opens.</p>
+        </div>
+      </section>
+      <div class="clip">
+        <p>The first line fits.</p>
+        <p>The second line fits.</p>
+        <p>This visible line is lost below the edge.</p>
+      </div>
+    </main>
+  </body>
+</html>

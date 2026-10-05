@@ -7,6 +7,189 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.47.0] - 2026-10-06
+
+### Added — Commander cloud operator inbox
+
+- Commander can read and answer supervisors from any enrolled device while the
+  machine is off. Each enrolled browser keeps up to 90 days of conversation
+  history encrypted end to end (HPKE and AES-GCM through the new
+  `cas-operator-crypto` crate and a byte-identical browser implementation).
+  Replies typed while the machine is offline show "Pending machine" and then
+  "Accepted by machine" once the hub drains them. Undelivered commands expire
+  after 24 hours.
+- An "Operator inbox" link in the conversation list subtitle opens a
+  sign-in-with-code dialog that lists the inbox threads.
+- The hub enrolls the machine with the cloud (`cas hub operator enroll`,
+  `status`, `approve`, `deny`, `principals`, `revoke-device`,
+  `revoke-machine`, `bind`, `detach`, `drain`). The machine key lives in
+  `~/.cas/hub/operator-inbox/machine.json` (mode 0600), and requests carry a
+  proof-of-possession signature.
+- Every operator-visible turn (MCP reply, mirrored transcript, watchdog notice)
+  is written together with an immutable outbox row in one SQLite transaction
+  (migration m263 `operator_delivery_outbox`), so a turn can't be stored
+  without its delivery record. A 15-second drain loop sends pending rows; the
+  hub's content-security policy allows only the operator inbox API.
+- The hub verifies the cloud's signed enrollment assertion before marking an
+  installation enrolled: `POST /v1/auth/account/challenge` and
+  `/v1/auth/account/enrollment` (one-use challenge, 5-minute lifetime, at most
+  4 per device; the assertion's audience, key thumbprint and account must
+  match). The installation inventory's Account row reads "Not in an operator
+  inbox" or "Operator inbox (key epoch N)".
+
+### Fixed — Commander sends and replies
+
+- Held sends are claimed atomically per item in an IndexedDB journal scoped to
+  the hub, device and session, so two tabs can no longer both send the same
+  message. Waiting and uncertain sends survive a reload and are never resent
+  automatically.
+- A reply counts as delivered to a device only after that browser stores it:
+  the browser sends `OperatorReplyPersisted` and the hub records a per-device
+  receipt (migration m264 `operator_reply_device_receipts`). Reply captions
+  read "Forwarded · not stored on this device" and then "Stored on this
+  device"; neither claims the reply was read.
+
+### Changed — Commander pairing and installations
+
+- Re-pairing a browser proves its retained signing key and rotates that same
+  installation's credential instead of creating a new device each time (one
+  host had accumulated 14). New routes `/v1/auth/pairing/{protocol,commit,abort}`,
+  `/v1/auth/devices` and `/v1/auth/devices/{device}/revoke`; tabs coordinate
+  through a Web Lock and a secret-free catalog generation.
+- Each Paired machines row opens an installation inventory: "This browser"
+  with its device ID, generation, first paired, last use, origin, key
+  fingerprint and account. "Revoke" confirms the exact device ID, "Remove from
+  this browser" is separate, and an uncertain cleanup offers "Retry cleanup".
+- An invitation can request "Hub administration" (`hub:admin`), never
+  pre-ticked, which allows revoking other installations.
+
+### Added — Commander connection causes and diagnostics
+
+- "Connection details" opens a Connection log that states the cause (for
+  example "Hub says access was revoked", "Event sequence gap detected" or
+  "Network or browser policy blocked the request"), the recovery action, the
+  next retry and the last successful connection. "Export safe diagnostics"
+  downloads `commander-connection-diagnostics.json` without credentials, keys
+  or prompts.
+- 18 typed causes are kept in a bounded 64-entry transition log. The hub adds
+  `X-Cas-Request-Id` (exposed only to granted origins) and `x-cas-refusal`,
+  and the event stream sends explicit lag and epoch markers instead of
+  silently skipping records. Reads, pairing and credential refresh have 10 s
+  deadlines; catalog refresh is limited to one request in flight plus one
+  trailing, at least 1 s apart.
+
+### Changed — Commander conversations
+
+- The legacy Terminal view is removed; Conversations is Commander's only
+  surface (about 6,200 lines deleted; the bundle shrinks from 501 KB to 449 KB
+  of JS and from 177 KB to 136 KB of CSS). The conversation header gains
+  Interrupt (it names the device it took control from, or says inline why it
+  can't act) and Raw output, a read-only drawer on desktop and a bottom sheet
+  on phones.
+- Questions show quick replies only for options they declare; otherwise the
+  reply goes in the composer. Each question appears once, in the thread, with a
+  compact "Waiting on you" bookmark that jumps to it. Only questions and
+  blockers count as waiting on you.
+- Previews render Markdown as plain text, statuses read "In progress",
+  "Awaiting merge" or "Held", and the side rail lists the real roster with each
+  member's current work, or "Current work not reported".
+- A failed fleet action's note spans the full row at desktop widths and names
+  its subject without squeezing to a narrow column.
+
+### Fixed — Commander hub status
+
+- `cas hub status --json` adds a read-only `runtime_receipt` after a restart:
+  separate results for the hub, Serve publication, external reach and
+  projects, boot prerequisites (Linux linger, macOS login) and the next step.
+  It never claims jobs resumed.
+- Service-manager probes have a 500 ms limit, so a stuck `systemctl` or
+  `launchctl` no longer blocks status; the state reads "service manager
+  unknown (timed out)" and restart refuses to change service ownership while
+  it is unknown.
+
+### Changed — browser test tiering
+
+- Journey selection follows source impact. `scripts/journeys-for-diff.py`
+  ignores the rebuilt `hub-web/dist` and maps changes through each journey's
+  declared touches, static imports, `main.ts` symbol ownership and changed CSS
+  selectors; tokens, base rules and unattributable changes still select the
+  whole surface. A one-module fix selected 1 journey instead of all 18.
+- `scripts/journey-eval.sh <artifact-dir>` runs the affected selection at 4
+  workers by default (`--affected <base>`, `--workers=1..4`, `--task <id>`);
+  an empty selection launches no browser. `--full` runs the whole suite and is
+  reserved for epic assembly; a PreToolUse guard denies `--full` and
+  unfiltered Playwright to workers and QA reviewers.
+- Close and QA gates recompute the selection at the delivered tip and require
+  a passing `journey-receipt.json` for every selected journey, refusing with
+  the missing, failing or unrecorded IDs. An epic close requires one
+  full-suite receipt. Previously each hub-web delivery ran the full ~80-test
+  suite three times, about an hour of browser tests.
+
+### Added — release learning loop
+
+- The release receipts stage refuses to finish until every blocked stage and
+  every hand fix maps to a learned gate row or an open task, and prints the
+  exact `release-gate.sh --learn` command to record it. Four missed lessons
+  from 3.42.0–3.46.0 are back-filled in the failure log.
+- `INTERVENTIONS` is counted from the evidence (resumed blocked stages, hand
+  fixes and manual rows) instead of `kind=manual` rows only, which had printed
+  0 since 3.42.0; 3.46.0 replays as 8. The release report gets a "Manual
+  interventions" row and both Slack replies a "Release effort" line.
+- A `publish-toolchain` gate and cut-preflight row loads the real
+  `cargo-zigbuild` configuration before a release lands, catching the class of
+  error that needed hotfix PR #1132 in 3.46.0. A failed publish deletes the
+  local tag it created once the remote is proven to have none.
+- The off-main tooling warning captures git noise and skips merged, stale,
+  epic-covered and duplicate refs, printing one summary line.
+
+### Fixed — factory messaging and workers
+
+- A message to a busy worker whose wake budget runs out is parked as
+  `awaiting_busy_recipient` instead of abandoned; turn-start and tool-boundary
+  hooks still surface it, and `message_status` reads "busy recipient: still
+  pending". The "reassign or recycle" notice fires only after 10 minutes of
+  transcript silence, once per message.
+- `--worker-cli claude` is honoured instead of being replaced by the stock
+  worker default; a worker that falls back from Codex to Claude is labelled
+  and messaged as Claude; `--worker-spec` names name the initial workers, and
+  duplicate or supervisor-clashing names are refused.
+- A clean worker holding tasks can be recycled without `force` and keeps its
+  name, tasks, lease and worktree; `clear_context` errors now name
+  `clear_context`.
+
+### Fixed — close and QA gates
+
+- A park binds its QA round to the delivered tip when every commit since the
+  recorded anchor belongs to the task's own branch, and `qa_request` rebinds a
+  stale pending round to the tip. A shared worker branch or another open
+  task's anchor never moves the anchor, and a close without `commit_receipt`
+  refuses rather than bind QA to a shared branch's old work.
+- A supervisor close of a parked child on a large epic is bounded: the
+  delivery content gate has a 35 s budget, logs
+  `stage=delivery_content_gate elapsed_ms`, and returns a retryable "DELIVERY
+  CONTENT CHECK TIMED OUT" refusal that changes nothing. Its line walk skips
+  unchanged history, batches diffs and messages and leaves regenerated
+  `hub-web/dist` bundles to the regenerated-artifact rule; one replay fell
+  from about 60,000 git processes to about 1,300. A deadline after only an
+  intermediate write reports IN_PROGRESS, not COMMITTED.
+
+### Fixed — QA and release tooling
+
+- Scoped visual QA matches findings by rule, page, state, viewport, text and
+  accessible name rather than the full CSS selector, so renaming an element no
+  longer turns an existing finding into a new one.
+- The contrast inspector resolves CSS Color 4 colours and opaque background
+  layers; a button reported at 2.57:1 now reads its true 12.08:1.
+- Assembly admits parallel test-binary links from live free memory
+  (`CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS`, default 8) instead of one at a time;
+  the reserve and compile guard are unchanged.
+- Each worktree's Rust proof builds into its own target directory
+  (`scripts/proof_target.py`), and proof logs record the worktree, HEAD and
+  target, so another worktree's build output can't produce a false result.
+- Merge-queue journeys cap session reattach delays at 10 s, wait for the retry
+  and for animations to settle, run Playwright with 6 workers in CI, and
+  upload the hidden `.results` traces on failure.
+
 ## [3.46.0] - 2026-10-05
 
 ### Changed — faster assembly proof

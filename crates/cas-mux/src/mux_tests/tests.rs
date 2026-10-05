@@ -1858,6 +1858,72 @@ fn effective_worker_spec_uses_worker_specs_map() {
 
 // ── end priority-2 coverage ───────────────────────────────────────────────────
 
+/// cas-2567 (AC2): the factory resolved slot 1 to Codex, Codex was not
+/// logged in, and `apply_codex_fallback` rewrote the (unnamed) slot spec to
+/// Claude. The pane launches from that slot spec, so the harness decisions
+/// read through `effective_worker_spec(name)` must say Claude too; before the
+/// fix they fell back to the singular `worker_cli` (still Codex), which routed
+/// a Claude worker's mail over PTY and labelled it `[worker:codex]`.
+#[test]
+fn cas_2567_initial_worker_harness_matches_the_spec_it_launched_from() {
+    let fallback_claude = WorkerSpec {
+        name: None,
+        ..WorkerSpec::builtin_default()
+    };
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        worker_names: vec!["keen-gazelle-59".to_string()],
+        include_director: false,
+        supervisor_cli: SupervisorCli::Claude,
+        worker_cli: SupervisorCli::Codex,
+        resolved_worker_specs: vec![fallback_claude],
+        ..MuxConfig::default()
+    };
+    let mux = Mux::factory_state_for_test(&config);
+    assert_eq!(
+        mux.effective_worker_spec("keen-gazelle-59", None).cli,
+        SupervisorCli::Claude
+    );
+    let launched = Mux::factory_pane_configs(&config);
+    let worker = launched
+        .iter()
+        .find(|(name, _)| name == "keen-gazelle-59")
+        .expect("worker pane config");
+    assert!(
+        !worker.1.command.contains("codex")
+            && !worker.1.args.iter().any(|arg| arg.contains("codex")),
+        "the pane itself launches Claude: {:?} {:?}",
+        worker.1.command,
+        worker.1.args
+    );
+}
+
+/// cas-2567: a spec that already carries a worker's name keeps precedence.
+#[test]
+fn cas_2567_named_spec_still_wins_for_its_worker() {
+    let codex_named = WorkerSpec {
+        name: Some("named-worker".to_string()),
+        cli: SupervisorCli::Codex,
+        ..WorkerSpec::builtin_default()
+    };
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        worker_names: vec!["named-worker".to_string()],
+        include_director: false,
+        supervisor_cli: SupervisorCli::Claude,
+        worker_cli: SupervisorCli::Claude,
+        resolved_worker_specs: vec![codex_named],
+        ..MuxConfig::default()
+    };
+    let mux = Mux::factory_state_for_test(&config);
+    assert_eq!(
+        mux.effective_worker_spec("named-worker", None).cli,
+        SupervisorCli::Codex
+    );
+}
+
 // ── cas-b68a: add_worker persists the resolved spec ──────────────────────────
 
 /// Regression for cas-b68a: a dynamically-spawned Codex worker in a Claude-DEFAULT

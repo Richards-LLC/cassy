@@ -426,6 +426,25 @@ impl Mux {
             }
         }
 
+        // cas-2567: an initial worker launches from the spec carrying its
+        // name, else the spec at its slot (`resolve_worker_spec_from_config`).
+        // Cascade specs are usually unnamed, so the launched spec was never
+        // recorded under the worker's name, and `effective_worker_spec(name)`
+        // fell back to the singular `worker_cli` default. After a Codex→Claude
+        // fallback rewrote the slot, the pane ran Claude while every harness
+        // decision (delivery channel, role tag) still said Codex. Record the
+        // launched spec under the launched name.
+        for (slot, name) in Self::resolve_worker_names(config).iter().enumerate() {
+            if mux.worker_specs.contains_key(name) {
+                continue;
+            }
+            if let Some(spec) = config.resolved_worker_specs.get(slot) {
+                let mut spec = spec.clone();
+                spec.name = Some(name.clone());
+                mux.worker_specs.insert(name.clone(), spec);
+            }
+        }
+
         mux
     }
 

@@ -251,9 +251,15 @@ pub struct FactoryArgs {
     #[arg(long, default_value = "claude")]
     pub supervisor_cli: String,
 
-    /// Worker CLI to use (claude, codex, or grok)
-    #[arg(long, default_value = "claude")]
-    pub worker_cli: String,
+    // cas-2567: an `Option`, not a `"claude"` default, so an explicit
+    // `--worker-cli claude` can be told apart from no flag at all. The old
+    // string default made it indistinguishable from omission, and the stock
+    // codex worker floor silently replaced it. (A `//` comment: clap renders
+    // `///` doc comments as help text.)
+    /// Worker CLI to use (claude, codex, or grok). Default: [llm.worker]
+    /// harness, else the stock worker default.
+    #[arg(long, value_name = "CLI")]
+    pub worker_cli: Option<String>,
 
     /// Persist this supervisor provider as the default for future sessions.
     ///
@@ -321,6 +327,56 @@ pub struct FactoryArgs {
     pub strict_cli: bool,
 }
 
+impl FactoryArgs {
+    /// The `--worker-cli` value, or `claude` when the flag was not given.
+    pub(crate) fn worker_cli_or_default(&self) -> &str {
+        self.worker_cli.as_deref().unwrap_or("claude")
+    }
+}
+
+/// cas-2567: the `--worker-cli` layer handed to the spec cascade. An explicit
+/// flag, Claude included, overrides the config layers below it. Only an
+/// implicit Claude (no flag, no config harness) leaves the slots to config.
+pub(crate) fn worker_cli_cascade_flag(
+    cli: cas_mux::SupervisorCli,
+    explicit: bool,
+) -> Option<cas_mux::SupervisorCli> {
+    (explicit || cli != cas_mux::SupervisorCli::Claude).then_some(cli)
+}
+
+/// cas-2567: initial workers take the names their `--worker-spec` entries
+/// give them. Without this a named spec still launched at its slot, but under
+/// a generated name, so nothing addressed to the requested name reached it.
+fn apply_worker_spec_names(
+    worker_names: &mut [String],
+    specs: &[cas_mux::WorkerSpec],
+    supervisor_name: &str,
+) -> Result<()> {
+    for (slot, spec) in specs.iter().enumerate() {
+        let Some(name) = spec
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        if name == supervisor_name {
+            bail!("--worker-spec name '{name}' is the supervisor's name");
+        }
+        if let Some(existing) = worker_names.get_mut(slot) {
+            *existing = name.to_string();
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for name in worker_names.iter() {
+        if !seen.insert(name.as_str()) {
+            bail!("--worker-spec names must be unique; '{name}' is used twice");
+        }
+    }
+    Ok(())
+}
+
 impl Default for FactoryArgs {
     fn default() -> Self {
         Self {
@@ -340,7 +396,7 @@ impl Default for FactoryArgs {
             tabbed: false,
             record: false,
             supervisor_cli: "claude".to_string(),
-            worker_cli: "claude".to_string(),
+            worker_cli: None,
             no_phone_home: false,
             worker_spec: vec![],
             lane: None,
@@ -1331,6 +1387,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     // invocation when `[llm.supervisor] harness = "codex"` was
     // persisted — the config value always won, even though the user asked for
     // Claude.
+    // cas-2567: remembered before the config fill below turns an absent
+    // flag into a concrete harness.
+    let worker_cli_explicit = args.worker_cli.is_some();
     let mut effective_args = args.clone();
     let cas_dir_buf = project_root.join(".cas");
     let effective_cas_dir = resolved_cas_root.as_deref().or_else(|| {
@@ -1346,8 +1405,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             if !effective_args.supervisor_cli_explicit {
                 effective_args.supervisor_cli = llm.harness_for_role("supervisor").to_string();
             }
-            if effective_args.worker_cli == "claude" {
-                effective_args.worker_cli = llm.harness_for_role("worker").to_string();
+            if effective_args.worker_cli.is_none() {
+                effective_args.worker_cli = Some(llm.harness_for_role("worker").to_string());
             }
         }
     }
@@ -1475,7 +1534,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     };
     let is_minions = theme_variant == crate::ui::theme::ThemeVariant::Minions;
 
-    let (supervisor_name, worker_names) = if is_minions {
+    let (supervisor_name, mut worker_names) = if is_minions {
         use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
         let sup = generate_minion_supervisor();
         let workers = generate_minion_unique(args.workers as usize);
@@ -1551,11 +1610,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             // already flows through correctly as `Some(Grok)` — no code change
             // needed here.
             let sources = ConfigSources {
-                cli_flag: if preflight.worker_cli != cas_mux::SupervisorCli::Claude {
-                    Some(preflight.worker_cli)
-                } else {
-                    None
-                },
+                cli_flag: worker_cli_cascade_flag(preflight.worker_cli, worker_cli_explicit),
                 model_flag: llm.model_for_role("worker").map(String::from),
                 effort_flag: llm
                     .reasoning_effort_for_role("worker")
@@ -1571,6 +1626,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             let mut specs = resolve_specs(args.workers as usize, sources.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
             normalize_worker_specs(&mut specs, &sources)?;
+            apply_worker_spec_names(&mut worker_names, &specs, &supervisor_name)?;
             (specs, fallback_model, None)
         }
     };
@@ -2150,7 +2206,7 @@ fn preflight_factory_launch(
     let worker_cli = if args.workers > 0 {
         match resolve_cli_choice(
             "Worker CLI",
-            &args.worker_cli,
+            args.worker_cli_or_default(),
             claude_installed,
             grok_installed,
             cas_factory::probe::codex_available,
@@ -2164,7 +2220,7 @@ fn preflight_factory_launch(
     } else {
         resolve_cli_choice(
             "Worker CLI",
-            &args.worker_cli,
+            args.worker_cli_or_default(),
             claude_installed,
             grok_installed,
             cas_factory::probe::codex_available,
@@ -2950,5 +3006,95 @@ mod tests {
                  must not invent errors it cannot prove",
             );
         }
+    }
+
+    /// cas-2567: parse `cas factory` flags the way the CLI does.
+    fn parse_factory_flags(flags: &[&str]) -> FactoryArgs {
+        use clap::FromArgMatches;
+        let command = FactoryArgs::augment_args(clap::Command::new("cas factory"));
+        let matches = command
+            .try_get_matches_from(std::iter::once("cas factory").chain(flags.iter().copied()))
+            .expect("factory flags parse");
+        FactoryArgs::from_arg_matches(&matches).expect("factory args")
+    }
+
+    /// cas-2567 (AC1): `--worker-cli claude` must be distinguishable from no
+    /// flag, or the stock codex worker floor silently replaces it.
+    #[test]
+    fn cas_2567_explicit_worker_cli_claude_is_distinguishable_from_no_flag() {
+        assert_eq!(parse_factory_flags(&[]).worker_cli, None);
+        assert_eq!(
+            parse_factory_flags(&["--worker-cli", "claude"])
+                .worker_cli
+                .as_deref(),
+            Some("claude")
+        );
+        assert_eq!(parse_factory_flags(&[]).worker_cli_or_default(), "claude");
+    }
+
+    /// cas-2567 (AC1): an explicit Claude reaches the cascade as a flag; an
+    /// implicit Claude stays out of it so config layers still decide.
+    #[test]
+    fn cas_2567_worker_cli_cascade_flag_keeps_an_explicit_claude() {
+        use cas_mux::SupervisorCli::{Claude, Codex};
+        assert_eq!(worker_cli_cascade_flag(Claude, true), Some(Claude));
+        assert_eq!(worker_cli_cascade_flag(Claude, false), None);
+        assert_eq!(worker_cli_cascade_flag(Codex, false), Some(Codex));
+        assert_eq!(worker_cli_cascade_flag(Codex, true), Some(Codex));
+    }
+
+    /// cas-2567 (AC1): a project that defaults its workers to Codex still
+    /// launches Claude workers when the operator asks for Claude explicitly.
+    #[test]
+    fn cas_2567_explicit_claude_overrides_a_codex_project_default() {
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        std::fs::write(&config, "[factory.defaults]\ncli = \"codex\"\n").unwrap();
+        let sources = |explicit| ConfigSources {
+            cli_flag: worker_cli_cascade_flag(cas_mux::SupervisorCli::Claude, explicit),
+            user_config: Some(project.path().join("absent-user-config.toml")),
+            project_config: Some(config.clone()),
+            ..Default::default()
+        };
+        let explicit = resolve_specs(2, sources(true)).unwrap();
+        assert!(
+            explicit
+                .iter()
+                .all(|spec| spec.cli == cas_mux::SupervisorCli::Claude),
+            "{explicit:?}"
+        );
+        let implicit = resolve_specs(2, sources(false)).unwrap();
+        assert!(
+            implicit
+                .iter()
+                .all(|spec| spec.cli == cas_mux::SupervisorCli::Codex),
+            "without the flag the project default still decides: {implicit:?}"
+        );
+    }
+
+    /// cas-2567 (AC3): `--worker-spec` names become the initial workers'
+    /// names, and a clash is rejected instead of silently ignored.
+    #[test]
+    fn cas_2567_worker_spec_names_name_the_initial_workers() {
+        let named = |name: Option<&str>| cas_mux::WorkerSpec {
+            name: name.map(str::to_string),
+            ..cas_mux::WorkerSpec::builtin_default()
+        };
+        let mut names = vec!["gen-one".to_string(), "gen-two".to_string()];
+        apply_worker_spec_names(&mut names, &[named(Some("busy-bee")), named(None)], "lead")
+            .unwrap();
+        assert_eq!(names, vec!["busy-bee".to_string(), "gen-two".to_string()]);
+
+        let mut names = vec!["gen-one".to_string(), "gen-two".to_string()];
+        assert!(
+            apply_worker_spec_names(&mut names, &[named(Some("gen-two")), named(None)], "lead")
+                .is_err(),
+            "two workers may not share a name"
+        );
+        let mut names = vec!["gen-one".to_string()];
+        assert!(
+            apply_worker_spec_names(&mut names, &[named(Some("lead"))], "lead").is_err(),
+            "a worker may not take the supervisor's name"
+        );
     }
 }

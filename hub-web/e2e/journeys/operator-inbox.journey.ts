@@ -87,6 +87,42 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await desktop.close();
   });
 
+  const qa = process.env.QA_ARTIFACTS;
+  if (qa) {
+    // cas-qa-craft polish evidence for cas-9b7d: four renders of the open
+    // thread, a standalone snapshot of the dialog with the committed CSS,
+    // and the three a11y modes proven by matchMedia.
+    const { readFile, writeFile } = await import("node:fs/promises");
+    for (const size of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
+      for (const scheme of ["light", "dark"] as const) {
+        await page.setViewportSize(size);
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.evaluate((value) => { document.documentElement.dataset.scheme = value; }, scheme);
+        await expect(inbox.getByText("Pending machine")).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
+        await page.screenshot({ path: `${qa}/inbox-${scheme}-${size.name}.png` });
+      }
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.evaluate(() => { delete document.documentElement.dataset.scheme; });
+    const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
+    const dialog = await inbox.evaluate((node) => node.outerHTML);
+    await writeFile(`${qa}/inbox.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Operator inbox</title><style>${css}</style></head><body>${dialog}</body></html>`);
+    const modes: Array<[string, string, Parameters<typeof page.emulateMedia>[0]]> = [
+      ["forced-colors", "(forced-colors: active)", { forcedColors: "active", reducedMotion: null, contrast: null }],
+      ["reduced-motion", "(prefers-reduced-motion: reduce)", { forcedColors: null, reducedMotion: "reduce", contrast: null }],
+      ["contrast-more", "(prefers-contrast: more)", { forcedColors: null, reducedMotion: null, contrast: "more" }],
+    ];
+    for (const [name, query, media] of modes) {
+      await page.emulateMedia(media);
+      expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
+      await expect(inbox.getByText("Pending machine")).toBeVisible();
+      await page.screenshot({ path: `${qa}/a11y-${name}.png` });
+    }
+    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+  }
+
   await journey.stage("soundwave returns and accepts the reply; a reload keeps everything", async () => {
     const [command] = cloud.commands.keys();
     cloud.acceptCommand(command);

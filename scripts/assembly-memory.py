@@ -78,7 +78,7 @@ def link(command):
                 raise ValueError("assembly linker memory/slot deadline expired")
             time.sleep(min(poll(env), deadline(env) - elapsed))
         # Preserve the lease in descendants if a wrapper is killed abruptly.
-        child = subprocess.run(command, pass_fds=(lease.fileno(),))
+        child = subprocess.run(command, pass_fds=tuple({lease.fileno()} | proof.release_scratch.inherited_leases()))
         peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
         peak_bytes = int(peak if platform.system() == "Darwin" else peak * 1024)
         append(receipt, {"phase": "link-complete", "status": child.returncode,
@@ -176,15 +176,20 @@ def compile_guard(command, policy, events, root):
         for event in admission["phases"]:
             append(events, event)
     env["CARGO_BUILD_JOBS"] = str(min(int(env.get("CARGO_BUILD_JOBS", jobs)), int(jobs)))
-    child = subprocess.Popen(command, env=env, start_new_session=True)
+    child = None
     paused = False
     paused_at = None
     handlers = {}
     def forward(sig, frame):
+        for watched in handlers:
+            signal.signal(watched, signal.SIG_IGN)
         raise InterruptedError("assembly compile interrupted by " + signal.Signals(sig).name)
     try:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             handlers[sig] = signal.signal(sig, forward)
+        with proof.release_scratch.defer_signals():
+            child = subprocess.Popen(command, env=env, start_new_session=True,
+                                     pass_fds=tuple(proof.release_scratch.inherited_leases(env)))
         while child.poll() is None:
             memory = proof.memory_budget(policy)
             event = dict(memory, phase="compile", paused=paused, action="sample")
@@ -209,16 +214,19 @@ def compile_guard(command, policy, events, root):
     finally:
         # Resume stopped descendants before termination; otherwise TERM would
         # stay pending indefinitely and scratch teardown could race builders.
-        for sig in (signal.SIGCONT, signal.SIGTERM):
+        for watched in handlers:
+            signal.signal(watched, signal.SIG_IGN)
+        if child is not None:
+            for sig in (signal.SIGCONT, signal.SIGTERM):
+                try:
+                    os.killpg(child.pid, sig)
+                except ProcessLookupError:
+                    pass
             try:
-                os.killpg(child.pid, sig)
-            except ProcessLookupError:
-                pass
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
 

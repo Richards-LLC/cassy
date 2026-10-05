@@ -205,28 +205,68 @@ def process_uses(path, own_lock_fd=None, lease_managed=False):
         return not lease_managed
 
 
+@contextlib.contextmanager
+def defer_signals():
+    watched = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    if hasattr(signal, "pthread_sigmask") and threading.current_thread() is threading.main_thread():
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, watched)
+        try:
+            yield
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    else:
+        yield
+
+
+def inherited_leases(env=None):
+    import stat
+    env = os.environ if env is None else env
+    descriptors = set()
+    for value in filter(None, env.get("CAS_RELEASE_GATE_SCRATCH_LEASE_FDS", "").split(",")):
+        fd = int(value)
+        metadata = os.fstat(fd)
+        if fd < 3 or metadata.st_uid != os.getuid() or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("invalid inherited scratch lease")
+        descriptors.add(fd)
+    return descriptors
+
+
 class OwnedDirectory:
     def __init__(self, prefix, parent):
-        self.path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
-        self.lock = open_lock(self.path / LOCK, create=True)
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
-        (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path / LOCK)))
-        if CURRENT is not None:
-            with CURRENT.lock:
-                CURRENT.leases.add(self.lock.fileno())
+        # Pending graceful signals may arrive as soon as masking is lifted.
+        # Register a fallback cleanup with the enclosing scope first.
+        with defer_signals():
+            self.path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+            try:
+                self.lock = open_lock(self.path / LOCK, create=True)
+                fcntl.flock(self.lock, fcntl.LOCK_EX)
+                (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path / LOCK)))
+                if CURRENT is not None:
+                    with CURRENT.lock:
+                        CURRENT.leases.add(self.lock.fileno())
+                        CURRENT.directories.add(self)
+            except BaseException:
+                shutil.rmtree(self.path)
+                if getattr(self, "lock", None):
+                    self.lock.close()
+                raise
 
     def __enter__(self):
         return self.path
 
     def __exit__(self, *exc):
+        if self.lock.closed:
+            return
         try:
             if CURRENT is not None:
                 CURRENT.stop()  # Reap before clone/base finally-cleanup unwinds.
-            shutil.rmtree(self.path)
+            if self.path.exists():
+                shutil.rmtree(self.path)
         finally:
             if CURRENT is not None:
                 with CURRENT.lock:
                     CURRENT.leases.discard(self.lock.fileno())
+                    CURRENT.directories.discard(self)
             self.lock.close()
 
 
@@ -237,6 +277,8 @@ class ChildScope:
         self.signalled = set()
         self.interrupted = False
         self.leases = set()
+        self.directories = set()
+        self.caches = set()
         self.lock = threading.RLock()
         self.cancelled = False
         self.handlers = {}
@@ -293,9 +335,12 @@ class ChildScope:
         with self.lock:
             if self.cancelled:
                 raise InterruptedError("release child admission cancelled")
-            inherited = set(kwargs.pop("pass_fds", ())) | self.leases
-            child = subprocess.Popen(command, start_new_session=True, pass_fds=tuple(inherited), **kwargs)
-            self.children.add(child)
+            child_env = dict(kwargs.pop("env", os.environ))
+            inherited = set(kwargs.pop("pass_fds", ())) | self.leases | inherited_leases(child_env)
+            child_env["CAS_RELEASE_GATE_SCRATCH_LEASE_FDS"] = ",".join(map(str, sorted(inherited)))
+            with defer_signals():
+                child = subprocess.Popen(command, env=child_env, start_new_session=True, pass_fds=tuple(inherited), **kwargs)
+                self.children.add(child)
         try:
             status = child.wait()
             if check and status:
@@ -313,6 +358,10 @@ class ChildScope:
         global CURRENT
         try:
             self.stop()
+            for directory in list(self.directories):
+                directory.__exit__(*exc)
+            for cache in list(self.caches):
+                cache.__exit__(*exc)
         finally:
             for sig, handler in self.handlers.items():
                 signal.signal(sig, handler)
@@ -486,38 +535,43 @@ class BoundedCache:
         return row
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.lock = open_lock(self.path.with_name(self.path.name + ".lock"), create=True)
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
-        if CURRENT is not None:
-            with CURRENT.lock:
-                CURRENT.leases.add(self.lock.fileno())
-        try:
-            self.inventory(clean=True)
-            if not self.path.exists():
-                self.path.mkdir(mode=0o700)
-                self.managed = True
-            elif read_owner(self.path):
-                # Do not overwrite a live stale-owner record after its flock
-                # was lost. Ownership requires both admission checks to pass.
-                owner = read_owner(self.path)
-                if owner_live(owner):
-                    raise ValueError("assembly target owner is still live")
-                self.managed = True
-            if self.managed:
-                (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path.with_name(self.path.name + ".lock"))))
-        except BaseException:
-            self.release()
-            raise
-        return self.path
+        with defer_signals():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.lock = open_lock(self.path.with_name(self.path.name + ".lock"), create=True)
+            fcntl.flock(self.lock, fcntl.LOCK_EX)
+            if CURRENT is not None:
+                with CURRENT.lock:
+                    CURRENT.leases.add(self.lock.fileno())
+                    CURRENT.caches.add(self)
+            try:
+                self.inventory(clean=True)
+                if not self.path.exists():
+                    self.path.mkdir(mode=0o700)
+                    self.managed = True
+                elif read_owner(self.path):
+                    # Do not overwrite a live stale-owner record after its flock
+                    # was lost. Ownership requires both admission checks to pass.
+                    owner = read_owner(self.path)
+                    if owner_live(owner):
+                        raise ValueError("assembly target owner is still live")
+                    self.managed = True
+                if self.managed:
+                    (self.path / OWNER).write_text(json.dumps(owner_record(self.path, self.path.with_name(self.path.name + ".lock"))))
+            except BaseException:
+                self.release()
+                raise
+            return self.path
 
     def release(self):
         if CURRENT is not None:
             with CURRENT.lock:
                 CURRENT.leases.discard(self.lock.fileno())
+                CURRENT.caches.discard(self)
         self.lock.close()
 
     def __exit__(self, *exc):
+        if self.lock.closed:
+            return
         try:
             if CURRENT is not None:
                 CURRENT.stop()
@@ -551,6 +605,14 @@ def cache_report(repo, path, clean=False, adopt=False, env=None):
     finally:
         if cache.lock:
             cache.lock.close()
+
+
+def select_cache(path):
+    """Leave unknown legacy output visible; new builds use a bounded lease cache."""
+    path = Path(path)
+    if path.exists() and not path.is_symlink() and read_owner(path) is None:
+        return path.with_name(path.name + "-leased-v1")
+    return path
 
 
 def guard(command, repo, base):
@@ -601,7 +663,11 @@ def main():
         raise ValueError("--adopt-legacy-cache requires clean and --cache")
     report = sweep(args.repo, args.base, clean=args.action == "clean")
     if args.cache:
-        report["cache"] = cache_report(args.repo, args.cache, clean=args.action == "clean", adopt=args.adopt_legacy_cache)
+        report["caches"] = [cache_report(args.repo, path, clean=args.action == "clean",
+                                              adopt=args.adopt_legacy_cache and path == args.cache)
+                            for path in (args.cache, args.cache.with_name(args.cache.name + "-leased-v1"))]
+        for field in ("reclaimable_bytes", "reclaimed_bytes", "retained_bytes"):
+            report[field] += sum(row[field] for row in report["caches"])
     print(json.dumps(report, sort_keys=True))
     return 0
 

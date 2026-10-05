@@ -598,6 +598,8 @@ def prove_owned(root):
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
         target = path.parent.parent / "assembly-target"
+        record["legacy_cache"] = release_scratch.cache_report(root, target, env=env)
+        target = release_scratch.select_cache(target)
         cache = release_scratch.BoundedCache(target, env, root)
         record["cache"] = cache.events
         with cache as clone_target, \

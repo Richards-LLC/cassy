@@ -639,6 +639,45 @@ The next check re-seeds missing debug outputs from the immutable baseline.
 Active builders and open test/output handles prevent reclamation. Source files,
 receipts and the baseline stay intact; concurrent workers keep independent targets.
 
+Actual worker shutdown also reclaims the complete `target/` after lane, Cargo
+lock, registered-checkout and process checks. Before deletion, non-build files
+including check logs and `nextest` receipts are copied, synced and verified in
+`<project-artifacts>/<last-task>/retired-target/<worker>/<head>-<attempt>/`.
+A worker without an associated task uses the inventory-only `_retired-workers`
+namespace. Recycle keeps its warm target; parked checkouts remain registered.
+Failed evidence copying or unreadable process evidence preserves the target and
+reports the deferred path and retained bytes. New target ownership for opaque
+hosts is tracked separately in cas-f96d.
+
+Assembly and release scratch uses an owner record, PID start-time identity and
+an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before
+cleanup; the parent allows 20 seconds for a nested guard's 5-second escalation.
+A dead lease-managed owner may be swept despite opaque unrelated processes.
+Unknown-provenance paths remain fail-closed. Registered remaps and their bases
+stay intact; only dead owned bases' `suite.tar.zst`, `extract`, `tmp`,
+`cargo-home` and `bin` siblings may be reclaimed (unregistration: cas-638d).
+`gc_report` includes paths, reclaimed/reclaimable and retained bytes in
+`RELEASE_SCRATCH_STATUS_JSON`; scratch `gc_cleanup` requires both `force=true`
+and `dry_run=false`. Reports never create locks or owner records.
+
+`CAS_RELEASE_SCRATCH_MAX_AGE_HOURS` defaults to 6. The shared assembly cache is
+exclusively leased and evicted whole before or after a proof above
+`CAS_ASSEMBLY_TARGET_MAX_GIB` (20 GiB), or after
+`CAS_ASSEMBLY_TARGET_MAX_AGE_DAYS` (7 days). Receipts record cache decisions.
+A legacy cache without an owner record is retained and reported; new proofs
+use `assembly-target-leased-v1` instead of enlarging it. Explicit adoption is
+available only in a quiet window and refuses held leases or unknown/live users:
+
+```bash
+python3 scripts/release_scratch.py --repo "$PWD" \
+  --cache .cas/merge-sweeps/assembly-target --adopt-legacy-cache clean
+```
+
+On soundwave, opaque `systemd --user` evidence makes adoption refuse. The
+supervisor must remove the reported legacy 29 GB cache by hand in a quiet
+window, after confirming no Cargo process is running and no cache lease is held.
+Never silently adopt or delete an unknown cache to bypass the liveness check.
+
 Lane compile previews carry provenance and a lifetime owner lock. Explicit
 `gc_cleanup force=true dry_run=false` removes stale owned detached previews,
 including their Git registration, after revalidating ownership, process liveness

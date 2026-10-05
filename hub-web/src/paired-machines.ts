@@ -24,6 +24,7 @@ export interface PairedMachineRow {
 }
 
 export interface PairedMachineActions {
+  readonly installations?: (id: string) => void;
   /** The one-time "Allow managing workers" grant for this machine. */
   readonly allowManagingWorkers?: (id: string) => Promise<void>;
   /** Copy a pairing command. */
@@ -142,6 +143,16 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
     const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Version unknown until it connects' };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
     renderFleetPermissions(node, row, options);
+    if (options.installations) {
+      let inventory = node.querySelector<HTMLButtonElement>('.paired-machine-installations');
+      if (!inventory) {
+        inventory = document.createElement('button'); inventory.type = 'button';
+        inventory.className = 'paired-machine-installations';
+        node.insertBefore(inventory, node.querySelector('.paired-machine-remove'));
+      }
+      inventory.textContent = `Browser installations on ${row.label}`;
+      inventory.onclick = () => options.installations?.(row.id);
+    }
   }
   // cas-0739: put rows in the given order. An open register passes
   // reorder: false so a status tick never moves a row under the operator's

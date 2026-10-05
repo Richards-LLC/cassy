@@ -108,6 +108,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/commander/symbols.woff2", get(commander_symbols_font))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
+        .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
             "/v1/auth/pairing/exchange",
             post(pairing_exchange::<R>).options(preflight::<R>),
@@ -294,7 +295,7 @@ async fn preflight<R: SessionReadModel>(
     };
     if matches!(
         uri.path(),
-        "/v1/auth/pairing/exchange" | "/v1/auth/pairing/commit" | "/v1/auth/pairing/abort"
+        "/v1/auth/pairing/exchange" | "/v1/auth/pairing/commit" | "/v1/auth/pairing/abort" | "/v1/auth/pairing/protocol"
     ) {
         return pairing_preflight(&origin, &headers);
     }
@@ -2537,6 +2538,21 @@ async fn pairing_exchange<R: SessionReadModel>(
         Err(_) if bound_origin => with_cors(unauthorized(), &headers),
         Err(_) => unauthorized(),
     }
+}
+
+#[derive(Deserialize)]
+struct InstallationProtocolRequest { controller_origin: String, pairing_token_hash: String }
+
+async fn installation_protocol<R: SessionReadModel>(
+    State(state): State<HubState<R>>, headers: HeaderMap, Json(request): Json<InstallationProtocolRequest>,
+) -> Response {
+    if origin(&headers).as_deref() != Some(request.controller_origin.as_str()) {
+        return unauthorized();
+    }
+    if state.auth.as_ref().is_none_or(|auth| !auth.installation_protocol_matches(&request.pairing_token_hash, &request.controller_origin, chrono::Utc::now()).unwrap_or(false)) {
+        return unauthorized();
+    }
+    with_cors(Json(serde_json::json!({"installation_protocol":1})).into_response(), &headers)
 }
 
 async fn installation_commit<R: SessionReadModel>(

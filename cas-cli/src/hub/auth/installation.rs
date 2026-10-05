@@ -24,6 +24,7 @@ pub struct InstallationAction {
     pub operation_id: String,
     pub controller_origin: String,
     pub proof: String,
+    pub pairing_token_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,7 +67,40 @@ fn generation_matches(matches: bool) -> Result<()> {
     }
 }
 
+/// Keep active rollback and at most 1000 prepared operations. An expired
+/// prepare cannot commit, but its receipt still proves a late abort after an
+/// outage. Superseded/revoked commits need only the ten-minute retry window.
+fn prune_installations(state: &mut PersistedState, now: DateTime<Utc>) {
+    state.installations.retain(|p| {
+        p.phase == Phase::Prepared
+            || p.expires_at >= now
+            || (p.phase == Phase::Committed
+                && state.devices.iter().any(|d| {
+                    d.device_id == p.candidate.device_id
+                        && d.credential_id == p.candidate.credential_id
+                        && d.revoked_at.is_none()
+                }))
+    });
+    state
+        .aborted_installations
+        .retain(|_, expires| *expires >= now);
+}
+
 impl AuthStore {
+    pub fn installation_protocol_matches(
+        &self,
+        token_hash: &str,
+        origin: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        Ok(self.lock()?.pairings.iter().any(|p| {
+            constant_time_eq(&p.token_hash, token_hash)
+                && p.hub_id == self.0.machine_id
+                && p.controller_origin == origin
+                && p.consumed_at.is_none()
+                && p.expires_at >= now
+        }))
+    }
     pub(super) fn prepare_installation(
         &self,
         exchange: PairingExchange,
@@ -113,6 +147,7 @@ impl AuthStore {
         verify_transcript(&exchange.public_key_jwk, &proof.proof, &transcript)?;
         let transcript_hash = hash_b64(&serde_json::to_vec(&transcript)?);
         let mut state = self.lock()?;
+        prune_installations(&mut state, now);
         anyhow::ensure!(
             !state
                 .aborted_installations
@@ -135,9 +170,6 @@ impl AuthStore {
                 proof.credential.clone(),
             ));
         }
-        state
-            .installations
-            .retain(|p| p.phase == Phase::Committed || p.expires_at >= now);
         state
             .source_attempts
             .retain(|a| a.at > now - Duration::hours(1));
@@ -212,12 +244,22 @@ impl AuthStore {
             .as_ref()
             .map(|d| d.device_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        generation_matches(
-            !state
+        generation_matches(!state.installations.iter().any(|p| {
+            p.phase == Phase::Prepared
+                && p.expires_at >= now
+                && (p.candidate.device_id == device_id
+                    || (p.candidate.controller_origin == exchange.controller_origin
+                        && p.candidate.public_key_thumbprint == thumbprint))
+        }))?;
+        anyhow::ensure!(
+            state
                 .installations
                 .iter()
-                .any(|p| p.candidate.device_id == device_id && p.phase == Phase::Prepared),
-        )?;
+                .filter(|p| p.phase == Phase::Prepared)
+                .count()
+                < 1000,
+            "too many pending installation operations"
+        );
         let generation = state
             .generation_highwater
             .get(&device_id)
@@ -278,6 +320,7 @@ impl AuthStore {
             .find(|d| d.device_id == device_id)
             .context("device not found")?;
         device.revoked_at = Some(now);
+        prune_installations(&mut state, now);
         state.leases.retain(|_, lease| lease.device_id != device_id);
         self.persist(&state)?;
         let _ = self.0.revocations.send(device_id.to_owned());
@@ -301,6 +344,7 @@ impl AuthStore {
     ) -> Result<()> {
         validate_origin(&action.controller_origin)?;
         let mut state = self.lock()?;
+        prune_installations(&mut state, now);
         uuid::Uuid::parse_str(&action.operation_id).context("invalid installation operation")?;
         let transcript = serde_json::json!([
             if commit {
@@ -310,7 +354,8 @@ impl AuthStore {
             },
             self.0.machine_id,
             action.controller_origin,
-            action.operation_id
+            action.operation_id,
+            action.pairing_token_hash.clone()
         ]);
         verify_transcript(&action.public_key_jwk, &action.proof, &transcript)?;
         let index = state
@@ -319,6 +364,28 @@ impl AuthStore {
             .position(|p| p.operation_id == action.operation_id);
         let Some(index) = index else {
             anyhow::ensure!(!commit, "unknown installation operation");
+            if state
+                .aborted_installations
+                .contains_key(&action.operation_id)
+            {
+                return Ok(());
+            }
+            // A missing operation may be a pruned, fenced commit. Only an
+            // unconsumed invitation proves that prepare never committed. Its
+            // signed hash prevents substitution; lock ordering prevents a
+            // delayed prepare overtaking this cancellation tombstone.
+            let token_hash = &action.pairing_token_hash;
+            let invitation_expiry = state
+                .pairings
+                .iter()
+                .find(|p| {
+                    constant_time_eq(&p.token_hash, token_hash)
+                        && p.hub_id == self.0.machine_id
+                        && p.controller_origin == action.controller_origin
+                        && p.consumed_at.is_none()
+                })
+                .context("installation rollback cannot be confirmed")?
+                .expires_at;
             state
                 .aborted_installations
                 .retain(|_, expires| *expires >= now);
@@ -328,7 +395,7 @@ impl AuthStore {
             );
             state
                 .aborted_installations
-                .insert(action.operation_id, now + Duration::minutes(10));
+                .insert(action.operation_id, invitation_expiry);
             self.persist(&state)?;
             return Ok(());
         };
@@ -339,13 +406,18 @@ impl AuthStore {
             "installation origin/key refused"
         );
         if commit {
+            if pending.phase == Phase::Committed {
+                generation_matches(state.devices.iter().any(|d| {
+                    d.device_id == pending.candidate.device_id
+                        && d.credential_id == pending.candidate.credential_id
+                        && d.revoked_at.is_none()
+                }))?;
+                return Ok(());
+            }
             anyhow::ensure!(
                 pending.phase != Phase::Aborted && pending.expires_at >= now,
                 "installation commit refused"
             );
-            if pending.phase == Phase::Committed {
-                return Ok(());
-            }
             let current = state
                 .devices
                 .iter()
@@ -428,12 +500,12 @@ mod tests {
         let signature: Signature = key.sign(&serde_json::to_vec(&value).unwrap());
         URL_SAFE_NO_PAD.encode(signature.to_bytes())
     }
-    fn prepare(
+    fn exchange(
         store: &AuthStore,
         key: &SigningKey,
         old: Option<&DeviceCredential>,
         now: DateTime<Utc>,
-    ) -> (PairingExchange, DeviceCredential) {
+    ) -> PairingExchange {
         let origin = "https://hub.example";
         let scopes = Scope::default_read_only();
         let invitation = store.mint_pairing(origin, scopes.clone(), now).unwrap();
@@ -478,6 +550,15 @@ mod tests {
             ]),
         );
         exchange.installation = Some(installation);
+        exchange
+    }
+    fn prepare(
+        store: &AuthStore,
+        key: &SigningKey,
+        old: Option<&DeviceCredential>,
+        now: DateTime<Utc>,
+    ) -> (PairingExchange, DeviceCredential) {
+        let exchange = exchange(store, key, old, now);
         let credential = store.exchange_pairing(exchange.clone(), now).unwrap();
         (exchange, credential)
     }
@@ -494,6 +575,7 @@ mod tests {
                 public_key_jwk: jwk(key),
                 operation_id: op.clone(),
                 controller_origin: exchange.controller_origin.clone(),
+                pairing_token_hash: hash_b64(exchange.token.as_bytes()),
                 proof: signed(
                     key,
                     serde_json::json!([
@@ -504,7 +586,8 @@ mod tests {
                         },
                         "test-hub",
                         exchange.controller_origin,
-                        op
+                        op,
+                        hash_b64(exchange.token.as_bytes())
                     ]),
                 ),
             },
@@ -522,6 +605,41 @@ mod tests {
             scopes: c.scopes.clone(),
             request_id: "test".into(),
         }
+    }
+
+    fn dpop(
+        key: &SigningKey,
+        c: &DeviceCredential,
+        method: &str,
+        path: &str,
+        now: DateTime<Utc>,
+    ) -> String {
+        let header = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(
+                &serde_json::json!({"typ":"dpop+jwt", "alg":"ES256", "jwk":jwk(key)}),
+            )
+            .unwrap(),
+        );
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({"htm":method, "htu":path, "iat":now.timestamp(), "jti":uuid::Uuid::new_v4().to_string(), "ath":hash_b64(c.credential.as_bytes())})).unwrap());
+        let input = format!("{header}.{claims}");
+        let signature: Signature = key.sign(input.as_bytes());
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+    fn authenticate(
+        store: &AuthStore,
+        key: &SigningKey,
+        c: &DeviceCredential,
+        now: DateTime<Utc>,
+    ) -> Result<AuthContext> {
+        let proof = dpop(key, c, "GET", "/v1/machine", now);
+        store.authenticate_dpop(
+            &format!("DPoP {}", c.credential),
+            &proof,
+            "https://hub.example",
+            "GET",
+            "/v1/machine",
+            now,
+        )
     }
 
     #[test]
@@ -543,6 +661,12 @@ mod tests {
                     .ensure_active_context(&context(&candidate), now)
                     .is_err()
             );
+            assert!(authenticate(&store, &key, &candidate, now).is_err());
+            let ticket = prior.as_ref().map(|old| {
+                store
+                    .issue_ws_ticket(&context(old), "session", "/v1/attach", now)
+                    .unwrap()
+            });
             action(
                 &store,
                 &key,
@@ -552,9 +676,22 @@ mod tests {
             )
             .unwrap();
             assert_eq!(candidate.credential_generation, generation as u64);
+            assert!(authenticate(&store, &key, &candidate, now).is_ok());
             if let Some(old) = prior {
                 assert_eq!(old.device_id, candidate.device_id);
                 assert!(store.ensure_active_context(&context(&old), now).is_err());
+                assert!(authenticate(&store, &key, &old, now).is_err());
+                assert!(
+                    store
+                        .consume_ws_ticket(
+                            &ticket.unwrap().ticket,
+                            "https://hub.example",
+                            "session",
+                            "/v1/attach",
+                            now
+                        )
+                        .is_err()
+                );
             }
             assert_eq!(store.list_devices().unwrap().len(), 1);
             prior = Some(candidate);
@@ -604,5 +741,187 @@ mod tests {
         let (second, _) = prepare(&store, &b, None, now);
         action(&store, &b, &second, true, now).unwrap();
         assert_eq!(store.list_devices().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn abort_before_prepare_is_idempotent_and_refuses_delayed_prepare() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let key = SigningKey::random(&mut OsRng);
+        let now = Utc::now();
+        let request = exchange(&store, &key, None, now);
+        action(&store, &key, &request, false, now).unwrap();
+        action(&store, &key, &request, false, now).unwrap();
+        assert!(store.exchange_pairing(request, now).is_err());
+        assert!(store.list_devices().unwrap().is_empty());
+    }
+
+    #[test]
+    fn expired_prepare_cannot_commit_but_outage_recovery_can_still_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let key = SigningKey::random(&mut OsRng);
+        let now = Utc::now();
+        let (first, old) = prepare(&store, &key, None, now);
+        action(&store, &key, &first, true, now).unwrap();
+        let (pending, _) = prepare(&store, &key, Some(&old), now);
+        let later = now + Duration::days(1);
+        assert!(action(&store, &key, &pending, true, later).is_err());
+        action(&store, &key, &pending, false, later).unwrap();
+        assert!(authenticate(&store, &key, &old, later).is_ok());
+    }
+
+    #[test]
+    fn superseded_commit_is_pruned_without_falsely_confirming_late_rollback() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let key = SigningKey::random(&mut OsRng);
+        let now = Utc::now();
+        let (first, old) = prepare(&store, &key, None, now);
+        action(&store, &key, &first, true, now).unwrap();
+        let later = now + Duration::minutes(11);
+        let (second, current) = prepare(&store, &key, Some(&old), later);
+        action(&store, &key, &second, true, later).unwrap();
+        assert!(action(&store, &key, &first, false, later).is_err());
+        assert!(action(&store, &key, &first, true, later).is_err());
+        assert_eq!(store.lock().unwrap().installations.len(), 1);
+        assert!(authenticate(&store, &key, &current, later).is_ok());
+        // The active candidate keeps its rollback even beyond the retry window.
+        action(&store, &key, &second, false, later + Duration::hours(1)).unwrap();
+        assert!(store.ensure_active_context(&context(&old), later).is_ok());
+    }
+
+    #[test]
+    fn simultaneous_initial_prepares_cannot_enroll_two_rows_for_the_same_key() {
+        let root = tempfile::tempdir().unwrap();
+        let a = AuthStore::open(root.path(), "test-hub").unwrap();
+        let b = AuthStore::open(root.path(), "test-hub").unwrap();
+        let key = SigningKey::random(&mut OsRng);
+        let now = Utc::now();
+        let first = exchange(&a, &key, None, now);
+        let second = exchange(&b, &key, None, now);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let other_barrier = barrier.clone();
+        let other = std::thread::spawn(move || {
+            other_barrier.wait();
+            b.exchange_pairing(second, now)
+        });
+        barrier.wait();
+        let own = a.exchange_pairing(first, now);
+        let peer = other.join().unwrap();
+        assert_ne!(own.is_ok(), peer.is_ok());
+        assert_eq!(a.lock().unwrap().installations.len(), 1);
+        assert!(a.list_devices().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rekey_requires_old_key_and_origin_body_changes_refuse() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let old_key = SigningKey::random(&mut OsRng);
+        let new_key = SigningKey::random(&mut OsRng);
+        let now = Utc::now();
+        let (first, old) = prepare(&store, &old_key, None, now);
+        action(&store, &old_key, &first, true, now).unwrap();
+        let request = exchange(&store, &new_key, Some(&old), now);
+        assert!(store.exchange_pairing(request.clone(), now).is_err());
+        let mut altered = request.clone();
+        altered.controller_origin = "https://other.example".into();
+        assert!(store.exchange_pairing(altered, now).is_err());
+        let mut altered = request.clone();
+        altered.operator_label.push('x');
+        assert!(store.exchange_pairing(altered, now).is_err());
+        let proof = request.installation.as_ref().unwrap();
+        let transcript = serde_json::json!([
+            "cassy-installation-v1",
+            "test-hub",
+            request.controller_origin,
+            hash_b64(request.token.as_bytes()),
+            proof.operation_id,
+            proof.device_id,
+            proof.expected_generation,
+            request.public_key_jwk.thumbprint().unwrap(),
+            hash_b64(proof.credential.as_bytes()),
+            request
+                .requested_scopes
+                .iter()
+                .map(|s| s.as_wire())
+                .collect::<Vec<_>>(),
+            request.device_label,
+            request.operator_label
+        ]);
+        let mut authorized = request;
+        authorized.installation.as_mut().unwrap().previous_proof =
+            Some(signed(&old_key, transcript));
+        let rotated = store.exchange_pairing(authorized.clone(), now).unwrap();
+        action(&store, &new_key, &authorized, true, now).unwrap();
+        assert!(authenticate(&store, &new_key, &rotated, now).is_ok());
+        assert!(authenticate(&store, &old_key, &rotated, now).is_err());
+        action(&store, &new_key, &authorized, false, now).unwrap();
+        assert!(authenticate(&store, &old_key, &old, now).is_ok());
+    }
+
+    #[test]
+    fn revoked_and_refreshed_candidates_fence_abort_and_cross_device_revoke_needs_admin() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let key = SigningKey::random(&mut OsRng);
+        let other_key = SigningKey::random(&mut OsRng);
+        let now = Utc::now();
+        let (first, old) = prepare(&store, &key, None, now);
+        action(&store, &key, &first, true, now).unwrap();
+        let (second, other) = prepare(&store, &other_key, None, now);
+        action(&store, &other_key, &second, true, now).unwrap();
+        assert!(
+            store
+                .revoke_installation(&context(&old), &other.device_id, now)
+                .is_err()
+        );
+        let refreshed = store
+            .refresh_device_credential(
+                &format!("DPoP {}", old.credential),
+                &dpop(&key, &old, "POST", "/v1/auth/refresh", now),
+                "https://hub.example",
+                "POST",
+                "/v1/auth/refresh",
+                now,
+            )
+            .unwrap();
+        assert!(action(&store, &key, &first, false, now).is_err());
+        assert!(
+            store
+                .ensure_active_context(&context(&refreshed), now)
+                .is_ok()
+        );
+        store
+            .revoke_installation(&context(&other), &other.device_id, now)
+            .unwrap();
+        assert!(action(&store, &other_key, &second, false, now).is_err());
+        assert!(store.ensure_active_context(&context(&other), now).is_err());
+    }
+
+    #[test]
+    fn refresh_wins_against_prepared_repair_and_abort_preserves_refresh() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let key = SigningKey::random(&mut OsRng);
+        let now = Utc::now();
+        let (first, old) = prepare(&store, &key, None, now);
+        action(&store, &key, &first, true, now).unwrap();
+        let (repair, _) = prepare(&store, &key, Some(&old), now);
+        let refreshed = store
+            .refresh_device_credential(
+                &format!("DPoP {}", old.credential),
+                &dpop(&key, &old, "POST", "/v1/auth/refresh", now),
+                "https://hub.example",
+                "POST",
+                "/v1/auth/refresh",
+                now,
+            )
+            .unwrap();
+        assert!(action(&store, &key, &repair, true, now).is_err());
+        action(&store, &key, &repair, false, now).unwrap();
+        assert!(authenticate(&store, &key, &refreshed, now).is_ok());
+        assert!(authenticate(&store, &key, &old, now).is_err());
     }
 }

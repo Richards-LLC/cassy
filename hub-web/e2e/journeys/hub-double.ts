@@ -6,6 +6,7 @@
 // shapes follow the hub wire types in src/types.ts and the relay contract in
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
+import { createHash, webcrypto } from "node:crypto";
 import { journeyNow } from "./clock";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
@@ -125,10 +126,25 @@ export type Outage = {
 const PANE_TEXT = "The supervisor is ready.\r\n";
 /** The real hub's operator text for `upstream_unavailable` (hub/server.rs). */
 const UPSTREAM_UNAVAILABLE_MESSAGE = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
+type InstallationRow = { machine: string; device_id: string; credential_id: string; credential_generation: number; credential: string; scopes: string[]; device_label: string; operator_label: string; controller_origin: string; public_key_jwk: JsonWebKey; revoked_at: string | null };
+const hash = (value: string) => createHash("sha256").update(value).digest("base64url");
+const fingerprint = (key: JsonWebKey) => hash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
+async function verifyInstallation(key: JsonWebKey, proof: string, transcript: unknown[]): Promise<boolean> {
+  try {
+    const imported = await webcrypto.subtle.importKey("jwk", key, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    return await webcrypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, imported, Buffer.from(proof, "base64url"), new TextEncoder().encode(JSON.stringify(transcript)));
+  } catch { return false; }
+}
 
 export class HubDouble {
   readonly sends: SentMessage[] = [];
   readonly exchanges: Array<Record<string, unknown>> = [];
+  readonly installations = new Map<string, InstallationRow>();
+  readonly staleInstallationRefusals: string[] = [];
+  installationRefreshes = 0;
+  private readonly installationSecrets = new Set<string>();
+  private readonly installationOperations = new Map<string, { candidate: InstallationRow; prior?: InstallationRow; phase: "prepared" | "committed" | "aborted" }>();
+  private readonly installationHighwater = new Map<string, number>();
   /** The hub origin each pairing exchange was posted to, in order. */
   readonly exchangeOrigins: string[] = [];
   readonly historyRequests: Array<Record<string, unknown>> = [];
@@ -255,8 +271,7 @@ export class HubDouble {
   }
 
   /** Install routes; call before the first navigation. */
-  async install(): Promise<void> {
-    const page = this.page;
+  async install(page = this.page): Promise<void> {
     // /v1/events is a long-lived event stream the bundle reads with fetch.
     await page.addInitScript(() => {
       const original = window.fetch;
@@ -643,7 +658,36 @@ export class HubDouble {
     const path = url.pathname;
     const method = route.request().method();
     if (!this.reachable(machineId)) return route.abort("internetdisconnected");
-    if (path === "/v1/health") return route.fulfill({ json: { ok: true } });
+    if (path === "/v1/auth/pairing/protocol") return route.fulfill({ json: { installation_protocol: 1 } });
+    if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
+    if (path === "/v1/auth/pairing/commit" || path === "/v1/auth/pairing/abort") return this.installationAction(route, machineId, path.endsWith("commit"));
+    const active = [...this.installations.values()].find((d) => route.request().headers()["authorization"] === `DPoP ${d.credential}` && d.machine === machineId && !d.revoked_at);
+    const secret = route.request().headers()["authorization"]?.replace(/^DPoP /, "");
+    if (secret && this.installationSecrets.has(secret) && !active) {
+      this.staleInstallationRefusals.push(path);
+      return route.fulfill({ status: 401, json: { reason: "unknown_credential", retryable: false } });
+    }
+    if (path === "/v1/auth/refresh" && active) {
+      this.installationRefreshes++;
+      const generation = (this.installationHighwater.get(active.device_id) ?? active.credential_generation) + 1;
+      active.credential_generation = generation; active.credential_id = `refresh-${generation}`;
+      active.credential = `journey-refreshed-${generation}`;
+      this.installationHighwater.set(active.device_id, generation); this.installationSecrets.add(active.credential);
+      return route.fulfill({ json: { ...active, expires_at: "2099-01-01T00:00:00Z", account_enrollment: { state: "unenrolled" } } });
+    }
+    if (path === "/v1/auth/devices") {
+      if (!active) return route.fulfill({ status: 401 });
+      const devices = [...this.installations.values()].filter((d) => d.machine === machineId && (active.scopes.includes("hub-admin") || d.device_id === active.device_id));
+      return route.fulfill({ json: devices.map((d) => ({ device_id: d.device_id, device_label: d.device_label, operator_label: d.operator_label, controller_origin: d.controller_origin, credential_generation: d.credential_generation, key_fingerprint: fingerprint(d.public_key_jwk), revoked_at: d.revoked_at, issued_at: "2026-10-05T12:00:00Z", last_used_at: "2026-10-05T14:00:00Z", account_enrollment: { state: "unenrolled" } })) });
+    }
+    const revoke = /^\/v1\/auth\/devices\/([^/]+)\/revoke$/.exec(path);
+    if (revoke) {
+      if (!active || (!active.scopes.includes("hub-admin") && active.device_id !== revoke[1])) return route.fulfill({ status: 401 });
+      const row = this.installations.get(revoke[1]!);
+      if (!row || row.machine !== machineId) return route.fulfill({ status: 404 });
+      row.revoked_at = "2026-10-05T14:00:00Z";
+      return route.fulfill({ status: 204 });
+    }
     const refusal = this.proofRefusals.get(machineId);
     if (refusal && refusal.count > 0 && route.request().headers()["dpop"]) {
       refusal.count -= 1;
@@ -715,6 +759,7 @@ export class HubDouble {
       const body = route.request().postDataJSON() as Record<string, unknown>;
       this.exchanges.push(body);
       this.exchangeOrigins.push(url.origin);
+      if (body.installation) return this.installationExchange(route, machineId, body);
       const requested = (body.requested_scopes as string[]) ?? [];
       return route.fulfill({
         status: 201,
@@ -744,6 +789,45 @@ export class HubDouble {
     }
     if (path.endsWith("/operations") && method === "POST") return this.operation(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
     return route.fulfill({ json: {} });
+  }
+
+  private async installationExchange(route: Route, machine: string, body: Record<string, unknown>): Promise<void> {
+    const proof = body.installation as { operation_id: string; credential: string; device_id: string | null; expected_generation: number; proof: string; previous_proof: string | null };
+    const key = body.public_key_jwk as JsonWebKey;
+    const order = ["machine-read", "session-read", "session-launch", "pane-read", "pane-input", "message-send", "pane-interrupt", "factory-operate", "factory-manage", "hub-admin"];
+    const scopes = body.requested_scopes as string[];
+    const transcript = ["cassy-installation-v1", machine, body.controller_origin, hash(String(body.token)), proof.operation_id, proof.device_id, proof.expected_generation, fingerprint(key), hash(proof.credential), order.filter((s) => scopes.includes(s)), body.device_label, body.operator_label];
+    const previous = proof.device_id ? this.installations.get(proof.device_id) : [...this.installations.values()].find((d) => d.machine === machine && d.controller_origin === body.controller_origin && fingerprint(d.public_key_jwk) === fingerprint(key) && !d.revoked_at);
+    if (!await verifyInstallation(key, proof.proof, transcript) || (previous && (previous.machine !== machine || previous.controller_origin !== body.controller_origin || previous.revoked_at || (fingerprint(previous.public_key_jwk) !== fingerprint(key) && !await verifyInstallation(previous.public_key_jwk, proof.previous_proof ?? "", transcript))))) return route.fulfill({ status: 401 });
+    if ((previous?.credential_generation ?? 0) !== proof.expected_generation) return route.fulfill({ status: 409 });
+    const id = previous?.device_id ?? `installation-${this.installations.size + 1}`;
+    const generation = (this.installationHighwater.get(id) ?? previous?.credential_generation ?? 0) + 1;
+    this.installationHighwater.set(id, generation);
+    const candidate: InstallationRow = { machine, device_id: id, credential_id: `generation-${generation}`, credential_generation: generation, credential: proof.credential, scopes, device_label: String(body.device_label), operator_label: String(body.operator_label), controller_origin: String(body.controller_origin), public_key_jwk: key, revoked_at: null };
+    this.installationSecrets.add(candidate.credential);
+    this.installationOperations.set(proof.operation_id, { candidate, prior: previous && { ...previous }, phase: "prepared" });
+    return route.fulfill({ status: 201, json: { ...candidate, expires_at: "2099-01-01T00:00:00Z", account_enrollment: { state: "unenrolled" } } });
+  }
+
+  private async installationAction(route: Route, machine: string, commit: boolean): Promise<void> {
+    const body = route.request().postDataJSON() as { operation_id: string; controller_origin: string; public_key_jwk: JsonWebKey; pairing_token_hash: string; proof: string };
+    const operation = this.installationOperations.get(body.operation_id);
+    if (!await verifyInstallation(body.public_key_jwk, body.proof, [`cassy-installation-${commit ? "commit" : "abort"}-v1`, machine, body.controller_origin, body.operation_id, body.pairing_token_hash])) return route.fulfill({ status: 401 });
+    if (!operation) return route.fulfill({ status: commit ? 409 : 204 });
+    const { candidate, prior } = operation;
+    if (candidate.machine !== machine || candidate.controller_origin !== body.controller_origin || fingerprint(candidate.public_key_jwk) !== fingerprint(body.public_key_jwk)) return route.fulfill({ status: 401 });
+    const active = this.installations.get(candidate.device_id);
+    if (commit) {
+      if (operation.phase === "aborted" || (active?.credential_id !== prior?.credential_id && active?.credential_id !== candidate.credential_id)) return route.fulfill({ status: 409 });
+      this.installations.set(candidate.device_id, candidate); operation.phase = "committed";
+    } else if (operation.phase !== "aborted") {
+      if (operation.phase === "committed") {
+        if (active?.credential_id !== candidate.credential_id || active.revoked_at) return route.fulfill({ status: 409 });
+        if (prior) this.installations.set(candidate.device_id, prior); else this.installations.delete(candidate.device_id);
+      }
+      operation.phase = "aborted";
+    }
+    return route.fulfill({ status: 204 });
   }
 
   /**

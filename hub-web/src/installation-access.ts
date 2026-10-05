@@ -1,3 +1,4 @@
+import { anySignal } from "./abort-signals";
 import { createDeviceKey } from "./dpop";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, type ExchangeOptions } from "./pairing-exchange";
 import type { MachineCatalog } from "./storage";
@@ -7,7 +8,8 @@ export type AccountEnrollment = { state: "unenrolled" };
 export type InstallationKey = Awaited<ReturnType<typeof createDeviceKey>>;
 export interface InstallationRecord extends InstallationKey {
   id: string;
-  pending?: { operationId: string; baseUrl: string; controllerOrigin: string; identity?: PairingInstallIdentity };
+  known?: { deviceId: string; credentialGeneration: number };
+  pending?: { operationId: string; baseUrl: string; controllerOrigin: string; previousKey?: InstallationKey; identity?: PairingInstallIdentity };
 }
 export interface InstallationStore {
   get(id: string): Promise<InstallationRecord | undefined>;
@@ -15,7 +17,7 @@ export interface InstallationStore {
   list(): Promise<InstallationRecord[]>;
 }
 export type InstallationLock = <T>(hubId: string, run: () => Promise<T>, signal?: AbortSignal) => Promise<T>;
-export const installationLock: InstallationLock = (hubId, run, signal) => {
+export const installationLock: InstallationLock = async (hubId, run, signal) => {
   if (!navigator.locks) return Promise.reject(new Error("This browser cannot safely coordinate pairing across tabs. Use a browser with Web Locks support."));
   return navigator.locks.request(`cassy-installation:${hubId}`, { mode: "exclusive", ...(signal ? { signal } : {}) }, run);
 };
@@ -30,7 +32,7 @@ export async function signInstallation(key: CryptoKey, transcript: unknown[]): P
   return b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, encoder.encode(JSON.stringify(transcript))));
 }
 const scopeOrder: Scope[] = ["machine-read", "session-read", "session-launch", "pane-read", "pane-input", "message-send", "pane-interrupt", "factory-operate", "factory-manage", "hub-admin"];
-export async function installationTranscript(options: ExchangeOptions, record: InstallationRecord, machine: StoredMachine | undefined, operationId: string, credential: string, scopes: Scope[]): Promise<unknown[]> {
+export async function installationTranscript(options: ExchangeOptions, record: InstallationRecord, machine: Pick<StoredMachine, "deviceId" | "credentialGeneration"> | undefined, operationId: string, credential: string, scopes: readonly Scope[]): Promise<unknown[]> {
   const key = record.publicKey;
   const thumbprint = await installationHash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
   return ["cassy-installation-v1", options.invitation.hubId, options.controllerOrigin,
@@ -48,6 +50,15 @@ export class InstallationAccess {
     return this.lock(options.invitation.hubId, async () => {
       await this.recoverHub(options.invitation.hubId, options.fetcher);
       const baseUrl = options.invitation.hubUrl ?? new URL(options.legacyHubUrl!).origin;
+      // Old hubs ignore unknown exchange fields and would enroll immediately.
+      // Check support before sending a capability that they could consume.
+      let protocol: number | undefined;
+      try {
+        const support = await options.fetcher(new URL("/v1/health", baseUrl), { credentials: "omit", cache: "no-store", signal: anySignal([...(options.signal ? [options.signal] : []), AbortSignal.timeout(10_000)]) });
+        if (!support.ok) throw new Error("hub health refused");
+        protocol = (await support.json() as { installation_protocol?: number }).installation_protocol;
+      } catch { throw new PairingExchangeError("Cannot reach the hub to check safe installation rotation. Check its address and browser network permission, then retry.", { recoverable: true }); }
+      if (protocol !== 1) throw new PairingExchangeError("Update this hub before pairing: it does not support safe installation rotation.", { recoverable: true });
       const id = `${options.invitation.hubId}@${new URL(baseUrl).origin}`;
       const prior = (await this.catalog.snapshot()).machines.find((m) => m.id === options.invitation.hubId && new URL(m.baseUrl).origin === new URL(baseUrl).origin);
       let record = await this.store.get(id);
@@ -55,20 +66,23 @@ export class InstallationAccess {
         record = { id, ...(prior ? { privateKey: prior.privateKey, publicKey: prior.publicKey } : await this.createKey()) };
         await this.store.put(record);
       }
+      const previousKey = options.rotateKey ? { privateKey: record.privateKey, publicKey: record.publicKey } : undefined;
+      if (previousKey) record = { ...record, ...await this.createKey() };
       const operationId = crypto.randomUUID();
       const credential = b64url(crypto.getRandomValues(new Uint8Array(32)));
       const ceiling = options.invitation.scopes ?? options.requestedScopes ?? [];
       const scopes = options.requestedScopes ? options.requestedScopes.filter((scope) => ceiling.includes(scope)) : ceiling;
-      const transcript = await installationTranscript(options, record, prior, operationId, credential, scopes);
+      const known = prior ?? record.known;
+      const transcript = await installationTranscript(options, record, known, operationId, credential, scopes);
       const proof = await signInstallation(record.privateKey, transcript);
-      record.pending = { operationId, baseUrl, controllerOrigin: options.controllerOrigin };
+      record.pending = { operationId, baseUrl, controllerOrigin: options.controllerOrigin, previousKey };
       await this.store.put(record); // Before POST: recovery can cancel even a lost response.
       const current = record;
       try {
         const machine = await exchangePendingPairing({ ...options,
           createKey: async () => current,
-          installation: { operation_id: operationId, credential, device_id: prior?.deviceId ?? null,
-            expected_generation: prior?.credentialGeneration ?? 0, proof, previous_proof: null },
+          installation: { operation_id: operationId, credential, device_id: known?.deviceId ?? null,
+            expected_generation: known?.credentialGeneration ?? 0, proof, previous_proof: previousKey ? await signInstallation(previousKey.privateKey, transcript) : null },
           stagePersisted: async (candidate, identity) => {
             if (candidate.credential !== credential || !candidate.credentialGeneration) throw new PairingExchangeError("The hub does not support safe installation rotation. Update it before pairing.");
             current.pending!.identity = identity;
@@ -79,14 +93,19 @@ export class InstallationAccess {
           // Remote restoration must complete before the local prior can become active.
           abortPrepared: () => this.action(current, "abort", options.fetcher, AbortSignal.timeout(10_000)),
         });
+        const completed = { ...current, known: { deviceId: machine.deviceId, credentialGeneration: machine.credentialGeneration! } };
+        delete completed.pending;
+        await this.store.put(completed);
+        Object.assign(current, completed);
         delete current.pending;
-        await this.store.put(current);
+        notifyInstallation(machine.id);
         return machine;
       } catch (error) {
         // This also covers cancellation before response decoding or before catalog staging.
         try {
           await this.action(current, "abort", options.fetcher, AbortSignal.timeout(10_000));
           if (current.pending?.identity) await this.catalog.rollback(current.pending.identity);
+          if (current.pending?.previousKey) Object.assign(current, current.pending.previousKey);
           delete current.pending;
           await this.store.put(current);
         } catch (cleanup) { throw new PairingCleanupError(cleanup); }
@@ -111,6 +130,7 @@ export class InstallationAccess {
       if (!record.pending || record.id.split("@")[0] !== hubId) continue;
       await this.action(record, "abort", fetcher, AbortSignal.timeout(10_000));
       if (record.pending.identity) await this.catalog.rollback(record.pending.identity);
+      if (record.pending.previousKey) Object.assign(record, record.pending.previousKey);
       delete record.pending;
       await this.store.put(record);
     }
@@ -124,4 +144,18 @@ export class InstallationAccess {
     }
     return pending;
   }
+}
+
+// Invalidation carries no credential or key material; readers use origin-local IDB.
+let invalidations: BroadcastChannel | undefined;
+function channel(): BroadcastChannel | undefined {
+  if (typeof BroadcastChannel === "undefined") return undefined;
+  return invalidations ??= new BroadcastChannel("cassy-installation-generations");
+}
+export function notifyInstallation(hubId: string): void { try { channel()?.postMessage({ hubId }); } catch { /* IDB remains authoritative when browser policy denies notifications. */ } }
+export function watchInstallations(change: (hubId: string) => void): () => void {
+  const bus = channel();
+  const listener = (event: MessageEvent) => { if (typeof event.data?.hubId === "string") change(event.data.hubId); };
+  bus?.addEventListener("message", listener);
+  return () => bus?.removeEventListener("message", listener);
 }

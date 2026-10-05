@@ -55,6 +55,17 @@ fn verify_transcript(key: &PublicJwk, proof: &str, transcript: &serde_json::Valu
         .map_err(|_| anyhow::anyhow!("installation proof refused"))
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("installation generation conflict")]
+pub(super) struct InstallationConflict;
+fn generation_matches(matches: bool) -> Result<()> {
+    if matches {
+        Ok(())
+    } else {
+        Err(InstallationConflict.into())
+    }
+}
+
 impl AuthStore {
     pub(super) fn prepare_installation(
         &self,
@@ -124,19 +135,24 @@ impl AuthStore {
                 proof.credential.clone(),
             ));
         }
-        state.installations.retain(|p| p.expires_at >= now);
+        state
+            .installations
+            .retain(|p| p.phase == Phase::Committed || p.expires_at >= now);
         state
             .source_attempts
             .retain(|a| a.at > now - Duration::hours(1));
-        anyhow::ensure!(
-            state
-                .source_attempts
-                .iter()
-                .filter(|a| a.source == exchange.source && a.at > now - Duration::minutes(1))
-                .count()
-                < 5,
-            "installation rate limited"
-        );
+        if state
+            .source_attempts
+            .iter()
+            .filter(|a| a.source == exchange.source && a.at > now - Duration::minutes(1))
+            .count()
+            >= 5
+        {
+            return Err(PairingExchangeError::Throttled {
+                retry_after_seconds: 60,
+            }
+            .into());
+        }
         state.source_attempts.push(SourceAttempt {
             source: exchange.source.clone(),
             at: now,
@@ -169,10 +185,7 @@ impl AuthStore {
                 old.controller_origin == exchange.controller_origin && old.revoked_at.is_none(),
                 "installation refused"
             );
-            anyhow::ensure!(
-                old.credential_generation == proof.expected_generation,
-                "installation generation conflict"
-            );
+            generation_matches(old.credential_generation == proof.expected_generation)?;
             if old.public_key_thumbprint != thumbprint {
                 verify_transcript(
                     &old.public_key,
@@ -189,26 +202,22 @@ impl AuthStore {
                 matches.len() <= 1,
                 "select an explicit installation before repairing legacy duplicates"
             );
-            let old = matches.first().map(|d| (*d).clone());
-            anyhow::ensure!(
-                old.as_ref()
-                    .map_or(proof.expected_generation == 0, |d| d.credential_generation
-                        == proof.expected_generation),
-                "installation generation conflict"
-            );
+            let old = matches.first().map(|d| (**d).clone());
+            generation_matches(old.as_ref().map_or(proof.expected_generation == 0, |d| {
+                d.credential_generation == proof.expected_generation
+            }))?;
             old
         };
         let device_id = prior
             .as_ref()
             .map(|d| d.device_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        anyhow::ensure!(
+        generation_matches(
             !state
                 .installations
                 .iter()
                 .any(|p| p.candidate.device_id == device_id && p.phase == Phase::Prepared),
-            "installation already rotating"
-        );
+        )?;
         let generation = state
             .generation_highwater
             .get(&device_id)
@@ -248,6 +257,39 @@ impl AuthStore {
             &candidate,
             proof.credential.clone(),
         ))
+    }
+
+    /// Inventory actions recheck the authorizing version inside the mutation lock.
+    pub fn revoke_installation(
+        &self,
+        context: &AuthContext,
+        device_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        Self::ensure_active_context_in_state(&state, context, now)?;
+        anyhow::ensure!(
+            context.device_id == device_id || context.has(Scope::HubAdmin),
+            "installation revoke refused"
+        );
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+            .context("device not found")?;
+        device.revoked_at = Some(now);
+        state.leases.retain(|_, lease| lease.device_id != device_id);
+        self.persist(&state)?;
+        let _ = self.0.revocations.send(device_id.to_owned());
+        drop(state);
+        self.audit(
+            Some(context),
+            "allowed",
+            "installation_revoke",
+            Some(Scope::MachineRead),
+            None,
+            now,
+        )
     }
 
     /// Idempotent actions bind their purpose. Prepared credentials cannot authorize.

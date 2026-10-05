@@ -2530,6 +2530,7 @@ async fn pairing_exchange<R: SessionReadModel>(
     exchange.source = exchange.controller_origin.clone();
     match auth.exchange_pairing(exchange, chrono::Utc::now()) {
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
+        Err(PairingExchangeError::Conflict) if bound_origin => with_cors((StatusCode::CONFLICT, Json(serde_json::json!({"error":"installation_conflict"}))).into_response(), &headers),
         Err(PairingExchangeError::Throttled {
             retry_after_seconds,
         }) if bound_origin => with_cors(pairing_throttled(retry_after_seconds), &headers),
@@ -2637,7 +2638,7 @@ async fn installation_revoke<R: SessionReadModel>(
     {
         return with_cors(unauthorized(), &headers);
     }
-    match auth.revoke_device(&device, chrono::Utc::now()) {
+    match auth.revoke_installation(&context, &device, chrono::Utc::now()) {
         Ok(_) => with_cors(StatusCode::NO_CONTENT.into_response(), &headers),
         Err(error) => with_cors(internal_error(error), &headers),
     }

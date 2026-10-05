@@ -1,4 +1,5 @@
-import { InstallationAccess } from "./installation-access";
+import { openInstallationInventory } from "./installation-inventory";
+import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
 import { presentFleetSheet } from "./fleet-sheet";
@@ -34,7 +35,7 @@ import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft, type PairingStep } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
 import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
-import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
+import { PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
 import { launchDropped, launchDroppedNotice, preselectedScopes, repairCommand, repairStatus } from "./pairing-scopes";
@@ -499,10 +500,21 @@ function commitSelection(next: SessionSelection): void {
 async function boot(): Promise<void> {
   const remotePending = await installationAccess.recover(window.fetch.bind(window));
   const stored = remotePending ? await catalog.snapshot() : await catalog.recoverPending();
-  for (const machine of stored.machines) machines.set(machine.id, machine);
+  const pendingHubs = new Set((await installationStore.list()).filter((r) => r.pending).map((r) => r.id.split("@")[0]));
+  for (const machine of stored.machines) if (!pendingHubs.has(machine.id)) machines.set(machine.id, machine);
+  watchInstallations((hubId) => {
+    void catalog.snapshot().then(({ machines: stored }) => {
+      const accepted = stored.find((m) => m.id === hubId);
+      const current = machines.get(hubId);
+      if (accepted && current && (accepted.credentialGeneration ?? 0) >= (current.credentialGeneration ?? 0)) Object.assign(current, accepted);
+    });
+  });
   machineCatalogLoaded = true;
-  if (stored.pendingCleanup > 0) {
-    pairingStatus = "A canceled credential remains blocked while durable local cleanup is pending.";
+  if (stored.pendingCleanup > 0 || remotePending > 0) {
+    pairingCleanupFailed = true;
+    pairingCleanupContext = { cause: "cancel", storeOpen: false, rollbackPending: true };
+    pairingCancellations.begin(undefined);
+    pairingStatus = "Pairing cleanup needs confirmation from the hub. Retry cleanup to restore the previous access.";
   }
   attention = (await attentionStore.list()).toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
   // Reopening on "No session open" throws away the one thing the operator was
@@ -673,7 +685,19 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       pairingStatus = `${detail}. Re-pair in Cassy Cloud; no browser reset is required.`;
       render();
     },
-    onCredentialRefreshed: async (refreshed) => { machines.set(refreshed.id, refreshed); await catalog.put(refreshed); },
+    onCredentialRefreshed: async (refreshed) => {
+      await catalog.put(refreshed);
+      const accepted = (await catalog.snapshot()).machines.find((m) => m.id === refreshed.id);
+      if (accepted) {
+        Object.assign(refreshed, accepted); machines.set(refreshed.id, refreshed);
+        for (const record of await installationStore.list()) {
+          if (!record.pending && record.id === `${accepted.id}@${new URL(accepted.baseUrl).origin}` && accepted.credentialGeneration !== undefined) {
+            record.known = { deviceId: accepted.deviceId, credentialGeneration: accepted.credentialGeneration };
+            await installationStore.put(record);
+          }
+        }
+      }
+    },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (items, freshnessThresholdSecs) => {
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
@@ -1080,6 +1104,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
       controllerOrigin: location.origin,
       legacyHubUrl: invitation.hubUrl ? undefined : String(values.get("url")),
       machineLabel: String(values.get("label")),
+      rotateKey: values.get("rotate-key") === "on",
       deviceLabel: String(values.get("device")),
       operatorLabel: String(values.get("operator")),
       // The relay form has no scope boxes, so its invitation's own scopes stand.
@@ -1378,7 +1403,8 @@ async function retryPairingCleanup(): Promise<void> {
   const cleared = pendingPairingStore.clear();
   let recovery: { pendingCleanup?: number; failed?: boolean };
   try {
-    recovery = { pendingCleanup: (await catalog.recoverPending()).pendingCleanup };
+    const remotePending = await installationAccess.recover(window.fetch.bind(window));
+    recovery = { pendingCleanup: remotePending || (await catalog.recoverPending()).pendingCleanup };
   } catch {
     recovery = { failed: true };
   }

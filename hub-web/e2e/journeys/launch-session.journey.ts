@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect, journeyPart } from "./journey";
 import { SCOPES, type LaunchWorld, type Machine } from "./hub-double";
@@ -317,7 +317,7 @@ for (const cell of consentCells) {
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (process.env.DELIVERY_QA && cell.id === "M01") {
         mkdirSync(process.env.DELIVERY_QA, { recursive: true });
-        writeFileSync(join(process.env.DELIVERY_QA, "consent.html"), await page.content());
+        writeFileSync(join(process.env.DELIVERY_QA, "consent.html"), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style></head><body>${await sheet.evaluate(node => node.outerHTML)}</body></html>`);
       }
     });
     await journey.stage(`${cell.id} cancel keeps permission, or one Allow opens projects`, async () => {
@@ -344,7 +344,7 @@ for (const cell of consentCells) {
       await expect(search).toMatchAriaSnapshot('- searchbox "Filter projects"');
       expect(hub.scopesFor("atlas")).toContain("session-launch");
       expect(hub.launches).toEqual([]);
-      if (process.env.DELIVERY_QA && cell.id === "M01") writeFileSync(join(process.env.DELIVERY_QA, "projects.html"), await page.content());
+      if (process.env.DELIVERY_QA && cell.id === "M01") writeFileSync(join(process.env.DELIVERY_QA, "projects.html"), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style></head><body>${await sheet.evaluate(node => node.outerHTML)}</body></html>`);
     });
   });
 }

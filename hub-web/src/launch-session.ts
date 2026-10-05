@@ -271,7 +271,7 @@ export function launchErrorCopy(result: { status: number; code?: string; detail?
   }
 }
 
-type View = "form" | "grant" | "confirm" | "starting" | "error";
+type View = "form" | "grant" | "starting" | "error";
 type Mode = "known" | "browse";
 type Selection = { target: LaunchTarget; name: string; path: string };
 type Load<T> = { status: "idle" } | { status: "loading" } | { status: "ready"; data: T } | { status: "failed"; message: string };
@@ -317,10 +317,6 @@ export function launchSheetMarkup(): string {
       <div class="pair-code-actions launch-grant-command"><code></code><button type="button" data-launch-action="copy">Copy command</button></div>
       <p class="field-hint launch-grant-note">The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.</p>
       <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button><button type="button" class="primary" data-launch-action="allow">Allow starting sessions</button></div>
-    </section>
-    <section class="launch-view launch-confirm" data-launch-view="confirm" hidden>
-      <p class="launch-confirm-copy"></p>
-      <div class="dialog-actions"><button type="button" data-launch-action="back-grant">Back</button><button type="button" class="primary" data-launch-action="confirm-grant">Allow starting sessions</button></div>
     </section>
     <section class="launch-view launch-starting" data-launch-view="starting" hidden>
       <div role="status" class="launch-progress"><p class="launch-progress-title"></p><p class="launch-progress-step"></p></div>
@@ -427,9 +423,7 @@ export class LaunchSheet {
       const action = target.closest<HTMLElement>("[data-launch-action]")?.dataset.launchAction;
       if (action === "close") { this.close(); return; }
       if (action === "start") { void this.start(); return; }
-      if (action === "allow") { this.showView("confirm"); this.$(".launch-confirm-copy").textContent = `Allow “Start new sessions” on ${this.machine()?.label ?? "this machine"}?`; this.focusFirst(); return; }
-      if (action === "back-grant") { this.showView("grant"); this.focusFirst(); return; }
-      if (action === "confirm-grant") { void this.grant(); return; }
+      if (action === "allow") { void this.grant(); return; }
       if (action === "back") { this.showView("form"); this.focusFirst(); return; }
       if (action === "copy") { void this.copyCommand(target.closest<HTMLButtonElement>("button")!); return; }
       if (action === "retry-accounts" && this.machineId) { void this.loadProfiles(this.machineId); return; }
@@ -467,9 +461,6 @@ export class LaunchSheet {
   }
 
   private selectMachine(machineId: string | undefined): void {
-    // A changed machine cancels the old consent; the next confirmation must
-    // name the same machine that receives the grant.
-    if (this.view === "confirm") this.view = "grant";
     this.grantNeedsInvitation = false;
     const grantError = this.$(".launch-grant-error");
     grantError.hidden = true;
@@ -690,7 +681,7 @@ export class LaunchSheet {
     for (const section of this.dialog!.querySelectorAll<HTMLElement>("[data-launch-view]")) section.hidden = section.dataset.launchView !== view;
     // The machine picker belongs to choosing; a launch in progress keeps its machine.
     const machineField = this.$("[data-launch-machine-field]");
-    if (view === "confirm" || view === "starting" || view === "error") machineField.hidden = true;
+    if (view === "starting" || view === "error") machineField.hidden = true;
     else machineField.hidden = this.host.machines().length < 2;
   }
 
@@ -716,9 +707,11 @@ export class LaunchSheet {
 
   private async grant(): Promise<void> {
     const machineId = this.machineId;
-    if (!machineId) return;
+    const button = this.$('[data-launch-action="allow"]') as HTMLButtonElement;
+    // The machine-named Allow is the consent itself. Ignore stale/duplicate
+    // actions and never self-grant through the read-only invitation path.
+    if (!machineId || this.view !== "grant" || button.disabled || button.hidden || !canEnableSessionLaunch(this.machine()?.scopes ?? [])) return;
     const generation = this.launchGeneration;
-    const button = this.$('[data-launch-action="confirm-grant"]') as HTMLButtonElement;
     button.disabled = true;
     try {
       await this.host.grant(machineId);
@@ -937,7 +930,6 @@ export class LaunchSheet {
         (allow.hidden ? this.$('.launch-grant [data-launch-action="copy"]') : allow).focus();
         return;
       }
-      if (this.view === "confirm") { this.$('.launch-confirm [data-launch-action="confirm-grant"]').focus(); return; }
       const search = this.$("input[name=launch-query]") as HTMLInputElement;
       if (!search.disabled && !search.closest("[hidden]")) { search.focus(); return; }
       const title = this.$(".launch-head h2");

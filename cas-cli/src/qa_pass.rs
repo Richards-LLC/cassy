@@ -46,6 +46,7 @@ pub fn is_non_surface_path(path: &str) -> bool {
     ["docs", "doc", "tests", "test", "__tests__", "e2e", "fixtures", "testdata", ".github", ".circleci", ".gitlab", ".buildkite"]
         .iter()
         .any(|dir| in_dir(dir))
+        || fixture_directory(&lower)
         || [".md", ".mdx", ".rst", ".adoc"].iter().any(|ext| file.ends_with(ext))
         || file.contains(".test.")
         || file.contains(".spec.")
@@ -58,6 +59,22 @@ pub fn is_non_surface_path(path: &str) -> bool {
         || file.starts_with("jest.config.")
         || file == ".gitlab-ci.yml"
         || lower.starts_with("scripts/test-")
+}
+
+/// cas-e86b: whether a path sits under a test-fixture directory named by a
+/// suffix or a JavaScript convention: `scripts/visual-qa-fixtures/`,
+/// `golden_fixtures/`, `__fixtures__/`, `fixture/`. A fixture page is input to
+/// a checker, not a product surface: `scripts/visual-qa-fixtures/clip-box.html`
+/// matched `**/*.html` and gated cas-0d16 behind a QA bundle and an
+/// independent round. Only directory segments count, never the file name.
+fn fixture_directory(lower: &str) -> bool {
+    let mut segments: Vec<&str> = lower.split('/').collect();
+    segments.pop();
+    segments.iter().any(|segment| {
+        matches!(*segment, "__fixtures__" | "fixture" | "__mocks__")
+            || segment.ends_with("-fixtures")
+            || segment.ends_with("_fixtures")
+    })
 }
 
 /// Decide whether a parked delivery needs an independent QA pass.
@@ -222,6 +239,160 @@ pub fn merge_gate(task: &Task, qa: &QaConfig, passes: &[QaPass], head: &str) -> 
         task = task.id,
         prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
     ))
+}
+
+/// The tip a supervisor's `qa_waive` binds to (cas-6c75, GH #1048, #1078).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaiverHead {
+    pub head: String,
+    /// The recorded tip the waiver moved past, when it bound to a newer one.
+    pub advanced_from: Option<String>,
+    /// Why the newer tip is the same delivery, in words for the receipt.
+    pub why: Option<&'static str>,
+}
+
+fn same_sha(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    !a.is_empty() && !b.is_empty() && (a == b || (a.len().min(b.len()) >= 7 && (a.starts_with(b) || b.starts_with(a))))
+}
+
+/// Which tip a waiver covers.
+///
+/// The recorded delivery is the parked anchor, else the open (or latest)
+/// round's tip, else a commit Cassy recorded for the delivery. `worktree_merge`
+/// checks the branch's *current* tip, so after a rebase a waiver on the
+/// recorded tip never let the merge through. The waiver binds to the current
+/// branch tip when that tip is still this delivery:
+/// - the open QA round is already bound to it (GH #1078), or
+/// - it is a rebased copy of the recorded tip: the recorded tip is no longer
+///   on the branch and both carry the same change (GH #1048).
+///
+/// A tip that only adds commits on top of the recorded one is new, unreviewed
+/// work: the waiver stays on the recorded tip and the merge still refuses.
+pub fn waiver_head(
+    task: &Task,
+    passes: &[QaPass],
+    branch_tip: Option<&str>,
+    rebased_copy: impl Fn(&str, &str) -> bool,
+) -> Option<WaiverHead> {
+    let recorded = task
+        .deliverables
+        .factory_branch_anchor
+        .clone()
+        .or_else(|| {
+            passes
+                .iter()
+                .find(|pass| !pass.is_withdrawn())
+                .map(|pass| pass.bound_head.clone())
+        })
+        .or_else(|| task.deliverables.delivery_pr_merge_commit.clone())
+        .or_else(|| task.deliverables.merge_commit.clone())
+        .or_else(|| task.deliverables.commit_hash.clone())
+        .filter(|head| !head.trim().is_empty());
+    if let Some(tip) = branch_tip.map(str::trim).filter(|tip| !tip.is_empty()) {
+        if recorded.as_deref().is_some_and(|recorded| same_sha(recorded, tip)) {
+            return Some(WaiverHead { head: tip.to_string(), advanced_from: None, why: None });
+        }
+        let open_round_at_tip = passes
+            .iter()
+            .any(|pass| pass.state.is_active() && same_sha(&pass.bound_head, tip));
+        if open_round_at_tip {
+            return Some(WaiverHead {
+                head: tip.to_string(),
+                advanced_from: recorded,
+                why: Some("the open QA round is bound to it"),
+            });
+        }
+        if let Some(recorded) = recorded.as_deref()
+            && rebased_copy(recorded, tip)
+        {
+            return Some(WaiverHead {
+                head: tip.to_string(),
+                advanced_from: Some(recorded.to_string()),
+                why: Some("it is a rebased copy of the recorded tip (same change, which is no longer on the branch)"),
+            });
+        }
+    }
+    recorded.map(|head| WaiverHead { head, advanced_from: None, why: None })
+}
+
+/// The current tip of `branch` in `repo`, as a full SHA.
+pub fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("{branch}^{{commit}}")])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !sha.is_empty()).then_some(sha)
+}
+
+/// Read the exact pushed head, rather than trusting a stale tracking ref.
+pub(crate) fn pushed_branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let remote_ref = format!("refs/heads/{branch}");
+    let timeout = std::time::Duration::from_secs(10);
+    let mut command = Command::new("git");
+    command
+        .current_dir(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["ls-remote", "--heads", "--refs", "origin", &remote_ref]);
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find_map(|(sha, name)| (name == remote_ref && !sha.is_empty()).then(|| sha.to_string()))
+}
+
+/// Whether `tip` is a rebased copy of `recorded` against `target`: `recorded`
+/// is no longer on `tip`'s history, and the change each brings over its
+/// merge-base with `target` has the same `git patch-id --stable`.
+pub fn is_rebased_copy(repo: &Path, recorded: &str, tip: &str, target: &str) -> bool {
+    let on_branch = Command::new("git")
+        .args(["merge-base", "--is-ancestor", recorded, tip])
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success());
+    if on_branch {
+        return false;
+    }
+    match (change_patch_id(repo, recorded, target), change_patch_id(repo, tip, target)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// `git patch-id --stable` of everything `head` brings over its merge-base
+/// with `target`. `None` when it cannot be computed or the change is empty.
+fn change_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
+    use std::io::Write;
+    let base = Command::new("git").args(["merge-base", head, target]).current_dir(repo).output().ok()?;
+    if !base.status.success() {
+        return None;
+    }
+    let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
+    let diff = Command::new("git").args(["diff", "--no-color", &base, head]).current_dir(repo).output().ok()?;
+    if !diff.status.success() || diff.stdout.is_empty() {
+        return None;
+    }
+    let mut child = Command::new("git")
+        .args(["patch-id", "--stable"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(&diff.stdout).ok()?;
+    let out = child.wait_with_output().ok()?;
+    let id = String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.to_string();
+    (out.status.success() && !id.is_empty()).then_some(id)
 }
 
 /// First changed path matching a configured glob, with the glob it matched.
@@ -617,13 +788,133 @@ pub fn validate_round_bundle(ledger_path: &Path, pass: &QaPass) -> Result<std::p
 /// build has it too, so it is not the delivery's defect (cas-e371, GH #1023
 /// finding 1). Cassy files each one as a follow-up task linked to the
 /// delivery instead of letting it reject a correct, narrow change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreExistingIssue {
+    /// The ledger's finding id ("F10"), when the reviewer gave one.
+    pub id: String,
+    /// A short title, when the reviewer gave one separately from the problem.
+    pub title: String,
     pub severity: String,
     pub problem: String,
     pub suggestion: String,
     /// The screenshot or file the reviewer cited, if any.
     pub evidence: String,
+}
+
+/// One finding line in a ledger's "## Pre-existing" section (cas-2849).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerFinding {
+    pub id: String,
+    pub severity: String,
+    pub text: String,
+}
+
+/// The "F10 NORMAL: <text>" lines of a ledger's pre-existing section
+/// (cas-2849). The section is the first "## " heading naming pre-existing
+/// findings; a finding line is a finding id, one severity word, a colon and
+/// its text, optionally bulleted. Prose lines are skipped.
+pub fn ledger_pre_existing_findings(ledger: &str) -> Vec<LedgerFinding> {
+    let mut findings = Vec::new();
+    let mut in_section = false;
+    for line in ledger.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            let heading = heading.to_ascii_lowercase();
+            in_section = heading.contains("pre-existing") || heading.contains("preexisting");
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let line = line.trim().trim_start_matches(['-', '*']).trim();
+        let Some((head, text)) = line.split_once(':') else {
+            continue;
+        };
+        let words: Vec<&str> = head.split_whitespace().collect();
+        let [id, severity] = words.as_slice() else {
+            continue;
+        };
+        let is_id = id.len() > 1
+            && id.starts_with(['F', 'f'])
+            && id[1..].bytes().all(|byte| byte.is_ascii_digit());
+        let text = text.trim();
+        if is_id && severity.chars().all(char::is_alphabetic) && !text.is_empty() {
+            findings.push(LedgerFinding {
+                id: id.to_ascii_uppercase(),
+                severity: severity.to_ascii_lowercase(),
+                text: text.to_string(),
+            });
+        }
+    }
+    findings
+}
+
+/// Fill each pre-existing issue's missing problem from the ledger's
+/// "F10 NORMAL: <text>" line for its id, and refuse one that still has no
+/// text: a follow-up titled "defect recorded by independent QA" with
+/// "Problem: (not described)" is unactionable (cas-2849).
+pub fn complete_pre_existing_issues(
+    issues: &mut [PreExistingIssue],
+    ledger: &str,
+) -> Result<(), String> {
+    let findings = ledger_pre_existing_findings(ledger);
+    for (index, issue) in issues.iter_mut().enumerate() {
+        if issue.problem.is_empty()
+            && let Some(finding) = findings
+                .iter()
+                .find(|finding| !issue.id.is_empty() && finding.id.eq_ignore_ascii_case(&issue.id))
+        {
+            issue.problem = finding.text.clone();
+            if issue.severity.is_empty() {
+                issue.severity = finding.severity.clone();
+            }
+        }
+        if issue.problem.is_empty() {
+            let named = if issue.id.is_empty() {
+                format!("pre-existing issue {}", index + 1)
+            } else {
+                format!("pre-existing issue {} ({})", index + 1, issue.id)
+            };
+            return Err(format!(
+                "{named} has no problem text, so its follow-up task would say nothing. Give it a \
+                 \"problem\" (or \"title\"/\"description\") in issues, or give it an \"id\" and write \
+                 the line \"{id} <SEVERITY>: <what is wrong>\" in the ledger's ## Pre-existing \
+                 section, then record the verdict again.",
+                id = if issue.id.is_empty() { "F<n>" } else { issue.id.as_str() },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The existing task a pre-existing issue already names as its follow-up
+/// ("existing follow-up cas-2a33"), so qa_record does not file a duplicate
+/// (cas-2849). The delivery's own id never counts.
+pub fn tracked_follow_up(
+    issue: &PreExistingIssue,
+    delivery_id: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let text = format!("{} {} {}", issue.title, issue.problem, issue.suggestion).to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find("cas-") {
+        let start = offset + found;
+        let digits = bytes[start + 4..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_hexdigit())
+            .count();
+        let end = start + 4 + digits;
+        offset = start + 4;
+        let boundary = bytes.get(end).is_none_or(|byte| !byte.is_ascii_alphanumeric());
+        if !(4..=8).contains(&digits) || !boundary {
+            continue;
+        }
+        let id = &text[start..end];
+        if !id.eq_ignore_ascii_case(delivery_id) && exists(id) {
+            return Some(id.to_string());
+        }
+    }
+    None
 }
 
 /// Split `qa_record`'s `issues` JSON array into the pre-existing issues and
@@ -650,11 +941,26 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
         };
         let scope = text("scope").to_ascii_lowercase().replace(['_', ' '], "-");
         if matches!(scope.as_str(), "pre-existing" | "preexisting") {
+            // cas-2849: reviewers also write id/title/description/evidence,
+            // as cas-d1fa round 1 did; read those rather than dropping them.
+            let first = |keys: &[&str]| {
+                keys.iter()
+                    .map(|key| text(key))
+                    .find(|value| !value.is_empty())
+                    .unwrap_or_default()
+            };
+            let title = text("title");
+            let mut problem = first(&["problem", "description", "summary"]);
+            if problem.is_empty() {
+                problem = title.clone();
+            }
             pre_existing.push(PreExistingIssue {
+                id: text("id"),
+                title,
                 severity: text("severity"),
-                problem: text("problem"),
-                suggestion: text("suggestion"),
-                evidence: text("file"),
+                problem,
+                suggestion: first(&["suggestion", "fix"]),
+                evidence: first(&["file", "evidence"]),
             });
         } else {
             delivery += 1;
@@ -693,7 +999,8 @@ pub fn follow_up_priority(severity: &str) -> cas_types::Priority {
 pub fn follow_up_title(delivery: &Task, issue: &PreExistingIssue) -> String {
     // The first sentence of the first line: "Footer contrast 3.1:1. Base too."
     // titles as "Footer contrast 3.1:1".
-    let first_line = issue.problem.lines().next().unwrap_or_default();
+    let source = if issue.title.is_empty() { &issue.problem } else { &issue.title };
+    let first_line = source.lines().next().unwrap_or_default();
     let mut problem = first_line
         .split(". ")
         .next()
@@ -736,6 +1043,49 @@ pub fn follow_up_description(
     }
     body.push_str(&format!("- Ledger: {ledger_path}\n"));
     body
+}
+
+/// The epic a QA follow-up joins: the reviewed delivery's parent epic.
+pub fn follow_up_epic(
+    store: &dyn cas_store::TaskStore,
+    delivery_id: &str,
+) -> cas_store::Result<Option<Task>> {
+    Ok(store
+        .get_parent_epic(delivery_id)?
+        .filter(|epic| !epic.is_terminal()))
+}
+
+/// The follow-up task for one pre-existing issue, before it is stored.
+pub fn follow_up_task(
+    id: &str,
+    delivery: &Task,
+    pass: &QaPass,
+    issue: &PreExistingIssue,
+    ledger_path: &str,
+    epic: Option<&Task>,
+) -> Task {
+    let mut task = Task::new(id.to_string(), follow_up_title(delivery, issue));
+    task.task_type = TaskType::Bug;
+    task.scope = crate::types::Scope::Project;
+    task.origin_project = delivery.origin_project.clone();
+    task.description = follow_up_description(delivery, pass, issue, ledger_path);
+    task.priority = follow_up_priority(&issue.severity);
+    task.risk = vec![cas_types::TaskRisk::None];
+    task.labels = vec!["qa-follow-up".to_string(), "pre-existing".to_string()];
+    task.external_ref = Some(ledger_path.to_string());
+    task.deliverables.work_target = delivery.deliverables.work_target.clone();
+    task.delivery_mode = delivery.delivery_mode;
+    if let Some(epic) = epic {
+        if let Some(target) =
+            crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
+                delivery, epic,
+            )
+        {
+            task.deliverables.work_target = Some(target);
+        }
+        task.delivery_mode = epic.delivery_mode;
+    }
+    task
 }
 
 /// Title of the QA work item for one round.
@@ -828,12 +1178,15 @@ pub fn qa_task_description(
          journeys/<ID>/ folder per journey. Run visual-qa.mjs --strict against your own local \
          serve of {head}, never the production URL: qa_record refuses a claimed visual-QA pass \
          without that local run.\n\n\
-         Record the verdict with: mcp__cas__verification action=qa_record task_id={task} \
+         {tool_naming}\n\n\
+         Replace {{prefix}} with your harness's prefix above. Load verification.\n\
+         Record the verdict with: {{prefix}}verification action=qa_record task_id={task} \
          status=approved|rejected summary=\"...\" issues='[...]' ledger_path={ledger}/LEDGER.md \
          — a rejection sends {task} back to its implementer with your ledger. Recording closes \
          this QA task and cannot be revised. If you change your mind after recording, do not \
          record again: message the supervisor (blocker=true) asking for request_changes on \
          {task}, and name the finding.",
+        tool_naming = crate::builtins::TOOL_NAMING_LINE,
         bar = QA_REJECTION_BAR,
         task = delivery.id,
         round = pass.round,
@@ -859,6 +1212,48 @@ mod tests {
 
     fn paths(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// cas-e86b: the cas-0d16 delivery (checker, two fixture pages, tests)
+    /// is not user-facing; the same diff plus a product page still is.
+    #[test]
+    fn fixture_directory_html_is_not_user_facing_but_product_html_still_is_cas_e86b() {
+        for fixture in [
+            "scripts/visual-qa-fixtures/clip-box.html",
+            "scripts/visual-qa-fixtures/nested/page.css",
+            "web/src/__fixtures__/card.html",
+            "golden_fixtures/report.html",
+            "hub-web/src/fixture/layout.css",
+            "src/__mocks__/view.tsx",
+        ] {
+            assert!(is_non_surface_path(fixture), "{fixture}");
+        }
+        for product in [
+            "hub-web/src/styles.css",
+            "hub-web/dist/index.html",
+            "web/fixtures-page.html",
+            "web/src/fixtures-panel/view.tsx",
+            "scripts/visual-qa.mjs",
+        ] {
+            assert!(!is_non_surface_path(product), "{product}");
+        }
+
+        let qa = QaConfig::default();
+        let cas_0d16 = paths(&[
+            "scripts/visual-qa.mjs",
+            "scripts/visual-qa-fixtures/clip-box.html",
+            "scripts/visual-qa-fixtures/clip-overflow.html",
+            "scripts/test-visual-qa.mjs",
+        ]);
+        let reasons = user_facing_reasons(&task(), &qa, Some(&cas_0d16), &[]);
+        assert!(!reasons.reasons.iter().any(|reason| reason.starts_with("path:")), "{reasons:?}");
+        assert!(!delivery_eligibility(&task(), &qa, Some(&cas_0d16), &[]).is_eligible());
+
+        let mut mixed = cas_0d16.clone();
+        mixed.push("hub-web/src/styles.css".to_string());
+        let reasons = user_facing_reasons(&task(), &qa, Some(&mixed), &[]);
+        assert_eq!(reasons.reasons, vec!["path:hub-web/src/styles.css (**/*.css)".to_string()]);
+        assert!(delivery_eligibility(&task(), &qa, Some(&mixed), &[]).is_eligible());
     }
 
     #[test]
@@ -980,6 +1375,159 @@ mod tests {
         let integrated = integrated_paths(repo, delivery_head.trim(), "main").unwrap();
         assert!(integrated.iter().any(|path| path == "app.vue"), "{integrated:?}");
         assert!(!integrated.iter().any(|path| path == "incoming.vue"), "{integrated:?}");
+    }
+
+    /// A git repo for the cas-6c75 regression: `main` with a base commit and
+    /// `factory/worker` carrying one UI change.
+    fn rebase_repo() -> (tempfile::TempDir, impl Fn(&[&str]) -> String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let git = move |args: &[&str]| -> String {
+            let output = Command::new("git")
+                .args(["-c", "user.name=QA", "-c", "user.email=qa@example.invalid"])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("app.css"), "body { color: red; }\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["switch", "-q", "-c", "factory/worker"]);
+        std::fs::write(dir.path().join("app.css"), "body { color: blue; }\n").unwrap();
+        git(&["commit", "-q", "-am", "the delivery"]);
+        (dir, git)
+    }
+
+    fn parked(anchor: &str) -> Task {
+        let mut task = task();
+        task.deliverables.factory_branch_anchor = Some(anchor.to_string());
+        task.deliverables.parked_branch = Some("factory/worker".to_string());
+        task
+    }
+
+    fn dispatch(cas: &Path, head: &str) {
+        let new = cas_store::NewQaPass {
+            task_id: "cas-ui1",
+            implementer_agent_id: "worker",
+            branch: "factory/worker",
+            bound_head: head,
+            deadline_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            max_rounds: 3,
+        };
+        cas_store::open_qa_pass(cas, &new, chrono::Utc::now()).unwrap();
+    }
+
+    /// cas-6c75 (GH #1048): park at A, a round dispatched for A, a sibling
+    /// lands, the worker rebases to T (same change). The waiver used to record
+    /// @A, and worktree_merge, which checks the branch tip T, refused it every
+    /// time. It now binds to T, and the merge gate accepts it.
+    #[test]
+    fn waiver_after_a_rebase_binds_to_the_current_tip_and_the_merge_accepts_it_gh_1048() {
+        let (dir, git) = rebase_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let anchor = git(&["rev-parse", "HEAD"]);
+        let task = parked(&anchor);
+        dispatch(cas.path(), &anchor);
+
+        // A sibling lands on main; the worker rebases onto it.
+        git(&["switch", "-q", "main"]);
+        std::fs::write(repo.join("other.rs"), "fn sibling() {}\n").unwrap();
+        git(&["add", "other.rs"]);
+        git(&["commit", "-q", "-m", "sibling"]);
+        git(&["switch", "-q", "factory/worker"]);
+        git(&["rebase", "-q", "main"]);
+        let tip = branch_tip(repo, "factory/worker").unwrap();
+        assert_ne!(tip, anchor, "the rebase moved the tip");
+        assert!(is_rebased_copy(repo, &anchor, &tip, "main"));
+
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let chosen = waiver_head(&task, &passes, Some(&tip), |recorded, tip| {
+            is_rebased_copy(repo, recorded, tip, "main")
+        })
+        .unwrap();
+        assert_eq!(chosen.head, tip);
+        assert_eq!(chosen.advanced_from.as_deref(), Some(anchor.as_str()));
+
+        cas_store::waive_qa_pass(
+            cas.path(),
+            "cas-ui1",
+            "supervisor",
+            "worker",
+            "factory/worker",
+            &chosen.head,
+            "rebased; reviewed content unchanged",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let qa = QaConfig::default();
+        assert_eq!(
+            merge_gate(&task, &qa, &passes, &tip),
+            Ok(()),
+            "worktree_merge accepts the waiver"
+        );
+
+        // The old binding: a waiver on the pre-rebase anchor never covers the tip.
+        let mut stale = passes.clone();
+        for pass in &mut stale {
+            if pass.state == cas_types::QaPassState::Waived {
+                pass.bound_head = anchor.clone();
+            }
+        }
+        let refusal = merge_gate(&task, &qa, &stale, &tip).unwrap_err();
+        assert!(refusal.contains(&format!("covers @{}", &tip[..8])), "{refusal}");
+    }
+
+    /// cas-6c75 (GH #1078): the branch and the open dispatch are both at the
+    /// rebased tip while the parked anchor is the pre-rebase copy. The waiver
+    /// binds to the dispatch's tip.
+    #[test]
+    fn waiver_binds_to_the_open_dispatch_tip_over_a_stale_anchor_gh_1078() {
+        let (dir, git) = rebase_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let stale = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "-q", "--amend", "-m", "the delivery, reworded"]);
+        let tip = branch_tip(repo, "factory/worker").unwrap();
+        dispatch(cas.path(), &tip);
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let chosen = waiver_head(&parked(&stale), &passes, Some(&tip), |_, _| false).unwrap();
+        assert_eq!(chosen.head, tip);
+        assert_eq!(chosen.why, Some("the open QA round is bound to it"));
+    }
+
+    /// New commits on top of the parked tip are unreviewed work: the waiver
+    /// stays on the parked tip and the merge of the new tip still refuses.
+    #[test]
+    fn waiver_never_jumps_to_a_tip_that_adds_unreviewed_work() {
+        let (dir, git) = rebase_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let anchor = git(&["rev-parse", "HEAD"]);
+        dispatch(cas.path(), &anchor);
+        std::fs::write(repo.join("app.css"), "body { color: green; }\n").unwrap();
+        git(&["commit", "-q", "-am", "more work after park"]);
+        let tip = branch_tip(repo, "factory/worker").unwrap();
+        assert!(!is_rebased_copy(repo, &anchor, &tip, "main"));
+        let task = parked(&anchor);
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let chosen = waiver_head(&task, &passes, Some(&tip), |recorded, tip| {
+            is_rebased_copy(repo, recorded, tip, "main")
+        })
+        .unwrap();
+        assert_eq!(chosen.head, anchor);
+        assert_eq!(chosen.advanced_from, None);
+        // A rebased copy with a different change is not the same delivery either.
+        git(&["switch", "-q", "-c", "factory/other", "main"]);
+        std::fs::write(repo.join("app.css"), "body { color: purple; }\n").unwrap();
+        git(&["commit", "-q", "-am", "something else"]);
+        let other = branch_tip(repo, "factory/other").unwrap();
+        assert!(!is_rebased_copy(repo, &anchor, &other, "main"));
     }
 
     #[test]
@@ -1204,6 +1752,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cas_bb7e_qa_task_brief_uses_the_reviewers_harness_prefix() {
+        let text = qa_task_description(
+            &task(),
+            &pass("aaaa1111", cas_types::QaPassState::Pending),
+            &["demo_statement".to_string()],
+            Path::new("/artifacts/cas-ui1/independent-qa/round-1"),
+            "epic/x",
+        );
+        assert!(text.contains(crate::builtins::TOOL_NAMING_LINE), "{text}");
+        assert!(text.contains("{prefix}verification action=qa_record task_id=cas-ui1"), "{text}");
+        assert!(!text.contains("mcp__cas__verification action=qa_record"), "{text}");
+    }
+
     /// cas-a6a3 (GH #1007): a round claiming `visual_qa_status: pass` needs
     /// the strict run's own report, from after the round opened, of a local
     /// build. A claim with no run, or a run against production, is refused.
@@ -1288,6 +1850,251 @@ mod tests {
         assert!(split_qa_issues(Some("[")).unwrap_err().contains("not valid JSON"));
     }
 
+    /// cas-1980: a delivery under epic E that once also hung under a closed
+    /// epic C (cas-9ebd's double parent). Returns the store, E and the delivery.
+    fn delivery_under_epic() -> (
+        tempfile::TempDir,
+        std::sync::Arc<dyn cas_store::TaskStore>,
+        Task,
+        Task,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut closed = Task::new("cas-c10d".to_string(), "Finished epic".to_string());
+        closed.task_type = TaskType::Epic;
+        closed.status = cas_types::TaskStatus::Closed;
+        closed.branch = Some("epic/finished".to_string());
+        store.add(&closed).unwrap();
+        let mut epic = Task::new("cas-e9e1".to_string(), "Live epic".to_string());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/live".to_string());
+        epic.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:cas-src".to_string(),
+            target_branch: "main".to_string(),
+        });
+        store.add(&epic).unwrap();
+        let delivery = task();
+        store.add(&delivery).unwrap();
+        for parent in [&closed.id, &epic.id] {
+            store
+                .add_dependency(&cas_types::Dependency::new(
+                    delivery.id.clone(),
+                    parent.clone(),
+                    cas_types::DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+        (dir, store, epic, delivery)
+    }
+
+    /// cas-1980: a QA follow-up joins the delivery's open epic and targets
+    /// its branch, so its close never targets main.
+    #[test]
+    fn a_qa_follow_up_joins_the_deliverys_open_epic_cas_1980() {
+        let (_dir, store, epic, delivery) = delivery_under_epic();
+        let parent = follow_up_epic(store.as_ref(), &delivery.id)
+            .unwrap()
+            .expect("the delivery has an open epic");
+        assert_eq!(
+            parent.id, epic.id,
+            "the closed parent is never the follow-up's epic"
+        );
+
+        let issue = PreExistingIssue {
+            severity: "normal".to_string(),
+            problem: "Footer contrast 3.1:1".to_string(),
+            suggestion: String::new(),
+            evidence: String::new(),
+            ..Default::default()
+        };
+        let round = pass("aaaa1111", cas_types::QaPassState::Passed);
+        let follow_up = follow_up_task(
+            "cas-f011",
+            &delivery,
+            &round,
+            &issue,
+            "/a/LEDGER.md",
+            Some(&parent),
+        );
+        assert_eq!(
+            follow_up
+                .deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str()),
+            Some("epic/live"),
+            "its close targets the epic's branch"
+        );
+        assert_eq!(follow_up.delivery_mode, cas_types::DeliveryMode::LocalMerge);
+        store
+            .create_atomic(&follow_up, &[], Some(&parent.id), Some("cas-qa-record"))
+            .unwrap();
+        assert_eq!(
+            store
+                .get_parent_epic("cas-f011")
+                .unwrap()
+                .map(|epic| epic.id),
+            Some(epic.id.clone())
+        );
+
+        // Without a parent epic the follow-up keeps the old shape.
+        let loose = follow_up_task("cas-f012", &delivery, &round, &issue, "/a/LEDGER.md", None);
+        assert!(loose.deliverables.work_target.is_none());
+    }
+
+    #[test]
+    fn follow_up_preserves_explicit_targets_and_skips_terminal_parent_cas_1980() {
+        let (_dir, store, epic, mut delivery) = delivery_under_epic();
+        let issue = PreExistingIssue {
+            severity: "normal".to_string(),
+            problem: "contrast".to_string(),
+            suggestion: String::new(),
+            evidence: String::new(),
+            ..Default::default()
+        };
+        let round = pass("aaaa1111", cas_types::QaPassState::Passed);
+        // A child still targeted to the epic's base follows its live lane.
+        delivery.deliverables.work_target = epic.deliverables.work_target.clone();
+        let inherited = follow_up_task(
+            "cas-f013",
+            &delivery,
+            &round,
+            &issue,
+            "/a/LEDGER.md",
+            Some(&epic),
+        );
+        assert_eq!(
+            inherited.deliverables.work_target.unwrap().target_branch,
+            "epic/live"
+        );
+        // A distinct explicit repository/branch remains authoritative.
+        for target in [
+            cas_types::WorkTarget {
+                repo_selector: "project:cas-src".into(),
+                target_branch: "release/custom".into(),
+            },
+            cas_types::WorkTarget {
+                repo_selector: "project:other".into(),
+                target_branch: "main".into(),
+            },
+        ] {
+            delivery.deliverables.work_target = Some(target.clone());
+            let follow_up = follow_up_task(
+                "cas-f014",
+                &delivery,
+                &round,
+                &issue,
+                "/a/LEDGER.md",
+                Some(&epic),
+            );
+            assert_eq!(follow_up.deliverables.work_target, Some(target));
+            assert!(follow_up.assignee.is_none());
+        }
+        store.remove_dependency(&delivery.id, &epic.id).unwrap();
+        assert!(
+            store
+                .get_parent_epic(&delivery.id)
+                .unwrap()
+                .unwrap()
+                .is_terminal()
+        );
+        assert!(
+            follow_up_epic(store.as_ref(), &delivery.id)
+                .unwrap()
+                .is_none()
+        );
+        store.remove_dependency(&delivery.id, "cas-c10d").unwrap();
+        assert!(
+            follow_up_epic(store.as_ref(), &delivery.id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    const D1FA_LEDGER: &str = include_str!("../tests/data/qa-ledgers/cas-d1fa-round-1-LEDGER.ledger.txt");
+    const D1FA_ISSUES: &str = include_str!("../tests/data/qa-ledgers/cas-d1fa-round-1-issues.json");
+
+    /// cas-2849, the real cas-d1fa round 1: its pre-existing section is free
+    /// text, "F10 NORMAL: <text>", not a table.
+    #[test]
+    fn free_text_pre_existing_lines_are_parsed_cas_2849() {
+        let findings = ledger_pre_existing_findings(D1FA_LEDGER);
+        let ids: Vec<_> = findings.iter().map(|finding| finding.id.as_str()).collect();
+        assert_eq!(ids, ["F10", "F11"], "{findings:?}");
+        assert!(findings.iter().all(|finding| finding.severity == "normal"));
+        assert!(findings[0].text.starts_with("nativeMac CtrlK fixture mismatch"), "{findings:?}");
+        assert!(findings[1].text.starts_with("strict contrast captureinstability"), "{findings:?}");
+    }
+
+    /// cas-2849: the issues qa_record received for cas-d1fa used id, title
+    /// and description; the follow-ups are titled from that text and carry it
+    /// as the problem, never "(not described)".
+    #[test]
+    fn titled_issues_fill_the_follow_up_cas_2849() {
+        let (mut pre, delivery_issues) = split_qa_issues(Some(D1FA_ISSUES)).unwrap();
+        assert_eq!(delivery_issues, 2);
+        complete_pre_existing_issues(&mut pre, D1FA_LEDGER).unwrap();
+        let delivery = task();
+        let round = pass("bd3d3afd", cas_types::QaPassState::Failed);
+        assert_eq!(pre[0].id, "F10");
+        assert_eq!(
+            follow_up_title(&delivery, &pre[1]),
+            "Pre-existing: Strict contrast captures race existing color transitions (found in QA of cas-ui1)"
+        );
+        let body = follow_up_description(&delivery, &round, &pre[1], "/a/LEDGER.md");
+        assert!(body.contains("visual-qa.mjs940 waits50ms"), "{body}");
+        assert!(!body.contains("(not described)"), "{body}");
+    }
+
+    /// cas-2849: an issue that gives only its id takes its text from the
+    /// ledger's "F10 NORMAL:" line.
+    #[test]
+    fn an_id_only_issue_takes_its_text_from_the_ledger_cas_2849() {
+        let (mut pre, _) = split_qa_issues(Some(
+            r#"[{"id":"F11","scope":"pre-existing","severity":"normal"}]"#,
+        ))
+        .unwrap();
+        complete_pre_existing_issues(&mut pre, D1FA_LEDGER).unwrap();
+        assert!(pre[0].problem.starts_with("strict contrast captureinstability"), "{pre:?}");
+        assert!(
+            follow_up_title(&task(), &pre[0]).starts_with("Pre-existing: strict contrast captureinstability"),
+            "{}",
+            follow_up_title(&task(), &pre[0])
+        );
+    }
+
+    /// cas-2849: F10 names its existing follow-up cas-2a33, so no new task.
+    #[test]
+    fn a_finding_naming_an_existing_task_is_not_refiled_cas_2849() {
+        let (mut pre, _) = split_qa_issues(Some(D1FA_ISSUES)).unwrap();
+        complete_pre_existing_issues(&mut pre, D1FA_LEDGER).unwrap();
+        let exists = |id: &str| id == "cas-2a33";
+        assert_eq!(tracked_follow_up(&pre[0], "cas-d1fa", exists).as_deref(), Some("cas-2a33"));
+        assert_eq!(tracked_follow_up(&pre[1], "cas-d1fa", exists), None);
+        // The delivery itself is never its own follow-up.
+        let own = PreExistingIssue {
+            problem: "seen while reviewing cas-d1fa".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(tracked_follow_up(&own, "cas-d1fa", |_| true), None);
+    }
+
+    /// cas-2849: a pre-existing issue with no text anywhere is refused with
+    /// what to add.
+    #[test]
+    fn a_pre_existing_issue_without_text_is_refused_cas_2849() {
+        let (mut pre, _) =
+            split_qa_issues(Some(r#"[{"scope":"pre-existing","severity":"normal"}]"#)).unwrap();
+        let refusal = complete_pre_existing_issues(&mut pre, "# ledger\n").unwrap_err();
+        assert!(refusal.contains("problem"), "{refusal}");
+        assert!(refusal.contains("## Pre-existing"), "{refusal}");
+        let (mut unknown, _) =
+            split_qa_issues(Some(r#"[{"id":"F99","scope":"pre-existing"}]"#)).unwrap();
+        assert!(complete_pre_existing_issues(&mut unknown, D1FA_LEDGER).unwrap_err().contains("F99"));
+    }
+
     #[test]
     fn a_rejection_needs_an_issue_the_delivery_owns() {
         use cas_types::QaVerdict::*;
@@ -1307,6 +2114,7 @@ mod tests {
             problem: "Footer links fail contrast at 3.1:1. The base build too.".to_string(),
             suggestion: "use --ink-mid".to_string(),
             evidence: "F02.png".to_string(),
+            ..Default::default()
         };
         assert_eq!(
             follow_up_title(&delivery, &issue),

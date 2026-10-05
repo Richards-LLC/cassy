@@ -77,7 +77,7 @@ pub(crate) fn delivered_head(
 }
 
 /// Which evidence the shared user-facing reasons demand. `terminal_render`
-/// says the diff touches a `qa.terminal_render_paths` glob.
+/// says the diff touches command output rather than only interactive surfaces.
 pub(crate) fn evidence_tier(reasons: &[String], terminal_render: bool) -> EvidenceTier {
     if reasons.is_empty() {
         EvidenceTier::None
@@ -91,6 +91,24 @@ pub(crate) fn evidence_tier(reasons: &[String], terminal_render: bool) -> Eviden
             terminal_qa: terminal_render,
         }
     }
+}
+
+/// A command's stdout capture cannot exercise a factory mouse event or PTY
+/// resize. Those surfaces keep the real-build ledger requirement. Examine
+/// every path so an interactive change cannot hide a command-output change.
+fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool {
+    if qa.terminal_render_paths.is_empty() {
+        return false;
+    }
+    let cli = ["**/cli/**".to_string()];
+    paths.iter().filter(|path| !is_non_surface_path(path)).any(|path| {
+        let one = std::slice::from_ref(path);
+        // Existing config files can retain the older default output globs,
+        // without **/cli/**. Do not let an input exemption hide CLI output.
+        first_user_facing_path(one, &cli).is_some()
+            || (first_user_facing_path(one, &qa.terminal_render_paths).is_some()
+                && first_user_facing_path(one, &qa.terminal_interaction_paths).is_none())
+    })
 }
 
 /// Run the gate. `Ok(notes)` carries decision-note lines to record on close;
@@ -111,9 +129,10 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     // Explicit historical citations remain valid. Otherwise prefer new QA
     // evidence; a namespace created only for issue attachments must not hide
     // an existing legacy ledger or terminal receipt.
-    let legacy_cited = cited
-        .as_deref()
-        .is_some_and(|path| Path::new(path).starts_with(&legacy));
+    let legacy_cited = cited.as_deref().is_some_and(|path| {
+        let path = crate::qa_evidence::expand_home(path);
+        path.starts_with(&legacy) && std::fs::symlink_metadata(path).is_ok()
+    });
     let scoped_evidence = scoped.join("LEDGER.md").exists()
         || scoped.join("qa").exists()
         || scoped.join("terminal-qa").exists();
@@ -124,6 +143,41 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     } else {
         scoped
     }
+}
+
+/// A missing flat citation can outlive the namespace migration in a running
+/// service. Read its corresponding scoped file without rewriting task history.
+/// Existing historical files, unsafe relative paths and unrelated citations
+/// keep their original validation; all mapped bundles still undergo the full
+/// containment, freshness, task/head binding and trace checks.
+fn task_qa_notes<'a>(
+    paths: &crate::config::FactoryArtifactPaths,
+    task: &'a Task,
+    read_dir: &Path,
+) -> std::borrow::Cow<'a, str> {
+    let original = std::borrow::Cow::Borrowed(task.notes.as_str());
+    let [scoped, legacy] = paths.task_dirs(&task.id);
+    if read_dir != scoped {
+        return original;
+    }
+    let Some(cited) = crate::qa_evidence::cited_bundle_path(&task.notes) else {
+        return original;
+    };
+    let cited = crate::qa_evidence::expand_home(&cited);
+    let Ok(relative) = cited.strip_prefix(&legacy) else {
+        return original;
+    };
+    if relative.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || !std::fs::symlink_metadata(&cited)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return original;
+    }
+    let replacement = scoped.join(relative);
+    if !replacement.is_file() {
+        return original;
+    }
+    std::borrow::Cow::Owned(format!("{}\nqa-bundle: {}", task.notes, replacement.display()))
 }
 
 /// The target a delivery is diffed against: `origin/<target>` when that ref
@@ -188,46 +242,109 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         .map(|paths| catalog_journeys_for(repo, paths))
         .unwrap_or_default();
     let reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
-    let terminal_render = changed.as_deref().is_some_and(|paths| {
-        let surface: Vec<String> = paths
-            .iter()
-            .filter(|path| !is_non_surface_path(path))
-            .cloned()
-            .collect();
-        first_user_facing_path(&surface, &qa.terminal_render_paths).is_some()
-    });
+    let terminal_render = changed.as_deref().is_some_and(|paths| requires_terminal_qa(paths, &qa));
     let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
         (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)
             .map(|diff| added_skip_markers(&diff))
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let artifacts_dir = task_qa_artifacts_dir(cas_root, &base, task);
-    if artifacts_dir.exists() && crate::config::canonical_factory_task_artifact_dir(&base, &artifacts_dir).is_none() {
+    let paths = crate::config::resolved_factory_artifact_paths(cas_root, config.factory().artifacts_root.as_deref());
+    let artifacts_dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
+    if artifacts_dir.exists() && crate::config::canonical_factory_task_artifact_dir(&paths.base, &artifacts_dir).is_none() {
         return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
     }
+    let notes = task_qa_notes(&paths, task, &artifacts_dir);
     let ctx = EvidenceContext {
         task_id: &task.id,
         task_artifacts_dir: &artifacts_dir,
         repo,
         delivered_head: &head,
-        notes: &task.notes,
+        notes: &notes,
         deployed_origins: &qa.deployed_origins,
     };
-    run_close_gate_with_write_dir(
+    let tier = evidence_tier(&reasons, terminal_render);
+    // Waivers authorize missing implementer ledger evidence only at the exact
+    // delivered commit. Independent QA PASS and ancestor waivers do not do so.
+    let waiver = if matches!(tier, EvidenceTier::Ledger { .. }) {
+        cas_store::satisfying_qa_passes(cas_root, &task.id)
+            .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
+            .into_iter()
+            .find(|pass| pass.bound_head == head && pass.state == cas_types::QaPassState::Waived)
+    } else {
+        None
+    };
+    let mut pass = run_close_gate_with_write_dir(
         &ctx,
-        evidence_tier(&reasons, terminal_render),
+        if waiver.is_some() {
+            EvidenceTier::None
+        } else {
+            tier
+        },
         &reasons,
         &markers,
-        &crate::config::project_factory_artifacts_root(cas_root, &base).join(&task.id),
-    )
-    .map(|pass| pass.notes)
+        &paths.task_dirs(&task.id)[0],
+    )?;
+    if let Some(waiver) = waiver {
+        pass.notes.push(format!(
+            "QA evidence ledger waived: head={} waiver={} supervisor={} reason={}",
+            head,
+            waiver.id,
+            waiver.issuer_agent_id.as_deref().unwrap_or(""),
+            waiver.summary.as_deref().unwrap_or("")
+        ));
+    }
+    if !pass.deferred_deployed.is_empty() {
+        let agents = crate::store::open_agent_store(cas_root)
+            .and_then(|store| Ok(store.list(None)?))
+            .map_err(|err| {
+                format!("QA EVIDENCE REJECTED: cannot validate deployed-verification owner: {err}")
+            })?;
+        for deferred in pass.deferred_deployed {
+            let by_id = agents.iter().find(|agent| agent.id == deferred.owner);
+            let named: Vec<_> = agents
+                .iter()
+                .filter(|agent| agent.name == deferred.owner)
+                .collect();
+            let owner = by_id.or_else(|| (named.len() == 1).then(|| named[0]));
+            let Some(owner) = owner.filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+            else {
+                return Err(format!(
+                    "QA EVIDENCE REJECTED: deployed-verification owner={} must identify one registered supervisor (use the agent id for ambiguous names)",
+                    deferred.owner
+                ));
+            };
+            pass.notes.push(format!(
+                "POST-DEPLOY OBLIGATION: task={} head={} row={} ledger={} owner={} ({}); deferred deployed verification, not PASS.",
+                task.id, head, deferred.row_id, deferred.ledger.display(), owner.name, owner.id
+            ));
+        }
+    }
+    Ok(pass.notes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interaction_classification_is_conservative_and_configurable_cas_266e() {
+        let mut qa = crate::config::QaConfig::default();
+        let factory = vec!["cas-cli/src/ui/factory/daemon/runtime/output.rs".into()];
+        assert!(!requires_terminal_qa(&factory, &qa));
+        assert!(requires_terminal_qa(&["src/ui/status.rs".into()], &qa));
+        assert!(requires_terminal_qa(&["src/theme.rs".into()], &qa));
+        qa.terminal_interaction_paths.clear();
+        assert!(requires_terminal_qa(&factory, &qa));
+        qa.terminal_interaction_paths = vec!["**/tui/**".into()];
+        assert!(!requires_terminal_qa(&["src/tui/input.rs".into()], &qa));
+        qa.terminal_render_paths = vec!["**/ui/**".into()];
+        qa.terminal_interaction_paths = vec!["**".into()];
+        assert!(requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
+        assert!(!requires_terminal_qa(&["tests/cli/output_test.rs".into()], &qa));
+        qa.terminal_render_paths.clear();
+        assert!(!requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
+    }
 
     fn git(repo: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -266,6 +383,8 @@ mod tests {
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
         std::fs::write(scoped.join("LEDGER.md"), "new evidence").unwrap();
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        std::fs::create_dir_all(legacy.join("qa")).unwrap();
+        std::fs::write(legacy.join("qa/bundle.json"), "historical bundle").unwrap();
         task.notes = format!("qa-bundle: {}", legacy.join("qa/bundle.json").display());
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
         task.notes = format!("qa-bundle: {}", scoped.join("qa/bundle.json").display());
@@ -424,6 +543,29 @@ mod tests {
             Some(Vec::<String>::new().as_slice()),
         )
         .expect("an attributed merge-only delivery has no UI change");
+    }
+
+    /// cas-e86b: the evidence gate reads the same shared reasons, so a
+    /// fixture-only HTML diff needs no evidence while a product page beside
+    /// it still needs the bundle.
+    #[test]
+    fn fixture_html_needs_no_evidence_but_product_html_needs_the_bundle_cas_e86b() {
+        let qa = crate::config::QaConfig::default();
+        let task = Task::new("cas-e86b-fixture".into(), "checker fixtures".into());
+        let fixtures: Vec<String> = [
+            "scripts/visual-qa.mjs",
+            "scripts/visual-qa-fixtures/clip-box.html",
+            "scripts/visual-qa-fixtures/clip-overflow.html",
+        ]
+        .map(String::from)
+        .to_vec();
+        let reasons = user_facing_reasons(&task, &qa, Some(&fixtures), &[]).reasons;
+        assert_eq!(evidence_tier(&reasons, false), EvidenceTier::None, "{reasons:?}");
+
+        let mut mixed = fixtures.clone();
+        mixed.push("hub-web/src/styles.css".into());
+        let reasons = user_facing_reasons(&task, &qa, Some(&mixed), &[]).reasons;
+        assert_eq!(evidence_tier(&reasons, false), EvidenceTier::Bundle, "{reasons:?}");
     }
 
     #[test]

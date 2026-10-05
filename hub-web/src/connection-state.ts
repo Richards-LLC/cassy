@@ -16,6 +16,8 @@ export interface ConnectionSnapshot {
   fatal?: boolean;
   attempt: number;
   reason?: string;
+  /** Browser permission remediation, independent of the hub's pairing. */
+  networkAccessHelp?: string;
   retryInMs?: number;
   latencyMs?: number;
   missedHeartbeats: number;

@@ -19,6 +19,9 @@ pub struct SlackConfig {
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HubConfig {
+    /// Publish the machine hub through Tailscale Serve by default. Explicit false opts out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale_serve: Option<bool>,
     /// Public origin used when authorizing a Commander page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
@@ -313,10 +316,18 @@ pub struct QaConfig {
     pub evidence_gate: bool,
 
     /// cas-0cd5: repo-relative globs whose change means a delivery alters
-    /// terminal rendering. A demo-only (non-web) delivery touching one needs a
-    /// cas-cli-craft terminal-qa PASS receipt as well as its evidence ledger.
+    /// terminal output. A demo-only (non-web) delivery touching one needs a
+    /// cas-cli-craft terminal-qa PASS receipt as well as its evidence ledger,
+    /// unless it is an interactive surface in `terminal_interaction_paths`.
     #[serde(default = "default_terminal_render_paths")]
     pub terminal_render_paths: Vec<String>,
+
+    /// Interactive terminal surfaces exercised through the real-build ledger,
+    /// rather than a command's stdout capture. Other output paths in the same
+    /// delivery still require terminal-qa; CLI command paths always do when
+    /// output checks are enabled (terminal_render_paths is non-empty).
+    #[serde(default = "default_terminal_interaction_paths")]
+    pub terminal_interaction_paths: Vec<String>,
 
     /// cas-619f: repo-relative globs whose change makes a delivery
     /// user-facing even without a label or demo_statement.
@@ -383,6 +394,7 @@ pub fn default_evidence_gate() -> bool {
 
 pub fn default_terminal_render_paths() -> Vec<String> {
     [
+        "**/cli/**",
         "**/ui/**",
         "**/tui/**",
         "**/*render*",
@@ -393,6 +405,13 @@ pub fn default_terminal_render_paths() -> Vec<String> {
     .into_iter()
     .map(ToOwned::to_owned)
     .collect()
+}
+
+pub fn default_terminal_interaction_paths() -> Vec<String> {
+    ["**/ui/factory/**", "**/cas-pty/**", "**/cas-mux/**"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub fn default_user_facing_paths() -> Vec<String> {
@@ -435,6 +454,7 @@ impl Default for QaConfig {
             independent_pass: default_independent_pass(),
             evidence_gate: default_evidence_gate(),
             terminal_render_paths: default_terminal_render_paths(),
+            terminal_interaction_paths: default_terminal_interaction_paths(),
             user_facing_paths: default_user_facing_paths(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),
@@ -476,6 +496,9 @@ impl Default for OrchestrationConfig {
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
+    /// Resource denials applied to every factory worker, across harnesses.
+    #[serde(flatten)]
+    pub worker_policy: cas_types::factory_worker_policy::FactoryWorkerPolicy,
     /// Durable, per-task proof/artifact directory. Factory workers may write
     /// under this root/project-key in addition to their worktree. If unset, the hook
     /// resolves a real-disk fallback under `~/.cas/artifacts`.
@@ -544,6 +567,18 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
+    /// Minimum GiB available before starting a worker on its filesystem.
+    /// Checked before creating or reusing a worktree, even with target seeding off. 0 disables it.
+    #[serde(default = "default_spawn_min_free_gib")]
+    pub spawn_min_free_gib: u32,
+
+    /// Days a terminal prompt-queue row (delivered, acked, suppressed or
+    /// abandoned) is kept before the maintenance sweep deletes it (cas-9d8a).
+    /// Pending rows and rows carrying a relay episode key are never deleted
+    /// by retention. 0 disables the sweep.
+    #[serde(default = "default_prompt_retention_days")]
+    pub prompt_retention_days: u32,
+
     /// Seconds a worker may hold an in-progress task with a fresh heartbeat
     /// but zero observable activity (no file edits, commits, or subagent
     /// events) before the director flags it `WorkerStalled` and notifies
@@ -608,12 +643,14 @@ pub struct FactoryConfig {
     #[serde(default = "default_target_cache_low_watermark_percent")]
     pub target_cache_low_watermark_percent: u8,
 
-    /// A cache with a write newer than this many seconds is never reclaimed.
+    /// Explicit GC preserves caches/previews with newer writes. Park-time
+    /// check-output pruning separately preserves durable logs and live handles.
     #[serde(default = "default_target_cache_min_idle_secs")]
     pub target_cache_min_idle_secs: u64,
 
     /// Number of the newest otherwise-stale worker caches retained as warm
     /// build caches even while the filesystem is above the high watermark.
+    /// Also bounds warm `target/debug` caches across parked worker deliveries.
     #[serde(default = "default_target_cache_retention_count")]
     pub target_cache_retention_count: usize,
 
@@ -777,6 +814,14 @@ fn default_max_concurrent_builders() -> usize {
     4
 }
 
+fn default_spawn_min_free_gib() -> u32 {
+    25
+}
+
+pub(crate) fn default_prompt_retention_days() -> u32 {
+    7
+}
+
 fn default_message_max_chars() -> usize {
     1200
 }
@@ -832,6 +877,7 @@ fn default_merge_sweep_timeout_secs() -> u64 {
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
+            worker_policy: Default::default(),
             artifacts_root: None,
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),
@@ -842,6 +888,8 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            spawn_min_free_gib: default_spawn_min_free_gib(),
+            prompt_retention_days: default_prompt_retention_days(),
             stall_threshold_secs: default_stall_threshold_secs(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),
@@ -915,6 +963,32 @@ pub fn project_factory_artifacts_root(
     artifacts_base.join(format!("{label}-{hash:x}"))
 }
 
+/// Resolve the artifact base and its writable project namespace together.
+/// The workspace hook and close gate use this same configuration boundary.
+pub(crate) struct FactoryArtifactPaths {
+    pub base: std::path::PathBuf,
+    pub project_root: std::path::PathBuf,
+}
+
+impl FactoryArtifactPaths {
+    fn from_base(cas_root: &std::path::Path, base: std::path::PathBuf) -> Self {
+        let project_root = project_factory_artifacts_root(cas_root, &base);
+        Self { base, project_root }
+    }
+
+    /// Writable scoped directory first, historical read-only directory second.
+    pub fn task_dirs(&self, task_id: &str) -> [std::path::PathBuf; 2] {
+        [self.project_root.join(task_id), self.base.join(task_id)]
+    }
+}
+
+pub(crate) fn resolved_factory_artifact_paths(
+    cas_root: &std::path::Path,
+    configured: Option<&str>,
+) -> FactoryArtifactPaths {
+    FactoryArtifactPaths::from_base(cas_root, resolved_factory_artifacts_root(configured))
+}
+
 /// Scoped directory first, historical flat directory second. Legacy evidence
 /// remains readable; new writers and cleanup use only the scoped directory.
 pub fn factory_task_artifact_dirs(
@@ -922,10 +996,7 @@ pub fn factory_task_artifact_dirs(
     artifacts_base: &std::path::Path,
     task_id: &str,
 ) -> [std::path::PathBuf; 2] {
-    [
-        project_factory_artifacts_root(cas_root, artifacts_base).join(task_id),
-        artifacts_base.join(task_id),
-    ]
+    FactoryArtifactPaths::from_base(cas_root, artifacts_base.to_path_buf()).task_dirs(task_id)
 }
 
 /// A task directory must resolve to exactly its expected location beneath the

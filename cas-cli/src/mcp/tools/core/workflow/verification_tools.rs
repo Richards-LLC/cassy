@@ -420,6 +420,9 @@ impl CasCore {
                 message: Cow::from(
                     crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_blocks_task_work_message(
                         "verification action=add",
+                        crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_prompt_id(
+                            &caller.metadata,
+                        ),
                     ),
                 ),
                 data: None,

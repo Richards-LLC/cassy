@@ -10,7 +10,7 @@ use crate::bridge::server::session::{
 use crate::bridge::server::types::{
     ActivityJson, AgentLatestActivityJson, AgentSummaryJson, InboxAckJson, InboxAckRequest,
     InboxCountJson, InboxPeekJson, InboxPollJson, MessageRequest, MessageResponse, PaneTailJson,
-    PingJson, StatusJson, TargetsJson, TaskSummaryJson, session_json,
+    PingJson, StatusJson, TargetsJson, session_json,
 };
 use crate::store::{open_prompt_queue_store, open_supervisor_queue_store};
 
@@ -319,6 +319,9 @@ pub(crate) fn handle_session_routes(
                 .into_iter()
                 .filter(|a| allowed.contains(&a.name))
                 .map(|a| AgentSummaryJson {
+                    generation: crate::ops::fleet::worker_generation(&cas_root, &session.name, &a.name)
+                        .ok()
+                        .flatten(),
                     id: a.id,
                     name: a.name,
                     status: format!("{:?}", a.status).to_lowercase(),
@@ -331,15 +334,9 @@ pub(crate) fn handle_session_routes(
                 })
                 .collect();
 
-            let to_task = |t: cas_factory::TaskSummary| TaskSummaryJson {
-                id: t.id,
-                title: t.title,
-                status: format!("{:?}", t.status).to_lowercase(),
-                priority: t.priority.0,
-                assignee: t.assignee,
-                task_type: format!("{:?}", t.task_type).to_lowercase(),
-                epic: t.epic,
-                branch: t.branch,
+            let task_store = crate::store::open_task_store(&cas_root).ok();
+            let to_task = |t: cas_factory::TaskSummary| {
+                super::session::task_summary_json(t, task_store.as_deref())
             };
 
             let queue = open_prompt_queue_store(&cas_root)?;
@@ -354,6 +351,7 @@ pub(crate) fn handle_session_routes(
                 tasks_ready: data.ready_tasks.into_iter().map(to_task).collect(),
                 tasks_in_progress: data.in_progress_tasks.into_iter().map(to_task).collect(),
                 epics: data.epic_tasks.into_iter().map(to_task).collect(),
+                focused_epic: crate::ops::fleet::pinned_epic(&session.name),
             };
 
             let bytes = serde_json::to_vec_pretty(&body).unwrap_or_else(|_| b"{}".to_vec());

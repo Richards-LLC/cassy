@@ -10,6 +10,7 @@ import {
   previousSelection,
   restorableSession,
   saveStoredSelection,
+  selectionAfterPairing,
   selectSelection,
   sessionPickerEntries,
   sessionPickerHeadline,
@@ -102,6 +103,23 @@ describe("session selection history", () => {
     const pruned = forgetMachine(state, "m1");
     expect(pruned.current).toBeUndefined();
     expect(pruned.history).toEqual([{ machineId: "m2", session: "beta" }]);
+  });
+});
+
+describe("where a pairing lands (cas-b452)", () => {
+  it("lands a first pairing on the new machine, whatever was open", () => {
+    expect(selectionAfterPairing("atlas", false, undefined)).toEqual({ machineId: "atlas" });
+    expect(selectionAfterPairing("atlas", false, { machineId: "studio", session: "gabber" })).toEqual({ machineId: "atlas" });
+  });
+
+  it("returns a re-pair to the conversation it was started from, on any machine", () => {
+    expect(selectionAfterPairing("atlas", true, { machineId: "atlas", session: "cas-src" })).toEqual({ machineId: "atlas", session: "cas-src" });
+    expect(selectionAfterPairing("atlas", true, { machineId: "studio", session: "gabber" })).toEqual({ machineId: "studio", session: "gabber" });
+  });
+
+  it("lands a re-pair with no conversation open on the machine", () => {
+    expect(selectionAfterPairing("atlas", true, undefined)).toEqual({ machineId: "atlas" });
+    expect(selectionAfterPairing("atlas", true, { machineId: "studio" })).toEqual({ machineId: "atlas" });
   });
 });
 

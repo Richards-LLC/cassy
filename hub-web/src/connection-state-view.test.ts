@@ -11,6 +11,7 @@ import {
   connectingView,
   disconnectedView,
   elapsedSeconds,
+  fatalConnectionRecovery,
   lostConnectionBanner,
   pairingControlsReason,
   pairingLostBanner,
@@ -18,6 +19,7 @@ import {
   unsteadyBanner,
   sessionOutageControlsReason,
   sessionReconnectingBanner,
+  outageControlsNotice,
   outageControlsReason,
   outageRefusal,
   shouldRetainDisconnectedFrame,
@@ -277,9 +279,20 @@ describe("a conversation opens behind one quiet line (cas-813a)", () => {
 });
 
 describe("one outage, one vocabulary (journey F9)", () => {
+  it("uses the actual unsupported-browser reason without an API name in the recovery sentence", () => {
+    const reason = "This browser is missing AbortSignal.timeout, which Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer.";
+    expect(lostConnectionBanner("Atlas", true, reason)).toBe("Lost connection to Atlas. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
+    expect(fatalConnectionRecovery()).toContain("Update your browser, then reload this page.");
+    expect(lostConnectionBanner("Atlas", false, reason)).toBe("Lost connection to Atlas. Reconnecting…");
+  });
+  it("folds a fatal session failure into the machine outage (cas-99d7)", () => {
+    const fatal = snapshot({ phase: "failed", fatal: true });
+    expect(transportFailureNeedsAttention(fatal, snapshot({ phase: "failed", fatal: true }))).toBe(false);
+    expect(transportFailureNeedsAttention(fatal, snapshot({ phase: "live" }))).toBe(true);
+  });
   it("words the refusal and the disabled controls the way the banner does", () => {
     expect(lostConnectionBanner("Atlas · Linux", false)).toBe("Lost connection to Atlas · Linux. Reconnecting…");
-    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. Not retrying.");
+    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
     // cas-d15c: one session's link, the machine still connected.
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", false)).toBe("Reconnecting to cas-src… Atlas · Linux is still connected.");
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", true)).toBe("Lost the link to cas-src. Not retrying. Atlas · Linux is still connected.");
@@ -298,5 +311,29 @@ describe("one outage, one vocabulary (journey F9)", () => {
       expect(line.toLowerCase()).toContain("lost connection to atlas · linux");
       expect(line).not.toMatch(/hub connection|session is live/);
     }
+  });
+
+  it("says the outage once in Terminal view: the line under the header only says what it means for the controls (journey F42)", () => {
+    const banners = {
+      machine: lostConnectionBanner("Atlas · Linux", false),
+      session: sessionReconnectingBanner("cas-src", "Atlas · Linux", false),
+      pairing: pairingLostBanner("Atlas · Linux"),
+    } as const;
+    const reasons = {
+      machine: outageControlsReason("Atlas · Linux"),
+      session: sessionOutageControlsReason("cas-src"),
+      pairing: pairingControlsReason("Atlas · Linux"),
+    } as const;
+    for (const kind of ["machine", "session", "pairing"] as const) {
+      const notice = outageControlsNotice(kind);
+      // The line beside the banner restates neither the machine nor the loss.
+      expect(notice).not.toMatch(/Atlas|cas-src|lost connection|needs pairing|reconnecting to/i);
+      expect(banners[kind]).not.toContain(notice);
+      // The control's own description is the banner's words plus the line's.
+      expect(reasons[kind].endsWith(notice)).toBe(true);
+    }
+    expect(outageControlsNotice("machine")).toBe("Control and interrupts return when it reconnects.");
+    expect(outageControlsNotice("session")).toBe("Control and interrupts return when it's back.");
+    expect(outageControlsNotice("pairing")).toBe("Re-pair it to take control and interrupt.");
   });
 });

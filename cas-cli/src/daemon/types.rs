@@ -198,6 +198,9 @@ pub struct DaemonRunResult {
     pub agents_cleaned: usize,
     /// Old stale/shutdown agents permanently deleted
     pub agents_purged: usize,
+    /// Terminal prompt-queue rows deleted by retention (cas-9d8a)
+    #[serde(default)]
+    pub prompts_pruned: usize,
     /// Tasks with interruption notes added (leases released while in progress)
     pub tasks_interrupted: usize,
     /// Orphaned worktrees cleaned up
@@ -222,6 +225,8 @@ pub struct CodeIndexResult {
     pub files_indexed: usize,
     /// Number of files deleted from index
     pub files_deleted: usize,
+    /// Deleted files retained for retry because another BM25 writer is busy.
+    pub files_deferred: usize,
     /// Number of symbols indexed
     pub symbols_indexed: usize,
     /// Errors encountered

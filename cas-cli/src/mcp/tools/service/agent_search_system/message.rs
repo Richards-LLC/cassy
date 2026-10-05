@@ -153,6 +153,14 @@ pub(crate) fn queued_message_provenance_at(
     )
 }
 
+/// A successful shared delivery claim is the first handoff for this recipient.
+/// Queue processing timestamps describe transport work, not earlier model delivery.
+pub(crate) fn first_message_provenance(message: &cas_store::QueuedPrompt) -> String {
+    let mut claimed = message.clone();
+    claimed.processed_at = None;
+    queued_message_provenance(&claimed)
+}
+
 pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> String {
     queued_message_provenance_at(message, chrono::Utc::now())
 }
@@ -1336,6 +1344,7 @@ impl CasService {
                     )
                 })?;
             let reply_id = reply.id();
+            crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
             if let Some(device_id) = device_id.as_deref() {
                 queue.stamp_recipient_device(reply_id, device_id).map_err(|error| {
                     Self::error(
@@ -1647,11 +1656,24 @@ impl CasService {
                     frozen_anchor.is_some() && anchor_integrated && !other_task_active;
                 if let Some(branch) = branch
                     && let Some(branch_tip) = frozen_anchor.or_else(|| {
-                        crate::prompt_revalidation::resolve_live_branch_tip(
+                        let live = crate::prompt_revalidation::resolve_live_branch_tip(
                             &repo.repo_root,
                             &branch,
                             recorded_anchor.as_deref(),
-                        )
+                        )?;
+                        // cas-afa9: a parked delivery is judged by a live tip
+                        // only when that tip contains it; a recorded branch
+                        // from an earlier cycle is not this delivery.
+                        Some(match recorded_anchor.as_deref() {
+                            Some(anchor) if task.status == cas_types::TaskStatus::AwaitingMerge => {
+                                crate::prompt_revalidation::merge_request_judged_tip(
+                                    &repo.repo_root,
+                                    Some(live),
+                                    anchor,
+                                )
+                            }
+                            _ => live,
+                        })
                     })
                 {
                     if task.status != cas_types::TaskStatus::AwaitingMerge
@@ -2187,6 +2209,7 @@ impl CasService {
                 (enqueue_outcome.id(), duplicate_suppressed, None)
             };
 
+        crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
         if let Some(notification_id) = explicit_reply_to {
             queue.ack(notification_id).map_err(|error| {
                 Self::error(
@@ -2290,23 +2313,27 @@ impl CasService {
             );
         }
 
-        // cas-85fd: release only the halt bound to an urgent that this worker
-        // demonstrably consumed and answered. `Confirmed` is the queue's
-        // existing proof: the urgent had a transport handoff + surfacing
-        // receipt and the worker's reply post-dated both. Do not clear a
-        // legacy/unbound halt or a newer halt that replaced this exchange.
+        // cas-85fd: release only the halt bound to the urgent this reply
+        // answers. cas-4a8e1 (GH #1064): any reply to the supervisor written
+        // after that urgent reached the worker discharges it — an interrupt
+        // is usually answered with an ordinary message, not message_ack, and
+        // requiring `Confirmed` left the halt to veto an unrelated close long
+        // after the exchange ended. Do not clear a legacy/unbound halt, a
+        // newer halt that replaced this exchange, or one whose urgent the
+        // worker could not yet have seen.
         if role == "worker" && target_is_supervisor {
             use crate::mcp::tools::core::task::lifecycle::stale_close_guard::{
-                clear_halt_metadata, halt_prompt_id,
+                clear_halt_metadata, halt_prompt_id, reply_discharges_halt,
             };
             use crate::store::open_agent_store;
             if let Ok(agent_store) = open_agent_store(&self.inner.cas_root)
                 && let Ok(mut agent) = agent_store.get(&source)
                 && let Some(prompt_id) = halt_prompt_id(&agent.metadata)
-                && matches!(
-                    queue.message_status(prompt_id),
-                    Ok(Some(cas_store::MessageStatus::Confirmed))
-                )
+                && queue
+                    .message_delivery_report(prompt_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|report| reply_discharges_halt(&report, reply_enqueued_at))
             {
                 clear_halt_metadata(&mut agent.metadata);
                 if let Err(error) = agent_store.update(&agent) {
@@ -2314,7 +2341,7 @@ impl CasService {
                         agent_id = %source,
                         prompt_id,
                         error = %error,
-                        "could not release confirmed urgent halt"
+                        "could not release answered urgent halt"
                     );
                 }
             }

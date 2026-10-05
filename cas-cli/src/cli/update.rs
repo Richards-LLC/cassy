@@ -214,6 +214,85 @@ pub struct UpdateArgs {
     pub refresh_receipt: Option<PathBuf>,
 }
 
+/// cas-49c0: which `cas update` mode a run asked for, for the worker scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateMode {
+    Sync,
+    AllProjects,
+    Register,
+    User,
+    PostSwap,
+    SchemaOnly,
+    Check,
+    Full,
+}
+
+impl UpdateMode {
+    fn of(args: &UpdateArgs) -> Self {
+        if args.post_swap {
+            Self::PostSwap
+        } else if args.register.is_some() {
+            Self::Register
+        } else if args.all_projects {
+            Self::AllProjects
+        } else if args.user {
+            Self::User
+        } else if args.sync {
+            Self::Sync
+        } else if args.schema_only || args.dry_run {
+            Self::SchemaOnly
+        } else if args.check {
+            Self::Check
+        } else {
+            Self::Full
+        }
+    }
+}
+
+/// cas-49c0: what a `cas update` run may touch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerUpdatePlan {
+    /// Not a factory worker: the run behaves as before.
+    Unrestricted,
+    /// A worker's `--sync`: refresh only the invoking worktree's own root.
+    SyncWorktree(PathBuf),
+    /// A worker asked for a host-wide refresh; refused with this guidance.
+    Refuse(String),
+}
+
+/// cas-49c0: a factory worker (`CAS_AGENT_ROLE=worker`) may refresh only its
+/// own worktree. Its `--sync` writes the harness files under `clone_path`,
+/// never the main checkout that `cas_root.parent()` names, and the modes that
+/// walk the host's local project registry or install a binary are refused.
+pub(crate) fn worker_update_plan(
+    role: Option<&str>,
+    clone_path: Option<&Path>,
+    mode: UpdateMode,
+) -> WorkerUpdatePlan {
+    let is_worker = role.is_some_and(|role| role.trim().eq_ignore_ascii_case("worker"));
+    if !is_worker {
+        return WorkerUpdatePlan::Unrestricted;
+    }
+    let worktree = clone_path.filter(|path| !path.as_os_str().is_empty());
+    match (mode, worktree) {
+        (UpdateMode::Check | UpdateMode::PostSwap, _) => WorkerUpdatePlan::Unrestricted,
+        (UpdateMode::Sync, Some(worktree)) => WorkerUpdatePlan::SyncWorktree(worktree.to_path_buf()),
+        (UpdateMode::Sync, None) => WorkerUpdatePlan::Refuse(
+            "cas update --sync refused: this factory worker has no bound worktree (CAS_CLONE_PATH), \
+             so the refresh cannot be confined to it. Ask the supervisor to refresh the project."
+                .to_string(),
+        ),
+        (_, worktree) => WorkerUpdatePlan::Refuse(format!(
+            "cas update refused for a factory worker: this mode refreshes the host's local \
+             projects or installs a binary, which belongs to the supervisor. Run \
+             `cas update --sync` to refresh only your worktree ({}).",
+            worktree
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unbound".to_string())
+        )),
+    }
+}
+
 pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     // Note: update command accepts Option<&Path> because it can run without an initialized Cassy
     // (e.g., binary update only, or checking for updates before init)
@@ -224,6 +303,25 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // binary, otherwise every update would recursively launch updates.
     if args.post_swap {
         return execute_post_swap(args, cli, current_version);
+    }
+
+    // cas-49c0: a factory worker refreshes only its own worktree. Its
+    // `--sync` used to rewrite the supervisor's main checkout, and the
+    // host-wide modes walk every registered project.
+    let worker_scope = {
+        let role = std::env::var("CAS_AGENT_ROLE").ok();
+        let clone_path = std::env::var_os("CAS_CLONE_PATH").map(PathBuf::from);
+        worker_update_plan(role.as_deref(), clone_path.as_deref(), UpdateMode::of(args))
+    };
+    match worker_scope {
+        WorkerUpdatePlan::Unrestricted => {}
+        WorkerUpdatePlan::Refuse(message) => anyhow::bail!(message),
+        WorkerUpdatePlan::SyncWorktree(worktree) => {
+            let mut steps = UpdateStepTracker::new(1, !cli.json);
+            return steps.run("Syncing .claude/.codex files in this worktree", || {
+                sync_claude_files_into(cli, cas_root, Some(&worktree))
+            });
+        }
     }
 
     if let Some(path) = &args.register {
@@ -850,6 +948,18 @@ fn render_project_phase_details(
                 ));
             } else {
                 selected.push_str(output);
+                // cas-91a3: a failed phase's own words (the cause, who holds
+                // the store, what to do) are not always in what it printed.
+                if phase.failed() && !output.contains(phase.detail()) {
+                    if !output.ends_with('\n') {
+                        selected.push('\n');
+                    }
+                    selected.push_str(&format!(
+                        "{} {label}: {}\n",
+                        phase.status_label(),
+                        phase.detail()
+                    ));
+                }
             }
         }
     }
@@ -1007,34 +1117,56 @@ fn refresh_all_projects(
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
         let (migration, output) = capture_phase(!cli.json, || {
-            run_project_phase("migration", args.dry_run, || {
+            let phase = run_project_phase("migration", args.dry_run, || {
                 run_schema_migrations(args, cli, Some(&cas_root))
-            })
+            });
+            name_store_lock_holders(phase, &cas_root)
         });
         details.push_str(&output);
         let mut phase_details = vec![(migration.is_ok(), output)];
-        let (search_index, output) = capture_phase(!cli.json, || {
-            repair_project_search_index(&cas_root, args.dry_run, cli)
-        });
-        details.push_str(&output);
-        phase_details.push((search_index.is_ok(), output));
-        let (skills, output) = capture_phase(!cli.json, || {
-            run_project_phase("skills", args.dry_run, || {
-                sync_claude_files(cli, Some(&cas_root))
-            })
-        });
-        details.push_str(&output);
-        phase_details.push((skills.is_ok(), output));
-        let (membership, output) = capture_phase(!cli.json, || {
-            refresh_project_membership(&cas_root, args.dry_run)
-        });
-        details.push_str(&output);
-        phase_details.push((membership.is_ok(), output));
-        let ((cloud, _summaries), output) = capture_phase(!cli.json, || {
-            sync_project_cloud(&cas_root, args.dry_run, cli)
-        });
-        details.push_str(&output);
-        phase_details.push((cloud.is_ok(), output));
+
+        // cas-91a3 / cas-3af4: every later phase reads this project's store
+        // with the current schema (rules.origin_project, operator_authority,
+        // ...). A store the migration phase could not bring current fails
+        // those reads with "no such column", which buried the one actionable
+        // cause. Skip them, each naming the same reason.
+        let schema_gate = (!args.dry_run)
+            .then(|| store_schema_gate(&cas_root, &migration))
+            .flatten();
+        let (search_index, skills, membership, cloud) = if let Some(reason) = &schema_gate {
+            let skipped = || ProjectPhase::Skipped(reason.clone());
+            // One message, not four: a failed migration already says why
+            // (and who holds the store); otherwise the first skipped phase
+            // carries the reason and the rest stay quiet in the details.
+            for index in 0..4 {
+                phase_details.push((migration.failed() || index > 0, String::new()));
+            }
+            (skipped(), skipped(), skipped(), skipped())
+        } else {
+            let (search_index, output) = capture_phase(!cli.json, || {
+                repair_project_search_index(&cas_root, args.dry_run, cli)
+            });
+            details.push_str(&output);
+            phase_details.push((search_index.is_ok(), output));
+            let (skills, output) = capture_phase(!cli.json, || {
+                run_project_phase("skills", args.dry_run, || {
+                    sync_claude_files(cli, Some(&cas_root))
+                })
+            });
+            details.push_str(&output);
+            phase_details.push((skills.is_ok(), output));
+            let (membership, output) = capture_phase(!cli.json, || {
+                refresh_project_membership(&cas_root, args.dry_run)
+            });
+            details.push_str(&output);
+            phase_details.push((membership.is_ok(), output));
+            let ((cloud, _summaries), output) = capture_phase(!cli.json, || {
+                sync_project_cloud(&cas_root, args.dry_run, cli)
+            });
+            details.push_str(&output);
+            phase_details.push((cloud.is_ok(), output));
+            (search_index, skills, membership, cloud)
+        };
 
         // Registration is what makes discovery converge: a project the scan had
         // to find this time is in the registry for every later run, and for
@@ -1225,6 +1357,81 @@ fn repair_project_search_index(cas_root: &Path, dry_run: bool, cli: &Cli) -> Pro
     }
 
     phase
+}
+
+/// Why a project's later refresh phases must not read its store, or `None`
+/// when the store's schema is current (cas-91a3, cas-3af4).
+fn store_schema_gate(cas_root: &Path, migration: &ProjectPhase) -> Option<String> {
+    if migration.failed() {
+        return Some("schema not current: the migration phase failed (see migr)".to_string());
+    }
+    if !cas_root.join("cas.db").exists() {
+        return None;
+    }
+    match check_migrations(cas_root) {
+        Ok(status) if status.pending.is_empty() => None,
+        Ok(status) => Some(format!(
+            "schema not current: v{} of v{}, {} migration(s) pending; rerun `cas update` in {}",
+            status.current_version,
+            status.latest_version,
+            status.pending.len(),
+            cas_root.parent().unwrap_or(cas_root).display()
+        )),
+        Err(error) => Some(format!("schema not readable: {error}")),
+    }
+}
+
+/// A migration refused by SQLite's write lock names the processes holding the
+/// store open and what to do, as the hub machine-lock message does (cas-91a3).
+fn name_store_lock_holders(phase: ProjectPhase, cas_root: &Path) -> ProjectPhase {
+    let ProjectPhase::Failed(detail) = phase else {
+        return phase;
+    };
+    if !is_store_lock_error(&detail) {
+        return ProjectPhase::Failed(detail);
+    }
+    ProjectPhase::Failed(format!(
+        "{detail}; {}",
+        store_lock_remedy(cas_root, &store_lock_holders(cas_root))
+    ))
+}
+
+fn is_store_lock_error(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("database is locked") || detail.contains("database table is locked")
+}
+
+fn store_lock_holders(cas_root: &Path) -> Vec<crate::hub::HubLockHolder> {
+    let mut holders = Vec::new();
+    for name in ["cas.db", "cas.db-wal", "cas.db-shm"] {
+        let path = cas_root.join(name);
+        let path = path.canonicalize().unwrap_or(path);
+        holders.extend(crate::hub::processes_holding_file(&path));
+    }
+    holders.sort_by_key(|holder| holder.pid);
+    holders.dedup_by_key(|holder| holder.pid);
+    holders
+}
+
+fn store_lock_remedy(cas_root: &Path, holders: &[crate::hub::HubLockHolder]) -> String {
+    let project = cas_root.parent().unwrap_or(cas_root).display();
+    let named = holders
+        .iter()
+        .map(|holder| match holder.command.as_deref() {
+            Some(command) => format!("pid {} ({command})", holder.pid),
+            None => format!("pid {}", holder.pid),
+        })
+        .collect::<Vec<_>>();
+    if named.is_empty() {
+        format!(
+            "another process holds its write lock; stop the Cassy sessions in {project} and rerun `cas update`"
+        )
+    } else {
+        format!(
+            "store held open by {}; stop the Cassy sessions in {project} and rerun `cas update`",
+            named.join(", ")
+        )
+    }
 }
 
 fn run_project_phase(
@@ -1509,15 +1716,40 @@ fn print_project_refresh_summary(
         return;
     }
 
+    print!(
+        "{}",
+        render_project_refresh_summary(
+            receipts,
+            user_level,
+            user_details,
+            skipped_unregistered,
+            cli.verbose,
+        )
+    );
+}
+
+/// The compact (non-JSON) refresh summary: the project table, a details
+/// block under each project with a warned, failed or dry-run planned phase
+/// (every project with `verbose`), the user-level line and skipped projects
+/// (cas-8030, cas-937a).
+fn render_project_refresh_summary(
+    receipts: &[ProjectRefreshReceipt],
+    user_level: &ProjectPhase,
+    user_details: &str,
+    skipped_unregistered: &[SkippedProject],
+    verbose: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     let mut warnings = RepeatedWarningCollector::default();
     let mut details = Vec::with_capacity(receipts.len());
     for receipt in receipts {
-        let project = project_display_name(&receipt.project, cli.verbose);
+        let project = project_display_name(&receipt.project, verbose);
         // Collect warnings from every phase, including successful phases whose
         // output is intentionally omitted from the compact transcript.
         warnings.collect_output(&project, &receipt.details);
-        let detail = render_project_phase_details(receipt, cli.verbose, &mut warnings, &project);
-        let show_detail = cli.verbose
+        let detail = render_project_phase_details(receipt, verbose, &mut warnings, &project);
+        let show_detail = verbose
             || [
                 &receipt.migration,
                 &receipt.search_index,
@@ -1526,56 +1758,68 @@ fn print_project_refresh_summary(
                 &receipt.cloud,
             ]
             .into_iter()
-            .any(|phase| !phase.is_ok());
+            // cas-8030: a skipped phase ("not cloud-linked") is already
+            // explained by the table's note, so it earns no details block.
+            // A dry run's planned phases do (cas-937a): their block is the
+            // only place the compact view says "DRY RUN" and what would run.
+            .any(|phase| {
+                matches!(
+                    phase,
+                    ProjectPhase::Warning(_) | ProjectPhase::Failed(_) | ProjectPhase::Planned(_)
+                )
+            });
         details.push((project, show_detail.then_some(detail)));
     }
     if !user_details.is_empty() {
         let project = "user-level";
         let detail =
-            strip_repeated_warning_lines(user_details, &mut warnings, project, cli.verbose, false);
-        if cli.verbose && !detail.trim().is_empty() {
+            strip_repeated_warning_lines(user_details, &mut warnings, project, verbose, false);
+        if verbose && !detail.trim().is_empty() {
             details.push((project.to_owned(), Some(detail)));
         }
     }
 
-    let table_lines = render_project_table_plain(receipts, cli.verbose);
+    let table_lines = render_project_table_plain(receipts, verbose);
     let mut table_lines = table_lines.lines();
     if let Some(header) = table_lines.next() {
-        println!("{header}");
+        let _ = writeln!(out, "{header}");
     }
     for ((_, row), (project, detail)) in receipts.iter().zip(table_lines).zip(details) {
-        println!("{row}");
+        let _ = writeln!(out, "{row}");
         if let Some(detail) = detail
             && !detail.trim().is_empty()
         {
-            println!("  {project} details:");
+            let _ = writeln!(out, "  {project} details:");
             for line in detail.lines().filter(|line| !line.trim().is_empty()) {
-                println!("    {line}");
+                let _ = writeln!(out, "    {line}");
             }
         }
     }
 
     // The user-level store is host state, so it gets a named line of its own
     // rather than a project row it would otherwise be miscounted in.
-    println!(
+    let _ = writeln!(
+            out,
         "  [{}] user-level store: {}",
         user_level.status_label().trim_matches(['[', ']']),
         user_level.detail()
     );
 
     if !skipped_unregistered.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  not refreshed (skipped_unregistered): {} — use `cas known-repos forget <path>` for stale registry rows; intentional projects can be registered explicitly",
             skipped_unregistered.len()
         );
         for skip in skipped_unregistered.iter().take(5) {
-            println!("    ! {} — {}", skip.project.display(), skip.reason);
+            let _ = writeln!(out, "    ! {} — {}", skip.project.display(), skip.reason);
         }
         if skipped_unregistered.len() > 5 {
-            println!("    … and {} more", skipped_unregistered.len() - 5);
+            let _ = writeln!(out, "    … and {} more", skipped_unregistered.len() - 5);
         }
     }
-    print!("{}", warnings.render(cli.verbose));
+    out.push_str(&warnings.render(verbose));
+    out
 }
 
 fn with_first_launch_ms(
@@ -1806,6 +2050,16 @@ fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>
 
 /// Sync rules, skills, and configuration to .claude/.codex directories
 fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result<()> {
+    sync_claude_files_into(cli, cas_root_param, None)
+}
+
+/// [`sync_claude_files`] writing the harness files under `project_root`
+/// instead of `cas_root.parent()` (cas-49c0: a worker's own worktree).
+fn sync_claude_files_into(
+    cli: &Cli,
+    cas_root_param: Option<&Path>,
+    project_root: Option<&Path>,
+) -> anyhow::Result<()> {
     // cas_root is optional - if not provided and Cassy is not initialized, nothing to sync
     let cas_root = match cas_root_param {
         Some(path) => path.to_path_buf(),
@@ -1815,11 +2069,14 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         }
     };
 
+    // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
     #[cfg(feature = "mcp-proxy")]
-    crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
-        &cas_root.join("proxy.toml"),
-    ))?;
-    let project_root = cas_root.parent().unwrap_or(&cas_root);
+    if project_root.is_none() {
+        crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
+            &cas_root.join("proxy.toml"),
+        ))?;
+    }
+    let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
     let claude_dir = project_root.join(".claude");
     let codex_dir = project_root.join(".codex");
     let codex_enabled = codex_dir.exists();
@@ -2463,6 +2720,26 @@ fn run_schema_migrations(
                 |row| row.get(0),
             )
             .unwrap_or(0);
+        // cas-3af4: a legacy store (rules/entries from before the task store
+        // and the migration ledger) is still ours. Install the missing base
+        // tables so the migration chain can bring it current, instead of
+        // calling it uninitialized, reporting the phase ok, and leaving the
+        // skills phase to fail on a column a migration adds.
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('entries', 'rules')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let table_count = if table_count < 3 && legacy > 0 && !args.dry_run {
+            crate::migration::ensure_base_schemas(&conn)
+                .context("install the base tables of a legacy store")?;
+            3
+        } else {
+            table_count
+        };
+        drop(conn);
         if table_count < 3 {
             if cli.json {
                 println!(

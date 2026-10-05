@@ -37,6 +37,9 @@ use tempfile::TempDir;
 mod test_env_guard;
 use test_env_guard::TestEnvGuard;
 
+#[path = "fixtures/ci_check_run.rs"]
+mod ci_check_run;
+
 // =============================================================================
 // Fixtures (deliberately self-contained: cas-0a21 must not couple to the
 // shared worktree_surface_test helpers while cas-59c0 is editing that file)
@@ -194,7 +197,7 @@ struct DeliveryFixture {
     receipt: WorkerCompletionReceiptInput,
 }
 
-async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
+async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> DeliveryFixture {
     let repo = GitRepo::new();
     run_git(
         &[
@@ -206,6 +209,11 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    // Keep deliberate CI doubles (notably the red-override regression).
+    // Other target-CAS fixtures need explicit successful code validation.
+    if std::env::var_os(cas::github_issue_attach::GH_BIN_ENV).is_none() {
+        env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
+    }
     let artifact_root = cas_root.join("durable-artifacts");
     std::fs::write(
         cas_root.join("config.toml"),
@@ -424,7 +432,7 @@ fn assert_no_delivery_projection(fixture: &DeliveryFixture, state: WorkerDeliver
 async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     // cas-bebc scopes worktree_merge to the caller's CAS_FACTORY_SESSION; the
     // test must not inherit the session of the shell that runs it (cas-31a3).
-    let _env = TestEnvGuard::temp_home();
+    let mut env = TestEnvGuard::temp_home();
     let repo = GitRepo::new();
     run_git(&["branch", "integration"], &repo.root);
     run_git(
@@ -432,6 +440,7 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
     std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
         .expect("write config");
     let supervisor_id = "cas8d38-supervisor-session";
@@ -506,7 +515,7 @@ async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("taskidaccepted", "task-id-accepted").await;
+    let fixture = arm_delivery("taskidaccepted", "task-id-accepted", &mut env).await;
 
     assert_eq!(
         cas_store::get_latest_worker_delivery(&fixture.cas_root, &fixture.task_id)
@@ -550,7 +559,7 @@ async fn delivery_merge_rejects_unrelated_union_parameter_before_target_resoluti
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("taskidrejectsother", "task-id-rejects-other").await;
+    let fixture = arm_delivery("taskidrejectsother", "task-id-rejects-other", &mut env).await;
     let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
     let mut merge = coord_req("worktree_merge");
     merge.id = Some(fixture.receipt.source_branch.clone());
@@ -584,21 +593,17 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     let home = TempDir::new().expect("temp HOME");
     let fake_bin = TempDir::new().expect("fake gh dir");
     let gh = fake_bin.path().join("gh");
-    std::fs::write(
-        &gh,
-        "#!/bin/sh\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
-    )
-    .expect("write fake gh");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod gh");
-    }
+    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2 $3\" = 'repo view org/red-ci-override' ]; then printf '%s\\n' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'; exit 0; fi\ncase \"$4\" in repos/Richards-LLC/cassy/commits/*/check-runs) ;; *) echo 'HTTP 422: No commit found for SHA' >&2; exit 1 ;; esac\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
     // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process
     // PATH stays untouched (factory_mcp_ops_test PATH-isolation lint).
     env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
-    let fixture = arm_delivery("redcioverride", "red-ci-override").await;
+    let fixture = arm_delivery("redcioverride", "red-ci-override", &mut env).await;
+    // cas-28c8: origin maps to a renamed canonical repo; upstream/default must
+    // not select CI. The fake refuses every noncanonical endpoint.
+    run_git(&["remote", "add", "upstream", "https://github.com/codingagentsystem/cas.git"], &fixture.repo.root);
+    env.set("GH_REPO", "codingagentsystem/cas");
     let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
     let merge_with = |supervisor_override: Option<bool>, reason: Option<&str>| {
         let mut merge = coord_req("worktree_merge");
@@ -617,6 +622,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
 
     let refused = outcome(supervisor_service.coordination(Parameters(merge_with(None, None))).await);
     assert!(refused.contains("CI RED"), "{refused}");
+    assert!(refused.contains(&format!("repos/Richards-LLC/cassy/commits/{}/check-runs", fixture.receipt.commit_sha)), "{refused}");
     assert!(refused.contains("supervisor_override=true"), "{refused}");
     // Refusals happen after merge authorization but before Git: the target
     // is untouched and the delivery has not merged.
@@ -626,14 +632,10 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
             fixture.receipt.target_sha,
             "{label}: the target must not move"
         );
-        assert!(
-            !matches!(
-                delivery_state(&fixture),
-                WorkerDeliveryState::Merged
-                    | WorkerDeliveryState::CloseReady
-                    | WorkerDeliveryState::Delivered
-            ),
-            "{label}: the delivery must not merge"
+        assert_eq!(
+            delivery_state(&fixture),
+            WorkerDeliveryState::AwaitingMerge,
+            "{label}: the refused delivery must remain retryable"
         );
     };
     unmerged("red CI without override");
@@ -677,12 +679,215 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     assert!(notes.contains("actions/runs/4150"), "{notes}");
 }
 
+/// cas-d1eb: refusing red CI must withdraw merge intent without consuming
+/// the approved receipt, so the supervisor can leave it parked or retry it.
+#[tokio::test]
+async fn red_ci_refusal_restores_awaiting_merge_cas_d1eb() {
+    let home = TempDir::new().expect("temp HOME");
+    let fake_bin = TempDir::new().expect("fake gh dir");
+    let gh = fake_bin.path().join("gh");
+    cas::test_paths::warm_stub(
+        &gh,
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}\nJSON\n",
+    );
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
+    env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+    let fixture = arm_delivery("redciretry", "red-ci-retry", &mut env).await;
+    let (receipt, approved) =
+        cas_store::get_latest_worker_delivery(&fixture.cas_root, &fixture.task_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(approved.state, WorkerDeliveryState::AwaitingMerge);
+
+    // Include a transaction stranded by an earlier runtime, not just a newly
+    // authorized merge. Both refusals must leave the same retryable boundary.
+    for prior_authorization in [false, true] {
+        if prior_authorization {
+            cas_store::transition_worker_delivery(
+                &fixture.cas_root,
+                &approved.id,
+                &[WorkerDeliveryState::AwaitingMerge],
+                WorkerDeliveryState::MergeAuthorized,
+                &fixture.supervisor_id,
+                Some(&fixture.supervisor_id),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let refusal = run_merge(&fixture).await;
+        assert!(refusal.contains("CI RED"), "{refusal}");
+        assert_eq!(
+            git_stdout(&fixture.repo.root, &["rev-parse", "main"]),
+            fixture.receipt.target_sha,
+            "a refused merge must not move the target"
+        );
+        let (retained_receipt, parked) =
+            cas_store::get_latest_worker_delivery(&fixture.cas_root, &fixture.task_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(parked.state, WorkerDeliveryState::AwaitingMerge);
+        assert_eq!(parked.last_error_code.as_deref(), Some("ci_refused"));
+        assert!(
+            parked
+                .last_error_detail
+                .as_deref()
+                .unwrap()
+                .contains("CI RED")
+        );
+        assert_eq!(
+            retained_receipt, receipt,
+            "retry retains the reviewed receipt"
+        );
+        assert_eq!(parked.verification_id, approved.verification_id);
+        assert_eq!(parked.merge_commit_sha, None);
+        assert_eq!(
+            open_task_store(&fixture.cas_root)
+                .unwrap()
+                .get(&fixture.task_id)
+                .unwrap()
+                .status,
+            TaskStatus::AwaitingMerge
+        );
+    }
+
+    // A later CI refusal during reconciliation cannot erase a completed merge.
+    run_git(
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "land reviewed delivery",
+            &receipt.source_branch,
+        ],
+        &fixture.repo.root,
+    );
+    let merged_tip = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
+    cas_store::transition_worker_delivery(
+        &fixture.cas_root,
+        &approved.id,
+        &[WorkerDeliveryState::AwaitingMerge],
+        WorkerDeliveryState::Merged,
+        &fixture.supervisor_id,
+        Some(&fixture.supervisor_id),
+        None,
+        Some(&merged_tip),
+        None,
+    )
+    .unwrap();
+    let refusal = run_merge(&fixture).await;
+    assert!(refusal.contains("CI RED"), "{refusal}");
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Merged);
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "main"]),
+        merged_tip
+    );
+}
+
+#[tokio::test]
+async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
+    let home = TempDir::new().expect("temp HOME");
+    let fake_bin = TempDir::new().expect("fake gh dir");
+    let gh = fake_bin.path().join("gh");
+    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
+    // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process
+    // PATH stays untouched (factory_mcp_ops_test PATH-isolation lint).
+    env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+    let fixture = arm_delivery("docscioverride", "docs-ci-override", &mut env).await;
+    let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
+    let merge_with = |supervisor_override: Option<bool>, reason: Option<&str>| {
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(fixture.receipt.source_branch.clone());
+        merge.task_id = Some(fixture.task_id.clone());
+        merge.allow_trunk = Some(true);
+        merge.cleanup = Some(false);
+        merge.supervisor_override = supervisor_override;
+        merge.reason = reason.map(str::to_string);
+        merge
+    };
+    let outcome = |result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>| match result {
+        Ok(result) => get_text(&result),
+        Err(error) => format!("MCP_ERROR: {error}"),
+    };
+
+    let refused = outcome(
+        supervisor_service
+            .coordination(Parameters(merge_with(None, None)))
+            .await,
+    );
+    assert!(refused.contains("CODE CI REQUIRED"), "{refused}");
+    assert!(refused.contains("supervisor_override=true"), "{refused}");
+    // Refusals happen after merge authorization but before Git: the target
+    // is untouched and the delivery has not merged.
+    let unmerged = |label: &str| {
+        assert_eq!(
+            git_stdout(&fixture.repo.root, &["rev-parse", "main"]),
+            fixture.receipt.target_sha,
+            "{label}: the target must not move"
+        );
+        assert_eq!(
+            delivery_state(&fixture),
+            WorkerDeliveryState::AwaitingMerge,
+            "{label}: the refused delivery must remain retryable"
+        );
+    };
+    unmerged("docs-only code CI without override");
+
+    let no_reason = outcome(
+        supervisor_service
+            .coordination(Parameters(merge_with(Some(true), None)))
+            .await,
+    );
+    assert!(
+        !no_reason.contains("Unsupported parameter(s)"),
+        "{no_reason}"
+    );
+    assert!(no_reason.contains("non-empty reason"), "{no_reason}");
+    unmerged("override without reason");
+
+    let merged = outcome(
+        supervisor_service
+            .coordination(Parameters(merge_with(
+                Some(true),
+                Some("docs-only run skipped validation; supervisor reviewed delivery"),
+            )))
+            .await,
+    );
+    assert!(!merged.contains("Unsupported parameter(s)"), "{merged}");
+    assert!(!merged.starts_with("MCP_ERROR"), "{merged}");
+    assert!(
+        merged.contains("docs-only code CI was explicitly overridden by a registered supervisor"),
+        "{merged}"
+    );
+    assert!(
+        matches!(
+            delivery_state(&fixture),
+            WorkerDeliveryState::Merged
+                | WorkerDeliveryState::CloseReady
+                | WorkerDeliveryState::Delivered
+        ),
+        "an accepted override must merge the delivery:\n{merged}"
+    );
+    let notes = open_task_store(&fixture.cas_root)
+        .expect("task store")
+        .get(&fixture.task_id)
+        .expect("task")
+        .notes;
+    assert!(notes.contains("overrode docs-only lane CI"), "{notes}");
+    assert!(notes.contains("supervisor reviewed delivery"), "{notes}");
+    assert!(notes.contains(&fixture.receipt.commit_sha), "{notes}");
+}
+
 #[tokio::test]
 async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_changed() {
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("driftbefore", "drift-before").await;
+    let fixture = arm_delivery("driftbefore", "drift-before", &mut env).await;
 
     // A concurrent actor commits on the reviewed target after approval.
     std::fs::write(fixture.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();
@@ -724,7 +929,7 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("driftduring", "drift-during").await;
+    let fixture = arm_delivery("driftduring", "drift-during", &mut env).await;
 
     let reviewed = fixture.receipt.target_sha.clone();
     assert_eq!(
@@ -796,8 +1001,8 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
 
-    let first = arm_delivery("indepone", "independent-one").await;
-    let second = arm_delivery("indeptwo", "independent-two").await;
+    let first = arm_delivery("indepone", "independent-one", &mut env).await;
+    let second = arm_delivery("indeptwo", "independent-two", &mut env).await;
 
     // Drift only the FIRST repository's target.
     std::fs::write(first.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();

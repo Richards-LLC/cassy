@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { journeyDay } from "./clock";
 import { ATLAS, PELICAN } from "./world";
 
@@ -168,12 +168,54 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
       expect(await anchorY(anchor.key)).toBeLessThanOrEqual(anchor.y + 3);
     };
     const beforeDrop = await reading();
+    // cas-c945 QA F01: what a screen reader would hear. Each change of text
+    // is attributed to its nearest live region (role status/alert/log or
+    // aria-live, an aria-live="off" ancestor silencing it), and the changed
+    // text itself is recorded, not the whole region's.
+    await page.evaluate(() => {
+      const w = window as unknown as { __heard: string[] };
+      w.__heard = [];
+      const region = (node: Node): Element | null => {
+        for (let element = node instanceof Element ? node : node.parentElement; element; element = element.parentElement) {
+          const live = element.getAttribute("aria-live");
+          if (live === "off") return null;
+          if (live || ["status", "alert", "log"].includes(element.getAttribute("role") ?? "")) return element;
+        }
+        return null;
+      };
+      new MutationObserver((records) => {
+        const last = new Map<Element, string>();
+        for (const record of records) {
+          for (const node of record.type === "characterData" ? [record.target] : [...record.addedNodes]) {
+            const speaker = region(node);
+            const words = node.textContent?.trim() ?? "";
+            if (!speaker || !words || last.get(speaker) === words) continue;
+            last.set(speaker, words);
+            w.__heard.push(words);
+          }
+        }
+      }).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
     hub.hold(PELICAN);
     hub.drop(PELICAN);
     await expect(header).toContainText("Reconnecting");
     await holds(beforeDrop, "when the connection drops");
+    // Journey F28: the card that said the machine "is connected" says what
+    // the header, banner, row and footer say, without another click, and
+    // without a second announcement of the outage.
+    const reconnecting = "Lost connection to Atlas · Linux. Reconnecting… Open the file again when it's back.";
+    await expect(note("art-offline")).toHaveText(reconnecting);
+    await expect(note("art-offline")).not.toHaveAttribute("role", "status");
+    await expect(log.locator('a[data-artifact-id="art-offline"]')).toHaveAccessibleName(/Lost connection to Atlas · Linux\. Reconnecting…/);
+    await expect(log).not.toContainText("is connected");
+    // The banner says the drop once; the card's rewrite is not a second
+    // announcement, through its own role or the thread's log around it.
+    await page.waitForTimeout(1_500);
+    const heard = await page.evaluate(() => (window as unknown as { __heard: string[] }).__heard);
+    expect(heard.filter((words) => /lost connection|reconnecting/i.test(words)), "the outage is spoken once, by the banner").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
+    await expect(note("art-offline")).toHaveAttribute("aria-live", "off");
     await log.locator('a[data-artifact-id="art-offline"]').click();
-    await expect(note("art-offline")).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    await expect(note("art-offline")).toHaveText(reconnecting);
     // Opening the card brought it into view: that is where the reader is now.
     const beforeReconnect = await reading();
     const firstPages = hub.historyRequests.filter((request) => request.before === undefined).length;
@@ -191,3 +233,148 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     expect(page.context().pages()).toHaveLength(1);
   });
 });
+
+test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus on Load earlier (cas-d362)", journeyPart, async ({ page, journey }) => {
+  // The multiplex machine path rebuilds the conversation shell a few ms after
+  // the header turns Live. A reader who tabs to Load earlier in that window
+  // lost focus to the page, and Enter then asked for nothing (cas-d362).
+  const hub = await journey.hub({
+    machines: [ATLAS],
+    paired: ["atlas"],
+    multiplex: true,
+    history: {
+      [PELICAN]: [
+        { has_earlier: true, next_before: 20, messages: [you(21, "Is the release ready to cut?", journeyDay(0, 0, 1)), you(23, "Post the notes when it's out.", journeyDay(0, 0, 3)), you(25, "And close the epic.", journeyDay(0, 0, 5))], replies: [sup(22, 21, "Yes. The gate is green on the release branch.", journeyDay(0, 0, 2)), sup(24, 23, "Will do once the tag is pushed.", journeyDay(0, 0, 4)), sup(26, 25, "Closing it after the notes go out.", journeyDay(0, 0, 6))] },
+        { has_earlier: true, next_before: 10, messages: [you(11, "Start the QA epic tomorrow morning.", journeyDay(1))], replies: [sup(12, 11, "Scheduled for 09:00 with three workers.", journeyDay(1, 12, 6))] },
+        { has_earlier: false, messages: [you(1, "Draft the QA epic plan.", journeyDay(2, 6)), you(3, "Keep it to three lanes.", journeyDay(2, 6, 30))], replies: [sup(2, 1, "Drafted: three lanes, one gate.", journeyDay(2, 6, 6)), sup(4, 3, "Three lanes it is.", journeyDay(2, 6, 36))] },
+      ],
+    },
+  });
+  // The reader's Tab lands on Load earlier the moment the header says Live:
+  // inside the window before the shell rebuild, where a test's own focus()
+  // after waiting for Live would usually arrive too late to see it.
+  await page.addInitScript(() => {
+    new MutationObserver(() => {
+      const armed = window as unknown as { __focusLoadEarlierAtLive?: boolean };
+      if (!armed.__focusLoadEarlierAtLive) return;
+      if (document.querySelector("#conversation-connection")?.textContent !== " · Live") return;
+      armed.__focusLoadEarlierAtLive = false;
+      document.querySelector<HTMLElement>(".conversation-load-earlier")?.focus();
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+  const log = page.getByRole("log");
+  const header = page.locator("#conversation-connection");
+  const loadEarlier = page.getByRole("button", { name: "Load earlier" });
+
+  await journey.stage("Read mid-history, then move on to the composer", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
+    await loadEarlier.scrollIntoViewIfNeeded();
+    await loadEarlier.click();
+    await expect(log.getByText("Scheduled for 09:00 with three workers.")).toBeAttached();
+    await expect(loadEarlier).toBeEnabled();
+    await page.getByRole("textbox", { name: "Your message" }).focus();
+  });
+
+  await journey.stage("The machine reconnects as the reader tabs back to Load earlier", async () => {
+    await page.evaluate(() => { (window as unknown as { __focusLoadEarlierAtLive?: boolean }).__focusLoadEarlierAtLive = true; });
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toContainText("Reconnecting");
+    await hub.up("atlas");
+    await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+    // Past the rebuild: focus is still where the reader put it.
+    await page.waitForTimeout(500);
+    await expect(loadEarlier).toBeFocused();
+  });
+
+  await journey.stage("Enter loads the start of the conversation", async () => {
+    await page.keyboard.press("Enter");
+    await expect(log.getByText("Drafted: three lanes, one gate.")).toBeAttached();
+    expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
+    await expect(page.getByText("No earlier history")).toBeFocused();
+  });
+});
+
+// cas-c2cb: right after a reconnect the thread is put back at the reader's
+// turn (cas-2093). A reader who tabs to Load earlier in that window asked to
+// see it; the pending put-back must not then scroll the focused control out of
+// the thread. Tall enough history that the two positions differ, on a desktop
+// and a phone.
+// The reader rests either in the composer (the thread follows its tail) or on
+// the header's Terminal view (the thread stays on their earlier page).
+for (const [name, viewport, rest] of [
+  ["following desktop", { width: 1280, height: 800 }, "composer"],
+  ["following phone", { width: 390, height: 844 }, "composer"],
+  ["reading desktop", { width: 1280, height: 800 }, "header"],
+  ["reading phone", { width: 390, height: 844 }, "header"],
+] as const) {
+  test(`HUB-J4 cas-c2cb ${name}: a reader who tabs to Load earlier during a reconnect sees it, and paging goes on`, journeyPart, async ({ page, journey }) => {
+    const turn = (id: number, text: string, day: number) => ({ notification_id: id, reply_to: null, message: text, summary: "", device_id: "journey-device", kind: "answer", attachments: [], at: journeyDay(day, 0, id % 20) });
+    await page.setViewportSize(viewport);
+    const hub = await journey.hub({
+      machines: [ATLAS],
+      paired: ["atlas"],
+      multiplex: true,
+      history: {
+        [PELICAN]: [
+          { has_earlier: true, next_before: 30, messages: [], replies: Array.from({ length: 12 }, (_, i) => turn(40 + i, `Recent turn ${i}: the release gate and a long operator history to read through.`, 0)) },
+          { has_earlier: true, next_before: 10, messages: [], replies: Array.from({ length: 8 }, (_, i) => turn(12 + i, `Earlier turn ${i}: keep the reading position.`, 1)) },
+          { has_earlier: false, messages: [], replies: [turn(1, "The oldest entry, reached by keyboard.", 2)] },
+        ],
+      },
+    });
+    await page.addInitScript(() => {
+      new MutationObserver(() => {
+        const armed = window as unknown as { __focusLoadEarlierAtLive?: boolean };
+        if (!armed.__focusLoadEarlierAtLive) return;
+        if (document.querySelector("#conversation-connection")?.textContent !== " · Live") return;
+        armed.__focusLoadEarlierAtLive = false;
+        document.querySelector<HTMLElement>(".conversation-load-earlier")?.focus();
+      }).observe(document, { subtree: true, childList: true, characterData: true });
+    });
+    const log = page.getByRole("log");
+    const header = page.locator("#conversation-connection");
+    const loadEarlier = page.getByRole("button", { name: "Load earlier" });
+    /** How much of the focused control the thread shows: its box inside the thread's scroll box. */
+    const shownInThread = () => loadEarlier.evaluate((button) => {
+      const thread = button.closest<HTMLElement>(".conversation-reading.thread")!.getBoundingClientRect();
+      const box = button.getBoundingClientRect();
+      return { top: Math.round(box.top - thread.top), bottom: Math.round(thread.bottom - box.bottom), height: Math.round(box.height) };
+    });
+
+    await journey.stage(`Read an earlier page mid-history, then move on to the composer (${name})`, async () => {
+      await journey.open();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await expect(log.getByText("Recent turn 11:")).toBeVisible();
+      await loadEarlier.scrollIntoViewIfNeeded();
+      await loadEarlier.click();
+      await expect(log.getByText("Earlier turn 0:")).toBeAttached();
+      await expect(loadEarlier).toBeEnabled();
+      if (rest === "composer") await page.getByRole("textbox", { name: "Your message" }).focus();
+      // A header control outside the thread: the thread keeps the earlier page.
+      else await page.locator("#conversation-terminal").focus();
+    });
+
+    await journey.stage(`The reader tabs to Load earlier as the machine comes back, and sees it (${name})`, async () => {
+      await page.evaluate(() => { (window as unknown as { __focusLoadEarlierAtLive?: boolean }).__focusLoadEarlierAtLive = true; });
+      await hub.down("atlas", { sockets: "close" });
+      await expect(header).toContainText("Reconnecting");
+      await hub.up("atlas");
+      await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+      // Past the rebuild and the put-back of the reading position.
+      await page.waitForTimeout(650);
+      await expect(loadEarlier).toBeFocused();
+      const shown = await shownInThread();
+      expect(shown.top, "the focused Load earlier is not above the thread").toBeGreaterThanOrEqual(0);
+      expect(shown.bottom, "the focused Load earlier is not below the thread").toBeGreaterThanOrEqual(0);
+    });
+
+    await journey.stage(`Enter still loads the start of the conversation (${name})`, async () => {
+      await page.keyboard.press("Enter");
+      await expect(log.getByText("The oldest entry, reached by keyboard.")).toBeAttached();
+      expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
+      await expect(page.getByText("No earlier history")).toBeFocused();
+    });
+  });
+}

@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { journeyNow, journeyStamp } from "./clock";
 import type { Page } from "@playwright/test";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -115,7 +115,8 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     // no "session … started" line opens below it, and it is labelled by this
     // session's supervisor.
     const order = await threadOrder(page);
-    const blockerAt = order.findIndex((label) => label.startsWith(`${PELICAN}, `) && label.endsWith(", machine clock ahead"));
+    // cas-d8a5 (journey F32): groups are spoken "cas-src supervisor, …", the codename their description.
+    const blockerAt = order.findIndex((label) => label.startsWith("cas-src supervisor, ") && label.endsWith(", machine clock ahead"));
     expect(blockerAt, `blocker marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
     expect(order.filter((label) => label.startsWith("session ")), "the thread is this session's: no session line").toEqual([]);
     await expect(page.getByRole("log").getByRole("group", { name: `Blocker from ${PELICAN}` }).filter({ hasText: "The release gate went red" })).toHaveCount(1);
@@ -242,6 +243,13 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     // A tap on the bar opens the question.
     await bar.click();
     await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
+    // cas-8674 (journey F6): the card's body scrolls inside about a quarter of
+    // this short screen, and the question itself comes last, under the
+    // preamble. Opened, the card shows the Ask line beside its choices, never
+    // two answers to a question scrolled out of sight.
+    const askLine = pinned.locator(".obj-body li", { hasText: "open the PR to main and cut a release?" });
+    await expect(askLine).toBeInViewport({ ratio: 1 });
+    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeInViewport();
     await page.setViewportSize({ width: 390, height: 844 });
     // Swiped off on a touch screen, it unpins; the thread copy says so and keeps its choices.
     await swipeAway(page, ".pinned-ask", -260);
@@ -270,7 +278,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     expect(reply.day).toBe("Today");
     await expect(page.getByRole("log").locator(".day")).toHaveText(["Today"]);
     const order = await threadOrder(page);
-    const machineTurn = order.findIndex((label) => label.startsWith(`${OTTER}, `) && label.endsWith(", machine clock ahead"));
+    const machineTurn = order.findIndex((label) => label.startsWith("gabber-studio supervisor, ") && label.endsWith(", machine clock ahead"));
     expect(machineTurn, `machine turn marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
     expect(order.lastIndexOf(reply.label), "the send sits below the machine's turn").toBeGreaterThan(machineTurn);
     // cas-8d52 (journey F13): the machine's sessionless turn is this session's; no line splits it from the send.
@@ -298,5 +306,94 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(page.getByRole("log").locator(".day")).toHaveText(["Today"]);
     const times = await page.getByRole("log").locator(".turn > time").evaluateAll((nodes) => nodes.map((node) => node.firstChild?.textContent ?? ""));
     expect(times, "times read in order down the thread").toEqual([...times].sort());
+  });
+});
+
+test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the row ages (cas-9e33, cas-24fe)", journeyPart, async ({ page, journey }) => {
+  // The machine's clock runs five minutes ahead, and nothing in the thread has
+  // shown it yet: no history, one answer arriving live.
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], clockAheadMs: { [PELICAN]: 300_000 } });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const log = page.getByRole("log");
+  const row = list.getByRole("button", { name: /cas-src/ });
+  let before: string[] = [];
+
+  await journey.stage("The supervisor answers live", async () => {
+    await journey.open();
+    await row.click();
+    await page.getByRole("textbox", { name: "Your message" }).fill("Is the gate green?");
+    const sent = hub.nextSend();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await sent;
+    hub.answerLatest(PELICAN, "Yes, the gate is green.");
+    await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
+    // The visit cannot know the machine's lead yet: the answer shows its arrival, unmarked.
+    await expect(log.locator("time .clock-ahead")).toHaveCount(0);
+    await expect(list.locator(".conversation-when")).toHaveText("now");
+    before = await threadOrder(page);
+  });
+
+  await journey.stage("Reload three minutes later", async () => {
+    await page.clock.fastForward(180_000);
+    await page.reload();
+    await row.click();
+    await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
+    // cas-9e33: the reload rebuilds the answer from the machine's stamp and
+    // shows it exactly as the visit did: the same time, and no mark the visit
+    // never showed.
+    await expect(log.locator("time .clock-ahead")).toHaveCount(0);
+    expect(await threadOrder(page), "the reload shows the thread the visit showed").toEqual(before);
+    // cas-24fe: the row dates the answer from its arrival, not from the
+    // machine's stamp in this browser's future.
+    await expect(list.locator(".conversation-when")).toHaveText("3m");
+  });
+
+  await journey.stage("Come back five minutes later", async () => {
+    await page.clock.fastForward(300_000);
+    await expect(list.locator(".conversation-when")).toHaveText("8m");
+    // The reload measured the lead, so the next live answer says the clock is ahead.
+    hub.answerLatest(PELICAN, "Tagging 3.26.0 now.");
+    await expect(log.getByText("Tagging 3.26.0 now.")).toBeVisible();
+    await expect(log.locator("time .clock-ahead")).toHaveText([" · machine clock ahead"]);
+    await expect(list.locator(".conversation-when")).toHaveText("now");
+  });
+});
+
+// cas-450b (found in cas-8674 QA): with the phone keyboard up (390x440), the
+// opened card's "Yes, go ahead" lies under the folded bar's tap point, so the
+// second tap of a double tap answered the question. A double tap only opens it.
+test("HUB-J7 a double tap on the folded question opens it without answering it (cas-450b)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const pinned = page.getByRole("region", { name: `Waiting on you: question from ${PELICAN}` });
+  const bar = pinned.locator(".pinned-expand");
+  const yes = pinned.getByRole("button", { name: "Yes, go ahead" });
+  let ask = 0;
+  await journey.stage("A question waits, folded to its bar while the phone keyboard is up", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    ask = hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask" });
+    await expect(yes).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("textbox", { name: "Your message" }).focus();
+    await expect(bar).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 440 });
+    await expect(bar).toBeVisible();
+  });
+  await journey.stage("Double-tap the bar: the question opens and nothing is answered", async () => {
+    const box = (await bar.boundingBox())!;
+    const before = hub.sends.length;
+    await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(600);
+    expect(hub.sends.map((send) => send.text).slice(before), "a double tap on the bar sends no answer").toEqual([]);
+    await expect(yes).toBeVisible();
+    // The opened card's choice does sit under the tap point: the guard, not the layout, keeps it unanswered.
+    const under = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.textContent?.trim() ?? null, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+    expect(under).toBe("Yes, go ahead");
+  });
+  await journey.stage("A deliberate tap on Yes afterwards answers it", async () => {
+    const sent = hub.nextSend();
+    await yes.click();
+    expect(await sent).toMatchObject({ text: "Yes, go ahead", in_reply_to: ask });
+    await expect(pinned).toBeHidden();
   });
 });

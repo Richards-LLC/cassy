@@ -32,6 +32,9 @@ pub(crate) enum QaCloseGate {
 struct QaDispatchStatus {
     text: String,
     satisfied: Option<QaPass>,
+    /// cas-7877: no review is owed; an unreviewed round for an earlier tip
+    /// was withdrawn instead of being re-dispatched.
+    withdrawn: bool,
 }
 
 impl QaDispatchStatus {
@@ -39,6 +42,7 @@ impl QaDispatchStatus {
         Self {
             text,
             satisfied: None,
+            withdrawn: false,
         }
     }
 }
@@ -51,6 +55,24 @@ fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+/// The target ref to classify a delivery against (cas-3760, GH #1066): the
+/// fresher of the local branch and `origin/<target>`. A stale local target
+/// puts the merge-base before commits the delivery already absorbed, so an
+/// unrelated `.scss` change on the target counted as this task's and marked a
+/// CI-only delivery user-facing. The close gate reads origin the same way
+/// (`live_target_ref`); a local target ahead of origin (merged here, not yet
+/// pushed) is kept, so neither side's newer history is lost.
+pub(crate) fn freshest_target_ref(repo: &Path, target_branch: &str) -> String {
+    let origin = format!("origin/{target_branch}");
+    let Some(origin_sha) = super::close_ops::resolve_branch_sha(repo, &origin) else {
+        return target_branch.to_string();
+    };
+    match super::close_ops::resolve_branch_sha(repo, target_branch) {
+        Some(local_sha) if is_ancestor(repo, &origin_sha, &local_sha) => target_branch.to_string(),
+        _ => origin,
+    }
 }
 
 fn close_delivery_location<'a>(repo: &Path, head: &str, target: &'a str) -> QaDeliveryLocation<'a> {
@@ -199,6 +221,22 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
         (Some(reviewed_patch), Some(integrated_patch)) => reviewed_patch == integrated_patch,
         _ => false,
     }
+}
+
+/// Whether a delivery is already carried by the target, including squash tips.
+/// Integration alone does not satisfy QA: dispatch suppression also needs a
+/// passed or waived verdict for this exact delivery.
+fn delivery_tip_on_target(repo: &Path, head: &str, target: &str) -> bool {
+    is_ancestor(repo, head, target) || reviewed_tip_carried_by(repo, head, target, target)
+}
+
+/// cas-624f: rejected (failed) rounds on record for a delivery.
+pub(crate) fn failed_qa_rounds(cas_root: &Path, task_id: &str) -> u32 {
+    cas_store::list_qa_passes(cas_root, task_id)
+        .unwrap_or_default()
+        .iter()
+        .filter(|pass| pass.state == cas_types::QaPassState::Failed)
+        .count() as u32
 }
 
 fn qa_pass_covers_integrated_delivery(
@@ -405,7 +443,25 @@ impl CasCore {
         // The close gate has already selected this task's delivery tip. A
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
-        let changed = match changed_paths_for_delivery(repo, parent_branch, delivery_ref) {
+        let target = freshest_target_ref(repo, parent_branch);
+        if delivery_tip_on_target(repo, delivery_ref, &target)
+            && resolve_commit(repo, delivery_ref).is_some_and(|delivered| {
+                cas_store::list_qa_passes(&self.cas_root, &task.id)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|pass| {
+                        pass.state.satisfies_gate()
+                            && resolve_commit(repo, &pass.bound_head).as_deref() == Some(delivered.as_str())
+                    })
+            })
+        {
+            return None;
+        }
+        let changed = match changed_paths_for_delivery(
+            repo,
+            &target,
+            delivery_ref,
+        ) {
             Ok(paths) => Some(paths),
             Err(error) => {
                 tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
@@ -506,7 +562,12 @@ impl CasCore {
                     task.id
                 )
             })?;
-        let changed = changed_paths_for_delivery(&repo_root, &target_branch, &head).ok();
+        let changed = changed_paths_for_delivery(
+            &repo_root,
+            &freshest_target_ref(&repo_root, &target_branch),
+            &head,
+        )
+        .ok();
         self.independent_qa_for_paths(
             task,
             &repo_root,
@@ -540,6 +601,16 @@ impl CasCore {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         let implementer = task.assignee.as_deref()?;
+        // cas-7877: the close backstop reaches here for a delivery that is not
+        // integrated yet, with no change set. Judging it from the demo alone
+        // re-dispatched a stale round as a "re-review" for a backend-only tip.
+        // Measure the tip's own diff against the fresh target instead.
+        let changed = changed.or_else(|| {
+            head.and_then(|head| {
+                changed_paths_for_delivery(repo, &freshest_target_ref(repo, parent_branch), head)
+                    .ok()
+            })
+        });
         let journeys = changed
             .as_deref()
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
@@ -559,6 +630,26 @@ impl CasCore {
             // branch already holding the reviewed change. Deciding afresh
             // left the merge refused with no round a reviewer could record.
             let prior = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            // cas-7877: rounds that never reached a verdict were opened for an
+            // earlier tip that looked user-facing (a lane stacked on another
+            // task's UI commit, say). They are not a review this tip owes.
+            // Withdraw the open one instead of re-dispatching it as a
+            // "re-review". A recorded verdict (passed, failed, waived) keeps
+            // the GH #1001 rule: the next park is reviewed again.
+            if changed.is_some()
+                && !prior.is_empty()
+                && !prior.iter().any(|pass| {
+                    !pass.is_withdrawn()
+                        && matches!(
+                            pass.state,
+                            cas_types::QaPassState::Passed
+                                | cas_types::QaPassState::Failed
+                                | cas_types::QaPassState::Waived
+                        )
+                })
+            {
+                return self.withdraw_unreviewed_qa_round(task, repo, head);
+            }
             if !crate::qa_pass::gate_applies(task, &qa, &prior) {
                 // cas-2ee2: a required GitHub check must still turn green for
                 // a delivery that needs no independent QA.
@@ -581,13 +672,24 @@ impl CasCore {
             )));
         };
         let now = chrono::Utc::now();
+        // cas-624f: after `max_rounds` rejections Cassy escalates instead of
+        // opening another round, and the escalation offers "a fix plan with
+        // the implementer". The supervisor's explicit qa_request (with that
+        // plan as its reason) is the executable form of that option: it opens
+        // exactly one more round. A worker's close stays capped, so a further
+        // rejection escalates again.
+        let max_rounds = if requested.is_some_and(|reason| !reason.trim().is_empty()) {
+            qa.max_rounds.max(failed_qa_rounds(&self.cas_root, &task.id) + 1)
+        } else {
+            qa.max_rounds
+        };
         let new = NewQaPass {
             task_id: &task.id,
             implementer_agent_id: implementer,
             branch,
             bound_head: head,
             deadline_at: now + chrono::Duration::minutes(i64::from(qa.pass_timeout_mins.max(1))),
-            max_rounds: qa.max_rounds,
+            max_rounds,
         };
         // cas-ce39: a new tip retires the round open for the old one. Report
         // which, so its work item is cancelled and a reviewer who had claimed
@@ -662,8 +764,12 @@ impl CasCore {
                 self.escalate_qa_rounds(task, failed_rounds, &latest);
                 format!(
                     "\n\nINDEPENDENT QA ESCALATED: {failed_rounds} rejected rounds (latest {}). \
-                     Cassy will not open another round; the supervisor decides (fix plan, waiver, or cancel).",
-                    latest.id
+                     Cassy will not open another round by itself; the supervisor decides: a fix plan \
+                     (`{prefix}verification action=qa_request task_id={task} summary=\"<fix plan>\"` opens \
+                     one more round), a waiver, or cancel.",
+                    latest.id,
+                    prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    task = task.id,
                 )
             }
         };
@@ -689,6 +795,66 @@ impl CasCore {
         Some(QaDispatchStatus {
             text: status,
             satisfied,
+            withdrawn: false,
+        })
+    }
+
+    /// cas-7877: the re-parked tip is not user-facing and no earlier round
+    /// reached a verdict. Withdraw the round still open for an earlier tip,
+    /// cancel its work item (telling a reviewer who claimed it to stop), and
+    /// report that no review is owed. `None` when there was nothing open.
+    fn withdraw_unreviewed_qa_round(
+        &self,
+        task: &Task,
+        repo: &Path,
+        head: Option<&str>,
+    ) -> Option<QaDispatchStatus> {
+        if let Some(head) = head {
+            crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
+        }
+        let tip = head.map(|head| head.get(..8).unwrap_or(head)).unwrap_or("this tip");
+        let reason = format!(
+            "re-parked at {tip}, which has no user-facing change; the round was opened for an earlier tip and never reviewed"
+        );
+        let pass = match cas_store::withdraw_open_qa_pass(
+            &self.cas_root,
+            &task.id,
+            &reason,
+            true,
+            chrono::Utc::now(),
+        ) {
+            Ok(Some(pass)) => pass,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, error = %error, "cas-7877: unreviewed QA round could not be withdrawn");
+                return Some(QaDispatchStatus::required(format!(
+                    "\n\nINDEPENDENT QA: this tip is not user-facing, but the round open for an earlier tip \
+                     could not be withdrawn ({error}). A supervisor can qa_waive it."
+                )));
+            }
+        };
+        let cancelled = self.cancel_withdrawn_qa_task(&pass, &reason);
+        let notified = pass
+            .reviewer_agent_id
+            .as_deref()
+            .map(|reviewer| {
+                self.notify_superseded_reviewer(
+                    &pass,
+                    reviewer,
+                    "no new round: the re-parked tip has no user-facing change",
+                )
+            })
+            .unwrap_or_default();
+        Some(QaDispatchStatus {
+            text: format!(
+                "\n\nINDEPENDENT QA WITHDRAWN: round {} (pass {}) for {} was opened for an earlier tip and \
+                 never reviewed; {tip} has no user-facing change, so no review is owed.{cancelled}{notified}",
+                pass.round,
+                pass.id,
+                pass.head8(),
+            ),
+            satisfied: None,
+            withdrawn: true,
         })
     }
 
@@ -846,6 +1012,7 @@ impl CasCore {
         if !qa.independent_pass {
             return QaCloseGate::Clear;
         }
+        let classification_target = freshest_target_ref(repo, target_branch);
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
         let branch = task
             .deliverables
@@ -863,7 +1030,7 @@ impl CasCore {
             // The live branch tip is the delivery only while it is itself
             // merged: months later it carries unrelated work.
             super::close_ops::resolve_branch_sha(repo, &branch)
-                .filter(|tip| is_ancestor(repo, tip, target_branch))
+                .filter(|tip| is_ancestor(repo, tip, &classification_target))
         });
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
@@ -881,7 +1048,7 @@ impl CasCore {
         // it ever parked through the gate.
         let changed = head
             .as_deref()
-            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, target_branch));
+            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, &classification_target));
         // cas-2387: a no-code task owes no review only while it delivered no
         // user-facing code. Then any round an earlier close opened for it is
         // withdrawn, so it cannot hold the close.
@@ -987,6 +1154,11 @@ impl CasCore {
             location,
             None,
         );
+        if dispatch.as_ref().is_some_and(|status| status.withdrawn) {
+            // cas-7877: the only round was an unreviewed one for an earlier,
+            // user-facing-looking tip; the delivered change owes no review.
+            return QaCloseGate::Clear;
+        }
         if let Some(pass) = dispatch
             .as_ref()
             .and_then(|status| status.satisfied.as_ref())
@@ -1128,7 +1300,9 @@ impl CasCore {
         let body = crate::prompt_revalidation::attach_blocker_envelope(
             &format!(
                 "Independent QA rejected {task} {failed_rounds} times (latest pass {pass}, ledger {ledger}). \
-                 Cassy stopped opening rounds. Decide: a fix plan with the implementer, a logged waiver \
+                 Cassy stopped opening rounds. Decide: a fix plan with the implementer (once it is \
+                 pushed and parked, `{prefix}verification action=qa_request task_id={task} \
+                 summary=\"<fix plan>\"` opens one more round), a logged waiver \
                  (`{prefix}verification action=qa_waive task_id={task} summary=\"...\"`), or cancel.",
                 task = task.id,
                 prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
@@ -1373,6 +1547,8 @@ mod squash_close_tests {
         tasks.add(&task).unwrap();
         let now = chrono::Utc::now();
         match state {
+            // An out-of-band squash can precede the delivery's first park.
+            QaPassState::Pending => {}
             QaPassState::Waived => {
                 cas_store::waive_qa_pass(
                     &cas_dir,
@@ -1430,6 +1606,70 @@ mod squash_close_tests {
         );
         git(repo, &["checkout", "-q", "factory/worker"]);
         (dir, core, task, squash)
+    }
+
+    #[test]
+    fn cas_b591_reviewed_squash_tip_does_not_dispatch_a_new_round() {
+        for state in [QaPassState::Passed, QaPassState::Waived] {
+            let mut env = TestEnvGuard::temp_home();
+            let (dir, core, mut task, _squash) = squash_fixture(&mut env, state);
+            let repo = dir.path();
+            let head = task.deliverables.factory_branch_anchor.clone().unwrap();
+            assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+            assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 1);
+            assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", None, None), QaCloseGate::Clear));
+
+            // An older verdict cannot waive new work added on this branch.
+            std::fs::write(repo.join("web/new.css"), ".new{color:red}\n").unwrap();
+            git(repo, &["add", "web/new.css"]);
+            git(repo, &["commit", "-q", "-m", "new unreviewed surface"]);
+            let new_head = git(repo, &["rev-parse", "HEAD"]);
+            task.deliverables.factory_branch_anchor = Some(new_head.clone());
+            let dispatch = core.dispatch_independent_qa(&task, repo, "main", Some(&new_head));
+            assert!(dispatch.unwrap().contains("INDEPENDENT QA DISPATCHED"));
+            assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn cas_b591_unreviewed_squash_still_dispatches_a_round() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+        let outcome = core.independent_qa_close_gate(&task, dir.path(), "main", None, None);
+        let QaCloseGate::Refuse(text) = outcome else {
+            panic!("an integrated delivery without a verdict still requires QA");
+        };
+        assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
+        let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].state, QaPassState::Pending);
+    }
+
+    #[test]
+    fn cas_b591_report_only_tip_excludes_target_only_stylesheets() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, mut task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+        let repo = dir.path();
+        git(repo, &["checkout", "-q", "main"]);
+        let stale = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("calendar.scss"), ".calendar{color:red}\n").unwrap();
+        git(repo, &["add", "calendar.scss"]);
+        git(repo, &["commit", "-q", "-m", "unrelated calendar style"]);
+        let fresh = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", &fresh]);
+        git(repo, &["branch", "-f", "factory/worker", &fresh]);
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["branch", "-f", "main", &stale]);
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/report.html"), "<main>QA report</main>\n").unwrap();
+        git(repo, &["add", "docs/report.html"]);
+        git(repo, &["commit", "-q", "-m", "report only"]);
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        task.execution_note = Some("no-code".into());
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+        assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", None, None), QaCloseGate::Clear));
+        assert!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().is_empty());
     }
 
     async fn worker_close_after_squash(state: QaPassState) {

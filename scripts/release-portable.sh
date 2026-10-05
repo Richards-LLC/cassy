@@ -15,6 +15,42 @@
 #   CAS_RELEASE_PORTABLE_SETSID    setsid binary (default: setsid)
 #   CAS_RELEASE_PORTABLE_SHA256SUM sha256sum binary (default: sha256sum)
 
+# Epoch seconds for timezone-qualified ISO timestamps. Keep GNU date's
+# successful Linux parsing; Python handles offsets and fractional seconds on
+# macOS, whose date has no -d. Invalid or timezone-free fallback input fails.
+release_portable_timestamp_epoch() {
+    local epoch
+    if epoch="$(date -u -d "$1" +%s 2>/dev/null)" && [[ "$epoch" =~ ^-?[0-9]+$ ]]; then
+        printf '%s\n' "$epoch"
+        return 0
+    fi
+    python3 - "$1" <<'PY_TIMESTAMP'
+import datetime
+import math
+import sys
+
+try:
+    timestamp = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("timestamp must carry a timezone")
+    print(math.floor(timestamp.timestamp()))
+except (ValueError, OverflowError, OSError):
+    sys.exit(1)
+PY_TIMESTAMP
+}
+
+# Canonical absolute path, resolving symlinks and allowing missing trailing
+# components like GNU realpath -m. Stock macOS has neither realpath nor
+# readlink -f; Python is already required by the release scripts.
+release_portable_realpath() {
+    python3 - "$1" <<'PY_REALPATH'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY_REALPATH
+}
+
 # Device number of a path: GNU `stat -c %d`, then BSD/macOS `stat -f %d`.
 # Prints nothing and returns 1 when neither works. (GNU `stat -f` means
 # "file system status", so the GNU form must be tried first.)
@@ -56,9 +92,11 @@ release_portable_setsid_prefix() {
 # SHA-256 of files or stdin in `sha256sum` format ("<hex>  <name>"):
 # GNU sha256sum, else `shasum -a 256` (stock on macOS).
 release_portable_sha256sum() {
-    local sha_bin="${CAS_RELEASE_PORTABLE_SHA256SUM:-sha256sum}"
-    if command -v "$sha_bin" >/dev/null 2>&1; then
-        "$sha_bin" "$@"
+    local sha_bin="${CAS_RELEASE_PORTABLE_SHA256SUM:-sha256sum}" sha_path
+    # Ignore the compatibility function below: detecting it as the binary
+    # would recurse forever on a host without coreutils.
+    if sha_path="$(type -P "$sha_bin")"; then
+        "$sha_path" "$@"
     elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$@"
     else
@@ -146,4 +184,3 @@ release_portable_default_scratch_base() {
         printf '/var/tmp/cas-release-gate\n'
     fi
 }
-

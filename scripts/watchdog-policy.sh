@@ -4,6 +4,9 @@
 # Keep the timeout here so each watchdog uses the same reviewed value instead
 # of drifting independently.
 
+# shellcheck source=scripts/release-portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-portable.sh"
+
 watchdog_policy_init() {
     WATCHDOG_REPOSITORY="${GITHUB_REPOSITORY:-}"
     WATCHDOG_THRESHOLD_SECONDS="${CASSY_WATCHDOG_STALE_SECONDS:-1200}"
@@ -31,24 +34,7 @@ watchdog_policy_init() {
 # GitHub emits timezone-qualified ISO-8601 timestamps. Preserve GNU date's
 # existing Linux parser; BSD date lacks -d, so use Python's UTC-aware parser.
 watchdog_timestamp_epoch() {
-    local epoch
-    if epoch="$(date -u -d "$1" +%s 2>/dev/null)"; then
-        printf '%s\n' "$epoch"
-        return 0
-    fi
-    python3 - "$1" <<'PY_TIMESTAMP'
-import datetime
-import math
-import sys
-
-try:
-    timestamp = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
-    if timestamp.tzinfo is None:
-        raise ValueError("timestamp must carry a timezone")
-    print(math.floor(timestamp.timestamp()))
-except (ValueError, OverflowError, OSError):
-    sys.exit(1)
-PY_TIMESTAMP
+    release_portable_timestamp_epoch "$1"
 }
 
 watchdog_cancel_run() {

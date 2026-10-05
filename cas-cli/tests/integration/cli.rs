@@ -27,12 +27,16 @@ mod hub_detached_lifecycle_test;
 mod hub_launcher_path_test;
 #[path = "../init_non_project_guard_test.rs"]
 mod init_non_project_guard_test;
+#[path = "../init_store_repair_test.rs"]
+mod init_store_repair_test;
 #[path = "../init_watchdog_budget_test.rs"]
 mod init_watchdog_budget_test;
 #[path = "../integrate_lifecycle_test.rs"]
 mod integrate_lifecycle_test;
 #[path = "../jail_guard_test.rs"]
 mod jail_guard_test;
+#[path = "../worker_isolation_hook_test.rs"]
+mod worker_isolation_hook_test;
 #[path = "../mcp_protocol_test.rs"]
 mod mcp_protocol_test;
 #[path = "../mcp_proxy_test.rs"]
@@ -61,3 +65,5 @@ mod update_sync_report_attribution_test;
 mod viktor_distribution_test;
 #[path = "../viktor_key_setup_test.rs"]
 mod viktor_key_setup_test;
+#[path = "../violet_json_test.rs"]
+mod violet_json_test;

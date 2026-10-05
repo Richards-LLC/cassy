@@ -21,6 +21,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    assignment acceptance; no prose ACK is required. Read its criteria, depth,
    execution note and project instructions. Reused checkout: `git rebase <target>`
    onto the supervisor's named target after checkpointing dirt.
+   For an assigned QA-pass task, follow cas-qa-craft's Independent pass and
+   `verification action=qa_record`; recording the verdict closes the QA task.
 3. Implement its scope, commit logical units with the task ID, and push unless
    `delivery_mode=local_merge`. Add milestone `note_type=progress` notes.
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
@@ -30,8 +32,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    to the supervisor; quote it in `need:`.
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and request merge with `merge_request=true`;
-   re-close after it lands. Read [recovery.md](references/recovery.md) for rejection
-   or crossed-message handling before amending a parked delivery.
+   re-close after it lands; don't poll for it. Read [recovery.md](references/recovery.md)
+   for the waiting rule and for rejection or crossed-message handling.
 
 Finish or hand off this task before starting another. Stay available after
 handoff; injected `Message from …` turns are instructions. Start only assignments

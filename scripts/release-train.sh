@@ -98,11 +98,14 @@ if [[ -d "$stage_dir" ]]; then
     shopt -u nullglob
 fi
 pid_file="$run_dir/gate.pid"
+# Every row release-gate.sh accepts, in its order. test-release-train.sh pins
+# this list to the gate's gate_check_ids, so a new gate row cannot be refused
+# by `--gate --only` again (cas-704a: hub-web-tests and eight more were).
 readonly -a gate_rows=(
-    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
-    version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
-    snapshot-portability builtin-projections changelog-and-versions release-script
-    procedure-guardrails working-tree
+    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
+    version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
+    procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
 
 # Cross-cutting audit hook. The --cut dispatcher marks nested calls with
@@ -418,10 +421,24 @@ pipeline_finish() {
     pipeline_log "pipeline terminal state: $state"
 }
 
+pull_request_run_exists() {
+    local branch="$1" expected_sha="$2" runs
+    runs="$(gh_cmd run list -R "$repo_slug" --branch "$branch" --event pull_request \
+        --commit "$expected_sha" --limit 20 --json headSha 2>/dev/null)" || return 1
+    printf '%s' "$runs" | jq -e --arg sha "$expected_sha" \
+        'type == "array" and any(.[]; .headSha == $sha)' >/dev/null 2>&1
+}
+
 # At least one bucket==pass row for EVERY required check. A skipped row carries
 # the same name and proves nothing, so it is treated as absent.
 required_checks_pass() {
     local checks
+    # A previous head can still have a green rollup just after the push.
+    # Wait for this pushed head's PR run before interpreting those buckets.
+    if ! pull_request_run_exists "$branch" "$gate_sha"; then
+        pipeline_log "pull_request run for pushed head $gate_sha not yet visible"
+        return 1
+    fi
     checks="$(gh_cmd pr checks "$pr_number" -R "$repo_slug" --json name,bucket 2>/dev/null || printf '[]')"
     printf '%s' "$checks" | jq -e '
         (map(select(.name == "Fast Validation" and .bucket == "pass")) | length) >= 1
@@ -862,7 +879,7 @@ print_release_report_status() {
     local tag pdf_path html_path pdf_sha pdf_size html_sha page_count file_permalink
     local remote_pdf_sha remote_pdf_size remote_pdf_pages
     local pdf_file_id html_file_id user_thread dev_thread
-    local actual_sha actual_size actual_html_sha actual_pages resolved_pdf resolved_html
+    local actual_sha actual_size actual_html_sha actual_pages resolved_pdf resolved_html resolved_worktree
 
     if [[ ! -s "$receipt" ]]; then
         printf 'release report: pending (run `cas release report %s --pdf`, post its PDF in the User thread, and save %s)\n' \
@@ -916,15 +933,20 @@ print_release_report_status() {
     else
         resolved_pdf="$worktree/$pdf_path"
     fi
-    resolved_pdf="$(realpath -m "$resolved_pdf" 2>/dev/null || true)"
+    resolved_pdf="$(release_portable_realpath "$resolved_pdf" 2>/dev/null || true)"
     if [[ "$html_path" = /* ]]; then
         resolved_html="$html_path"
     else
         resolved_html="$worktree/$html_path"
     fi
-    resolved_html="$(realpath -m "$resolved_html" 2>/dev/null || true)"
+    resolved_html="$(release_portable_realpath "$resolved_html" 2>/dev/null || true)"
+    resolved_worktree="$(release_portable_realpath "$worktree" 2>/dev/null || true)"
+    if [[ -z "$resolved_worktree" ]]; then
+        printf 'release report: pending (cannot resolve release worktree)\n'
+        return 1
+    fi
     case "$resolved_pdf:$resolved_html" in
-        "$worktree"/*:"$worktree"/*) ;;
+        "$resolved_worktree"/*:"$resolved_worktree"/*) ;;
         *)
             printf 'release report: pending (PDF_PATH or HTML_PATH escapes the release worktree)\n'
             return 1
@@ -1019,7 +1041,7 @@ print_publication_status() {
         printf 'publication: unavailable (published/latency receipts are incomplete or disagree)\n'
         return
     fi
-    published_epoch="$(date -u -d "$published_at" +%s 2>/dev/null || true)"
+    published_epoch="$(release_portable_timestamp_epoch "$published_at" 2>/dev/null || true)"
     if [[ ! "$published_epoch" =~ ^[0-9]+$ ]]; then
         printf 'publication: unavailable (PUBLISHED_AT is invalid: %s)\n' "$published_at"
         return

@@ -4,9 +4,11 @@ import copy
 import contextlib
 import io
 import importlib.util
+import itertools
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -70,6 +72,91 @@ class ReceiptTests(unittest.TestCase):
         changed = dict(self.expected, code_input=proof.code_input(self.root))
         self.assertNotEqual(self.expected["code_input"], changed["code_input"])
         self.assertIsNone(proof.matching(self.root, changed))
+
+    def inputs_for_environment(self, env):
+        # Exercise the real projection and environment scrub, faking only tool
+        # version probes so this script harness never starts Cargo or rustc.
+        check_output = proof.subprocess.check_output
+
+        def probe(command, **kwargs):
+            if command[0] == "git":
+                return check_output(command, **kwargs)
+            self.assertIn(command, (["cargo", "--version"],
+                                    ["cargo", "nextest", "--version"], ["rustc", "-Vv"]))
+            return b"fixture tool version\n"
+
+        with mock.patch.dict(proof.os.environ, env, clear=True), \
+                mock.patch.object(proof.subprocess, "check_output", side_effect=probe):
+            return proof.inputs(self.root)
+
+    def harness_environment(self, base):
+        return dict(base, AI_AGENT="claude", CLAUDECODE="1",
+                    CLAUDE_CODE_CHILD_SESSION="fixture-child-session",
+                    CAS_FACTORY_SESSION="fixture-factory", CAS_AGENT_ROLE="supervisor",
+                    CAS_AGENT_NAME="fixture-agent", CAS_SUPERVISOR_NAME="fixture-supervisor",
+                    CAS_AGENT_ID="fixture-agent-id", CAS_SESSION_ID="fixture-session",
+                    CAS_ROOT="/fixture/operator/.cas", CAS_CLONE_PATH="/fixture/worktree",
+                    CAS_FACTORY_MODE="1", CAS_FACTORY_SUPERVISOR_CLI="claude",
+                    CAS_FACTORY_WORKER_CLI="codex", CAS_RELEASE_ENV_FILE="/fixture/release.env")
+
+    def test_harness_sessions_share_fingerprint_and_scrubbed_test_environment(self):
+        base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        expected, baseline_env = self.inputs_for_environment(base)
+        factory = self.harness_environment(base)
+        other_session = dict(factory, AI_AGENT="codex", CAS_SESSION_ID="another-session",
+                             CAS_CLONE_PATH="/another/worktree",
+                             CAS_FACTORY_SUPERVISOR_CLI="codex",
+                             CAS_RELEASE_ENV_FILE="/another/release.env")
+        for ambient in (factory, other_session):
+            with self.subTest(session=ambient["CAS_SESSION_ID"]):
+                actual, test_env = self.inputs_for_environment(ambient)
+                self.assertEqual(expected, actual)
+                self.assertEqual(proof.receipt_path(self.root, expected),
+                                 proof.receipt_path(self.root, actual))
+                # Session context must not affect the actual test processes
+                # either. The publish-only env-file locator may remain.
+                self.assertEqual(baseline_env,
+                                 {key: value for key, value in test_env.items()
+                                  if key != "CAS_RELEASE_ENV_FILE"})
+
+    def test_build_test_and_unknown_variables_still_invalidate_fingerprint(self):
+        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        expected, _ = self.inputs_for_environment(base)
+        variables = {
+            "RUSTFLAGS": "-C debuginfo=2", "CARGO_ENCODED_RUSTFLAGS": "-C\x1fdebuginfo=2",
+            "HOME": str(self.root / "other-home"), "PATH": "/other/bin:/usr/bin:/bin",
+            "TMPDIR": "/other/tmp", "CAS_INIT_TIMEOUT_SECS": "30",
+            "CAS_TEST_PROTECTED_DBS": "/fixture/operator.db",
+            "CAS_TEST_PROTECTED_HOME": "/fixture/operator",
+            "CAS_FACTORY_CARGO_BUILD_JOBS": "2", "CAS_FACTORY_BUILD_GUARD": "off",
+            "CAS_FUTURE_TEST_INPUT": "enabled",
+        }
+        for name, value in variables.items():
+            with self.subTest(variable=name):
+                actual, test_env = self.inputs_for_environment(dict(base, **{name: value}))
+                self.assertEqual(test_env[name], value)
+                self.assertNotEqual(expected["environment"], actual["environment"])
+                self.assertNotEqual(proof.receipt_path(self.root, expected),
+                                    proof.receipt_path(self.root, actual))
+
+    def test_scrubbed_train_reuses_factory_receipt_without_running_rows(self):
+        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        expected, _ = self.inputs_for_environment(self.harness_environment(base))
+        self.record["inputs"] = expected
+        self.path = proof.receipt_path(self.root, expected)
+        self.save()
+        train_inputs = self.inputs_for_environment(base)
+        stream = io.StringIO()
+        with mock.patch.dict(proof.os.environ, base, clear=True), \
+                mock.patch.object(proof, "inputs", return_value=train_inputs), \
+                mock.patch.object(proof, "clone_scratch", return_value=self.root / "scratch"), \
+                mock.patch.object(proof, "run_row") as rows, \
+                mock.patch.object(proof.sys, "argv", ["assembly-proof.py", "prove", str(self.root)]), \
+                contextlib.redirect_stdout(stream):
+            self.assertEqual(proof.main(), 0)
+        rows.assert_not_called()
+        self.assertIn("PASS assembly receipt=" + str(self.path), stream.getvalue())
+        self.assertIn("source_sha=" + self.record["head"], stream.getvalue())
 
     def test_train_output_locations_do_not_change_environment_fingerprint(self):
         base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": "/home/fixture", "PATH": "/bin"}
@@ -177,6 +264,32 @@ class ReceiptTests(unittest.TestCase):
         self.commit()
         self.assertNotEqual(self.expected["code_input"], proof.code_input(self.root))
 
+    def test_journey_markdown_keeps_code_proof(self):
+        path = self.root / "docs/qa/journey-evaluations/fixture.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("journey passed\n")
+        self.commit()
+        self.assertEqual(self.expected["code_input"], proof.code_input(self.root))
+        self.assertIsNotNone(proof.matching(self.root, self.expected))
+
+    def test_non_markdown_journey_file_remains_a_code_input(self):
+        path = self.root / "docs/qa/journey-evaluations/fixture.json"
+        path.parent.mkdir(parents=True)
+        path.write_text('{}\n')
+        self.assert_code_miss()
+
+    def test_embedded_journey_markdown_remains_a_code_input(self):
+        path = self.root / "docs/qa/journey-evaluations/fixture.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("journey passed\n")
+        (self.root / "src/lib.rs").write_text('const DOC: &str = include_str!(\n'
+                                               ' "../docs/qa/journey-evaluations/fixture.md");\n')
+        self.commit()
+        before = proof.code_input(self.root)
+        path.write_text("changed embedded journey\n")
+        self.commit()
+        self.assertNotEqual(before, proof.code_input(self.root))
+
     def test_expired_future_and_invalid_receipts_miss(self):
         for epoch in (time.time() - proof.MAX_AGE - 10, time.time() + 100, "bad"):
             with self.subTest(epoch=epoch):
@@ -203,43 +316,181 @@ class ReceiptTests(unittest.TestCase):
                 self.save()
                 self.assertIsNone(proof.matching(self.root, self.expected))
 
-    def run_producer(self, fail_script=False):
+    def test_row_timing_rejects_a_nested_failed_self_test_row(self):
+        logs = self.root / "row-logs"
+        logs.mkdir()
+        real_run = proof.subprocess.run
+
+        def gate(command, **kwargs):
+            if command[0] == "git":
+                return real_run(command, **kwargs)
+            rows = Path(kwargs["env"]["CAS_RELEASE_GATE_LOG_DIR"])
+            rows.mkdir()
+            (rows / "ci-script-tests.log").write_text("self-tests passed\n")
+            (rows / "timing.tsv").write_text(
+                "row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n"
+                "hub-web-tests\tstart\tend\t1\t1\t0\t1\tsynthetic\n"
+                "ci-script-tests\tstart\tend\t2\t1\t0\t0\touter\n")
+            kwargs["stdout"].write("PASS ci-script-tests script fixtures\n")
+            return proof.subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(proof.subprocess, "run", side_effect=gate):
+            with self.assertRaisesRegex(ValueError, "invalid timing.tsv"):
+                proof.run_row(self.root, "ci-script-tests", {}, logs)
+
+    def run_producer(self, failure=None, serial=False, deny_test=False, recover_test=False):
         self.path.unlink()
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         rows = []
+        tests = []
+        script_done = threading.Event()
+        native_done = threading.Event()
+        producers = threading.Barrier(3)
 
         def run(root, row, env, logs):
             rows.append(row)
             self.assertFalse(proof.IDENTITY & env.keys())
-            if row == "ci-script-tests" and fail_script:
-                raise ValueError("test_seeded_ci_script_failure")
+            if not serial:
+                producers.wait(timeout=5)  # all three legs must overlap
+            if row == "ci-script-tests":
+                if failure == row:
+                    raise ValueError("test_seeded_ci_script_failure")
+                script_done.set()
+            else:
+                if failure == row:
+                    raise ValueError("test_seeded_compile_failure")
+                sync_dir = env.get("CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR")
+                if sync_dir:
+                    sync = Path(sync_dir)
+                    (sync / ("compiled-" + row)).touch()
+                    deadline = time.monotonic() + 5
+                    while not (sync / ("release-" + row)).exists():
+                        if (sync / "abort").exists():
+                            raise ValueError("test_seeded_admission_aborted")
+                        if time.monotonic() > deadline:
+                            raise ValueError("test_admission_stranded")
+                        time.sleep(0.01)
+                self.assertTrue(script_done.is_set(), "tests preceded script PASS")
+                if row == "archive-mode":
+                    self.assertTrue(native_done.is_set(), "consumers overlapped")
+                else:
+                    native_done.set()
+                tests.append(row)
             if row == "archive-mode":
                 (logs / "archive-size-bytes").write_text("123")
             return {"status": "PASS", "row": row, "tree": self.tree, "passed": 10}
 
+        memory = {"total_bytes": 64 * proof.GIB, "available_bytes": (36 if serial else 60) * proof.GIB,
+                  "source": "fixture"}
+        snapshots = itertools.chain([memory, memory], itertools.repeat(dict(memory, available_bytes=17 * proof.GIB))) if deny_test else None
+        if recover_test:
+            snapshots = itertools.chain([memory, memory, dict(memory, available_bytes=17 * proof.GIB)], itertools.repeat(memory))
         with mock.patch.object(proof, "clone_scratch", return_value=Path(scratch.name) / "base"), \
-                mock.patch.object(proof, "inputs", return_value=(self.expected, proof.test_environment(self.root))), \
+                mock.patch.object(proof, "inputs", return_value=(self.expected, dict(proof.test_environment(self.root), CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS="1"))), \
+                mock.patch.object(proof, "memory_snapshot", return_value=memory, side_effect=snapshots), \
+                mock.patch.object(proof, "cpu_count", return_value=32), \
                 mock.patch.object(proof, "run_row", side_effect=run):
-            if fail_script:
-                with self.assertRaisesRegex(ValueError, "test_seeded_ci_script_failure"):
+            if failure or deny_test:
+                pattern = "cannot fit above memory reserve" if deny_test else "test_seeded_.*failure"
+                with self.assertRaisesRegex(ValueError, pattern):
                     proof.prove(self.root)
-                self.assertEqual(rows, ["ci-script-tests"])
+                self.assertEqual(tests, [])
+                self.assertCountEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
                 self.assertIsNone(proof.matching(self.root, self.expected))
                 self.assertEqual(json.loads(self.path.read_text())["status"], "RUNNING")
             else:
                 record, _ = proof.prove(self.root)
-                self.assertEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+                self.assertCountEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+                self.assertEqual(tests, ["nextest", "archive-mode"])
                 self.assertEqual(record["script_tests"]["status"], "PASS")
+                if recover_test:
+                    self.assertEqual([event["admitted"] for event in record["execution"]["phases"]], [False, True, True])
+                self.assertEqual(record["execution"]["mode"], "serial" if serial else "concurrent")
                 self.assertIsNotNone(proof.matching(self.root, self.expected))
                 proof.prove(self.root)
-                self.assertEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+                self.assertEqual(len(rows), 3)
 
     def test_script_failure_blocks_rust_suites_and_pass_publication(self):
-        self.run_producer(fail_script=True)
+        self.run_producer(failure="ci-script-tests")
 
     def test_script_pass_precedes_both_contexts_and_receipt_reuse(self):
         self.run_producer()
+
+    def test_compile_failure_aborts_waiters_without_pass(self):
+        for row in ("nextest", "archive-mode"):
+            with self.subTest(row=row):
+                self.run_producer(failure=row)
+
+    def test_memory_constrained_proof_falls_back_to_serial_and_reuses(self):
+        self.run_producer(serial=True)
+
+    def test_memory_drop_after_compile_aborts_both_consumers(self):
+        self.run_producer(deny_test=True)
+
+    def test_refuse_then_recover_completes_proof_and_publishes_pass(self):
+        self.run_producer(recover_test=True)
+
+    def test_memory_and_cpu_caps_on_soundwave_and_prowl(self):
+        for total, available, cores, expected_jobs in ((62, 50, 32, 16), (48, 40, 18, 9), (62, 35, 32, 0)):
+            with self.subTest(cores=cores), \
+                    mock.patch.object(proof, "memory_snapshot", return_value={
+                        "total_bytes": total * proof.GIB, "available_bytes": available * proof.GIB,
+                        "source": "fixture"}), mock.patch.object(proof, "cpu_count", return_value=cores):
+                plan = proof.execution_plan({})
+                self.assertEqual(plan["compile_jobs"], expected_jobs)
+                estimated = 2 * (expected_jobs * proof.COMPILE_JOB_BYTES + proof.PRODUCER_BYTES) + proof.SCRIPT_BYTES + proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
+                if expected_jobs:
+                    self.assertLessEqual(estimated, plan["budget_bytes"])
+                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS": "99"})["compile_jobs"], expected_jobs)
+                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS": "1"})["compile_jobs"], min(1, expected_jobs))
+                reserved = proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB": "48"})
+                self.assertEqual(reserved["mode"], "serial")
+
+    def test_reserve_floor_and_phase_refusal(self):
+        with mock.patch.object(proof, "memory_snapshot", return_value={
+                "total_bytes": 16 * proof.GIB, "available_bytes": 9 * proof.GIB, "source": "fixture"}):
+            self.assertEqual(proof.execution_plan({})["reserve_bytes"], 8 * proof.GIB)
+            execution = {"phases": []}
+            with mock.patch.object(proof.time, "monotonic", side_effect=[0, 1]), \
+                    self.assertRaisesRegex(ValueError, "cannot fit above memory reserve"):
+                proof.admit_phase({"CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS": "1"}, execution, "nextest-compile", True)
+            self.assertFalse(execution["phases"][0]["admitted"])
+
+    def test_admission_waits_for_recovery_and_records_both_samples(self):
+        low = {"total_bytes": 64 * proof.GIB, "available_bytes": 15 * proof.GIB, "source": "fixture"}
+        high = dict(low, available_bytes=32 * proof.GIB)
+        execution = {"phases": []}
+        with mock.patch.object(proof, "memory_snapshot", side_effect=[low, high]), \
+                mock.patch.object(proof.time, "sleep") as sleep:
+            count = proof.admit_phase({"CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS": "1"},
+                                      execution, "archive-mode-tests")
+        self.assertGreater(int(count), 0)
+        self.assertEqual([item["admitted"] for item in execution["phases"]], [False, True])
+        sleep.assert_called_once()
+
+    def test_invalid_memory_and_job_knobs_fail_closed(self):
+        for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS", "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
+                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS", "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS"):
+            for value in ("", "0", "-1", "auto", "1.5"):
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                    proof.execution_plan({key: value})
+        with mock.patch.object(proof, "memory_snapshot", side_effect=OSError("unavailable")):
+            with self.assertRaisesRegex(ValueError, "cannot safely admit"):
+                proof.execution_plan({})
+
+    def test_linux_memory_probe_uses_available_not_free(self):
+        with mock.patch.object(proof.platform, "system", return_value="Linux"), \
+                mock.patch.object(Path, "read_text", return_value="MemTotal: 64000 kB\nMemFree: 1 kB\nMemAvailable: 40000 kB\n"):
+            self.assertEqual(proof.memory_snapshot()["available_bytes"], 40000 * 1024)
+
+    def test_macos_memory_probe_uses_actual_page_size_without_double_counting(self):
+        vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+              "Pages free: 100.\nPages inactive: 200.\nPages speculative: 50.\n"
+              "Pages purgeable: 80.\nPages occupied by compressor: 900.\n")
+        with mock.patch.object(proof.platform, "system", return_value="Darwin"), \
+                mock.patch.object(proof.subprocess, "check_output", side_effect=[str(48 * proof.GIB).encode(), vm]):
+            self.assertEqual(proof.memory_snapshot()["available_bytes"], 350 * 16384)
 
     def test_incomplete_corrupt_and_running_receipts_miss(self):
         baseline = copy.deepcopy(self.record)

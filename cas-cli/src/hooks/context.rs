@@ -330,7 +330,7 @@ fn normalize_hostname_tag(hostname: &str) -> Option<String> {
 }
 
 fn user_cas_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|home| home.join(".cas"))
+    cas_core::env_overlay::home_dir(dirs::home_dir).map(|home| home.join(".cas"))
 }
 
 fn entry_has_host_tag(entry: &Entry, expected_tag: &str) -> bool {

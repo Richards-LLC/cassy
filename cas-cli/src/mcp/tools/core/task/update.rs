@@ -6,6 +6,45 @@ use crate::cloud::{CloudConfig, TeamRegistration};
 /// (cas-cc74). Aligned with claim/close assignee liveness (~5 min).
 const EPIC_OWNER_TARGET_STALE_SECS: i64 = 300;
 
+// Branch-only retargeting preserves a declared repository, but legacy
+// targetless tasks default to the project exactly as public creation does.
+fn branch_update_work_target(
+    cas_root: &std::path::Path,
+    existing: Option<&cas_types::WorkTarget>,
+    branch: &str,
+) -> Result<cas_types::WorkTarget, String> {
+    if let Some(existing) = existing {
+        let mut target = existing.clone();
+        // Resolve the corrected branch, so a deleted old epic cannot prevent
+        // repairing the target in its otherwise valid repository.
+        target.target_branch = branch.trim().to_string();
+        let context = super::repo_context::resolve_repo_context(cas_root, &target)?;
+        target.target_branch = context.target_branch;
+        Ok(target)
+    } else {
+        super::repo_context::declare_work_target(cas_root, None, Some(branch))?
+            .ok_or_else(|| "WORK TARGET REJECTED: project resolved to no work target".into())
+    }
+}
+
+fn last_recorded_close_blocker(cas_root: &std::path::Path, task_id: &str) -> Option<String> {
+    let events = crate::store::open_event_store(cas_root).ok()?
+        .list_by_type(cas_types::EventType::WorkerVerificationBlocked, 512).ok()?;
+    for event in events {
+        let Some(metadata) = event.metadata.as_ref() else { continue };
+        if metadata.get("task_id").and_then(|v| v.as_str()) != Some(task_id)
+            || metadata.get("close_rejected").and_then(|v| v.as_bool()) != Some(true)
+        {
+            continue;
+        }
+        let reason = metadata.get("reason").and_then(|v| v.as_str()).unwrap_or("close gate");
+        let message = metadata.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        return Some(format!("Last recorded close blocker: {}: {}",
+            truncate_str(reason, 128), truncate_str(message, 1024)));
+    }
+    None
+}
+
 fn requested_update_fields(
     request: &TaskUpdateRequest,
     target_repo_supplied: bool,
@@ -380,6 +419,7 @@ impl CasCore {
             proof_scope_fix_reason,
             state_patch,
             None,
+            None,
         )
         .await
     }
@@ -393,16 +433,26 @@ impl CasCore {
         proof_scope_fix_reason: Option<&str>,
         state_patch: Option<serde_json::Value>,
         delivery_mode: Option<&str>,
+        merged_into: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
-        let requested_fields =
+        let mut requested_fields =
             requested_update_fields(&req, target_repo.is_some(), target_branch.is_some());
+        if merged_into.is_some() { requested_fields.push("merged_into"); }
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        if merged_into.is_some() && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some() || req.status.is_some()) {
+            return Err(McpError { code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("INTEGRATION BATCH REJECTED: record merged_into separately from work-target, epic or status changes"), data: None });
+        }
+        let staged_batch = merged_into.map(|selector| self.prepare_integration_batch(&task, selector))
+            .transpose().map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None,
+            })?;
         let door_update = req.door.as_deref().map(|value| {
             if value.trim().is_empty() { Ok(None) } else { value.parse::<cas_types::TaskDoor>().map(Some) }
         }).transpose().map_err(|error| McpError {
@@ -511,11 +561,17 @@ impl CasCore {
             }
             let proof_targets_fix = req.proof_targets.is_some();
             let risk_fix = req.risk.is_some();
-            if target_repo.is_none() && target_branch.is_none() && !proof_targets_fix && !risk_fix {
+            let methodology_fix = req.execution_note.is_some();
+            let corrected_methodology = req.execution_note.as_deref()
+                .map(|raw| crate::mcp::tools::types::validate_execution_note(Some(raw)))
+                .transpose().map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None,
+                })?;
+            if target_repo.is_none() && target_branch.is_none() && !proof_targets_fix && !risk_fix && !methodology_fix {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: supply target_repo/target_branch, widened proof_targets, or corrected risk to repair the delivery scope."
+                        "PROOF-SCOPE FIX REJECTED: supply target_repo/target_branch, widened proof_targets, corrected risk, or execution_note to repair the delivery scope."
                             .to_string(),
                     ),
                     data: None,
@@ -523,12 +579,13 @@ impl CasCore {
             }
             let correction_kinds = proof_targets_fix as u8
                 + risk_fix as u8
+                + methodology_fix as u8
                 + (target_repo.is_some() || target_branch.is_some()) as u8;
             if correction_kinds > 1 {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: change only one of proof_targets, risk, or the work target in one correction."
+                        "PROOF-SCOPE FIX REJECTED: change only one of proof_targets, risk, execution_note, or the work target in one correction."
                             .to_string(),
                     ),
                     data: None,
@@ -558,6 +615,28 @@ impl CasCore {
                     data: None,
                 });
             }
+            if methodology_fix && corrected_methodology.as_ref() == Some(&task.execution_note) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("PROOF-SCOPE FIX REJECTED: execution methodology is unchanged."), data: None,
+                });
+            }
+            let paired_no_code_proof = methodology_fix
+                && corrected_methodology.as_ref().and_then(|note| note.as_deref()) == Some("no-code");
+            if paired_no_code_proof {
+                let reference = req.external_ref.as_deref().or(task.external_ref.as_deref());
+                let reference = reference.map(str::trim).filter(|value| !value.is_empty())
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from("PROOF-SCOPE FIX REJECTED: execution_note=no-code requires a portable external_ref."), data: None,
+                    })?;
+                if let Some(reason) = super::lifecycle::close_ops::delivery_audit_text_rejection(reference) {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: external_ref {reason}.")), data: None,
+                    });
+                }
+            }
             let unrelated = [
                 ("title", req.title.is_some()),
                 ("notes", req.notes.is_some()),
@@ -568,13 +647,12 @@ impl CasCore {
                 ("design", req.design.is_some()),
                 ("acceptance_criteria", req.acceptance_criteria.is_some()),
                 ("demo_statement", req.demo_statement.is_some()),
-                ("execution_note", req.execution_note.is_some()),
                 (
                     "proof_targets",
                     req.proof_targets.is_some() && !proof_targets_fix,
                 ),
                 ("door", req.door.is_some()),
-                ("external_ref", req.external_ref.is_some()),
+                ("external_ref", req.external_ref.is_some() && !paired_no_code_proof),
                 ("assignee", req.assignee.is_some()),
                 ("status", req.status.is_some()),
                 ("epic", req.epic.is_some()),
@@ -593,7 +671,7 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "PROOF-SCOPE FIX REJECTED: this administrative path may change only the work target, proof_targets, or risk; unrelated field(s) supplied: {}.",
+                        "PROOF-SCOPE FIX REJECTED: this administrative path may change only the work target, proof_targets, risk, or execution_note (with portable external_ref for no-code); unrelated field(s) supplied: {}.",
                         unrelated.join(", ")
                     )),
                     data: None,
@@ -623,7 +701,7 @@ impl CasCore {
             let parked_anchor = task.deliverables.factory_branch_anchor.clone()
                 .or_else(|| task.deliverables.historical_factory_branch_anchors.last().cloned());
 
-            let corrected_target = if proof_targets_fix || risk_fix {
+            let corrected_target = if proof_targets_fix || risk_fix || methodology_fix {
                 task.deliverables.work_target.clone()
             } else if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
                 if task.execution_note.as_deref() != Some("no-code") {
@@ -669,43 +747,26 @@ impl CasCore {
                     })?,
                 )
             } else {
-                let existing = task.deliverables.work_target.as_ref().ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding"
-                            .to_string(),
-                    ),
-                    data: None,
-                })?;
-                let context = super::repo_context::resolve_repo_context(&self.cas_root, existing)
-                    .map_err(|message| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
-                    data: None,
-                })?;
-                let branch = super::repo_context::validate_target_branch(
-                    &context.repo_root,
+                Some(branch_update_work_target(
+                    &self.cas_root,
+                    task.deliverables.work_target.as_ref(),
                     target_branch.expect("checked above"),
-                )
-                .map_err(|message| McpError {
+                ).map_err(|message| McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
-                    data: None,
-                })?;
-                Some(cas_types::WorkTarget {
-                    repo_selector: existing.repo_selector.clone(),
-                    target_branch: branch,
-                })
+                    message: Cow::from(message), data: None,
+                })?)
             };
-            if !proof_targets_fix && !risk_fix
+            if !proof_targets_fix && !risk_fix && !methodology_fix
                 && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated."
-                            .to_string(),
-                    ),
+                    message: Cow::from(format!(
+                        "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated. {} Retry task action=close id={} to report the current blocking gate before requesting another scope correction.",
+                        last_recorded_close_blocker(&self.cas_root, &task.id)
+                            .unwrap_or_else(|| "No close rejection is recorded for this task.".into()),
+                        task.id,
+                    )),
                     data: None,
                 });
             }
@@ -717,13 +778,21 @@ impl CasCore {
             if risk_fix {
                 task.risk = effective_risk.clone();
             }
+            if let Some(methodology) = corrected_methodology {
+                task.execution_note = methodology;
+                if paired_no_code_proof && let Some(reference) = req.external_ref.as_deref() {
+                    task.external_ref = Some(reference.trim().to_string());
+                }
+            }
             task.deliverables.review_envelope = None;
             task.deliverables.pre_close_hook = None;
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
-            task.updated_at = chrono::Utc::now();
-            let target_description = if risk_fix {
+        task.updated_at = chrono::Utc::now();
+            let target_description = if methodology_fix {
+                format!("Execution methodology corrected to {}.", task.execution_note.as_deref().unwrap_or("<cleared>"))
+            } else if risk_fix {
                 format!(
                     "Risk corrected to {}.",
                     task.risk.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
@@ -785,7 +854,11 @@ impl CasCore {
                     data: None,
                 })?;
             }
-            let correction = if proof_targets_fix || risk_fix {
+            let correction = if methodology_fix {
+                cas_store::correct_parked_delivery_execution_note(
+                    &self.cas_root, &task, original_updated_at, &supervisor.id, reason,
+                )
+            } else if proof_targets_fix || risk_fix {
                 cas_store::correct_parked_delivery_proof_targets(
                     &self.cas_root,
                     &task,
@@ -807,7 +880,9 @@ impl CasCore {
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
-            let result_target = if risk_fix {
+            let result_target = if methodology_fix {
+                format!("Execution methodology corrected to {}. Ordinary delivery and close proofs still apply.", task.execution_note.as_deref().unwrap_or("<cleared>"))
+            } else if risk_fix {
                 format!(
                     "Risk corrected to {}.",
                     task.risk.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
@@ -1004,22 +1079,13 @@ impl CasCore {
         // cas-c85e: an explicit target in this same call outranks the
         // WorkTarget an epic move would otherwise inherit.
         let work_target_supplied = target_repo.is_some() || target_branch.is_some();
-        let existing_repo_context = if target_repo.is_none() && target_branch.is_some() {
-            match task.deliverables.work_target.as_ref() {
-                Some(target) => Some(
-                    super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
-                        |message| McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(message),
-                            data: None,
-                        },
-                    )?,
-                ),
-                None => None,
-            }
-        } else {
-            None
-        };
+        let branch_only_target = if target_repo.is_none() {
+            target_branch.map(|branch| branch_update_work_target(
+                &self.cas_root, task.deliverables.work_target.as_ref(), branch,
+            )).transpose().map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None,
+            })?
+        } else { None };
         let prior_assignee = task.assignee.clone();
 
         let mut changes = Vec::new();
@@ -1177,29 +1243,8 @@ impl CasCore {
                     message: Cow::from(message),
                     data: None,
                 })?;
-            } else if let Some(branch) = target_branch {
-                let context = existing_repo_context.as_ref().ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding",
-                    ),
-                    data: None,
-                })?;
-                let branch =
-                    super::repo_context::validate_target_branch(&context.repo_root, branch)
-                        .map_err(|message| McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(message),
-                            data: None,
-                        })?;
-                let target = task.deliverables.work_target.as_mut().ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding",
-                    ),
-                    data: None,
-                })?;
-                target.target_branch = branch;
+            } else {
+                task.deliverables.work_target = branch_only_target;
             }
             changes.push("work_target");
         }
@@ -1738,6 +1783,33 @@ impl CasCore {
                     created_by: Some("mcp".to_string()),
                 })
             };
+            // cas-c85e / cas-6fb6: the delivery target a move into this
+            // epic implies, decided before any edge changes so a refusal
+            // leaves the task graph untouched.
+            let retarget = if !epic_id.is_empty() && !work_target_supplied {
+                let epic_task = task_store.get(epic_id).map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to reload epic {epic_id}: {e}")),
+                    data: None,
+                })?;
+                let previous_parents: Vec<Task> = previous_parent_ids
+                    .iter()
+                    .filter(|id| id.as_str() != epic_id)
+                    .filter_map(|id| task_store.get(id).ok())
+                    .collect();
+                super::repo_context::work_target_for_task_moved_into_epic(
+                    &self.cas_root,
+                    &task,
+                    &epic_task,
+                    &previous_parents,
+                    || known_epics(task_store.as_ref()),
+                )
+                .filter(|target| task.deliverables.work_target.as_ref() != Some(target))
+            } else {
+                None
+            };
+            // A parked or recorded delivery never reaches here: the guard
+            // above refuses `epic=` for it with the proof_scope_fix route.
             let already_matches = match replacement.as_ref() {
                 Some(dep) => {
                     existing_parent_deps.len() == 1 && existing_parent_deps[0].to_id == dep.to_id
@@ -1773,27 +1845,9 @@ impl CasCore {
             // trunk, bypassing the epic's PR/CI gate. Runs even when the edge
             // already exists so a task moved before this fix can be repaired
             // by repeating `epic=`. A distinct explicit target is kept.
-            if !epic_id.is_empty() && !work_target_supplied {
-                let epic_task = task_store.get(epic_id).map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to reload epic {epic_id}: {e}")),
-                    data: None,
-                })?;
-                let previous_parents: Vec<Task> = previous_parent_ids
-                    .iter()
-                    .filter(|id| id.as_str() != epic_id)
-                    .filter_map(|id| task_store.get(id).ok())
-                    .collect();
-                if let Some(target) = super::repo_context::work_target_for_task_moved_into_epic(
-                    &self.cas_root,
-                    &task,
-                    &epic_task,
-                    &previous_parents,
-                ) && task.deliverables.work_target.as_ref() != Some(&target)
-                {
-                    task.deliverables.work_target = Some(target);
-                    changes.push("work_target");
-                }
+            if let Some(target) = retarget {
+                task.deliverables.work_target = Some(target);
+                changes.push("work_target");
             }
         }
 
@@ -1974,6 +2028,17 @@ impl CasCore {
             changes.push("execution_state");
         }
 
+        if let Some(batch) = staged_batch {
+            let note = batch.as_ref().map(|batch| format!(
+                "integration batch staged: {}@{} base={} delivery={} supervisor={}",
+                batch.branch, batch.tip, batch.base, batch.delivered_head, batch.supervisor_id
+            )).unwrap_or_else(|| "integration batch staging cleared by registered supervisor".into());
+            task.deliverables.integration_batch = batch;
+            changes.push("merged_into");
+            if !task.notes.is_empty() { task.notes.push('\n'); }
+            task.notes.push_str(&note);
+        }
+
         if changes.is_empty() {
             return Ok(Self::success("No changes specified"));
         }
@@ -2002,6 +2067,12 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        if task.assignee.is_some() && task.assignee != prior_assignee {
+            if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
+                warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
+            }
+        }
 
         // cas-ea9c (GH #1005): an assignment attaches the GitHub issues the
         // task cites, so a worker without GitHub credentials reads them from
@@ -2127,6 +2198,48 @@ impl CasCore {
 
         Ok(Self::success(response))
     }
+}
+
+/// cas-6fb6: every epic in the store, for recognising a target that is some
+/// epic's lane. Read only when cheaper inheritance checks do not decide.
+pub(crate) fn known_epics(task_store: &dyn cas_store::TaskStore) -> Vec<Task> {
+    task_store
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| task.task_type == TaskType::Epic)
+        .collect()
+}
+
+/// cas-6fb6: `dep_add parent` must not silently move a delivery that is
+/// already parked for merge: its branch, anchor and proof were measured
+/// against the current target. Refuse, naming the explicit correction, as the
+/// `update epic=` guard does.
+pub(crate) fn refuse_retarget_of_parked_delivery(
+    task: &Task,
+    epic_id: &str,
+    target: &cas_types::WorkTarget,
+) -> Result<(), McpError> {
+    if task.status != TaskStatus::AwaitingMerge {
+        return Ok(());
+    }
+    let current = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|current| format!("{} @ {}", current.repo_selector, current.target_branch))
+        .unwrap_or_else(|| "no work target".to_string());
+    Err(McpError {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(format!(
+            "RE-PARENT REFUSED: task {id} is parked for merge against {current}, and moving it under epic {epic_id} would retarget it to {repo} @ {branch}. A parked delivery is not retargeted implicitly. To move the delivery, a registered supervisor runs `{prefix}task action=update id={id} proof_scope_fix=true target_repo={repo} target_branch={branch} reason=\"<why>\"`, then repeats the re-parent.",
+            id = task.id,
+            repo = target.repo_selector,
+            branch = target.target_branch,
+            prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+        )),
+        data: None,
+    })
 }
 
 #[cfg(test)]
@@ -2628,7 +2741,7 @@ mod epic_move_work_target_tests {
     //! cas-c85e (GH #997): `task update epic=` moves the delivery target with
     //! the task, so worktree_merge never inherits a stale trunk target.
     use super::*;
-    use cas_types::{Dependency, DependencyType, Task, TaskType, WorkTarget};
+    use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
     use tempfile::TempDir;
 
     const REPO: &str = "project:cas-c85e";
@@ -2709,6 +2822,179 @@ mod epic_move_work_target_tests {
             "release/operator-selected",
             "an explicit non-default target must not be overwritten"
         );
+    }
+
+    async fn add_parent(core: &CasCore, task_id: &str, epic_id: &str) -> Result<(), String> {
+        let req: DependencyRequest = serde_json::from_value(serde_json::json!({
+            "from_id": task_id,
+            "to_id": epic_id,
+            "dep_type": "parent",
+        }))
+        .unwrap();
+        core.cas_task_dep_add(Parameters(req))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.message.to_string())
+    }
+
+    fn parent_of(store: &std::sync::Arc<dyn cas_store::TaskStore>, id: &str) -> Vec<String> {
+        store
+            .get_dependencies(id)
+            .unwrap()
+            .into_iter()
+            .filter(|dep| dep.dep_type == DependencyType::ParentChild)
+            .map(|dep| dep.to_id)
+            .collect()
+    }
+
+    /// cas-6fb6: the 17 cas-f29b moves that kept their old epic lane. The
+    /// old parent edge was already gone (cas-8f1b: dep_remove first), or the
+    /// old epic carried only a branch. Either way the old lane follows the
+    /// task to the new epic; a release pin no epic owns stays.
+    #[tokio::test]
+    async fn re_parenting_moves_a_target_on_another_epics_lane_cas_6fb6() {
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-6fb6-old", "epic/old")).unwrap();
+        let mut branch_only = Task::new("cas-6fb6-c4d3".into(), "epic with a branch only".into());
+        branch_only.task_type = TaskType::Epic;
+        branch_only.branch = Some("epic/c4d3".into());
+        store.add(&branch_only).unwrap();
+        store.add(&epic("cas-6fb6-new", "epic/new")).unwrap();
+
+        // The old parent edge was removed before the move.
+        let mut orphaned = Task::new("cas-6fb6-orphan".into(), "edge already removed".into());
+        orphaned.deliverables.work_target = Some(target("epic/old"));
+        store.add(&orphaned).unwrap();
+        move_into(&core, &orphaned.id, "cas-6fb6-new").await;
+        assert_eq!(branch_of(&store, &orphaned.id), "epic/new");
+
+        // The old epic has a branch but no WorkTarget, and the edge exists.
+        let mut on_c4d3 = Task::new("cas-6fb6-lane".into(), "on a branch-only epic".into());
+        on_c4d3.deliverables.work_target = Some(target("epic/c4d3"));
+        store.add(&on_c4d3).unwrap();
+        store
+            .add_dependency(&Dependency::new(on_c4d3.id.clone(), branch_only.id.clone(), DependencyType::ParentChild))
+            .unwrap();
+        move_into(&core, &on_c4d3.id, "cas-6fb6-new").await;
+        assert_eq!(branch_of(&store, &on_c4d3.id), "epic/new");
+        assert_eq!(parent_of(&store, &on_c4d3.id), vec!["cas-6fb6-new".to_string()]);
+
+        // dep_add parent follows the same rule.
+        let mut via_dep_add = Task::new("cas-6fb6-dep".into(), "parent-linked".into());
+        via_dep_add.deliverables.work_target = Some(target("epic/old"));
+        store.add(&via_dep_add).unwrap();
+        add_parent(&core, &via_dep_add.id, "cas-6fb6-new").await.unwrap();
+        assert_eq!(branch_of(&store, &via_dep_add.id), "epic/new");
+
+        // An explicitly chosen non-epic target is preserved by both paths.
+        let mut pinned = Task::new("cas-6fb6-pinned".into(), "release pin".into());
+        pinned.deliverables.work_target = Some(target("release/operator-selected"));
+        store.add(&pinned).unwrap();
+        move_into(&core, &pinned.id, "cas-6fb6-new").await;
+        assert_eq!(branch_of(&store, &pinned.id), "release/operator-selected");
+        let mut pinned_dep = Task::new("cas-6fb6-pinned-dep".into(), "hotfix pin".into());
+        pinned_dep.deliverables.work_target = Some(target("hotfix/operator"));
+        store.add(&pinned_dep).unwrap();
+        add_parent(&core, &pinned_dep.id, "cas-6fb6-new").await.unwrap();
+        assert_eq!(branch_of(&store, &pinned_dep.id), "hotfix/operator");
+    }
+
+    /// cas-6fb6: a delivery already parked for merge is not retargeted
+    /// implicitly. Both paths refuse with the proof_scope_fix route and leave
+    /// the parent edge and the target untouched.
+    #[tokio::test]
+    async fn re_parenting_a_parked_delivery_is_refused_with_guidance_cas_6fb6() {
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-6fb6-old", "epic/old")).unwrap();
+        store.add(&epic("cas-6fb6-new", "epic/new")).unwrap();
+        let mut parked = Task::new("cas-6fb6-parked".into(), "parked".into());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.work_target = Some(target("epic/old"));
+        store.add(&parked).unwrap();
+        store
+            .add_dependency(&Dependency::new(parked.id.clone(), "cas-6fb6-old".into(), DependencyType::ParentChild))
+            .unwrap();
+
+        let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": parked.id,
+            "epic": "cas-6fb6-new",
+        }))
+        .unwrap();
+        let refused = core.cas_task_update(Parameters(req)).await.unwrap_err().message.to_string();
+        assert!(
+            refused.contains("DELIVERY PROOF SCOPE LOCKED") && refused.contains("proof_scope_fix")
+                && refused.contains("epic/new"),
+            "{refused}"
+        );
+        assert_eq!(branch_of(&store, &parked.id), "epic/old");
+        assert_eq!(parent_of(&store, &parked.id), vec!["cas-6fb6-old".to_string()]);
+
+        let refused = add_parent(&core, &parked.id, "cas-6fb6-new").await.unwrap_err();
+        assert!(
+            refused.contains("RE-PARENT REFUSED") && refused.contains("proof_scope_fix=true")
+                && refused.contains("target_branch=epic/new"),
+            "{refused}"
+        );
+        assert_eq!(branch_of(&store, &parked.id), "epic/old");
+        assert_eq!(parent_of(&store, &parked.id), vec!["cas-6fb6-old".to_string()]);
+    }
+
+    /// cas-6fb6 (cas-940f): dep_add parent on a task left on the trunk
+    /// fallback, into an epic whose own target is its lane, used to keep the
+    /// trunk target. It now follows the epic, as `update epic=` does.
+    #[tokio::test]
+    async fn dep_add_parent_moves_a_trunk_fallback_onto_a_lane_targeted_epic_cas_6fb6() {
+        let repo = TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.path().join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["branch", "epic/f29b"]);
+        let cas_dir = repo.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-6fb6-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\n",
+        )
+        .unwrap();
+        let at = |branch: &str| WorkTarget {
+            repo_selector: "project:cas-6fb6-fixture".into(),
+            target_branch: branch.into(),
+        };
+        assert!(
+            crate::mcp::tools::core::task::repo_context::resolve_repo_context(&cas_dir, &at("main")).is_ok(),
+            "precondition: the fixture project resolves"
+        );
+
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let mut lane_epic = Task::new("cas-6fb6-f29b".into(), "lane-targeted epic".into());
+        lane_epic.task_type = TaskType::Epic;
+        lane_epic.branch = Some("epic/f29b".into());
+        lane_epic.deliverables.work_target = Some(at("epic/f29b"));
+        store.add(&lane_epic).unwrap();
+        let mut trunk = Task::new("cas-6fb6-940f".into(), "trunk fallback".into());
+        trunk.deliverables.work_target = Some(at("main"));
+        store.add(&trunk).unwrap();
+
+        add_parent(&core, &trunk.id, &lane_epic.id).await.unwrap();
+        assert_eq!(branch_of(&store, &trunk.id), "epic/f29b");
     }
 
     #[tokio::test]

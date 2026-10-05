@@ -25,6 +25,8 @@ mod observation;
 pub(crate) mod source_text;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod worktree_index_tests;
 mod types;
 
 pub use indexing::{

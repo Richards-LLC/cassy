@@ -524,14 +524,14 @@ async fn jev_files_mock_http_globs_secrets_ignores_binary_and_hash_only() {
 }
 
 #[tokio::test]
-async fn jev_files_caps_truncate_utf8_and_bound_selection() {
+async fn jev_files_caps_abstain_at_utf8_boundary_and_bound_selection() {
     let server = MockServer::start().await;
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("a.txt"), "abésecret-after-cap").unwrap();
     fs::write(dir.path().join("b.txt"), "never-read").unwrap();
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response()))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
     let client = fixture(&server, &dir, false);
@@ -585,13 +585,9 @@ async fn jev_files_caps_truncate_utf8_and_bound_selection() {
     let encoded = serde_json::to_value(result).unwrap();
     assert_eq!(encoded["files"].as_array().unwrap().len(), 1);
     assert_eq!(encoded["files"][0]["truncated"], true);
-    let requests = server.received_requests().await.unwrap();
-    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(
-        body["state"]["content"],
-        "ab\n[Jev: file truncated at byte cap]"
-    );
-    assert!(!String::from_utf8_lossy(&requests[0].body).contains("secret-after-cap"));
+    assert_eq!(encoded["files"][0]["status"], "incomplete");
+    assert!(encoded["files"][0].get("answers").is_none());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -777,4 +773,246 @@ async fn jev_files_choice_confidence_and_strict_advisory_log_all_calls() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn truncated_files_abstain_instead_of_confident_negatives_cas_c5e8() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("large.sh"),
+        format!("{}\ndate -d tomorrow", "x".repeat(DEFAULT_FILE_BYTES)),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("large.bin"),
+        vec![0; DEFAULT_FILE_BYTES + 1],
+    )
+    .unwrap();
+    let negative = json!({"model":"jev-1.13.0", "answers":{"urgent":{"type":"noul","noul":0.12}}, "usage":{"input_tokens":1,"output_tokens":1}});
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(negative))
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    let result = tokio::task::spawn_blocking(move || {
+        client.files(
+            dir.path(),
+            &FilesOptions {
+                paths: vec!["large.sh".into(), "large.bin".into()],
+                ..Default::default()
+            },
+            &questions(),
+            "truncated",
+            false,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let encoded = serde_json::to_value(result).unwrap();
+    assert_eq!(
+        encoded["files"][0]["status"], "incomplete",
+        "a truncated prefix cannot prove absence: {encoded}"
+    );
+    assert_eq!(encoded["files"].as_array().unwrap().len(), 2);
+    for row in encoded["files"].as_array().unwrap() {
+        assert_eq!(row["status"], "incomplete");
+        assert_eq!(row["truncated"], true);
+        assert!(row.get("answers").is_none());
+    }
+    assert!(encoded["files"][0].get("answers").is_none());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn capped_file_sweep_reports_continuation_cas_c5e8() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    for n in 0..51 {
+        fs::write(dir.path().join(format!("{n:03}.txt")), "complete").unwrap();
+    }
+    let mut client = fixture(&server, &dir, false);
+    client.config.enabled = false;
+    let result = tokio::task::spawn_blocking(move || {
+        client.files(
+            dir.path(),
+            &FilesOptions {
+                globs: vec!["*.txt".into()],
+                ..Default::default()
+            },
+            &questions(),
+            "page",
+            true,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let encoded = serde_json::to_value(result).unwrap();
+    assert_eq!(encoded["files"].as_array().unwrap().len(), 50);
+    assert_eq!(
+        encoded["next_offset"], 50,
+        "capped sweep needs continuation: {encoded}"
+    );
+}
+
+#[tokio::test]
+async fn file_sweep_resumes_without_duplicates_cas_c5e8() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    for n in 0..53 {
+        fs::write(dir.path().join(format!("{n:03}.txt")), "complete").unwrap();
+    }
+    let mut client = fixture(&server, &dir, false);
+    client.config.enabled = false;
+    tokio::task::spawn_blocking(move || {
+        let mut options = FilesOptions {
+            globs: vec!["*.txt".into()],
+            max_files: 20,
+            ..Default::default()
+        };
+        let mut paths = std::collections::BTreeSet::new();
+        for expected in [20, 20, 13] {
+            let response = client
+                .files(dir.path(), &options, &questions(), "pages", true)
+                .unwrap();
+            assert_eq!(response.files.len(), expected);
+            for row in serde_json::to_value(&response).unwrap()["files"]
+                .as_array()
+                .unwrap()
+            {
+                assert!(
+                    paths.insert(row["path"].as_str().unwrap().to_string()),
+                    "duplicate page row"
+                );
+            }
+            if let Some(offset) = response.next_offset {
+                options.offset = offset;
+            } else {
+                assert!(!response.limit_reached);
+                break;
+            }
+        }
+        assert_eq!(paths.len(), 53);
+        options.offset = 100;
+        let exhausted = client
+            .files(dir.path(), &options, &questions(), "pages", true)
+            .unwrap();
+        assert!(exhausted.files.is_empty());
+        assert!(exhausted.next_offset.is_none());
+    })
+    .await
+    .unwrap();
+}
+
+fn revision_fixture_git(root: &Path, args: &[&str]) -> String {
+    let result = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    String::from_utf8(result.stdout).unwrap().trim().into()
+}
+
+#[tokio::test]
+async fn revision_files_use_pinned_blobs_and_snapshot_ignores_cas_c5e8() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    revision_fixture_git(dir.path(), &["init", "-q"]);
+    revision_fixture_git(dir.path(), &["config", "user.name", "Fixture"]);
+    revision_fixture_git(
+        dir.path(),
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(dir.path().join("source.rs"), "committed source").unwrap();
+    fs::write(dir.path().join("ignored.rs"), "ignored private").unwrap();
+    fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+    fs::write(dir.path().join(".env.local"), "do-not-send").unwrap();
+    fs::write(dir.path().join("large.rs"), "x".repeat(1024)).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("source.rs", dir.path().join("alias.rs")).unwrap();
+    revision_fixture_git(dir.path(), &["add", "-f", "."]);
+    revision_fixture_git(dir.path(), &["commit", "-qm", "snapshot"]);
+    let commit = revision_fixture_git(dir.path(), &["rev-parse", "HEAD"]);
+    fs::remove_file(dir.path().join("source.rs")).unwrap();
+    fs::write(dir.path().join(".gitignore"), "source.rs\n").unwrap();
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    let expected_commit = commit.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let options = FilesOptions {
+            paths: vec![
+                "source.rs".into(),
+                "ignored.rs".into(),
+                "missing.rs".into(),
+                ".env.local".into(),
+                "large.rs".into(),
+                "alias.rs".into(),
+            ],
+            rev: Some("HEAD".into()),
+            max_bytes: 64,
+            ..Default::default()
+        };
+        let result = client
+            .files(dir.path(), &options, &questions(), "revision", false)
+            .unwrap();
+        assert_eq!(result.revision.as_deref(), Some(commit.as_str()));
+        for bad in ["--help", "not-a-revision"] {
+            let bad = FilesOptions {
+                rev: Some(bad.into()),
+                ..options.clone()
+            };
+            assert!(matches!(
+                client.files(dir.path(), &bad, &questions(), "revision", false),
+                Err(JevError::InvalidInput(_))
+            ));
+        }
+        serde_json::to_value(result).unwrap()
+    })
+    .await
+    .unwrap();
+    let files = result["files"].as_array().unwrap();
+    assert!(
+        files
+            .iter()
+            .any(|r| r["path"] == "source.rs" && r["status"] == "available")
+    );
+    for (path, reason) in [
+        ("missing.rs", "missing at revision"),
+        ("ignored.rs", "ignored by file selection rules"),
+        (".env.local", "secret path"),
+    ] {
+        assert!(
+            files
+                .iter()
+                .any(|r| r["path"] == path && r["reason"] == reason),
+            "{result}"
+        );
+    }
+    assert!(files.iter().any(|r| r["path"] == "large.rs"
+        && r["status"] == "incomplete"
+        && r.get("answers").is_none()));
+    #[cfg(unix)]
+    assert!(
+        files
+            .iter()
+            .any(|r| r["path"] == "alias.rs" && r["reason"] == "symlink file (not followed)")
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let state: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(state["state"]["content"], "committed source");
+    assert_eq!(state["state"]["revision"], expected_commit);
+    assert!(!result.to_string().contains("committed source"));
 }

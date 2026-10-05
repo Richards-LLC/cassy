@@ -60,6 +60,12 @@ pub struct JevFilesArgs {
     pub max_files: usize,
     #[arg(long, default_value_t = crate::jev::DEFAULT_FILE_BYTES)]
     pub max_bytes: usize,
+    /// Resume with next_offset from the preceding files response.
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+    /// Read files from this Git revision instead of the working tree.
+    #[arg(long)]
+    pub rev: Option<String>,
     #[arg(long)]
     pub questions: String,
     #[arg(long)]
@@ -102,6 +108,8 @@ pub fn execute(command: &JevCommands, cas_root: &Path) -> anyhow::Result<()> {
                         recursive: args.recursive,
                         max_files: args.max_files,
                         max_bytes: args.max_bytes,
+                        offset: args.offset,
+                        rev: args.rev.clone(),
                     },
                     &questions,
                     "cli:jev.files",
@@ -260,6 +268,34 @@ mod tests {
             panic!("files command missing")
         };
         assert_eq!((args.max_files, args.max_bytes), (50, 24576));
+    }
+    #[test]
+    fn jev_cli_revision_and_continuation_parity_cas_c5e8() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas",
+            "jev",
+            "files",
+            "--path",
+            "source.rs",
+            "--offset",
+            "50",
+            "--rev",
+            "HEAD",
+            "--questions",
+            "{}",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Jev(JevCommands::Files(args))) = cli.command else {
+            panic!("files command missing")
+        };
+        assert_eq!(args.offset, 50);
+        assert_eq!(args.rev.as_deref(), Some("HEAD"));
+        let req: cas_mcp::JevRequest = serde_json::from_value(serde_json::json!({"action":"files", "paths":["source.rs"], "offset":50, "rev":"HEAD", "questions":{}})).unwrap();
+        assert_eq!(req.offset, Some(args.offset));
+        assert_eq!(req.rev, args.rev);
+        let schema = serde_json::to_value(schemars::schema_for!(cas_mcp::JevRequest)).unwrap();
+        assert!(schema["properties"]["rev"].is_object());
+        assert!(schema["properties"]["offset"].is_object());
     }
     #[test]
     fn jev_cli_parses_local_gate_report() {

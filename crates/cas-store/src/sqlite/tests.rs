@@ -430,6 +430,128 @@ fn test_rule_history_and_tombstone_delete() {
     assert_eq!(restored.status, cas_types::RuleStatus::Draft);
 }
 
+/// cas-1502: another agent holds the write lock and commits while a rule
+/// update, promote (an update) and tombstone delete run. Each must wait the
+/// writer out, not fail "database is locked", and leave the right rule and
+/// history behind. Before the fix the history write read inside a DEFERRED
+/// transaction and then upgraded to a writer over the foreign commit, which
+/// SQLite refuses with SQLITE_BUSY without consulting the busy handler.
+#[test]
+fn test_rule_writes_wait_out_a_concurrent_writer() {
+    use std::sync::mpsc;
+    use std::time::{Duration as StdDuration, Instant};
+
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    let rule = Rule::new("rule-contended-01".to_string(), "v1".to_string());
+    store.add(&rule).unwrap();
+    store
+        .add(&Rule::new("rule-other-01".to_string(), "other".to_string()))
+        .unwrap();
+    let db = temp.path().join("cas.db");
+
+    // Another agent: take the write lock, write, hold it, then commit.
+    let hold = |label: &'static str| {
+        let db = db.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(db).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            conn.execute(
+                "UPDATE rules SET surface_count = surface_count + 1 WHERE id = 'rule-other-01'",
+                [],
+            )
+            .unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(StdDuration::from_millis(300));
+            conn.execute_batch("COMMIT").unwrap();
+            label
+        });
+        ready_rx.recv().unwrap();
+        holder
+    };
+
+    let mut updated = rule.clone();
+    updated.content = "v2".to_string();
+    let holder = hold("update");
+    let started = Instant::now();
+    store
+        .update_with_metadata(&updated, Some("agent-a"), Some("revise"))
+        .expect("update waits out the writer");
+    let waited = started.elapsed();
+    holder.join().unwrap();
+    assert!(
+        waited >= StdDuration::from_millis(200),
+        "it waited for the lock: {waited:?}"
+    );
+    assert!(
+        waited < StdDuration::from_secs(10),
+        "the wait is bounded: {waited:?}"
+    );
+
+    let mut promoted = updated.clone();
+    promoted.status = cas_types::RuleStatus::Proven;
+    let holder = hold("promote");
+    store
+        .update(&promoted)
+        .expect("promote waits out the writer");
+    holder.join().unwrap();
+
+    let holder = hold("delete");
+    store.delete(&rule.id).expect("delete waits out the writer");
+    holder.join().unwrap();
+
+    let final_rule = store.get(&rule.id).unwrap();
+    assert_eq!(final_rule.content, "v2");
+    assert_eq!(final_rule.status, cas_types::RuleStatus::Retired);
+    let versions = store.list_versions(&rule.id).unwrap();
+    // Newest first: delete (prior: proven v2), promote (prior: draft v2),
+    // update (prior: draft v1), create.
+    let history: Vec<(i64, String, String, String)> = versions
+        .iter()
+        .map(|v| {
+            (
+                v.version,
+                v.operation.clone(),
+                v.content.clone(),
+                v.status.to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        history,
+        vec![
+            (
+                4,
+                "delete".to_string(),
+                "v2".to_string(),
+                "proven".to_string()
+            ),
+            (
+                3,
+                "update".to_string(),
+                "v2".to_string(),
+                "draft".to_string()
+            ),
+            (
+                2,
+                "update".to_string(),
+                "v1".to_string(),
+                "draft".to_string()
+            ),
+            (
+                1,
+                "create".to_string(),
+                "v1".to_string(),
+                "draft".to_string()
+            ),
+        ]
+    );
+    // The other agent's writes all landed too.
+    assert_eq!(store.get("rule-other-01").unwrap().surface_count, 3);
+}
+
 /// cas-ef20: creating a rule is an auditable lifecycle mutation too. The
 /// initial snapshot must be restorable and identify the create operation.
 #[test]

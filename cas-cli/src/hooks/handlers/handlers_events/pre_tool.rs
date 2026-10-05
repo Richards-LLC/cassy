@@ -27,6 +27,13 @@ pub fn handle_pre_tool_use(
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
+    // cas-f6ad (GH #1057): no deliverable share before its epic's
+    // verification passes, for every harness and role.
+    if let Some(reason) =
+        super::publication_gate::denial(tool_name, input.tool_input.as_ref(), cas_root)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
@@ -96,19 +103,14 @@ pub fn handle_pre_tool_use(
             // Evaluate every existing protection against the command that
             // will actually run, including early rule-based approvals.
             let mut output = handle_pre_tool_use(&rewritten_input, cas_root)?;
-            if let Some(cas_core::hooks::types::HookSpecificOutput::PreToolUse {
-                permission_decision,
-                updated_input,
-                ..
-            }) = output.hook_specific_output.as_mut()
-            {
-                if permission_decision.as_deref() != Some("deny") {
-                    *updated_input = Some(updated);
-                }
-                return Ok(output);
-            }
-            return Ok(HookOutput::with_pre_tool_updated_input(updated));
-        } else if let Some(what) = command.and_then(worker_command_rust_build) {
+            // cas-980d: in the shape the harness applies. Codex honours the
+            // rewrite only with permissionDecision "allow" and otherwise runs
+            // the raw command; a deny from a later guard stands.
+            output.rewrite_pre_tool_input(updated);
+            return Ok(output);
+        } else if let Some(what) =
+            command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd)))
+        {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
@@ -450,9 +452,9 @@ pub fn handle_pre_tool_use(
                     .and_then(|staging| staging.scratch_root.clone()),
             )
         };
-        let mut artifacts_root = Some(crate::config::project_factory_artifacts_root(
-            cas_root, &crate::config::resolved_factory_artifacts_root(artifacts_root.as_deref())
-        ).display().to_string());
+        let mut artifacts_root = Some(crate::config::resolved_factory_artifact_paths(
+            cas_root, artifacts_root.as_deref()
+        ).project_root.display().to_string());
         if artifacts_root.as_deref().is_some_and(|root| {
             std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink())
         }) {
@@ -1233,13 +1235,13 @@ fn worker_check_log_denial(input: &HookInput, suffix: &str) -> Option<String> {
 /// metadata, tree, version) is not a build. Commands passed to `sh -c` /
 /// `bash -c` are inspected too; quoted text in other commands (a commit
 /// message, an echo) is not.
-fn worker_command_rust_build(command: &str) -> Option<String> {
-    worker_command_rust_build_at_depth(command, 0)
+fn worker_command_rust_build(command: &str, cwd: &Path) -> Option<String> {
+    worker_command_rust_build_at_depth(command, cwd, 0)
 }
 
-fn worker_command_rust_build_at_depth(command: &str, depth: usize) -> Option<String> {
+fn worker_command_rust_build_at_depth(command: &str, cwd: &Path, depth: usize) -> Option<String> {
     for words in shell_statement_words(command) {
-        if let Some(found) = rust_build_invocation(&words) {
+        if let Some(found) = rust_build_invocation(&words, cwd) {
             return Some(found);
         }
         if depth < 2 {
@@ -1256,7 +1258,7 @@ fn worker_command_rust_build_at_depth(command: &str, depth: usize) -> Option<Str
                     })
                     .and_then(|flag| words.get(index + 1 + flag + 1));
                 if let Some(found) =
-                    script.and_then(|script| worker_command_rust_build_at_depth(script, depth + 1))
+                    script.and_then(|script| worker_command_rust_build_at_depth(script, cwd, depth + 1))
                 {
                     return Some(found);
                 }
@@ -1295,7 +1297,7 @@ const CARGO_BUILD_SUBCOMMANDS: &[&str] = &[
     "hack",
 ];
 
-fn rust_build_invocation(words: &[String]) -> Option<String> {
+fn rust_build_invocation(words: &[String], cwd: &Path) -> Option<String> {
     let mut index = executable_word_index(words)?;
     // Wrappers that run their argument as a command.
     loop {
@@ -1384,9 +1386,20 @@ fn rust_build_invocation(words: &[String]) -> Option<String> {
             Some(command.to_string())
         }
         "make" | "gmake" => {
+            let mut dir = cwd.to_path_buf();
+            let mut makefile = None;
+            let mut targets = Vec::new();
             let mut rest = args.iter();
             while let Some(arg) = rest.next() {
-                if arg == "-C" || arg == "-f" || arg == "-j" {
+                if arg == "-C" {
+                    dir = dir.join(rest.next()?);
+                    continue;
+                }
+                if arg == "-f" {
+                    makefile = rest.next().cloned();
+                    continue;
+                }
+                if arg == "-j" {
                     rest.next();
                     continue;
                 }
@@ -1394,13 +1407,135 @@ fn rust_build_invocation(words: &[String]) -> Option<String> {
                     continue;
                 }
                 if arg.starts_with("test") || arg == "build" || arg == "check" {
-                    return Some(format!("make {arg}"));
+                    targets.push(arg.clone());
                 }
             }
-            None
+            // cas-cf70: a test target whose rule, read from the Makefile
+            // itself, runs only scripts (no Cargo, no sub-make, no variable
+            // that could expand to either) is not a Rust build. Anything the
+            // Makefile cannot prove stays refused.
+            targets
+                .into_iter()
+                .find(|target| !make_target_is_script_only(&dir, makefile.as_deref(), target))
+                .map(|target| format!("make {target}"))
         }
         _ => None,
     }
+}
+
+/// cas-cf70: whether `target`'s rule in the Makefile under `dir` (or `-f`
+/// `makefile`) runs only scripts. Every recipe line of the target and of its
+/// prerequisite rules must be free of Rust builds and sub-makes and expand no
+/// variable; a prerequisite without a rule must be an existing file. A missing
+/// Makefile, an unknown target, or a cycle beyond four levels is not proof.
+fn make_target_is_script_only(dir: &Path, makefile: Option<&str>, target: &str) -> bool {
+    let path = match makefile {
+        Some(makefile) => dir.join(makefile),
+        None => ["GNUmakefile", "makefile", "Makefile"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| dir.join("Makefile")),
+    };
+    let Ok(source) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let rules = makefile_rules(&source);
+    let mut seen = Vec::new();
+    make_rule_is_script_only(dir, &rules, target, &mut seen)
+}
+
+/// Explicit rules as (targets, prerequisites, recipe lines), with `\`
+/// continuations joined. Assignments, conditionals, includes and
+/// target-specific variables are not rules.
+fn makefile_rules(source: &str) -> Vec<(Vec<String>, Vec<String>, Vec<String>)> {
+    let mut lines = Vec::new();
+    let mut pending = String::new();
+    for line in source.lines() {
+        if let Some(head) = line.strip_suffix('\\') {
+            pending.push_str(head);
+            pending.push(' ');
+            continue;
+        }
+        pending.push_str(line);
+        lines.push(std::mem::take(&mut pending));
+    }
+    let mut rules: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+    let mut in_recipe = false;
+    for line in lines {
+        if let Some(recipe) = line.strip_prefix('\t') {
+            if in_recipe && let Some(rule) = rules.last_mut() {
+                rule.2.push(recipe.trim().to_string());
+            }
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        in_recipe = false;
+        let Some((head, tail)) = line.split_once(':') else {
+            continue;
+        };
+        let tail = tail.trim_start_matches(':');
+        if head.contains('=') || tail.trim_start().starts_with('=') || tail.contains('=') {
+            continue;
+        }
+        let targets: Vec<String> = head.split_whitespace().map(str::to_string).collect();
+        if targets.is_empty() || targets.iter().any(|target| target.contains('$')) {
+            continue;
+        }
+        let (prerequisites, inline) = match tail.split_once(';') {
+            Some((prerequisites, inline)) => (prerequisites, Some(inline.trim().to_string())),
+            None => (tail, None),
+        };
+        let prerequisites = prerequisites
+            .split_whitespace()
+            .filter(|word| *word != "|")
+            .map(str::to_string)
+            .collect();
+        rules.push((targets, prerequisites, inline.into_iter().collect()));
+        in_recipe = true;
+    }
+    rules
+}
+
+fn make_rule_is_script_only(
+    dir: &Path,
+    rules: &[(Vec<String>, Vec<String>, Vec<String>)],
+    target: &str,
+    seen: &mut Vec<String>,
+) -> bool {
+    if seen.iter().any(|known| known == target) {
+        return true;
+    }
+    if seen.len() >= 4 {
+        return false;
+    }
+    seen.push(target.to_string());
+    let matching: Vec<_> = rules
+        .iter()
+        .filter(|(targets, _, _)| targets.iter().any(|known| known == target))
+        .collect();
+    if matching.is_empty() {
+        // A plain file prerequisite has no recipe to run.
+        return seen.len() > 1 && dir.join(target).is_file();
+    }
+    matching.into_iter().all(|(_, prerequisites, recipe)| {
+        recipe.iter().all(|line| {
+            let line = line.trim_start_matches(['@', '-', '+']);
+            // Sub-makes are refused before classification so a recipe that
+            // re-invokes make cannot recurse through this check.
+            !line.contains('$')
+                && !line.contains('`')
+                && !shell_statement_words(line).iter().any(|words| {
+                    words.iter().any(|word| matches!(shell_word_basename(word), "make" | "gmake"))
+                })
+                && worker_command_rust_build_at_depth(line, dir, 0).is_none()
+        }) && prerequisites
+            .iter()
+            .all(|prerequisite| make_rule_is_script_only(dir, rules, prerequisite, seen))
+    })
 }
 
 /// Detect formatter invocations that can mutate files outside a worker's scope.
@@ -2564,7 +2699,11 @@ fn factory_shell_variable_values(
             continue;
         };
         if is_shell_variable_name(name) {
-            values.insert(name.to_string(), vec![value.to_string()]);
+            // Shell assignments expand their RHS using values already bound:
+            // `R=/artifacts; P=$R/task; mkdir -p $P` must not leave `$R`
+            // inside the target. Unknown values still remain unresolved.
+            let expanded = expand_factory_shell_word(value, &values);
+            values.insert(name.to_string(), expanded);
         }
     }
 
@@ -2929,9 +3068,10 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or(command);
+                // cas-cf4f: `rm` is a deletion, judged by bash_delete_targets.
                 if !matches!(
                     command,
-                    "touch" | "mkdir" | "tee" | "cp" | "mv" | "rm" | "install"
+                    "touch" | "mkdir" | "tee" | "cp" | "mv" | "install"
                 ) {
                     index += 1;
                     continue;
@@ -3039,6 +3179,311 @@ fn factory_unsanctioned_write_path(
     .map(|violation| violation.resolved_path)
 }
 
+/// cas-cf4f: the operands of `rm`, `rmdir` and `unlink` in command position,
+/// each with whether its command was recursive (`-r`, `-R`, `--recursive`).
+/// Mirrors the small command recognizer in [`bash_write_targets`].
+fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
+    let shell_command = shell_command_without_heredoc_bodies(command);
+    let tokens = factory_shell_tokens(&shell_command);
+    let variable_values = factory_shell_variable_values(&tokens);
+    let mut targets = Vec::new();
+    let mut index = 0;
+    let mut command_position = true;
+    while index < tokens.len() {
+        match &tokens[index] {
+            ShellToken::Operator(';')
+            | ShellToken::Operator('|')
+            | ShellToken::Operator('&')
+            | ShellToken::Operator('(')
+            | ShellToken::Operator(')') => {
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => index += 1,
+            ShellToken::Word(word) if command_position => {
+                if matches!(word.as_str(), "do" | "then" | "else" | "elif")
+                    || word.starts_with('-')
+                    || word.contains('=')
+                    || matches!(word.as_str(), "command" | "env" | "sudo")
+                {
+                    index += 1;
+                    continue;
+                }
+                command_position = false;
+                let name = std::path::Path::new(word)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(word);
+                if !matches!(name, "rm" | "rmdir" | "unlink") {
+                    index += 1;
+                    continue;
+                }
+                let mut recursive = false;
+                let mut operands = Vec::new();
+                let mut cursor = index + 1;
+                while cursor < tokens.len() {
+                    match &tokens[cursor] {
+                        ShellToken::Operator(';')
+                        | ShellToken::Operator('|')
+                        | ShellToken::Operator('&')
+                        | ShellToken::Operator('(')
+                        | ShellToken::Operator(')') => break,
+                        ShellToken::Operator(_) => {}
+                        ShellToken::Word(flag) if flag == "--recursive" => recursive = true,
+                        ShellToken::Word(flag) if flag.starts_with("--") => {}
+                        ShellToken::Word(flag) if flag.starts_with('-') => {
+                            recursive |= flag.contains('r') || flag.contains('R');
+                        }
+                        ShellToken::Word(operand) => operands.push(operand.clone()),
+                    }
+                    cursor += 1;
+                }
+                for operand in operands {
+                    for expanded in expand_factory_shell_word(&operand, &variable_values) {
+                        targets.push((expanded, recursive));
+                    }
+                }
+                index = cursor;
+            }
+            ShellToken::Word(_) => {
+                command_position = false;
+                index += 1;
+            }
+        }
+    }
+    targets
+}
+
+/// cas-cf4f / cas-aa4e: a Cassy runtime file under `~/.cas` (a socket, lock
+/// or pid file, or a session record under `~/.cas/sessions`) left behind by
+/// a throwaway factory. Files only. Any agent may delete one once it is
+/// stale; a live one is refused with the reason.
+/// cas-aa4e: what a delete target under `~/.cas` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeLeftover {
+    /// Not a Cassy runtime file (other path, a directory, another name).
+    NotLeftover,
+    /// A runtime file nothing is using: deletable.
+    Stale,
+    /// A runtime file still in use, with the reason it is live.
+    Live(&'static str),
+}
+
+/// cas-aa4e: classify a `~/.cas` socket, lock, pid file or session record by
+/// whether something still uses it. Unknown state counts as live: a delete
+/// can always wait, a deleted live socket or lock cannot be undone.
+fn cas_runtime_leftover(path: &std::path::Path, home: Option<&std::path::Path>) -> RuntimeLeftover {
+    let Some(cas_home) = home.and_then(|home| canonicalize_for_containment(&home.join(".cas")))
+    else {
+        return RuntimeLeftover::NotLeftover;
+    };
+    if !path.starts_with(&cas_home) || path == cas_home || path.is_dir() {
+        return RuntimeLeftover::NotLeftover;
+    }
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let session_record = path.parent() == Some(cas_home.join("sessions").as_path());
+    if name.ends_with(".sock") {
+        socket_staleness(path)
+    } else if name.ends_with(".lock") {
+        lock_staleness(path)
+    } else if name.ends_with(".pid") || session_record {
+        match recorded_pid(path) {
+            Some(pid) if crate::mcp::daemon::pid_alive(pid) => {
+                RuntimeLeftover::Live("its recorded pid is alive")
+            }
+            _ => RuntimeLeftover::Stale,
+        }
+    } else {
+        RuntimeLeftover::NotLeftover
+    }
+}
+
+/// A socket is stale only when nothing accepts on it.
+#[cfg(unix)]
+fn socket_staleness(path: &std::path::Path) -> RuntimeLeftover {
+    use std::os::unix::fs::FileTypeExt;
+    // A regular file named *.sock (a 0-byte leftover) has no listener.
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_socket() => return RuntimeLeftover::Stale,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RuntimeLeftover::Stale,
+        _ => {}
+    }
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => RuntimeLeftover::Live("the socket has a listener"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            RuntimeLeftover::Stale
+        }
+        Err(_) => RuntimeLeftover::Live("the socket state could not be determined"),
+    }
+}
+
+#[cfg(not(unix))]
+fn socket_staleness(_path: &std::path::Path) -> RuntimeLeftover {
+    RuntimeLeftover::Live("the socket state could not be determined")
+}
+
+/// A lock is stale when no process holds it and no pid it records is alive.
+fn lock_staleness(path: &std::path::Path) -> RuntimeLeftover {
+    use fs2::FileExt;
+    let Ok(file) = std::fs::File::open(path) else {
+        return if path.exists() {
+            RuntimeLeftover::Live("the lock could not be opened")
+        } else {
+            RuntimeLeftover::Stale
+        };
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+        }
+        Err(_) => return RuntimeLeftover::Live("the lock is held"),
+    }
+    match recorded_pid(path) {
+        Some(pid) if crate::mcp::daemon::pid_alive(pid) => {
+            RuntimeLeftover::Live("the lock's recorded pid is alive")
+        }
+        _ => RuntimeLeftover::Stale,
+    }
+}
+
+/// The pid a runtime file records: the whole file as a number, a `pid=` or
+/// `pid:` line, or a JSON `pid`/`daemon_pid` field. Only plausible user pids
+/// (2..=i32::MAX) count; anything else is no recorded pid.
+fn recorded_pid(path: &std::path::Path) -> Option<u32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let plausible = |pid: u64| (2..=i32::MAX as u64).contains(&pid).then_some(pid as u32);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(pid) = ["daemon_pid", "pid"]
+            .iter()
+            .find_map(|key| value.get(key).and_then(serde_json::Value::as_u64))
+        {
+            return plausible(pid);
+        }
+        if let Some(pid) = value.as_u64() {
+            return plausible(pid);
+        }
+    }
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line
+            .strip_prefix("pid=")
+            .or_else(|| line.strip_prefix("pid:"))
+            .unwrap_or(line)
+            .trim();
+        value.parse::<u64>().ok().and_then(plausible)
+    })
+}
+
+/// cas-cf4f: judge one deletion target. Never `/`, `$HOME` or an ancestor of
+/// it, `/tmp` itself, or the worktree root or any ancestor of it (which
+/// includes the main checkout). Otherwise allowed inside the sanctioned write
+/// roots, for stale Cassy runtime files under `~/.cas`, and, for the
+/// supervisor, below `/tmp` (cache cleanup, cas-a3af).
+fn factory_delete_violation(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
+    is_supervisor: bool,
+    registered_worktree_root: Option<&std::path::Path>,
+    raw_path: &str,
+) -> Option<FactoryWriteViolation> {
+    let violation = |resolved_path: std::path::PathBuf, matched_rule: &'static str| FactoryWriteViolation {
+        evaluated_path: raw_path.to_string(),
+        resolved_path,
+        matched_rule,
+    };
+    if raw_path.contains('$') {
+        return Some(violation(
+            std::path::PathBuf::from(raw_path),
+            "deletion with an unresolved shell variable",
+        ));
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let expanded = if raw_path == "~" {
+        home.clone()?
+    } else if let Some(suffix) = raw_path.strip_prefix("~/") {
+        home.as_ref()?.join(suffix)
+    } else {
+        std::path::PathBuf::from(raw_path)
+    };
+    let path = if expanded.is_absolute() {
+        lexically_normalize_path(expanded)
+    } else {
+        lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(expanded))
+    };
+    let Some(resolved) = canonicalize_for_containment(&path) else {
+        return Some(violation(path, "deletion outside sanctioned roots (unresolvable path)"));
+    };
+    let canonical = |path: &std::path::Path| canonicalize_for_containment(path);
+    let worktree_root = registered_worktree_root
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::var_os("CAS_CLONE_PATH").filter(|v| !v.is_empty()).map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    let is_root_or_ancestor_of = |protected: Option<std::path::PathBuf>| {
+        protected
+            .and_then(|protected| canonical(&protected))
+            .is_some_and(|protected| protected.starts_with(&resolved))
+    };
+    if resolved.parent().is_none()
+        || is_root_or_ancestor_of(home.clone())
+        || is_root_or_ancestor_of(Some(worktree_root))
+        || ["/tmp", "/private/tmp"]
+            .iter()
+            .any(|tmp| canonical(std::path::Path::new(tmp)).is_some_and(|tmp| tmp == resolved))
+    {
+        return Some(violation(resolved, "deletion of a protected root ($HOME, /, /tmp, the repository or the worktree)"));
+    }
+    if unsanctioned_factory_path_with_worktree(
+        input,
+        configured_artifacts_root,
+        configured_scratch_root,
+        is_supervisor,
+        raw_path,
+        registered_worktree_root,
+    )
+    .is_none()
+    {
+        return None;
+    }
+    // cas-aa4e: a ~/.cas runtime file is deletable only when it is stale.
+    match cas_runtime_leftover(&resolved, home.as_deref()) {
+        RuntimeLeftover::Stale => return None,
+        RuntimeLeftover::Live(reason) => {
+            return Some(violation(resolved, live_runtime_rule(reason)));
+        }
+        RuntimeLeftover::NotLeftover => {}
+    }
+    if is_supervisor
+        && ["/tmp", "/private/tmp"].iter().any(|tmp| {
+            canonical(std::path::Path::new(tmp)).is_some_and(|tmp| resolved.starts_with(tmp))
+        })
+    {
+        return None;
+    }
+    Some(violation(resolved, "deletion outside sanctioned roots"))
+}
+
+/// cas-aa4e: the static refusal rule for a live runtime file's reason.
+fn live_runtime_rule(reason: &'static str) -> &'static str {
+    match reason {
+        "the socket has a listener" => "deletion of a live Cassy runtime file: the socket has a listener",
+        "the socket state could not be determined" => {
+            "deletion of a live Cassy runtime file: the socket state could not be determined"
+        }
+        "the lock could not be opened" => "deletion of a live Cassy runtime file: the lock could not be opened",
+        "the lock is held" => "deletion of a live Cassy runtime file: the lock is held",
+        "the lock's recorded pid is alive" => {
+            "deletion of a live Cassy runtime file: the lock's recorded pid is alive"
+        }
+        _ => "deletion of a live Cassy runtime file: its recorded pid is alive",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FactoryWriteViolation {
     evaluated_path: String,
@@ -3055,6 +3500,22 @@ fn factory_write_violation(
 ) -> Option<FactoryWriteViolation> {
     let tool = input.tool_name.as_deref()?;
     let tool_input = input.tool_input.as_ref()?;
+    // cas-cf4f: Bash deletions are judged as deletions, before creation.
+    if tool == "Bash"
+        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
+        && let Some(violation) = bash_delete_targets(command).into_iter().find_map(|(raw_path, _recursive)| {
+            factory_delete_violation(
+                input,
+                configured_artifacts_root,
+                configured_scratch_root,
+                is_supervisor,
+                registered_worktree_root,
+                &raw_path,
+            )
+        })
+    {
+        return Some(violation);
+    }
     let raw_paths = match tool {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
             .get("file_path")
@@ -3065,6 +3526,12 @@ fn factory_write_violation(
         "Bash" => {
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
             bash_write_targets(command)
+        }
+        // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
+        // text in `tool_input.command`.
+        "apply_patch" => {
+            let patch = tool_input.get("command").and_then(|value| value.as_str())?;
+            apply_patch_write_targets(patch)
         }
         _ => return None,
     };
@@ -3096,6 +3563,25 @@ fn factory_write_violation(
             matched_rule: "none",
         })
     })
+}
+
+/// cas-49c0: every file a Codex `apply_patch` call adds, updates, deletes or
+/// moves to, in patch order.
+fn apply_patch_write_targets(patch: &str) -> Vec<String> {
+    // Only header lines name files; `+`, `-` and ` ` lines are content, so a
+    // header-looking line inside an added file is never a target.
+    const HEADERS: [&str; 4] = ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
+    patch
+        .lines()
+        .filter_map(|line| {
+            HEADERS
+                .iter()
+                .find_map(|header| line.strip_prefix(header))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn unsanctioned_factory_path(
@@ -3272,6 +3758,16 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if violation.matched_rule.starts_with("deletion") {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: deletion refused ({}): {}. Assigned worktree: `{}`. Deleting is allowed inside your worktree, under `{}/<task-id>/`{}, and for stale Cassy runtime files (sockets, locks, pid and session files) under ~/.cas. $HOME, /, /tmp, the repository and your worktree root are never deleted.",
+            violation.matched_rule,
+            violation.resolved_path.display(),
+            worktree.display(),
+            artifacts,
+            scratch,
+        );
+    }
     format!(
         "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
         violation.resolved_path.display(),
@@ -3457,6 +3953,265 @@ mod workspace_contract_tests {
         }
     }
 
+    fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {
+        HookInput {
+            cwd: cwd.to_string_lossy().to_string(),
+            tool_name: Some(tool.to_string()),
+            tool_input: Some(payload),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn apply_patch_targets_every_added_updated_deleted_and_moved_file_cas_49c0() {
+        let patch = "*** Begin Patch\n\
+                     *** Add File: src/new.rs\n+pub fn new() {}\n\
+                     *** Update File: /abs/src/lib.rs\n*** Move to: /abs/src/moved.rs\n@@\n-a\n+b\n\
+                     *** Delete File: ../other/gone.rs\n\
+                     *** End Patch\n";
+        assert_eq!(
+            apply_patch_write_targets(patch),
+            vec!["src/new.rs", "/abs/src/lib.rs", "/abs/src/moved.rs", "../other/gone.rs"]
+        );
+        // Patch body lines are content, never targets.
+        assert!(apply_patch_write_targets("*** Begin Patch\n+*** Add File: /etc/x\n*** End Patch\n").is_empty());
+    }
+
+    /// cas-49c0: the worker write guard's decision table. A worker may write
+    /// inside its own worktree and under the durable artifacts root; a write
+    /// that resolves into the supervisor's main checkout (or any other repo)
+    /// is refused with the path named, whichever tool makes it — including a
+    /// Codex `apply_patch` with an absolute path.
+    #[test]
+    fn worker_write_guard_decision_table_cas_49c0() {
+        let main = tempfile::tempdir().expect("main checkout");
+        let worktree = main.path().join(".cas/worktrees/strong-puma-16");
+        std::fs::create_dir_all(worktree.join("src")).expect("worktree");
+        let artifacts = tempfile::tempdir().expect("artifacts root");
+        let other_repo = tempfile::tempdir().expect("another repository");
+        let artifacts_root = Some(artifacts.path().display().to_string());
+        let main_file = main.path().join("cas-cli/src/mcp/tools/service/core.rs");
+        let patch = |header: &str, path: &str| {
+            serde_json::json!({ "command": format!("*** Begin Patch\n*** {header}: {path}\n+x\n*** End Patch\n") })
+        };
+        let cases: Vec<(&str, HookInput, Option<std::path::PathBuf>)> = vec![
+            ("apply_patch inside the worktree", tool_input("apply_patch", patch("Update File", "src/lib.rs"), &worktree), None),
+            ("apply_patch absolute inside the worktree", tool_input("apply_patch", patch("Add File", &worktree.join("src/new.rs").display().to_string()), &worktree), None),
+            ("apply_patch into the artifacts root", tool_input("apply_patch", patch("Add File", &artifacts.path().join("cas-49c0/LEDGER.md").display().to_string()), &worktree), None),
+            ("apply_patch absolute into the main checkout", tool_input("apply_patch", patch("Update File", &main_file.display().to_string()), &worktree), Some(main_file.clone())),
+            ("apply_patch relative escape into the main checkout", tool_input("apply_patch", patch("Delete File", "../../../cas-cli/src/mcp/tools/service/core.rs"), &worktree), Some(main_file.clone())),
+            ("apply_patch move into another repository", tool_input("apply_patch", serde_json::json!({ "command": format!("*** Begin Patch\n*** Update File: src/lib.rs\n*** Move to: {}\n*** End Patch\n", other_repo.path().join("lib.rs").display()) }), &worktree), Some(other_repo.path().join("lib.rs"))),
+            ("Edit absolute into the main checkout", tool_input("Edit", serde_json::json!({ "file_path": main_file.display().to_string() }), &worktree), Some(main_file.clone())),
+            ("Write inside the worktree", tool_input("Write", serde_json::json!({ "file_path": worktree.join("src/lib.rs").display().to_string() }), &worktree), None),
+        ];
+        for (case, input, expected) in cases {
+            let violation =
+                factory_write_violation(&input, &artifacts_root, None, false, Some(worktree.as_path()));
+            assert_eq!(
+                violation.as_ref().map(|violation| violation.resolved_path.clone()),
+                expected.as_deref().and_then(canonicalize_for_containment),
+                "{case}"
+            );
+            if let Some(violation) = violation {
+                let denial = factory_workspace_contract_denial(
+                    &input,
+                    &violation,
+                    artifacts_root.as_deref(),
+                    None,
+                    Some(worktree.as_path()),
+                );
+                assert!(
+                    denial.contains(&violation.resolved_path.display().to_string())
+                        && denial.contains(&worktree.display().to_string()),
+                    "{case}: the refusal names the path and the worker's own worktree: {denial}"
+                );
+            }
+        }
+    }
+
+    /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
+    /// its sanctioned roots and stale Cassy runtime files (sockets, locks,
+    /// pid and session files) under ~/.cas; the supervisor may also clear
+    /// caches under /tmp. `$HOME`, `/`, `/tmp`, the repository and the
+    /// worktree root are never deletable, and every other delete is refused
+    /// as a deletion with its reason, never as "file creation".
+    #[test]
+    fn rm_is_classified_as_deletion_decision_table_cas_cf4f() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let root_path = root.path().canonicalize().expect("canonical fixture root");
+        let home = root_path.join("home");
+        let main = root_path.join("main");
+        let worktree = main.join(".cas/worktrees/solid-condor-23");
+        let artifacts = root_path.join("artifacts");
+        for dir in [home.join(".cas/sessions"), worktree.join("src"), artifacts.join("cas-cf4f/old")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for file in [
+            home.join(".cas/factory-qa4cd6.gui.sock"),
+            home.join(".cas/sessions/qa4cd6.json.lock"),
+            home.join(".cas/sessions/qa4cd6.json"),
+            home.join(".cas/daemon.pid"),
+            home.join(".zshrc"),
+            worktree.join("src/stale.rs"),
+        ] {
+            std::fs::write(file, b"").unwrap();
+        }
+        let tmp_cache = tempfile::Builder::new()
+            .prefix("cas-cf4f-cache")
+            .tempdir_in("/tmp")
+            .expect("/tmp cache dir");
+        let tmp_cache_path = tmp_cache.path().display().to_string();
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let artifacts_root = Some(artifacts.display().to_string());
+        let decide = |command: &str, supervisor: bool| {
+            factory_write_violation(
+                &bash_input(command, &worktree),
+                &artifacts_root,
+                None,
+                supervisor,
+                Some(worktree.as_path()),
+            )
+        };
+
+        let allowed: Vec<(&str, String, bool)> = vec![
+            ("stale socket and lock under ~/.cas", "rm -f ~/.cas/factory-qa4cd6.gui.sock ~/.cas/sessions/qa4cd6.json.lock".into(), false),
+            ("stale session file", "rm ~/.cas/sessions/qa4cd6.json".into(), false),
+            ("stale pid file via $HOME", "rm -f $HOME/.cas/daemon.pid".into(), false),
+            ("a file in the worktree", "rm -f src/stale.rs".into(), false),
+            ("task-scoped artifacts", format!("rm -rf {}", artifacts.join("cas-cf4f/old").display()), false),
+            ("supervisor clears a /tmp cache", format!("rm -rf {tmp_cache_path}"), true),
+        ];
+        for (case, command, supervisor) in &allowed {
+            assert_eq!(decide(command, *supervisor), None, "{case}: {command}");
+        }
+
+        let refused: Vec<(&str, String, bool, &str)> = vec![
+            ("all of $HOME", "rm -rf ~".into(), false, "protected"),
+            ("all of $HOME via the variable", "rm -rf $HOME".into(), true, "protected"),
+            ("the main checkout", format!("rm -rf {}", main.display()), true, "protected"),
+            ("the worktree root", "rm -rf .".into(), false, "protected"),
+            ("/tmp itself", "rm -rf /tmp".into(), true, "protected"),
+            ("the whole ~/.cas directory", "rm -rf ~/.cas".into(), false, "outside"),
+            ("an unrelated home file", "rm ~/.zshrc".into(), false, "outside"),
+            ("a worker clearing /tmp", format!("rm -rf {tmp_cache_path}"), false, "outside"),
+        ];
+        for (case, command, supervisor, rule) in &refused {
+            let violation = decide(command, *supervisor).unwrap_or_else(|| panic!("{case} must be refused: {command}"));
+            assert!(violation.matched_rule.starts_with("deletion"), "{case}: {violation:?}");
+            assert!(violation.matched_rule.contains(rule), "{case}: {violation:?}");
+            let denial = factory_workspace_contract_denial(
+                &bash_input(command, &worktree),
+                &violation,
+                artifacts_root.as_deref(),
+                None,
+                Some(worktree.as_path()),
+            );
+            assert!(
+                denial.contains("deletion") && !denial.contains("file creation"),
+                "{case}: a delete is refused as a deletion, with its reason: {denial}"
+            );
+        }
+
+        // Creation keeps its own rule: `touch` of the same socket path is
+        // still refused as file creation outside the sanctioned roots.
+        let created = decide("touch ~/.cas/factory-qa4cd6.gui.sock", false).expect("creation is still guarded");
+        assert_eq!(created.matched_rule, "none");
+    }
+
+    /// cas-aa4e: a ~/.cas runtime leftover may be deleted only when it is
+    /// stale. A socket someone still listens on, a lock someone holds or
+    /// whose recorded pid is alive, a pid file or session record whose pid is
+    /// alive: all refused with the reason. Stale ones are allowed.
+    #[cfg(unix)]
+    #[test]
+    fn runtime_leftover_delete_requires_staleness_decision_table_cas_aa4e() {
+        use fs2::FileExt;
+        // Unix socket paths are short-limited (about 104 bytes on macOS).
+        let root = tempfile::Builder::new().prefix("aa4e").tempdir_in("/tmp").expect("short root");
+        let home = root.path().canonicalize().unwrap().join("h");
+        let cas = home.join(".cas");
+        let worktree = root.path().canonicalize().unwrap().join("wt");
+        std::fs::create_dir_all(cas.join("sessions")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // A pid that has exited.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let live_pid = std::process::id();
+
+        let stale_sock = cas.join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale_sock).unwrap());
+        let live_sock = cas.join("live.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&live_sock).unwrap();
+        let free_lock = cas.join("free.lock");
+        std::fs::write(&free_lock, b"").unwrap();
+        let held_lock = cas.join("held.lock");
+        std::fs::write(&held_lock, b"").unwrap();
+        let holder = std::fs::File::open(&held_lock).unwrap();
+        holder.lock_exclusive().unwrap();
+        let pid_lock_live = cas.join("runner.lock");
+        std::fs::write(&pid_lock_live, format!("{live_pid}\n")).unwrap();
+        let pid_lock_dead = cas.join("old-runner.lock");
+        std::fs::write(&pid_lock_dead, format!("{dead_pid}\n")).unwrap();
+        let live_pidfile = cas.join("daemon.pid");
+        std::fs::write(&live_pidfile, format!("{live_pid}\n")).unwrap();
+        let dead_pidfile = cas.join("old-daemon.pid");
+        std::fs::write(&dead_pidfile, format!("{dead_pid}\n")).unwrap();
+        let live_session = cas.join("sessions/live.json");
+        std::fs::write(&live_session, format!("{{\"daemon_pid\": {live_pid}}}")).unwrap();
+        let dead_session = cas.join("sessions/dead.json");
+        std::fs::write(&dead_session, format!("{{\"daemon_pid\": {dead_pid}}}")).unwrap();
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let artifacts_root = Some(root.path().join("artifacts").display().to_string());
+        let decide = |path: &std::path::Path| {
+            factory_write_violation(
+                &bash_input(&format!("rm -f {}", path.display()), &worktree),
+                &artifacts_root,
+                None,
+                false,
+                Some(worktree.as_path()),
+            )
+        };
+
+        for (case, path) in [
+            ("socket with connect() refused", &stale_sock),
+            ("lock nobody holds", &free_lock),
+            ("lock recording a dead pid", &pid_lock_dead),
+            ("pid file of a dead pid", &dead_pidfile),
+            ("session record of a dead daemon", &dead_session),
+        ] {
+            assert_eq!(decide(path), None, "{case}: a stale leftover is deletable");
+        }
+        for (case, path, reason) in [
+            ("socket with a live listener", &live_sock, "listener"),
+            ("lock held by another handle", &held_lock, "held"),
+            ("lock recording a live pid", &pid_lock_live, "alive"),
+            ("pid file of a live pid", &live_pidfile, "alive"),
+            ("session record of a live daemon", &live_session, "alive"),
+        ] {
+            let violation = decide(path).unwrap_or_else(|| panic!("{case} must be refused"));
+            assert!(
+                violation.matched_rule.contains("live Cassy runtime file")
+                    && violation.matched_rule.contains(reason),
+                "{case}: {violation:?}"
+            );
+        }
+        drop(holder);
+    }
+
     #[test]
     fn home_paths_in_read_only_commands_are_not_write_targets() {
         for command in [
@@ -3491,10 +4246,52 @@ mod workspace_contract_tests {
     }
 
     #[test]
+    fn cas_2366_chained_assignments_resolve_before_workspace_checks() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let root_path = root.path().canonicalize().unwrap();
+        let worktree = root_path.join("worktree");
+        let artifacts = root_path.join("artifacts");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let artifacts_root = Some(artifacts.display().to_string());
+
+        for (suffix, command) in [
+            ("cas-2366/post", format!("R={}; P=$R/cas-2366/post; mkdir -p $P", artifacts.display())),
+            ("cas-2366/post/more", format!("R={}; P=$R/cas-2366/post; Q=${{P}}/more; mkdir -p \"$Q\"", artifacts.display())),
+        ] {
+            assert_eq!(bash_write_targets(&command), vec![artifacts.join(suffix).display().to_string()]);
+            assert_eq!(factory_write_violation(
+                &bash_input(&command, &worktree), &artifacts_root, None, true, Some(&worktree)
+            ), None, "known assignment chain must resolve inside artifacts: {command}");
+        }
+
+        let command = "R=..; mkdir -p $R/x";
+        assert_eq!(bash_write_targets(command), vec!["../x"]);
+        let violation = factory_write_violation(
+            &bash_input(command, &worktree), &artifacts_root, None, true, Some(&worktree)
+        ).expect("resolved path outside the worktree remains guarded");
+        assert_eq!(violation.resolved_path, root_path.join("x"));
+        assert_eq!(violation.matched_rule, "none");
+
+        let command = "P=$UNKNOWN/x; mkdir -p $P";
+        let violation = factory_write_violation(
+            &bash_input(command, &worktree), &artifacts_root, None, true, Some(&worktree)
+        ).expect("unknown values remain guarded");
+        assert_eq!(violation.matched_rule, "unresolved shell variable");
+    }
+
+    #[test]
     fn bash_rm_targets_expand_loop_variables() {
-        let targets = bash_write_targets(
+        // cas-cf4f: rm operands are deletion targets, still expanded and guarded.
+        let targets: Vec<String> = bash_delete_targets(
             "B=cas-cli/src/builtins; for h in codex grok; do for sk in cas-html-reports cas-dataviz; do rm -rf $B/$h/skills/$sk; done; done",
-        );
+        )
+        .into_iter()
+        .map(|(target, recursive)| {
+            assert!(recursive, "-rf is recursive");
+            target
+        })
+        .collect();
         for target in [
             "cas-cli/src/builtins/codex/skills/cas-html-reports",
             "cas-cli/src/builtins/codex/skills/cas-dataviz",

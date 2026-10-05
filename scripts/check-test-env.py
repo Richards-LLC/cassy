@@ -492,13 +492,18 @@ class Analyzer:
         return sorted(self.findings.values(), key=lambda x: x['id'])
 
 
-def workspace_sources(root):
+def workspace_sources(root, changed_paths=None):
     manifest = root / 'Cargo.toml'
     # Real workspace membership, including future members; fixtures may use a
     # miniature workspace. Vendored, non-member sources are outside this lint.
     data = tomllib.loads(manifest.read_text()) if manifest.exists() else {}
     members = data.get('workspace', {}).get('members', ['cas-cli', 'crates/*'])
     roots = [p for pattern in members for p in root.glob(pattern) if p.is_dir()]
+    if changed_paths is not None:
+        # Preserve cross-file helper resolution and reverse callers within an
+        # affected crate. Unchanged crates do not need tokenizing in a fast lane.
+        roots = [p for p in roots if any(name.endswith('.rs') and (root / name).is_relative_to(p)
+                                        for name in changed_paths)]
     files = git(root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z').split('\0')
     return {name: (root / name).read_text() for name in sorted(set(files))
             if name.endswith('.rs') and (root / name).is_file() and
@@ -521,8 +526,11 @@ def read_baseline(data):
     return result
 
 
-def ratchet(findings, baseline):
+def ratchet(findings, baseline, audited_paths=None):
     allowed = read_baseline(baseline)
+    if audited_paths is not None:
+        allowed = {ident: section for ident, section in allowed.items()
+                   if ident.split('::', 1)[0] in audited_paths}
     actual = {row['id']: row for row in findings}
     errors = []
     for ident in sorted(actual.keys() - allowed.keys()):
@@ -540,21 +548,34 @@ def ratchet(findings, baseline):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
-    parser.add_argument('--changed-since', help='ratchet against this Git baseline; still scans the whole workspace')
+    parser.add_argument('--changed-since', help='ratchet against this Git baseline')
+    parser.add_argument('--changed-paths', action='store_true',
+                        help='scan changed Rust crates and their helpers; requires --changed-since')
     parser.add_argument('--inventory', action='store_true', help='print findings; never update the baseline')
     args = parser.parse_args()
     try:
         root = args.root.resolve()
+        if args.changed_paths and (not args.changed_since or args.inventory):
+            raise ValueError('--changed-paths requires --changed-since and cannot combine with --inventory')
         baseline_path = root / BASELINE
         baseline = ({'version': 1, 'violations': [], 'exceptions': []}
                     if args.inventory and not baseline_path.exists()
                     else json.loads(baseline_path.read_text()))
         current = read_baseline(baseline)
-        findings = Analyzer(workspace_sources(root), reviewed_mutations=current).run()
+        changed = None
+        if args.changed_paths:
+            changed = set(git(root, 'diff', '--name-only', '--no-renames', '-z', args.changed_since).split('\0'))
+            changed.update(git(root, 'ls-files', '--others', '--exclude-standard', '-z').split('\0'))
+            policy = {BASELINE, 'scripts/check-test-env.py', 'scripts/rust_test_source.py'}
+            if changed & policy or any(name == 'Cargo.toml' or name.endswith('/Cargo.toml') for name in changed):
+                changed = None  # Policy or workspace changes require the complete inventory.
+        sources = workspace_sources(root, changed)
+        audited_paths = None if changed is None else set(sources) | {p for p in changed if p.endswith('.rs')}
+        findings = Analyzer(sources, reviewed_mutations=current).run()
         if args.inventory:
             print(json.dumps(findings, indent=2))
             return 0
-        errors = ratchet(findings, baseline)
+        errors = ratchet(findings, baseline, audited_paths)
         # HEAD comparison covers unstaged growth; changed-since covers committed
         # lane growth. Initial installation has no previous baseline to compare.
         seed_history = git(root, 'log', '--reverse', '--format=%H', '--', BASELINE).splitlines()
@@ -575,6 +596,8 @@ def main():
             print('test-env: ' + error, file=sys.stderr)
         print(f'test-env: {len(findings)} findings, {len(baseline["violations"])} reasoned legacy violations, '
               f'{len(baseline["exceptions"])} exact exceptions, {len(errors)} errors')
+        if args.changed_paths:
+            print(f'test-env: {len(sources)} Rust paths analyzed ({"full policy scope" if changed is None else "affected crates"})')
         return int(bool(errors))
     except (ValueError, OSError, KeyError, IndexError) as error:
         print('test-env: ' + str(error), file=sys.stderr)

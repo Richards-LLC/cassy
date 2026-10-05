@@ -16,7 +16,7 @@ use crate::migration::{
 };
 use crate::store::{
     StoreType, detect_store_type, open_agent_store, open_rule_store, open_store,
-    open_task_store,
+    open_task_store, PromptQueueStore,
 };
 use crate::types::RuleStatus;
 use crate::ui::components::{Formatter, Verdict};
@@ -266,7 +266,7 @@ impl CheckGroup {
             | "models"
             | "sessionstart budget" => Self::Config,
             "issue repositories" => Self::Config,
-            "integrations" | "violet" => Self::Integrations,
+            "integrations" | "violet" | "github origin" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -1376,15 +1376,23 @@ fn root_projection_autofix(root: &Path) -> Option<Check> {
 fn code_index_autofix(root: &Path) -> Option<Check> {
     let state = gather_symbol_index_state(root);
     if !matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning) { return None; }
-    let project = root.parent().unwrap_or(root).to_path_buf();
+    let project = crate::daemon::indexing::code_project_root(root);
     let cfg = Config::load(root).unwrap_or_default().code();
     let roots = vec![project];
     let mut files = crate::daemon::indexing::collect_source_files(&roots, &cfg.extensions, &cfg.exclude_patterns);
     files.sort();
-    match crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false) {
-        Ok(result) if result.errors.is_empty() => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed))),
-        Ok(result) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation had {} error(s)", result.errors.len()))),
-        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation failed: {error}"))),
+    Some(code_index_autofix_outcome(crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false)))
+}
+
+fn code_index_autofix_outcome(outcome: Result<crate::daemon::CodeIndexResult, crate::error::CasError>) -> Check {
+    match outcome {
+        Ok(result) if result.errors.is_empty() && result.files_deferred == 0 => Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed)),
+        Ok(result) if result.files_deferred > 0 => Check::new("auto-fix", CheckStatus::Warning, format!(
+            "symbol index: {} file retirement(s) deferred; writer busy. {} error(s). Retry: cas index code",
+            result.files_deferred, result.errors.len()
+        )),
+        Ok(result) => Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation had {} error(s)", result.errors.len())),
+        Err(error) => Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation failed: {error}")),
     }
 }
 
@@ -1861,6 +1869,156 @@ fn session_start_budget_check() -> Check {
     session_start_budget_check_for(crate::builtins::supervisor_guidance().len())
 }
 
+// Queue diagnostics never initialize or migrate the database they inspect
+// (cas-d6b9). A project that has never queued anything has no prompt_queue
+// table yet: that is health, not a fault (cas-5b0b). A queue that exists but
+// can't be read is still a warning, said in plain words without SQL text.
+
+/// Whether the prompt queue has never been created, asked read-only. An
+/// unreadable database answers `false`, so the caller reports the failure.
+fn prompt_queue_absent(cas_root: &Path) -> bool {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        cas_root.join("cas.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|tables| tables == 0)
+    .unwrap_or(false)
+}
+
+/// Why the prompt queue couldn't be read, in the operator's words.
+fn prompt_queue_read_failure(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("locked") || error.contains("busy") {
+        "the database is in use by another process; run cas doctor again in a moment"
+    } else if error.contains("no such table") || error.contains("no such column") {
+        "the prompt queue is from an older cas; run 'cas update --schema-only'"
+    } else if error.contains("not a database") || error.contains("malformed") {
+        "the database file looks damaged"
+    } else if error.contains("unable to open") {
+        "the database could not be opened"
+    } else {
+        "the prompt queue could not be read"
+    }
+}
+
+fn supervisor_relay_check(cas_root: &Path) -> Check {
+    if prompt_queue_absent(cas_root) {
+        return Check {
+            name: "supervisor relay".to_string(),
+            status: CheckStatus::Ok,
+            message: "no relays yet".to_string(),
+        };
+    }
+    match crate::store::SqlitePromptQueueStore::open_read_only(cas_root)
+        .map_err(|e| e.to_string())
+        .and_then(|queue| {
+            queue
+                .list_undelivered_lifecycle_relays(50)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(relays) if relays.is_empty() => Check {
+            name: "supervisor relay".to_string(),
+            status: CheckStatus::Ok,
+            message: "no undelivered lifecycle relays".to_string(),
+        },
+        Ok(relays) => {
+            let sample = relays
+                .iter()
+                .take(3)
+                .filter_map(|relay| relay.summary.as_deref())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Check {
+                name: "supervisor relay".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "{} lifecycle relay(s) expired without ever reaching the supervisor{}{}. \
+                     Those lanes may still be waiting — open each task directly.",
+                    relays.len(),
+                    if sample.is_empty() { "" } else { ": " },
+                    sample
+                ),
+            }
+        }
+        // Fail loud rather than silently reporting health: this check
+        // exists precisely because an unreadable failure signal reads as
+        // success.
+        Err(e) => Check {
+            name: "supervisor relay".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "cannot check undelivered lifecycle relays: {}",
+                prompt_queue_read_failure(&e)
+            ),
+        },
+    }
+}
+
+fn delivery_retries_check(cas_root: &Path) -> Check {
+    const RETRY_WARN_THRESHOLD: u32 = 3;
+    if prompt_queue_absent(cas_root) {
+        return Check {
+            name: "delivery retries".to_string(),
+            status: CheckStatus::Ok,
+            message: "none queued".to_string(),
+        };
+    }
+    match crate::store::SqlitePromptQueueStore::open_read_only(cas_root)
+        .map_err(|e| e.to_string())
+        .and_then(|queue| {
+            queue
+                .list_most_retried_pending(RETRY_WARN_THRESHOLD, 5)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(rows) if rows.is_empty() => Check {
+            name: "delivery retries".to_string(),
+            status: CheckStatus::Ok,
+            message: format!("no pending message has spent {RETRY_WARN_THRESHOLD}+ attempts"),
+        },
+        Ok(rows) => {
+            let worst = rows
+                .iter()
+                .take(3)
+                .map(|row| {
+                    format!(
+                        "#{} -> {} ({} attempts{})",
+                        row.prompt_id,
+                        row.target,
+                        row.delivery_attempts,
+                        row.reason.map(|r| format!(", {r}")).unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            Check {
+                name: "delivery retries".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "{} pending message(s) have spent {RETRY_WARN_THRESHOLD}+ transport \
+                     attempts: {worst}. The recipient is likely unreachable — check the \
+                     pane before the row exhausts its budget.",
+                    rows.len()
+                ),
+            }
+        }
+        Err(e) => Check {
+            name: "delivery retries".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "cannot check delivery retry counts: {}",
+                prompt_queue_read_failure(&e)
+            ),
+        },
+    }
+}
+
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let started = Instant::now();
     let mut checks = Vec::new();
@@ -2010,6 +2168,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     let host = host_checks(Some(project_root));
     if cli.full { checks.extend(host); } else { checks.push(host_summary(&host)); }
     recorder.mark("host checks", &checks);
+    if let Some(check) = github_origin_check(project_root) { checks.push(check); }
+    recorder.mark("GitHub origin", &checks);
     checks.push(prompt_hook_check(&cas_root));
     recorder.mark("prompt hook", &checks);
     checks.push(session_start_budget_check());
@@ -2084,48 +2244,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // reached. Surfacing it here — as a WARNING, not an Ok line — is what
     // makes "the relay is silent" distinguishable from "there was nothing to
     // relay".
-    {
-        match crate::store::open_prompt_queue_store(&cas_root)
-            .map_err(|e| e.to_string())
-            .and_then(|queue| {
-                queue
-                    .list_undelivered_lifecycle_relays(50)
-                    .map_err(|e| e.to_string())
-            }) {
-            Ok(relays) if relays.is_empty() => checks.push(Check {
-                name: "supervisor relay".to_string(),
-                status: CheckStatus::Ok,
-                message: "no undelivered lifecycle relays".to_string(),
-            }),
-            Ok(relays) => {
-                let sample = relays
-                    .iter()
-                    .take(3)
-                    .filter_map(|relay| relay.summary.as_deref())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                checks.push(Check {
-                    name: "supervisor relay".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "{} lifecycle relay(s) expired without ever reaching the supervisor{}{}. \
-                         Those lanes may still be waiting — open each task directly.",
-                        relays.len(),
-                        if sample.is_empty() { "" } else { ": " },
-                        sample
-                    ),
-                });
-            }
-            // Fail loud rather than silently reporting health: this check
-            // exists precisely because an unreadable failure signal reads as
-            // success.
-            Err(e) => checks.push(Check {
-                name: "supervisor relay".to_string(),
-                status: CheckStatus::Warning,
-                message: format!("cannot check undelivered lifecycle relays: {e}"),
-            }),
-        }
-    }
+    checks.push(supervisor_relay_check(&cas_root));
 
     // Every active factory session needs exactly one live durable supervisor
     // row. Otherwise logical handoffs and verification recovery have nowhere
@@ -2164,53 +2283,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // pending after several spent attempts is the earliest honest signal that
     // a recipient is unreachable — visible here BEFORE the row exhausts its
     // budget and dies, which is the only window in which anyone can act.
-    {
-        const RETRY_WARN_THRESHOLD: u32 = 3;
-        match crate::store::open_prompt_queue_store(&cas_root)
-            .map_err(|e| e.to_string())
-            .and_then(|queue| {
-                queue
-                    .list_most_retried_pending(RETRY_WARN_THRESHOLD, 5)
-                    .map_err(|e| e.to_string())
-            }) {
-            Ok(rows) if rows.is_empty() => checks.push(Check {
-                name: "delivery retries".to_string(),
-                status: CheckStatus::Ok,
-                message: format!("no pending message has spent {RETRY_WARN_THRESHOLD}+ attempts"),
-            }),
-            Ok(rows) => {
-                let worst = rows
-                    .iter()
-                    .take(3)
-                    .map(|row| {
-                        format!(
-                            "#{} -> {} ({} attempts{})",
-                            row.prompt_id,
-                            row.target,
-                            row.delivery_attempts,
-                            row.reason.map(|r| format!(", {r}")).unwrap_or_default()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                checks.push(Check {
-                    name: "delivery retries".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "{} pending message(s) have spent {RETRY_WARN_THRESHOLD}+ transport \
-                         attempts: {worst}. The recipient is likely unreachable — check the \
-                         pane before the row exhausts its budget.",
-                        rows.len()
-                    ),
-                });
-            }
-            Err(e) => checks.push(Check {
-                name: "delivery retries".to_string(),
-                status: CheckStatus::Warning,
-                message: format!("cannot check delivery retry counts: {e}"),
-            }),
-        }
-    }
+    checks.push(delivery_retries_check(&cas_root));
 
     recorder.mark("message handoff", &checks);
     // Check 3b: Schema details (tables and columns). An unreadable schema is a
@@ -2587,11 +2660,21 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     recorder.mark("integrations", &checks);
-    // Check 13b: Violet hub reachability (cas-8fad). Machine-scoped, so
-    // it is not part of `integration_checks` (which walks per-project keep
-    // blocks). Unlike the platform rows this one *can* be an Error: a missing
-    // variable, a rejected bearer, or a drifted tool contract each mean the
-    // next release post will fail, and each has an exact remedy.
+    // The host summary covers the machine registration. A project proxy can
+    // override that endpoint/auth, so it needs its own visible probe row.
+    #[cfg(feature = "mcp-proxy")]
+    {
+        let proxy = cas_root.join("proxy.toml");
+        if proxy.is_file()
+            && let Some(row) = crate::cli::integrate::violet::doctor_row_from_env(Some(&proxy))
+        {
+            checks.push(Check::new("violet", match row.severity {
+                crate::cli::integrate::violet::DoctorSeverity::Ok => CheckStatus::Ok,
+                crate::cli::integrate::violet::DoctorSeverity::Warning => CheckStatus::Warning,
+                crate::cli::integrate::violet::DoctorSeverity::Error => CheckStatus::Error,
+            }, row.message));
+        }
+    }
     recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
@@ -3889,6 +3972,41 @@ fn registered_project_root_checks(current_project_root: &Path) -> Vec<Check> {
 /// `known_roots` carries the registry read outcome, not just its rows: an
 /// `Err` becomes a Warning row naming the failure, so a skipped collision
 /// check can never masquerade as a clean one.
+/// A moved origin is diagnostic, never an automatic remote rewrite.
+fn github_origin_check(project: &Path) -> Option<Check> {
+    let timeout = Duration::from_secs(2);
+    let origin = match crate::github_repo::origin_slug(project, timeout) {
+        Ok(Some(origin)) => origin,
+        Ok(None) => return None,
+        Err(error) => return Some(Check::new("GitHub origin", CheckStatus::Warning, error)),
+    };
+    let binary = crate::github_repo::gh_binary();
+    Some(
+        match crate::github_repo::resolve_slug(&origin, project, &binary, timeout) {
+            Ok(repo) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => Check::new(
+                "GitHub origin",
+                CheckStatus::Warning,
+                format!(
+                    "origin repository moved: {} -> {}; CI uses the canonical repository. Run `git remote set-url origin https://github.com/{}.git`",
+                    repo.origin, repo.canonical, repo.canonical
+                ),
+            ),
+            Ok(repo) => Check::new(
+                "GitHub origin",
+                CheckStatus::Ok,
+                format!("origin repository is current: {}", repo.canonical),
+            ),
+            Err(error) => Check::new(
+                "GitHub origin",
+                CheckStatus::Warning,
+                format!(
+                    "origin repository could not be checked: {error}. Run `gh repo view {origin} --json nameWithOwner`"
+                ),
+            ),
+        },
+    )
+}
+
 fn canonical_id_checks(
     cas_root: &Path,
     known_roots: Result<Vec<crate::cloud::LocalRootIdentity>, String>,
@@ -4327,14 +4445,15 @@ struct SymbolIndexState {
 const SYMBOL_INDEX_LAG_WARN_SECS: i64 = 24 * 60 * 60;
 
 fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
-    let enabled = Config::load(cas_root)
-        .map(|config| config.code().enabled)
-        .unwrap_or(true);
-    let searchable = crate::hybrid_search::code::code_search_available(cas_root);
+    let project_root = crate::daemon::indexing::code_project_root(cas_root);
+    gather_symbol_index_state_for(cas_root, &project_root)
+}
 
-    let project_root = cas_root.parent().unwrap_or(cas_root);
-    // Same derivation the indexer writes with, or the lookup would miss every row.
-    let (_repo_root, repository) = crate::daemon::indexing::resolve_repository(project_root);
+fn gather_symbol_index_state_for(cas_root: &Path, project_root: &Path) -> SymbolIndexState {
+    let code_config = Config::load(cas_root).unwrap_or_default().code();
+    let enabled = code_config.enabled;
+    let searchable = crate::hybrid_search::code::code_search_available(cas_root);
+    let (_, repository) = crate::daemon::indexing::resolve_repository(project_root);
 
     let store = match crate::store::open_code_store(cas_root) {
         Ok(store) => store,
@@ -4360,6 +4479,14 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         }
     };
 
+    let files: Vec<_> = files.into_iter().filter(|file| {
+        crate::daemon::indexing::code_file_in_root(&file.path, project_root)
+    }).collect();
+    let (eligible, skipped) = crate::daemon::indexing::checkout_source_files(
+        project_root, &code_config.extensions, &code_config.exclude_patterns,
+    );
+    let indexed_files = crate::daemon::indexing::checkout_indexed_file_count(&files, &eligible);
+
     let vector_store = match cas_store::SqliteCodeVectorStore::open(cas_root) {
         Ok(store) => store,
         Err(e) => {
@@ -4378,7 +4505,7 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
     // contain, which reads as "0 pending" for a store whose queue was emptied
     // while thousands of symbols still have no vector (GH #696).
     let vectors = vector_store.coverage().unwrap_or_default();
-    let scan = vector_store.index_state(&repository).ok().flatten();
+    let scan = vector_store.index_state(&crate::daemon::indexing::code_scan_key(project_root)).ok().flatten();
     let current_head = crate::daemon::indexing::resolve_repository(project_root)
         .0
         .as_deref()
@@ -4396,11 +4523,11 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         files: files.len(),
         symbols: store.count_symbols().unwrap_or(0),
         last_indexed: files.iter().map(|file| file.updated).max(),
-        eligible_files: scan.as_ref().map(|scan| scan.eligible_files).unwrap_or(0),
-        indexed_files: scan.as_ref().map(|scan| scan.indexed_files).unwrap_or(0),
+        eligible_files: eligible.len(),
+        indexed_files,
         failed_files: scan.as_ref().map(|scan| scan.failed_files).unwrap_or(0),
-        skipped_files: scan.as_ref().map(|scan| scan.skipped_files).unwrap_or(0),
-        skipped_detail: scan.as_ref().and_then(|scan| scan.skipped_detail.clone()),
+        skipped_files: skipped.len(),
+        skipped_detail: (!skipped.is_empty()).then(|| skipped.join("; ")),
         vector_eligible: vectors.eligible,
         vectorized: vectors.vectorized,
         vector_pending: vectors.pending,
@@ -5213,11 +5340,9 @@ fn pull_id_collision_check_for(ids: &[String]) -> Option<Check> {
     ))
 }
 
-/// Surface the exact content queue rows that keep `purge-foreign` fail-closed.
-/// The remediation is intentionally executable in order: reset terminal rows,
-/// push them, then preview the purge again. A count from the generic queue
-/// stats would include knowledge pages, so this reuses the purge's own content
-/// predicate instead.
+/// Surface the content backlog and cloud rejections independently of purge
+/// safety. Reset terminal rows, push them, then preview the purge. The preview
+/// reports unrelated queued rows as information because they survive cleanup.
 fn cloud_queue_check(cas_root: &Path) -> Check {
     let db_path = cas_root.join("cas.db");
     let conn = match rusqlite::Connection::open_with_flags(
@@ -5255,7 +5380,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
-    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately.";
     let rejections = cloud_queue_rejections(&conn);
 
     if !registration_conflicts.is_empty() {
@@ -5270,7 +5395,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             .join("; ");
         let remedy = "Resolve with `cas cloud project set <registered-canonical-id>` or a cloud-owner alias, then run `cas cloud sync`; parked rows are not transport retries.";
         let mut message = format!(
-            "{} queued content change(s) block purge-foreign ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
+            "{} queued content change(s) await push ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
             pending.len()
         );
         if !rejections.is_empty() {
@@ -5291,14 +5416,14 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Ok,
-            message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+            message: format!("0 queued content change(s) await push; {remediation}"),
         }
     } else if pending.is_empty() {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "0 queued content change(s) block purge-foreign, but the cloud refused {} parked row(s): {}",
+                "0 queued content change(s) await push, but the cloud refused {} parked row(s): {}",
                 rejections.iter().map(|(_, count)| count).sum::<usize>(),
                 describe_queue_rejections(&rejections)
             ),
@@ -5308,7 +5433,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}{}",
+                "{} queued content change(s) await push ({breakdown}); {remediation}{}",
                 pending.len(),
                 if rejections.is_empty() {
                     String::new()
@@ -5603,6 +5728,248 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn doctor_preserves_database_schema_without_prompt_queue_cas_d6b9() {
+        use clap::Parser;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set_current_dir(&project);
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS prompt_queue_recipient_seen;
+                     DROP TABLE IF EXISTS prompt_queue_recipient_transport;
+                     DROP TABLE IF EXISTS prompt_queue;",
+        )
+        .unwrap();
+        let schema = || {
+            let mut stmt = conn
+                .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        let counts = || {
+            get_schema_summary(&root)
+                .unwrap()
+                .tables
+                .into_iter()
+                .map(|table| (table.name, table.columns, table.row_count))
+                .collect::<Vec<_>>()
+        };
+        let before = schema();
+        let counts_before = counts();
+        let cli = Cli::parse_from(["cas", "--json", "doctor"]);
+        let Some(crate::cli::Commands::Doctor(args)) = &cli.command else {
+            panic!("doctor arguments");
+        };
+        // Findings may make the command return an error. Diagnosing them may
+        // not change the database whose health is being reported.
+        let result = execute(args, &cli, Some(&root));
+        assert_eq!(schema(), before, "doctor result: {result:?}");
+        assert_eq!(
+            counts(),
+            counts_before,
+            "doctor must preserve table, column and row counts"
+        );
+    }
+
+    #[test]
+    fn doctor_queue_checks_read_an_absent_queue_as_healthy_without_creating_it_cas_5b0b() {
+        // cas-5b0b: a project that has never queued anything has no
+        // prompt_queue table. That reads as healthy, and doctor still creates
+        // nothing in the database it inspects (cas-d6b9).
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('retained');",
+            )
+            .unwrap();
+        let before = fs::read(&db).unwrap();
+        let relay = supervisor_relay_check(temp.path());
+        assert!(matches!(relay.status, CheckStatus::Ok), "{}", relay.message);
+        assert_eq!(relay.message, "no relays yet");
+        let retries = delivery_retries_check(temp.path());
+        assert!(
+            matches!(retries.status, CheckStatus::Ok),
+            "{}",
+            retries.message
+        );
+        assert_eq!(retries.message, "none queued");
+        assert_eq!(fs::read(&db).unwrap(), before);
+    }
+
+    #[test]
+    fn doctor_queue_checks_warn_in_plain_words_when_the_queue_cannot_be_read_cas_5b0b() {
+        // A queue that exists but can't be read is still a warning, said
+        // without SQL error text: here an older queue missing the columns the
+        // checks read.
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE prompt_queue(id INTEGER PRIMARY KEY);")
+            .unwrap();
+        let before = fs::read(&db).unwrap();
+        for check in [
+            supervisor_relay_check(temp.path()),
+            delivery_retries_check(temp.path()),
+        ] {
+            assert!(
+                matches!(check.status, CheckStatus::Warning),
+                "{}",
+                check.message
+            );
+            assert!(
+                check.message.ends_with("run 'cas update --schema-only'"),
+                "{}",
+                check.message
+            );
+            for sql in ["no such", "database error", "SELECT", "sqlite"] {
+                assert!(!check.message.contains(sql), "{}", check.message);
+            }
+        }
+        assert_eq!(fs::read(&db).unwrap(), before);
+        assert_eq!(
+            prompt_queue_read_failure("database is locked"),
+            "the database is in use by another process; run cas doctor again in a moment"
+        );
+        assert_eq!(
+            prompt_queue_read_failure("file is not a database"),
+            "the database file looks damaged"
+        );
+    }
+
+    #[test]
+    fn doctor_queue_checks_keep_relay_and_retry_health_cas_d6b9() {
+        use crate::store::SqlitePromptQueueStore;
+        use cas_store::PendingReason;
+        let temp = TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(matches!(
+            supervisor_relay_check(temp.path()).status,
+            CheckStatus::Ok
+        ));
+        assert!(matches!(
+            delivery_retries_check(temp.path()).status,
+            CheckStatus::Ok
+        ));
+        let lost = queue
+            .enqueue_with_summary(
+                "lifecycle-wake:42",
+                "supervisor",
+                "lost relay",
+                None,
+                Some("cas-d6b9"),
+            )
+            .unwrap();
+        queue
+            .mark_undelivered_lifecycle_relay(lost, Some("recipient unavailable"))
+            .unwrap();
+        let retry = queue.enqueue("supervisor", "worker", "pending").unwrap();
+        for _ in 0..3 {
+            queue
+                .record_pending_reason(retry, PendingReason::TargetUnavailable, None)
+                .unwrap();
+        }
+        let relay_check = supervisor_relay_check(temp.path());
+        assert!(matches!(relay_check.status, CheckStatus::Warning));
+        assert!(
+            relay_check.message.contains("1 lifecycle relay(s)"),
+            "{}",
+            relay_check.message
+        );
+        assert!(relay_check.message.contains("cas-d6b9"));
+        let retry_check = delivery_retries_check(temp.path());
+        assert!(matches!(retry_check.status, CheckStatus::Warning));
+        assert!(
+            retry_check.message.contains("1 pending message(s)"),
+            "{}",
+            retry_check.message
+        );
+        assert!(retry_check.message.contains("3 attempts"));
+        assert_eq!(queue.list_most_retried_pending(3, 10).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_origin_doctor_warns_on_move_and_preserves_json_remedy_cas_28c8() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = TempDir::new().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/pippenz/cas.git",
+            ],
+            vec![
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/codingagentsystem/cas.git",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let gh = temp.path().join("gh");
+        crate::test_paths::warm_stub(
+            &gh,
+            "#!/bin/sh\n[ \"$1 $2 $3\" = 'repo view pippenz/cas' ] || exit 97\nprintf '%s' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'\n",
+        );
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        let check = github_origin_check(temp.path()).unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("pippenz/cas -> Richards-LLC/cassy"),
+            "{}",
+            check.message
+        );
+        let json = serialize_checks(&[check], &[]);
+        assert_eq!(json[0]["group"], "integrations");
+        assert_eq!(json[0]["status"], "warning");
+        assert_eq!(
+            json[0]["remediation"],
+            "Run `git remote set-url origin https://github.com/Richards-LLC/cassy.git`"
+        );
+        crate::test_paths::warm_stub(
+            &gh,
+            "#!/bin/sh\nprintf '%s' '{\"nameWithOwner\":\"Pippenz/Cas\"}'\n",
+        );
+        assert!(matches!(
+            github_origin_check(temp.path()).unwrap().status,
+            CheckStatus::Ok
+        ));
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");
+        let unavailable = github_origin_check(temp.path()).unwrap();
+        assert!(matches!(unavailable.status, CheckStatus::Warning));
+        assert!(unavailable.message.contains("could not be checked"));
+        assert!(!unavailable.message.contains("is current"));
+        let empty = TempDir::new().unwrap();
+        assert!(github_origin_check(empty.path()).is_none());
+    }
 
     /// cas-0140: doctor errors on a failing hub audit writer and stays OK on a
     /// log that is merely quiet.
@@ -7132,7 +7499,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_queue_check_names_retry_push_purge_and_exact_blocking_counts() {
+    fn doctor_queue_check_names_retry_push_purge_and_exact_queued_counts() {
         use rusqlite::Connection;
 
         let temp = TempDir::new().unwrap();
@@ -7167,6 +7534,8 @@ mod tests {
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("1 queued content change(s)"));
+        assert!(check.message.contains("await push"));
+        assert!(!check.message.contains("block purge-foreign"));
         assert!(!check.message.contains("entry: 2"));
         assert!(check.message.contains("task: 1"));
         let retry = check.message.find("cas cloud queue --retry").unwrap();
@@ -9282,6 +9651,66 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(idle.status, CheckStatus::Ok));
+    }
+
+    #[test]
+    fn busy_retirement_doctor_autofix_warns_until_retry_cas_e4aa() {
+        let fixture = crate::daemon::worktree_index_tests::Worktrees::new();
+        assert!(fixture.scan(&fixture.main).errors.is_empty());
+        fs::remove_file(fixture.main.join("new.rs")).unwrap();
+        fs::remove_file(fixture.main.join("extra.rs")).unwrap();
+        // A previous failed scan makes the real doctor offer its autofix.
+        let scans = cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap();
+        let key = crate::daemon::indexing::code_scan_key(&fixture.main);
+        scans.record_scan(&key, 2, 2, 0, 0, None, None, Some("previous scan needs retry")).unwrap();
+        let holder = cas_search::Bm25Index::open(&crate::daemon::indexing::code_index_dir(&fixture.cas_root)).unwrap();
+        holder.delete_batch(["lock-probe"]).unwrap();
+        let warning = code_index_autofix(&fixture.cas_root).expect("doctor offered the retry");
+        assert!(matches!(warning.status, CheckStatus::Warning), "{}", warning.message);
+        assert!(warning.message.contains("2 file retirement(s) deferred"), "{}", warning.message);
+        assert!(warning.message.contains("cas index code"), "{}", warning.message);
+        assert!(!warning.message.contains("fixed:"), "{}", warning.message);
+        let store = crate::store::open_code_store(&fixture.cas_root).unwrap();
+        assert_eq!(store.list_files("repo", None).unwrap().len(), 2, "retry manifest was lost");
+        let pending = gather_symbol_index_state_for(&fixture.cas_root, &fixture.main);
+        assert_eq!(pending.failed_files, 0, "writer contention inflated permanent failures");
+        assert!(pending.scan_error.as_ref().unwrap().contains("2 file retirement(s) deferred"));
+        assert!(matches!(symbol_index_check(pending, chrono::Utc::now()).status, CheckStatus::Warning));
+        drop(holder);
+        // The persisted warning makes a subsequent real doctor retry possible
+        // even though both files disappeared and no new event will arrive.
+        let success = code_index_autofix(&fixture.cas_root).expect("deferred receipt offered retry");
+        assert!(matches!(success.status, CheckStatus::Ok), "{}", success.message);
+        assert!(success.message.contains("fixed: symbol index"));
+        assert!(store.list_files("repo", None).unwrap().is_empty());
+        assert!(scans.index_state(&key).unwrap().unwrap().last_error.is_none());
+    }
+
+    #[test]
+    fn doctor_counts_current_checkout_after_sibling_scan_cas_e4aa() {
+        let fixture = crate::daemon::worktree_index_tests::Worktrees::new();
+        assert!(fixture.scan(&fixture.main).errors.is_empty());
+        assert!(fixture.scan(&fixture.sibling).errors.is_empty());
+        // Repository-level historical failure receipts cannot certify this checkout.
+        cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap()
+            .record_scan("repo", 999, 1, 998, 0, None, None, Some("false retirement")).unwrap();
+        let main = gather_symbol_index_state_for(&fixture.cas_root, &fixture.main);
+        assert_eq!((main.files, main.eligible_files, main.indexed_files, main.failed_files), (2, 2, 2, 0));
+        assert_eq!(main.head_lag, Some(false));
+        assert!(main.scan_error.is_none());
+        assert!(matches!(symbol_index_check(main, chrono::Utc::now()).status, CheckStatus::Ok));
+        let sibling = gather_symbol_index_state_for(&fixture.cas_root, &fixture.sibling);
+        assert_eq!((sibling.files, sibling.eligible_files, sibling.indexed_files, sibling.failed_files), (1, 1, 1, 0));
+        assert_eq!(sibling.head_lag, Some(false));
+        assert!(matches!(symbol_index_check(sibling, chrono::Utc::now()).status, CheckStatus::Ok));
+        fs::write(fixture.main.join("unindexed.rs"), "pub fn unindexed() {}\n").unwrap();
+        fs::write(fixture.main.join("binary.rs"), [0xff, 0xfe, 0x00]).unwrap();
+        let changed = gather_symbol_index_state_for(&fixture.cas_root, &fixture.main);
+        assert_eq!((changed.eligible_files, changed.indexed_files, changed.skipped_files), (3, 2, 1));
+        let check = symbol_index_check(changed, chrono::Utc::now());
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("2/3 eligible"), "{}", check.message);
+        assert!(check.message.contains("0 file failure(s)"), "{}", check.message);
     }
 
     /// End-to-end over a real code store: a seeded stale `code_files.updated` row is what the

@@ -322,6 +322,16 @@ impl CodeWatcher {
         &self.config.watch_paths
     }
 
+    pub(crate) fn request_reconcile(&self) {
+        self.initial_reconcile.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn source_files(&self) -> Vec<PathBuf> {
+        super::indexing::collect_source_files(
+            &self.config.watch_paths, &self.config.extensions, &self.config.ignore_patterns,
+        )
+    }
+
     /// Check if a path should be watched based on extension and ignore patterns
     fn should_watch_path(path: &Path, extensions: &[String], ignore_patterns: &[String]) -> bool {
         if Self::is_ignored_path(path, ignore_patterns) {
@@ -406,6 +416,19 @@ impl CodeWatcher {
 
     pub fn take_initial_reconcile(&self) -> bool {
         self.initial_reconcile.swap(false, Ordering::AcqRel)
+    }
+
+    /// Deterministic test entry to the same debounced-path emitter as the
+    /// native watcher, without relying on OS event coalescing or timing.
+    #[cfg(test)]
+    pub(crate) fn emit_test_path(&mut self, path: PathBuf) {
+        if self._event_tx.is_none() {
+            let (tx, rx) = channel();
+            self._event_tx = Some(tx);
+            self.event_rx = Some(rx);
+        }
+        emit_debounced_path(path, &self.pending_files, self._event_tx.as_ref().unwrap(),
+            &self.config.extensions, &self.config.ignore_patterns);
     }
 
     /// Check if there are pending files

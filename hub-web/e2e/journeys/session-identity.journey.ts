@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { journeyDay, journeyStamp } from "./clock";
 import { SCOPES, type Machine } from "./hub-double";
 
@@ -118,14 +118,48 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     // stops offering Terminal view; back on, it is the plain live copy again.
     const empty = page.locator(".thread .empty");
     const header = page.locator("#conversation-connection");
+    const headerTerminal = page.locator("#conversation-terminal");
+    await expect(headerTerminal).not.toHaveAttribute("aria-disabled", "true");
     await hub.down("atlas", { sockets: "close" });
     await expect(header).toContainText("Reconnecting");
     await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
     await expect(empty.getByRole("button", { name: "Terminal view" })).toHaveCount(0);
+    // cas-6b75 (F03): the header doesn't offer the terminal either; it says
+    // why, to the eye (dimmed, title) and to a screen reader (description),
+    // and pressing it explains instead of opening a terminal it can't reach.
+    const unavailable = "Reconnecting to Atlas · Linux — Terminal view opens once it's back.";
+    await expect(headerTerminal).toHaveAttribute("aria-disabled", "true");
+    await expect(headerTerminal).toHaveAccessibleName("Terminal view");
+    await expect(headerTerminal).toHaveAccessibleDescription(unavailable);
+    await expect(headerTerminal).toHaveAttribute("title", unavailable);
+    await headerTerminal.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#toast")).toHaveText(unavailable);
+    await expect(page.locator("#conversation-return")).toBeHidden();
+    await expect(empty.locator(".said")).toBeVisible();
     await hub.up("atlas");
     await expect(header).toContainText("Live", { timeout: 20_000 });
     await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
     await expect(empty.getByRole("button", { name: "Terminal view" })).toBeVisible();
+    await expect(headerTerminal).not.toHaveAttribute("aria-disabled", "true");
+    await expect(headerTerminal).toHaveAccessibleDescription("");
+  });
+
+  await journey.stage("On a phone, Terminal view on the empty card is a full-size target", async () => {
+    // cas-6b75 (F01): at 390 the card's Terminal view is at least 44 px each
+    // way, the coarse-pointer minimum, and still opens Terminal view.
+    const viewport = page.viewportSize()!;
+    await page.setViewportSize({ width: 390, height: 844 });
+    const open = page.locator(".thread .empty").getByRole("button", { name: "Terminal view" });
+    await expect(open).toBeVisible();
+    const box = (await open.boundingBox())!;
+    expect(box.height, "Terminal view is at least 44 px tall").toBeGreaterThanOrEqual(44);
+    expect(box.width, "Terminal view is at least 44 px wide").toBeGreaterThanOrEqual(44);
+    await open.click();
+    await expect(page.locator("#conversation-return")).toBeVisible();
+    await page.locator("#conversation-return").click();
+    await expect(page.locator(".thread .empty .said")).toBeVisible();
+    await page.setViewportSize(viewport);
   });
 
   await journey.stage("Each session shows its own conversation", async () => {
@@ -167,8 +201,22 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   await journey.stage("End a stale session", async () => {
     await backToList();
     const end = list.locator(".conversation-end").nth(2);
-    await end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" }).click();
+    // cas-f60a: a double-click on End session opens the confirmation and
+    // nothing more. Its destructive button is never where the pointer was.
+    const ask = end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" });
+    const box = (await ask.boundingBox())!;
+    const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await ask.dblclick();
     await expect(end.locator(".conversation-end-question")).toHaveText("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
+    expect(hub.ends).toEqual([]);
+    // cas-488f: ask the hit test a yes/no question. Whatever is under the
+    // pointer (Cancel, the question, or nothing), it must not be End session.
+    const underPointer = await page.evaluate(({ x, y }) => {
+      const hit = document.elementFromPoint(x, y);
+      return { hit: hit ? `${hit.tagName.toLowerCase()}.${hit.className}` : "nothing", confirm: Boolean(hit?.closest(".conversation-end-confirm")) };
+    }, point);
+    expect(underPointer.confirm, `the confirm is not under the pointer (hit: ${underPointer.hit})`).toBe(false);
+    expect(await end.locator("button").allTextContents()).toEqual(["Cancel", "End session"]);
     // cas-d6bf: the last row's confirmation is in view and focused, and the list stays whole.
     await expect(end.getByRole("button", { name: "Cancel" })).toBeFocused();
     await expect(end.getByRole("button", { name: "End session", exact: true })).toBeInViewport({ ratio: 1 });
@@ -178,5 +226,41 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(row("noble-cheetah-84")).toHaveCount(0);
     expect(hub.ends).toEqual([{ machine: "atlas", session: NOBLE, scopes: [...SCOPES, "factory-manage"] }]);
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 2 conversations on Atlas");
+    // cas-f60a: the list says it ended where the row was, and so does a polite live region.
+    await expect(list.locator(".conversation-ended")).toHaveText("noble-cheetah-84 on Atlas ended.");
+    await expect(page.locator(".conversation-ended-status[role=status]")).toHaveText("noble-cheetah-84 on Atlas ended.");
+  });
+});
+
+// cas-f50f: on a phone the list and the thread take turns. Back from a lower
+// row's conversation returns the list to where it was, with that row in view
+// and focused, not the list's top with focus on its first row.
+test.describe("on a phone", () => {
+  test.use({ viewport: { width: 390, height: 600 }, hasTouch: true, isMobile: true });
+  test("HUB-J14 Back from a lower grouped row returns the list to that row (cas-f50f)", journeyPart, async ({ page, journey }) => {
+    // Enough live sessions in one project that a phone's list scrolls.
+    const crowded = atlas();
+    for (const [index, name] of ["amber-heron-11", "brisk-lynx-22", "copper-wren-33", "dusky-otter-44", "eager-finch-55", "fable-moth-66"].entries()) {
+      crowded.sessions!.push(session(`gabber-studio-${name}`, name, journeyStamp(-(5 + index) * 60_000), "supervisor → Commander"));
+    }
+    await journey.hub({ machines: [crowded], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage"] } });
+    const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+    const scroller = page.locator("#conversation-list");
+    const row = (codename: string) => list.locator(".conversation-row", { hasText: codename });
+    await journey.stage("Open the lowest grouped row from a list scrolled down to it", async () => {
+      await journey.open();
+      await expect(list.locator(".conversation-row")).toHaveCount(9);
+      await row("noble-cheetah-84").scrollIntoViewIfNeeded();
+      const scrolled = await scroller.evaluate((node) => node.scrollTop);
+      expect(scrolled, "the list scrolls on a phone, so its place matters").toBeGreaterThan(0);
+      await row("noble-cheetah-84").tap();
+      await expect(page.locator("#conversation-back")).toBeVisible();
+    });
+    await journey.stage("Back returns to that row, in view and focused", async () => {
+      await page.locator("#conversation-back").tap();
+      await expect(row("noble-cheetah-84")).toBeFocused();
+      await expect(row("noble-cheetah-84")).toBeInViewport({ ratio: 1 });
+      expect(await scroller.evaluate((node) => node.scrollTop), "the list did not jump back to its top").toBeGreaterThan(0);
+    });
   });
 });

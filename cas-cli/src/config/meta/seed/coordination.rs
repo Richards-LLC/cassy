@@ -4,6 +4,19 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     // FACTORY SECTION
     // ============================================================
+    for (key, name, description) in [
+        ("factory.supervisor_only_mcp", "Supervisor-only MCP Servers", "Exact MCP server names excluded from worker project configuration, inherited Claude MCP scopes, native Codex servers and proxy connections. Supervisors retain them; empty keeps existing policy."),
+        ("factory.supervisor_only_env", "Supervisor-only Environment", "Environment variable names removed from every worker, even when a project proxy grants them. Machine credential bootstrap cannot restore them. Supervisors retain them; empty keeps existing credential protections."),
+        ("factory.worker_credential_env", "Worker Credential Environment", "Explicit environment names granted to every worker harness from the operator environment or existing credential-file/profile resolution. Missing names warn without refusing spawn; supervisor_only_env wins conflicts. Factory identity variables cannot be granted."),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description,
+            value_type: ConfigType::StringList, default: "", constraint: Constraint::None,
+            advanced: false, requires_feature: None,
+            keywords: &["factory", "worker", "supervisor", "mcp", "credentials", "environment"],
+            use_cases: &["Keep deployment and production database access on the supervisor"],
+        });
+    }
     registry.register(ConfigMeta {
         key: "factory.artifacts_root",
         section: "factory",
@@ -77,6 +90,37 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         use_cases: &[
             "Keep a shared 32-core host at four concurrent builders",
             "Raise the cap only when the host has spare CPU capacity",
+        ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.spawn_min_free_gib",
+        section: "factory",
+        name: "Worker Spawn Minimum Free Space (GiB)",
+        description: "Refuse worker spawns below this available-space floor before checkout or reuse, whether target seeding is enabled or not. Failure names spawn_disk_floor. 0 disables the floor.",
+        value_type: ConfigType::Int,
+        default: "25",
+        constraint: Constraint::Range(0, 65536),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "seed", "disk", "space", "workers"],
+        use_cases: &["Fail a low-disk spawn before creating or reusing its worktree"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.prompt_retention_days",
+        section: "factory",
+        name: "Prompt Queue Retention (days)",
+        description: "Days a terminal prompt-queue row (delivered, acknowledged, suppressed or abandoned) is kept before the maintenance sweep deletes it with its delivery receipts. Pending rows and rows that carry a relay episode key are never deleted by retention. gc_cleanup force=true uses the same window. 0 disables the sweep.",
+        value_type: ConfigType::Int,
+        default: "7",
+        constraint: Constraint::Range(0, 3650),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "prompt", "queue", "retention", "gc", "cleanup", "messages"],
+        use_cases: &[
+            "Keep a week of message forensics while bounding queue growth",
+            "Set 0 to keep every terminal prompt row",
         ],
     });
 

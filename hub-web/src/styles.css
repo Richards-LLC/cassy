@@ -559,6 +559,10 @@ pre { font-family: var(--font-mono); }
   border-radius: var(--radius-card);
   font-size: var(--fs-meta);
 }
+/* cas-7c37f F02: without the tint, forced colors still draw the notice's edge. */
+@media (forced-colors: active) {
+  .compatibility-warning { border: 1px solid CanvasText; }
+}
 
 main {
   min-width: 0;
@@ -671,9 +675,12 @@ main {
   /* It keeps its width while the codename has any to give (a proportional
      shrink took a fraction of a pixel from it too, enough to show "cas-s…"
      beside a truncated codename, cas-3400), and is capped short of the caret
-     when the project name alone is too long. */
+     when the project name alone is too long. The cap reserves exactly the
+     gap and the caret's fixed box: a larger reserve cut "Fleet overview" to
+     "Fleet overvi…" with 200px of header to spare, because the toggle sizes
+     to its content and the percentage is taken from that (journey F24). */
   flex: 0 0 auto;
-  max-width: calc(100% - var(--space-4));
+  max-width: calc(100% - var(--space-1) - var(--space-3));
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -692,8 +699,10 @@ main {
   text-overflow: ellipsis;
 }
 
+/* A fixed box (the name's cap above reserves exactly this and the gap). */
 .session-picker-caret {
-  flex: 0 0 auto;
+  flex: 0 0 var(--space-3);
+  text-align: center;
   color: var(--text-mid);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
@@ -954,12 +963,23 @@ main {
 }
 
 .pane-last-activity {
-  margin-left: auto;
+  /* cas-2072: the activity line takes only the room the name, role and
+     controls leave, so it never trims the name (twin codenames differ in
+     their tail digits). It shows whole or not at all: words that do not fit
+     wrap past the zero-width first item onto a clipped second line instead
+     of trimming to a stub. */
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+  height: 1lh;
   overflow: hidden;
   color: var(--text-mid);
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The first line's full height, so words that wrap past it fall below the clip. */
+.pane-last-activity::before { content: ""; height: 100%; }
 
 .pane-layout-controls {
   display: flex;
@@ -978,6 +998,34 @@ main {
   white-space: nowrap;
 }
 
+/* cas-d1fa: while this browser is in control the terminal keeps Tab; its
+   header says how the keyboard leaves it, outside the drawing area. */
+.pane-layout-controls .pane-leave[hidden] { display: none; }
+.pane-layout-controls .pane-leave kbd { margin-left: var(--space-1); padding: 0 var(--space-1); color: var(--text-mid); font: inherit; font-size: var(--fs-xs); white-space: nowrap; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+/* cas-7d25: the key is always on screen, so a sighted keyboard user learns
+   it without hovering. Where the pane header is compact (a 1280 window with
+   the drawer open, a phone), the word gives way to a glyph and the control
+   reads "⇥ Ctrl+Alt+M"; its name stays "Leave terminal". */
+.pane-header { container: pane-header / inline-size; }
+@container pane-header (max-width: 960px) {
+  .pane-layout-controls .pane-leave .pane-leave-word { display: none; }
+  .pane-layout-controls .pane-leave::before { content: "⇥"; font-size: var(--fs-md); }
+  .pane-layout-controls .pane-leave kbd { margin-left: var(--space-1); }
+}
+/* cas-2072: a short header (a 1280 window with the drawer open) keeps the
+   pane's whole name and Leave's key by turning the other controls into the
+   glyphs a phone uses; each keeps its name and its tooltip. Kept at the
+   specificity of the desktop rules so the phone block still governs a phone. */
+@container pane-header (max-width: 720px) {
+  .pane-layout-controls button { display: grid; place-items: center; min-width: var(--space-8); padding: 0; font-size: 0; }
+  .pane-layout-controls .pane-leave:not([hidden]) { display: inline-flex; align-items: center; padding: 0 var(--space-1); }
+  .pane-layout-controls .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
+  .pane-layout-controls .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
+  .pane-layout-controls .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
+  .pane-layout-controls .make-primary::after { content: "★"; font-size: var(--fs-meta); }
+  .pane-layout-controls .move-earlier::after { content: "←"; font-size: var(--fs-md); }
+  .pane-layout-controls .move-later::after { content: "→"; font-size: var(--fs-md); }
+}
 .pane-layout-controls button:hover:not(:disabled),
 .pane-layout-controls button:focus-visible { color: var(--text-hi); background: var(--bg-hover); }
 
@@ -1710,7 +1758,9 @@ main {
 }
 
 .attention-payload-body {
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
@@ -1729,10 +1779,17 @@ main {
   word-break: break-word;
 }
 
+/* cas-b56b: a closed notice's Copy is not laid out at all. Chromium hides a
+   closed <details>' content with content-visibility, which still gives the
+   button a box below the rail's scroll range, where a layout check (and
+   anything else that measures it) finds a "Copy" no one can reach. It
+   appears with the payload when Details opens. */
+.attention-payload:not([open]) .attention-copy { display: none; }
+
 .attention-copy {
-  position: absolute;
-  top: var(--space-1);
-  right: var(--space-1);
+  align-self: flex-end;
+  /* Keep the outer focus ring inside the Attention tab's scroll boundary. */
+  margin-inline-end: calc(2 * var(--focus-ring-width));
   min-height: var(--space-6);
   padding: var(--space-1) var(--space-2);
   color: var(--text-mid);
@@ -1804,6 +1861,45 @@ main {
 }
 
 .status-identifier { color: var(--text-hi); }
+
+/* cas-a474 (fleet-operations brief S5): each row's one trailing control, its
+   menu, the inline confirmation and the ask-to-merge preview. Destructive
+   items sit last, after a rule, in the danger ink; a control this pairing
+   cannot use stays focusable and says why beneath it. */
+.status-agent, .status-task { position: relative; }
+.fleet-ops { display: grid; gap: var(--space-1); justify-items: start; }
+/* Only the ⋯ trigger sits in the row's corner; its menu, confirmation and
+   notes flow inside the row, so they push the next row down instead of
+   lying over it. */
+.status-agent > .fleet-ops { justify-items: stretch; }
+.status-agent > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
+.status-agent .status-line { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+.status-agent > .fleet-ops > .fleet-ops-note { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+.fleet-ops button:not(.primary), .fleet-ops-header button:not(.primary) { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
+.fleet-ops .fleet-ops-trigger { min-width: var(--rail-item-min); padding: 0; font-size: var(--fs-md); }
+.fleet-ops button[aria-disabled="true"], .fleet-ops-header button[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
+.fleet-ops button.danger { color: var(--state-crit); }
+.fleet-ops .primary, .fleet-ops-header .primary { width: auto; min-height: var(--rail-item-min); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); cursor: pointer; }
+.fleet-ops-menu { display: grid; gap: var(--space-1); min-width: 12rem; padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); z-index: 2; }
+.fleet-ops-menu [role="menuitem"] { justify-self: stretch; text-align: left; border-color: transparent; }
+.fleet-ops-separator { height: var(--line-width); margin: var(--space-1) 0; background: var(--line-subtle); }
+.fleet-ops-reason { display: block; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.fleet-ops-confirm, .fleet-ops-preview { display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+.fleet-ops-question, .fleet-ops-preview-lead { margin: 0; color: var(--text-hi); }
+.fleet-ops-preview-text { margin: 0; padding: var(--space-2); border-left: 3px solid var(--line-strong); color: var(--text-hi); white-space: pre-wrap; overflow-wrap: anywhere; }
+.fleet-ops-confirm-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.fleet-ops-progress, .fleet-ops-note, .fleet-ops-asked { margin: 0; color: var(--text-mid); }
+.fleet-ops-note--error, .fleet-ops-note--stale { color: var(--state-warn); }
+.fleet-ops-header { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-2); }
+.fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
+.fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
+.fleet-ops-undo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); }
+.fleet-ops-undo button { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: 999px; background: var(--bg-panel); color: var(--text-hi); cursor: pointer; }
+@media (forced-colors: active) {
+  .fleet-ops-menu, .fleet-ops-confirm, .fleet-ops-preview { border-color: Highlight; }
+  .fleet-ops button:focus-visible, .fleet-ops-header button:focus-visible { outline: 2px solid Highlight; }
+}
 
 /* Workers & Tasks: identifiers and state stay mono on one line, the sentence
    about what the agent is doing reads as prose beneath it. */
@@ -2072,6 +2168,14 @@ main > #conversation-return { order: 1; }
 
 .message-status.error { color: var(--state-warn); }
 
+/* cas-adfc: this draft will not survive a reload. */
+.message-draft-note {
+  margin: 0;
+  color: var(--state-warn);
+  font-size: var(--fs-meta);
+  text-wrap: pretty;
+}
+
 .control-disabled-reason {
   margin: 0;
   color: var(--state-warn);
@@ -2204,6 +2308,9 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 /* Journey F20: the Appearance row in effect carries a check and "Current". */
 .palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
 .palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* cas-786a (journey F30): the conversation already open leads its description
+   with "Open now". The button is aria-current, so the words are visual only. */
+.palette-command[data-palette-current] small::before { content: "Open now · " / ""; color: var(--text-hi); font-weight: var(--weight-medium); }
 /* A phone row is too narrow for both on one line: the description drops under
    the title, both at full row width, so each reads in full or ellipsises alone. */
 @media (max-width: 40rem) {
@@ -2363,6 +2470,16 @@ fieldset {
   flex-wrap: wrap;
   margin-top: var(--space-2);
 }
+
+/* cas-b52d (journey F26): what a narrowed link withholds sits under what it
+   grants, compact enough that the fields still open unscrolled: the hint and
+   its Copy share a row, and the command fills whole lines below them. */
+.pair-withheld { display: grid; gap: var(--space-1); }
+.pair-withheld > .pair-lead { margin: 0; }
+.pair-withheld-command { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+.pair-withheld-command .scope-hint { flex: 1 1 14rem; margin: 0; }
+.pair-withheld-command button { min-height: var(--space-8); padding: 0 var(--space-3); font-size: var(--fs-meta); }
+.pair-withheld-command code { flex: 1 1 100%; min-width: 0; color: var(--text-hi); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 
 .scope-hint + .pair-code-actions code {
   min-width: 0;
@@ -2597,7 +2714,10 @@ dialog form > *,
   position: fixed;
   top: calc(var(--space-4) + env(safe-area-inset-top));
   right: var(--space-4);
-  z-index: 10;
+  /* cas-f4e5: above every in-page layer, including the phone Attention sheet
+     (z-index 20), so a confirmation such as "Details copied" is seen where the
+     action happened. Modal dialogs sit in the top layer and stay above it. */
+  z-index: 30;
   max-width: min(28rem, calc(100vw - 2 * var(--space-4)));
   transform: translate(0, calc(-1 * var(--space-6)));
   opacity: 0;
@@ -2869,6 +2989,12 @@ dialog form > *,
 
   .context-panel:not(.collapsed) {
     position: static;
+    /* cas-bad9: expanded, the panel is a row of its own and needs no layer.
+       The pill's z-index 6 (above) made it a stacking context over the
+       machine navigation (5), so the open drawer slid under it and every
+       machine row below the first was covered. The landscape sheet sets its
+       own layer below. */
+    z-index: auto;
     grid-column: 1;
     grid-row: 2;
     grid-template-columns: minmax(0, 1fr);
@@ -2962,6 +3088,13 @@ dialog form > *,
     min-height: var(--space-8);
     padding: 0;
     font-size: 0;
+  }
+  /* cas-7d25: Leave keeps its key beside the glyph on one line. */
+  .pane-grid.pane-layout .pane-layout-controls .pane-leave:not([hidden]) {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 var(--space-1);
+    white-space: nowrap;
   }
 
   /* A compact viewport holds the PTY at 80 columns, so the true grid is wider
@@ -3282,6 +3415,10 @@ dialog form > *,
 .conversation-flag { width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--warn-text); }
 .conversation-unread { min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
 .conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
+/* cas-7c37f F01: the list's permission notice keeps the empty copy's 18px
+ * inset at every width, so its tint never runs to the panel edge, and sits one
+ * rhythm step under the copy that owns the "Can't reach…" sentence. */
+.conversation-sidebar > #network-access-help { margin: 0 18px var(--space-6); }
 /* F14: until storage and the first catalog answer arrive, the list shows its
  * own shape, not a claim ("Not paired", "No live supervisors") it cannot make yet. */
 .conversation-empty[data-state="loading"] { margin: 0; }
@@ -3332,8 +3469,10 @@ dialog form > *,
 .conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }
 .conversation-identity .host-sep { flex: none; white-space: pre; }
 .conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
-.conversation-identity .host-where.os-dropped .host-os { display: none; }
-.conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { display: none; }
+/* cas-8526: what steps aside is hidden from sight only (the .sr-only
+   technique), never display:none, so the line is heard whole at any width. */
+.conversation-identity .host-where.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
+.conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
@@ -3342,7 +3481,9 @@ dialog form > *,
 .conversation-pane-slot .secondary-pane-strip, .conversation-pane-slot .pane-header { display: none; }
 .conversation-pane-slot .pane { display: block; height: 100%; border: 0; border-radius: 0; background: var(--bg-root); color: var(--text-hi); }
 .conversation-pane-slot .terminal-mount { height: 100%; padding: 0; background: var(--bg-root); color: var(--text-hi); overflow: hidden; }
-.conversation-active > :not(.conversation-reading) { visibility: hidden; position: absolute; pointer-events: none; }
+/* Keep the terminal mounted and its grid intact, but exclude its hidden
+   descendants from the reading surface's scroll geometry (cas-ff3d). */
+.conversation-active > :not(.conversation-reading) { display: none; }
 
 /* ---- Pebble thread (cas-d167) --------------------------------------------
  * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:
@@ -3606,7 +3747,11 @@ button.chip:disabled { cursor: default; }
 .thread .conversation-dismiss svg.close { width: 16px; height: 16px; }
 .thread .conversation-dismiss:hover { color: var(--ink); background: var(--bg-hover); }
 /* "1 unsent message · Show": the way back, dashed like the card it restores. */
-.conversation-unsent { display: flex; align-items: center; gap: 6px; min-height: 32px; margin: var(--space-2) auto 0; padding: 0 14px; border: 1.5px dashed var(--crit-bg); border-radius: 999px; background: var(--canvas); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+/* Its focus ring (2px, offset 2px) reaches 4px below the chip, where the
+   composer, positioned and opaque, painted over it and cut the ring flat
+   (journey F22). The bottom margin leaves the ring its room and the chip
+   paints above the composer. */
+.conversation-unsent { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; min-height: 32px; margin: var(--space-2) auto var(--space-1); padding: 0 14px; border: 1.5px dashed var(--crit-bg); border-radius: 999px; background: var(--canvas); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
 .conversation-unsent[hidden] { display: none; }
 .conversation-unsent svg.warn { width: 14px; height: 14px; flex: none; color: var(--crit-bg); }
 .conversation-unsent-show { color: var(--color-action); font-weight: var(--weight-semibold); }
@@ -3681,8 +3826,8 @@ button.chip:disabled { cursor: default; }
 .thread .empty .proj2.machine-long > .proj2-machine { min-width: 16ch; }
 .thread .empty .proj2-sep { flex: none; white-space: pre; }
 .thread .empty .proj2-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
-.thread .empty .proj2.os-dropped .host-os { display: none; }
-.thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { display: none; }
+.thread .empty .proj2.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
+.thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .thread .empty .proj2.codename-squeezed > .proj2-machine { min-width: 0; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
@@ -3754,6 +3899,10 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
+/* Auto-placed across the composer: the status row when that is empty,
+   otherwise its own row beneath, never on top of a status (cas-adfc). */
+.conversation-composer .message-draft-note { grid-column: 1 / -1; }
+.conversation-composer .message-draft-note[hidden] { display: none; }
 .conversation-context { min-width: 0; overflow-y: auto; padding: var(--space-6) var(--space-4); border-left: var(--line-width) solid var(--line-subtle); }
 .conversation-context[data-open="false"] { padding: 0; overflow: hidden; }
 .conversation-context .context-section[hidden] { display: none; }
@@ -3793,14 +3942,22 @@ button.chip:disabled { cursor: default; }
      list is the count here). The toggle's hit area still reaches 40px. */
   .conversation-shell .conversation-sidebar > footer { padding-top: var(--space-1); padding-bottom: max(var(--space-1), env(safe-area-inset-bottom)); }
   .conversation-sidebar .hub-footer-badges { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-3); min-height: 32px; margin: 0; }
-  .conversation-sidebar #paired-machines-toggle { position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
+  .conversation-sidebar #paired-machines-toggle { display: flex; align-items: center; position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
   .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
-  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: none; overflow-wrap: normal; white-space: nowrap; }
+  /* cas-c19d: the label shrinks too, ellipsised, once the state has given
+     all its room: a 691px name used to run past the button and over its
+     state. The button's 8px gap then always separates the two. */
+  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; max-width: none; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
   /* cas-0739 QA F01: on the one-line phone footer the state yields to the
      label, ellipsised; the full words are its title, the button's spoken
-     name, and the open dialog's first row. */
-  .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+     name, and the open dialog's first row. Its outage words lead ("Can't
+     reach Build Server…", cas-cae9), so the ellipsis cuts the name, not the
+     verb. Its shrink weight makes it give
+     way first (cas-c19d), so an ordinary long name still reads whole; it
+     keeps a 4em stub ("Conne…", its full words in the title), so an
+     overlong name never hides it entirely. */
+  .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1000 auto; min-width: 4em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
   .conversation-sidebar .hub-footer-badges > #paired-machines-toggle { flex: 1 1 auto; }
   .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
@@ -3875,7 +4032,9 @@ button.chip:disabled { cursor: default; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }
-  .conversation-identity .conversation-host { display: none; }
+  /* cas-8526: off the short landscape header, not out of its spoken name or
+     its connection status. */
+  .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
   .conversation-identity { gap: var(--space-2); }
   .conversation-composer { padding-top: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
   .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); padding-top: 10px; padding-bottom: 10px; }
@@ -3885,16 +4044,19 @@ button.chip:disabled { cursor: default; }
 
 .conversation-row-state:empty { display: none; }
 .conversation-context .status-identifier { display: none; }
+/* cas-a474: an agent row the operator can act on names its worker; the ⋯ menu
+   would otherwise be the only place the name appears. */
+.conversation-context .status-agent .status-line > .status-identifier:first-child { display: inline; }
 
 #conversation-return { flex: none; white-space: nowrap; }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
-#paired-machines-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
-/* cas-0739 QA F02: the label keeps its own width (basis auto, never 0), so a
-   long outage state wraps onto its own line instead of squeezing the label
-   to a letter per line. */
-#paired-machines-toggle > span:nth-child(2) { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+#paired-machines-toggle { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
+/* cas-94eb: reserve the dot and its gap when wrapping the full desktop name,
+   so both fit on the first flex line. Short names still share a row with the
+   state; long states wrap without squeezing the name (cas-0739 QA F02). */
+#paired-machines-toggle > span:nth-child(2) { flex: 1 1 auto; min-width: 0; max-width: calc(100% - var(--space-2) * 2); overflow-wrap: anywhere; }
 .machine-badge-state { flex: 0 1 auto; min-width: 0; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .pairing-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--color-series-neutral); flex: none; }
 .pairing-dot.connected { background: var(--state-ok); }
@@ -3914,6 +4076,18 @@ button.chip:disabled { cursor: default; }
 .paired-machine-address { font-family: var(--font-mono); }
 .paired-machine button { margin-top: var(--space-2); min-height: var(--rail-item-min); }
 #paired-machines-error { color: var(--state-crit); }
+/* cas-d382: each pairing's fleet permissions, in words; a missing one names
+   its state and the command (or the one-time grant) beside it. */
+.paired-machine-fleet { margin-top: var(--space-3); }
+.fleet-permissions-title { margin: 0 0 var(--space-1); font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-ui); color: var(--text-hi); }
+.fleet-permission { padding: var(--space-1) 0; }
+.paired-machine .fleet-permission-head { margin: 0; color: var(--text-hi); }
+.fleet-permission-state { color: var(--text-mid); }
+.fleet-permission[data-allowed="false"] .fleet-permission-state { color: var(--state-warn); }
+.paired-machine .fleet-permission-control[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
+.fleet-permission-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
+/* cas-d382 QA F01: Copy command is one line, beside or under the command, never wrapped. */
+.fleet-permission-command .fleet-permission-copy { flex: none; white-space: nowrap; }
 .commander-mark .cloud-brand > span { display: none; }
 .commander-mark .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
 #pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }
@@ -4014,7 +4188,11 @@ button.chip:disabled { cursor: default; }
 .launch-cli-option.is-checked { background: var(--bg-active); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 .launch-cli-option:has(input:focus-visible) { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
 .launch-cli-option input:focus-visible { outline: none; }
-.launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
+/* cas-c107: one "Default" treatment, a plain sub-label under the name, for
+   the supervisor CLI and the account alike (it was a filled pill on accounts). */
+.launch-cli-default,
+.launch-account-tag { color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
+.launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); }
 .launch-cli-default[hidden] { display: none; }
 .launch-workers input { width: 100%; max-width: 12rem; box-sizing: border-box; }
 .launch-optional { color: var(--text-mid); }
@@ -4026,7 +4204,6 @@ button.chip:disabled { cursor: default; }
 .launch-account[hidden] { display: none; }
 /* The account list never scrolls on its own: a logged-out row's command and Copy stay whole. */
 .launch-list.launch-accounts { max-height: none; overflow: visible; }
-.launch-account-tag { justify-self: start; padding: 0 var(--space-2); color: var(--text-hi); background: var(--bg-raised); border-radius: var(--radius-pill); font-size: var(--fs-xs); font-weight: var(--weight-semibold); }
 .launch-account-out { flex-wrap: wrap; row-gap: var(--space-2); cursor: default; color: var(--text-mid); }
 .launch-account-out:hover { background: var(--panel); }
 .launch-account-label { display: flex; align-items: center; gap: var(--space-3); min-width: 0; flex: 1 1 100%; }
@@ -4034,7 +4211,7 @@ button.chip:disabled { cursor: default; }
 .launch-account-state { color: var(--text-mid); font-size: var(--fs-xs); }
 .launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
 .launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
-.launch-login button { min-height: 36px; font-size: var(--fs-meta); }
+.launch-login button { min-height: 36px; font-size: var(--fs-meta); border: var(--line-width) solid var(--color-transparent); }
 .launch-account-note { padding-inline: 0; }
 .launch-retry { justify-self: start; width: auto; min-height: 36px; font-size: var(--fs-meta); }
 .launch-account-body { display: grid; gap: var(--space-2); }
@@ -4042,7 +4219,12 @@ button.chip:disabled { cursor: default; }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
 .launch-grant-command[hidden], .launch-grant-invite[hidden], .launch-grant-note[hidden], .launch-grant-error[hidden], .launch-grant [data-launch-action="allow"][hidden] { display: none; }
-.launch-grant-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-meta); }
+.launch-grant-command code { min-width: 0; overflow-wrap: break-word; color: var(--text-hi); font-size: var(--fs-meta); }
+/* cas-cee5 (journey F31): it wraps between whole tokens only. */
+.launch-command-piece { white-space: nowrap; }
+/* The refusal's login command, as a logged-out account row shows it. */
+.launch-error-command { padding-inline-start: 0; margin-top: var(--space-2); }
+.launch-error-command[hidden] { display: none; }
 .launch-grant .launch-lead { color: var(--text-hi); font-size: var(--fs-md); }
 .launch-grant .launch-lead, .launch-confirm-copy { overflow-wrap: anywhere; }
 .launch-grant .dialog-actions, .launch-confirm .dialog-actions { min-width: 0; }
@@ -4114,6 +4296,9 @@ button.chip:disabled { cursor: default; }
 }
 @media (forced-colors: active) {
   .launch-choice.is-checked, .launch-cli-option.is-checked { border: 2px solid Highlight; }
+  /* cas-c107: Copy keeps a visible boundary, like Attach and Start, where the
+     system palette drops its fill. */
+  .launch-login button { border-color: ButtonBorder; }
 }
 /* == End New session == */
 
@@ -4138,6 +4323,12 @@ button.chip:disabled { cursor: default; }
 .thread .empty .empty-terminal { display: inline-flex; align-items: center; min-height: 24px; padding: 0 2px; border: 0; background: none; color: var(--ink-mid); font: inherit; text-decoration: underline; text-decoration-color: var(--line-subtle); text-underline-offset: 3px; cursor: pointer; }
 .thread .empty .empty-terminal:hover { color: var(--ink); text-decoration-color: currentColor; }
 .thread .empty .empty-terminal:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
+/* cas-6b75: on a phone or any coarse pointer, Terminal view is a full
+   44 px target; the line centres the activity text on it. */
+@media (max-width: 53rem), (pointer: coarse) {
+  .thread .empty .empty-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; }
+  .thread .empty .empty-terminal { min-height: 44px; min-width: 44px; padding: 0 var(--space-2); }
+}
 @media (max-width: 720px) {
   .thread .earlier-sessions { margin: 10px 14px 0; }
 }
@@ -4159,6 +4350,11 @@ button.chip:disabled { cursor: default; }
 .conversation-end .conversation-end-confirm { color: var(--state-crit); border-color: currentColor; }
 .conversation-end-question { flex-basis: 100%; color: var(--ink); }
 .conversation-end-error { flex-basis: 100%; color: var(--state-crit); }
+/* cas-f60a: Cancel comes first and is at least as wide as End session's
+   words, so the pointer that opened the confirmation rests on Cancel. */
+.conversation-end .conversation-end-cancel { min-width: 7.5em; }
+/* cas-f60a: "<codename> on <machine> ended." where the row was, for a while. */
+.conversation-ended { margin: 0 14px var(--space-1) 77px; color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-ui); }
 /* cas-d6bf: desktop keeps the words; the glyph is the phone's. */
 .conversation-end-icon { display: none; width: 16px; height: 16px; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
@@ -4173,6 +4369,7 @@ button.chip:disabled { cursor: default; }
   /* The button's aria-label names it; the glyph is its face. */
   .conversation-end[data-state="idle"] .conversation-end-label { display: none; }
   .conversation-end:not([data-state="idle"]) { margin: 0 12px var(--space-2) 12px; }
+  .conversation-ended { margin: 0 14px var(--space-2); }
   .conversation-end .conversation-end-confirm, .conversation-end .conversation-end-cancel { min-height: 36px; padding-inline: 14px; }
 }
 @media (forced-colors: active) {
@@ -4212,9 +4409,60 @@ button.chip:disabled { cursor: default; }
 #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target] { position: relative; padding-right: 72px; background: var(--accent-soft); outline: var(--line-width) solid var(--line-subtle); outline-offset: -1px; }
 .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] { background: var(--bg-hover); outline: var(--line-width) solid var(--line-subtle); outline-offset: -1px; }
 #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target]::after,
-.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { content: "Enter ↵"; position: absolute; right: 12px; top: 50%; translate: 0 -50%; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { content: "Enter ↵" / ""; position: absolute; right: 12px; top: 50%; translate: 0 -50%; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
 @media (forced-colors: active) {
   #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target],
   .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] { outline: 2px solid Highlight; outline-offset: -2px; }
 }
-.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { top: auto; bottom: 6px; translate: none; }
+/* cas-786a (journey F29): the row's hint is laid out, not overlaid. A row
+   with no marks sets it in its own grid cell, under the time; the column
+   widens and the title and preview ellipsise around it. A row with an unread
+   count or waiting dot carries it inside its marks, in flow before them, so
+   the count moves aside instead of sitting under the hint. */
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { position: static; grid-column: 3; grid-row: 2; justify-self: end; translate: none; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]:has(.conversation-marks)::after { content: none; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] .conversation-marks::before { content: "Enter ↵" / ""; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
+
+/* S6: the phone enters its own fleet from the conversation, then takes one action. */
+#conversation-fleet { display: none; }
+.fleet-action-sheet { color: var(--text-hi); }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  #conversation-fleet { display: flex; align-items: center; justify-content: center; min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font-size: var(--fs-lg); }
+  .fleet-sheet-open > .conversation-context .context-section:not([data-section="progress"]) { display: none; }
+  .fleet-sheet-open > .conversation-context .context-section[data-section="progress"] { display: block; }
+  .conversation-shell.fleet-sheet-open > .conversation-context { height: var(--keyboard-viewport-height, 100dvh); box-sizing: border-box; }
+  .status-task { position: relative; }
+  .status-task > .status-line, .status-task > .status-task-title { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+  .status-task > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
+  .fleet-action-sheet { position: fixed; inset: auto 0 calc(100dvh - var(--keyboard-viewport-height, 100dvh)); margin: 0; width: 100%; max-width: none; max-height: calc(var(--keyboard-viewport-height, 100dvh) - var(--space-4)); box-sizing: border-box; overflow-y: auto; padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane) var(--radius-pane) 0 0; background: var(--sheet-bg); box-shadow: var(--lift-strong); }
+  .fleet-action-sheet::backdrop { background: var(--overlay-backdrop); }
+  .fleet-action-sheet--picker { height: var(--keyboard-viewport-height, 100dvh); max-height: var(--keyboard-viewport-height, 100dvh); border-radius: 0; }
+  .fleet-sheet-close { display: flex; align-items: center; justify-content: center; margin: 0 0 var(--space-2) auto; min-width: var(--rail-item-min); min-height: var(--rail-item-min); border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--text-hi); font-size: var(--fs-lg); cursor: pointer; }
+  .fleet-action-sheet .fleet-ops-menu, .fleet-action-sheet .fleet-ops-confirm, .fleet-action-sheet .fleet-ops-preview { width: 100%; min-width: 0; box-sizing: border-box; border: 0; padding: 0; background: var(--color-transparent); }
+  .fleet-action-sheet .fleet-ops-confirm-actions, .fleet-action-sheet .fleet-ops-panel { display: grid; width: 100%; }
+  .fleet-action-sheet .fleet-ops-item, .fleet-action-sheet .fleet-ops-confirm-actions button, .fleet-action-sheet select, .fleet-action-sheet input, .fleet-action-sheet .fleet-ops-add-go { width: 100%; min-height: var(--rail-item-min); box-sizing: border-box; }
+  .fleet-action-sheet .fleet-ops-picker { align-content: start; }
+  .fleet-action-sheet input { font: var(--weight-regular) var(--fs-md)/var(--line-ui) var(--font-ui); padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane); background: var(--bg-panel); color: var(--text-hi); }
+  #conversation-composer-slot:has(#fleet-phone-undo) { flex-shrink: 0; }
+  #fleet-phone-undo { margin: 0 var(--space-3) var(--space-2); border: var(--line-width) solid var(--line-strong); box-shadow: var(--lift); }
+  .conversation-context > #fleet-phone-undo { margin: var(--space-3) 0 0; }
+  #fleet-phone-undo > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #fleet-phone-undo > button { flex: none; min-width: var(--rail-item-min); }
+  .fleet-ops-picker h2 { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }
+  .fleet-picker-context { margin: 0; color: var(--text-mid); overflow-wrap: anywhere; }
+}
+@media (forced-colors: active) {
+  .fleet-action-sheet, #fleet-phone-undo { border-color: Highlight; }
+  .fleet-sheet-close:focus-visible { outline: 2px solid Highlight; }
+}
+
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .conversation-heading { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
+  #conversation-fleet { grid-column: 3; grid-row: 1; }
+  #conversation-terminal { grid-column: 4; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto auto; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-fleet { grid-column: 4; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-terminal { grid-column: 5; }
+  .fleet-ops-picker { display: grid; gap: var(--space-3); }
+  .fleet-ops-picker [role="menuitem"][hidden], .fleet-ops-no-match[hidden], #fleet-phone-undo[hidden] { display: none; }
+}

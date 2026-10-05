@@ -24,14 +24,16 @@ version and worktree, never a version-keyed path.
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,
    pending, or malformed evidence refuses the merge. Supervisors monitor CI;
    workers never poll CI.
-3. Start a clean detached or `release/` worktree from `origin/main`. Confirm
+3. Start a clean detached or `release/` worktree from `origin/main`. Copy the
+   reviewed dated CHANGELOG section and draft from the epic into this worktree
+   and commit them; preflight reads the release checkout. Confirm
    the preflight prerequisites: no competing release (open PRs, the
    merge-queue GraphQL query, and remote tags); a writable `scratch-base` with
    space for twice the last archive; readable `CAS_RELEASE_ENV_FILE` (names
    only); resolvable Zig; a complete host `toolchain` (cargo, cargo-nextest,
    cargo-zigbuild, jq, python3, GNU objdump, an x86_64 Linux C compiler or
-   Zig, the `x86_64-unknown-linux-gnu` Rust target); a dated CHANGELOG heading
-   and draft; and a passing integration receipt. A macOS host needs only
+   Zig, the `x86_64-unknown-linux-gnu` Rust target); and a passing integration
+   receipt. A macOS host needs only
    Homebrew `jq binutils`, those Cargo tools and that target: the train
    supplies the `stat`, `sha256sum`, `setsid` and Cargo-PATH fallbacks itself,
    and defaults its scratch base to `/Users/Shared/cas-release-gate` there
@@ -61,11 +63,14 @@ version and worktree, never a version-keyed path.
    block to the draft. `receipts` commits that draft and the release report
    artifacts on the `release/` branch, writes the commit and branch to the
    run-dir `receipts.commit` receipt, and never opens a docs-only PR. Before
-   the next release, `preflight` warns about an unmerged prior receipt commit
-   and `prep` carries it forward with a merge before preparing the new draft.
+   the next release, `preflight` warns about an unmerged prior receipt commit.
+   Leave it for `prep` to carry forward after assembly; its report files are
+   outside the initial metadata rebase allowlist.
    `prep` refreshes `Cargo.lock` with `cargo update --workspace --offline`.
-   `assemble` rebases docs-only release commits from `main` onto the tested
-   integration tip. The pipeline waits for `MERGEABLE` plus the required
+   `assemble` rebases CHANGELOG, release notes and
+   `docs/qa/journey-evaluations/*.md` from `main` onto the tested integration
+   tip; other paths stop with preservation and fresh-worktree guidance.
+   The pipeline waits for `MERGEABLE` plus the required
    status-check rollup before enqueueing, defaulting to 60 attempts at 5 seconds.
 5. If the command stops, answer only the named blocker, then rerun the exact
    printed `--cut --resume` command. Use `scripts/release-train.sh <version>

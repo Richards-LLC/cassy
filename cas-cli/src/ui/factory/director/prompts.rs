@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::AutoPromptConfig;
-use crate::mcp::tools::core::task::lifecycle::close_ops::{
+use crate::git_evidence::{
     KnownUnmergedCount, fetch_parent_branch_best_effort, known_unmerged_factory_commits,
     resolve_ref_commit_sha,
 };
@@ -934,6 +934,14 @@ fn classify_merge_alert_observations(
 /// Fetch and re-read both the local epic ref and `origin/<epic>`, then
 /// classify the factory branch against immutable commit IDs. Unknown Git
 /// state never masquerades as zero.
+fn staged_integration_batch(repo_root: &Path, task_id: &str) -> bool {
+    // Freshness checks must not initialize a Cassy database in another target repo.
+    if !repo_root.join(".cas/cas.db").is_file() { return false; }
+    crate::store::open_task_store(&repo_root.join(".cas"))
+        .and_then(|store| Ok(store.get(task_id)?))
+        .is_ok_and(|task| task.status == TaskStatus::AwaitingMerge && task.deliverables.integration_batch.is_some())
+}
+
 fn fresh_merge_alert_git_evidence(
     repo_root: &Path,
     task_id: &str,
@@ -980,6 +988,9 @@ pub fn check_merge_alert_freshness(
     };
     if task.task_status != TaskStatus::AwaitingMerge {
         return MergeAlertFreshness::NotApplicable;
+    }
+    if staged_integration_batch(repo_root, &task.task_id) {
+        return MergeAlertFreshness::Stale;
     }
     let factory_branch = format!("factory/{worker}");
     let (_, epic_branch, _) = resolve_merge_target_for_task(data, &task.task_id);
@@ -1038,6 +1049,9 @@ pub fn check_merge_alert_freshness_for_task(
         return MergeAlertFreshness::Stale;
     };
     if task.status != TaskStatus::AwaitingMerge {
+        return MergeAlertFreshness::Stale;
+    }
+    if staged_integration_batch(repo_root, task_id) {
         return MergeAlertFreshness::Stale;
     }
     let Some(worker) = task.assignee.clone() else {
@@ -1464,7 +1478,8 @@ pub fn generate_prompt_at(
             // instead of catching it.
             //
             // State resolution:
-            //   - task absent from ready+in_progress → closed (expected path)
+            //   - task absent from ready+in_progress → terminal or otherwise
+            //     unavailable; actor-aware close notices come from lifecycle
             //   - task in ready_tasks as Open       → lease expired, still needs close
             //   - task in in_progress_tasks         → still being worked (edge case)
             let in_ready = unfiltered_data
@@ -1491,15 +1506,13 @@ pub fn generate_prompt_at(
                 // Still in progress — stale event, nothing to do.
                 return None;
             } else {
-                // Task is already closed (the normal path after a successful close).
-                // Do NOT instruct the supervisor to ask the worker to close it again.
-                format!(
-                    "Worker {worker} has closed task {task_id} ({task_title}).\n\n\
-                     Next steps:\n\
-                     - Assign another task to this worker, OR\n\
-                     - If all subtasks are done, verify and close the epic\n\n\
-                     Remember: workers close their own tasks, supervisors close epics."
-                )
+                // GH #1124: disappearance from active sets carries the old
+                // assignee, not the closing actor (and may be cancellation).
+                // Actual closes already use the durable lifecycle relay, which
+                // records the authenticated actor and suppresses supervisor
+                // self-echoes. Do not add a second, falsely attributed notice
+                // or recommend assigning work to a possibly shut-down assignee.
+                return None;
             };
 
             Some(Prompt {
@@ -2729,6 +2742,105 @@ mod tests {
     }
 
     #[test]
+    fn gh1124_terminal_notice_uses_real_actor_without_assignee_echo() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, emit_task_lifecycle_transition,
+        };
+        use cas_types::{Agent, AgentRole, Task};
+
+        for (status, actor, shutdown) in [
+            (TaskStatus::Closed, "supervisor", true),
+            (TaskStatus::Closed, "swift-fox", false),
+            (TaskStatus::Closed, "swift-fox", true),
+            (TaskStatus::Cancelled, "supervisor", true),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            let agents = crate::store::open_agent_store(&dir).unwrap();
+            let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or("gh1124".into());
+            for (id, name, role) in [
+                ("sup-id", "supervisor", AgentRole::Supervisor),
+                ("worker-id", "swift-fox", AgentRole::Worker),
+            ] {
+                let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+                agent.factory_session = Some(session.clone());
+                if role == AgentRole::Worker && shutdown {
+                    agent.mark_shutdown();
+                }
+                agents.register(&agent).unwrap();
+            }
+            let tasks = crate::store::open_task_store(&dir).unwrap();
+            let mut task = Task::new("cas-gh1124".into(), "Delivered work".into());
+            task.assignee = Some("swift-fox".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            task.status = status;
+            task.closed_at = Some(chrono::Utc::now());
+            task.updated_at = tasks.update(&task).unwrap();
+            let sq = crate::store::open_supervisor_queue_store(&dir).unwrap();
+            let pq = crate::store::open_prompt_queue_store(&dir).unwrap();
+            if status == TaskStatus::Closed {
+                // The real close handler calls this durable relay with its
+                // authenticated actor; supervisor_override does not change it.
+                emit_task_lifecycle_transition(
+                    sq.as_ref(),
+                    Some(pq.as_ref()),
+                    agents.as_ref(),
+                    &task.id,
+                    &task.title,
+                    TaskStatus::InProgress,
+                    status,
+                    actor,
+                    Some("supervisor_override=true: merged delivery verified"),
+                    LifecycleTransition::Closed,
+                    &task.updated_at.to_rfc3339(),
+                )
+                .unwrap();
+                let durable = sq.peek("sup-id", 10).unwrap();
+                assert_eq!(durable.len(), 1);
+                let payload: serde_json::Value = serde_json::from_str(&durable[0].payload).unwrap();
+                assert_eq!(payload["actor"], actor);
+                assert!(durable[0].prompt_delivered_at.is_some());
+            }
+            let notices = pq.peek_all(10).unwrap();
+            if status == TaskStatus::Closed && actor == "swift-fox" {
+                assert_eq!(notices.len(), 1, "one authoritative worker-close notice");
+                let envelope =
+                    crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt).unwrap();
+                assert_eq!(envelope.task_id, task.id);
+                assert!(notices[0].prompt.contains(&format!("actor=\"{actor}\"")));
+                assert!(!notices[0].prompt.contains("Assign another task"));
+            } else {
+                assert!(
+                    notices.is_empty(),
+                    "the supervisor gets no echo for their own close/cancel"
+                );
+            }
+            let data = DirectorData::load_fast(&dir).unwrap();
+            let inferred = DirectorEvent::TaskCompleted {
+                task_id: task.id.clone(),
+                task_title: task.title.clone(),
+                worker: task.assignee.clone().unwrap(),
+            };
+            let prompt = generate_prompt(
+                &inferred,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                claude(),
+                codex(),
+                &HashSet::new(),
+                None,
+            );
+            assert!(
+                prompt.is_none(),
+                "{status:?} by {actor}, shutdown={shutdown}: actorless completion cannot credit the assignee or suggest assigning them: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_task_assigned_prompt() {
         let event = DirectorEvent::TaskAssigned {
             task_id: "task-123".to_string(),
@@ -2801,7 +2913,22 @@ mod tests {
     /// harness, rather than retaining a literal from a previous CLI flavor.
     #[test]
     fn cas_9d40_injected_templates_only_render_the_live_tool_prefix() {
-        let data = make_data(0);
+        // GH #1124: only the lease-expired Open path renders a completion
+        // template. Terminal tasks leave close notices to the lifecycle relay.
+        let closed_data = make_data(0);
+        let mut data = make_data(0);
+        data.ready_tasks.push(TaskSummary {
+            id: "cas-prefix".to_string(),
+            title: "Prefix guard".to_string(),
+            status: TaskStatus::Open,
+            priority: Priority::MEDIUM,
+            assignee: Some("swift-fox".to_string()),
+            task_type: TaskType::Task,
+            epic: None,
+            branch: None,
+            updated_at: None,
+            epic_verification_owner: None,
+        });
         let events = [
             DirectorEvent::TaskAssigned {
                 task_id: "cas-prefix".to_string(),
@@ -2820,6 +2947,21 @@ mod tests {
             SupervisorCli::Grok,
         ] {
             let prefix = cli.backend().capabilities().tool_prefix;
+            assert!(
+                generate_prompt(
+                    &events[1],
+                    &closed_data,
+                    &closed_data,
+                    "supervisor",
+                    &default_config(),
+                    cli,
+                    cli,
+                    &HashSet::new(),
+                    None,
+                )
+                .is_none(),
+                "{cli:?}: terminal completion must not emit an actorless template"
+            );
             for event in &events {
                 let prompt = generate_prompt(
                     event,
@@ -2853,7 +2995,7 @@ mod tests {
         }
     }
 
-    /// cas-6aaf: TaskCompleted with task already closed (the normal path).
+    /// GH #1124: an inferred terminal completion must not duplicate lifecycle delivery.
     /// The prompt must NOT instruct the supervisor to ask the worker to close
     /// the task — it was already closed when the event fired.
     #[test]
@@ -2877,30 +3019,12 @@ mod tests {
             codex(),
             &HashSet::new(),
             None,
-        )
-        .unwrap();
+        );
 
-        assert_eq!(prompt.target, "supervisor");
-        assert!(prompt.text.contains("swift-fox"));
-        assert!(prompt.text.contains("task-123"));
-        // Must say "closed" not "completed" — reflects actual final state.
         assert!(
-            prompt.text.contains("closed"),
-            "cas-6aaf: TaskCompleted prompt must say 'closed' (task is already closed): {}",
-            prompt.text
+            prompt.is_none(),
+            "the durable lifecycle relay owns close notices: {prompt:?}"
         );
-        // Must NOT instruct supervisor to close an already-closed task.
-        assert!(
-            !prompt.text.to_lowercase().contains("task action=close"),
-            "cas-6aaf: TaskCompleted must not emit close instruction for already-closed task: {}",
-            prompt.text
-        );
-        // Should clarify verification ownership.
-        assert!(prompt.text.contains("workers close their own tasks"));
-        assert!(prompt.text.contains("supervisors close epics"));
-        // Response instructions should point to the worker.
-        assert!(prompt.text.contains("To respond to this message, use:"));
-        assert!(prompt.text.contains("target=swift-fox"));
     }
 
     /// cas-6aaf: TaskCompleted when task regressed to Open (lease expired).
@@ -5142,7 +5266,7 @@ mod tests {
     /// reported to a Claude supervisor.
     ///
     /// cas-6aaf added state-aware routing for TaskCompleted:
-    ///   - Task already closed (not in ready/in_progress) → "Worker has closed" path,
+    ///   - Task absent from ready/in_progress → no actorless close notice,
     ///     NO close instruction in body.  Regression guard: supervisor must NOT be
     ///     told to re-close a task the worker already closed.
     ///   - Task regressed to Open (lease expired) → "ask worker to close" path,
@@ -5154,9 +5278,8 @@ mod tests {
     ///
     /// Two sub-tests cover both branches.
 
-    /// cas-efc4 AC5 normal (closed) path: TaskCompleted when task is already
-    /// closed must NOT emit a close instruction. Verifies cas-6aaf stale-guidance
-    /// suppression in the heterogeneous case (Claude sup + Codex worker).
+    /// GH #1124: heterogeneous sessions also leave terminal close notices to
+    /// the actor-aware lifecycle relay, with no stale worker-close instruction.
     #[test]
     fn test_efc4_task_completed_already_closed_no_stale_close_instruction() {
         let event = DirectorEvent::TaskCompleted {
@@ -5178,36 +5301,11 @@ mod tests {
             codex(),
             &HashSet::new(),
             None,
-        )
-        .expect("TaskCompleted (closed path) must produce a prompt");
+        );
 
-        assert_eq!(
-            prompt.target, "supervisor",
-            "cas-efc4 AC5: TaskCompleted prompt goes to supervisor"
-        );
-        // cas-6aaf: stale-guidance suppression — no "please close" for already-closed task
         assert!(
-            !prompt.text.contains("action=close"),
-            "cas-efc4 / cas-6aaf: already-closed path must NOT emit a close instruction: {}",
-            prompt.text
-        );
-        assert!(
-            prompt.text.contains("closed"),
-            "cas-efc4: prompt must confirm the task is already closed: {}",
-            prompt.text
-        );
-        // Response instruction: supervisor (Claude) uses its own coordination tool
-        assert!(
-            prompt
-                .text
-                .contains("mcp__cas__coordination action=message"),
-            "cas-efc4 AC5: response instruction must use Claude supervisor prefix: {}",
-            prompt.text
-        );
-        assert!(
-            prompt.text.contains("target=codex-worker"),
-            "cas-efc4 AC5: response instruction must address the Codex worker: {}",
-            prompt.text
+            prompt.is_none(),
+            "the durable lifecycle relay owns close notices: {prompt:?}"
         );
     }
 
@@ -7011,6 +7109,29 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn cas_4b26f_staged_batch_suppresses_merge_nag() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = dir.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut task = cas_types::Task::new("cas-b401".into(), "Batch delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let mut value = serde_json::to_value(task).unwrap();
+        value["deliverables"]["integration_batch"] = serde_json::json!({
+            "branch":"batch/X", "tip":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "delivered_head":"cccccccccccccccccccccccccccccccccccccccc",
+            "supervisor_id":"supervisor", "recorded_at":chrono::Utc::now()
+        });
+        store.add(&serde_json::from_value(value).unwrap()).unwrap();
+        let event = DirectorEvent::WorkerIdle { worker:"worker".into(), active_task:Some(ActiveLeaseSummary {
+            task_id:"cas-b401".into(), task_title:"Batch delivery".into(), task_status:TaskStatus::AwaitingMerge,
+            close_rejected_reason:Some("MERGE REQUIRED".into()), pending_qa:None,
+        }) };
+        assert!(matches!(check_merge_alert_freshness(&event, &make_data(0), dir.path()), MergeAlertFreshness::Stale));
+    }
+
 }
 
 #[cfg(test)]
@@ -7046,4 +7167,5 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         assert!(merge.text.starts_with(&observed.detail()));
         assert!(!merge.text.contains("is idle while task"));
     }
+
 }

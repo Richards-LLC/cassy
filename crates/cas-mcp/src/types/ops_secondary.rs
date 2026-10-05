@@ -357,7 +357,9 @@ pub struct SystemRequest {
 pub struct VerificationRequest {
     /// Typed shadow-review operation, encoded as bounded JSON. These records
     /// never contribute verification verdicts to task or merge gates.
-    #[schemars(description = "shadow: JSON operation (start, context, report, cross_check, show, apply); see cas-shadow-review. Requires separate registered Spec/Standards children; apply requires supervisor opt-in.")]
+    #[schemars(
+        description = "shadow: JSON operation (start, context, report, cross_check, show, apply); see cas-shadow-review. Requires separate registered Spec/Standards children; apply requires supervisor opt-in."
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
 
@@ -454,6 +456,13 @@ pub struct VerificationRequest {
     #[schemars(description = "qa_record: absolute path of this round's LEDGER.md")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_path: Option<String>,
+
+    /// Explicit pre-park waiver binding, checked against the live pushed tip.
+    #[schemars(
+        description = "qa_waive: full SHA of the delivery's pushed factory branch tip; allows a waiver before parking. Must match the live origin branch exactly."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
 }
 
 /// Unified published-artifact operations request (cassy#910).
@@ -605,6 +614,11 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub id: Option<String>,
 
+    /// Explicit label for server_start; id remains a compatibility alias.
+    #[schemars(description = "server_start: explicit server name; takes precedence over id")]
+    #[serde(default)]
+    pub name: Option<String>,
+
     /// Number of workers to spawn/shutdown
     #[schemars(
         description = "Number of workers (for spawn: how many to create, for shutdown: how many to stop, 0 = all)"
@@ -619,9 +633,9 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub accept: Option<bool>,
 
-    /// Maximum child rows to inspect/render for epic_status.
+    /// Maximum rows to inspect/render for epic_status or server_list.
     #[schemars(
-        description = "epic_status only: maximum child rows to inspect/render; combine with offset for paging"
+        description = "epic_status: maximum child rows to inspect/render, with offset for paging. server_list: maximum server rows (default 20, capped at 50; must be positive)"
     )]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
@@ -646,12 +660,24 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub worker_names: Option<String>,
 
-    /// Task to pre-assign to the spawned worker (spawn_workers only).
+    /// Task to pre-assign to a worker, own a server, or filter server_list.
     #[schemars(
-        description = "spawn_workers only: task ID to pre-assign to the spawned worker once it boots (single-worker requests only — count must be 1 or worker_names must name exactly one worker). Eliminates the spawn-then-message race: the worker's first `task mine` already shows the task, no follow-up message required."
+        description = "spawn_workers: task ID to pre-assign once the worker boots (single-worker requests only). server_start: owning task. server_list: exact owning task filter."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Server lifecycle filter; history is opt-in.
+    #[schemars(
+        description = "server_list: 'running' (default), 'stopped', 'dead', 'unverified', or 'all' (includes history)"
+    )]
+    #[serde(default)]
+    pub status: Option<String>,
+
+    /// Exact registered worker name or immutable agent ID.
+    #[schemars(description = "server_list: exact owner worker name or registered agent ID")]
+    #[serde(default)]
+    pub owner: Option<String>,
 
     /// Factory delivery route for spawn_workers/focus_epic.
     #[schemars(
@@ -871,12 +897,13 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub id: Option<String>,
 
-    /// Task ID (for loop_start, worktree_create, spawn_workers, remind, or a
+    /// Task ID (for loop_start, worktree_create, spawn_workers, server_start,
+    /// server_list, remind, or a
     /// merge_request message).
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. For message with merge_request=true: identify the parked merge delivery. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
+        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For server_start: owning task. For server_list: exact owning task filter. For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. For message with merge_request=true: identify the parked merge delivery. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
@@ -992,7 +1019,9 @@ pub struct CoordinationRequest {
     pub clear: Option<bool>,
 
     /// Maximum items to return
-    #[schemars(description = "Maximum items to return")]
+    #[schemars(
+        description = "Maximum items to return; server_list defaults to 20 and caps at 50 (must be positive)"
+    )]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
@@ -1012,7 +1041,9 @@ pub struct CoordinationRequest {
 
     // ========== Agent Fields ==========
     /// Human-readable agent name (for register)
-    #[schemars(description = "Human-readable name for the agent")]
+    #[schemars(
+        description = "register: agent name; server_start: explicit server name (id is an alias)"
+    )]
     #[serde(default)]
     pub name: Option<String>,
 
@@ -1033,7 +1064,9 @@ pub struct CoordinationRequest {
 
     /// Loop prompt (for loop_start). spawn_workers rejects a non-empty value;
     /// worker briefs must be sent with coordination message after registration.
-    #[schemars(description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration.")]
+    #[schemars(
+        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration."
+    )]
     #[serde(default)]
     pub prompt: Option<String>,
 
@@ -1114,7 +1147,9 @@ pub struct CoordinationRequest {
     pub worker_names: Option<String>,
 
     /// Target branch/ref for sync actions
-    #[schemars(description = "Target branch/ref for sync actions (e.g., 'epic/my-epic'); for db_branch_create, the non-production Neon parent (a recorded label such as dev or staging, a branch id, or a name)")]
+    #[schemars(
+        description = "Target branch/ref for sync actions (e.g., 'epic/my-epic'); for db_branch_create, the non-production Neon parent (a recorded label such as dev or staging, a branch id, or a name)"
+    )]
     #[serde(default)]
     pub branch: Option<String>,
 
@@ -1233,12 +1268,17 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub all: Option<bool>,
 
-    /// Worktree status filter (for worktree_list)
+    /// Worktree or server lifecycle status filter.
     #[schemars(
-        description = "Filter by status: 'active', 'merged', 'abandoned', 'conflict', 'removed'"
+        description = "worktree_list: 'active', 'merged', 'abandoned', 'conflict', 'removed'. server_list: 'running' (default), 'stopped', 'dead', 'unverified', or 'all' (includes history)"
     )]
     #[serde(default)]
     pub status: Option<String>,
+
+    /// Server owner filter.
+    #[schemars(description = "server_list: exact owner worker name or registered agent ID")]
+    #[serde(default)]
+    pub owner: Option<String>,
 
     /// Show only orphaned worktrees (for worktree_list)
     #[schemars(description = "Show only orphaned worktrees")]
@@ -1343,6 +1383,7 @@ impl CoordinationRequest {
         super::FactoryRequest {
             action: self.action.clone(),
             id: self.id.clone(),
+            name: self.name.clone(),
             count: self.count,
             accept: self.accept,
             limit: self.limit,
@@ -1354,6 +1395,8 @@ impl CoordinationRequest {
                     .flatten()
             }),
             task_id: self.task_id.clone(),
+            status: self.status.clone(),
+            owner: self.owner.clone(),
             delivery_mode: self.delivery_mode.clone(),
             target: self.target.clone().or_else(|| {
                 matches!(self.action.as_str(), "hold_worker" | "release_worker")

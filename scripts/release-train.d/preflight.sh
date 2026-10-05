@@ -36,9 +36,24 @@ cut_preflight_merge_queue_query() {
     printf '%s\n' 'query { repository(owner: "Richards-LLC", name: "cassy") { mergeQueue(branch: "main") { entries(first: 100) { nodes { pullRequest { number title headRefName } } } } } }'
 }
 
+cut_preflight_has_competing_pr() {
+    local own_pr="$1" own_branch="$2"
+    jq -e --arg v "$version" --arg own_pr "$own_pr" --arg own_branch "$own_branch" '
+        any(.[];
+            ($own_pr == "" or ((.number // "") | tostring) != $own_pr)
+            and ($own_branch == "" or (.headRefName // "") != $own_branch)
+            and (((.title // "") + " " + (.headRefName // "")) |
+                 test("release[ /_-]*" + $v + "|v" + $v; "i")))
+    ' >/dev/null 2>&1
+}
+
 cut_preflight_check_competing_release() {
-    local gh="${CAS_RELEASE_TRAIN_GH:-gh}" prs queue query competing
+    local gh="${CAS_RELEASE_TRAIN_GH:-gh}" prs queue query own_pr own_branch
     [[ "${CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING:-}" == 1 ]] && return 0
+    own_pr="$(cat "$run_dir/pr-number.txt" 2>/dev/null || true)"
+    [[ "$own_pr" =~ ^[1-9][0-9]*$ ]] || own_pr=""
+    own_branch="$(git -C "$worktree" branch --show-current 2>/dev/null || true)"
+    [[ "$own_branch" == release/* ]] || own_branch=""
     if ! command -v "$gh" >/dev/null 2>&1; then
         cut_preflight_block competing-release "GitHub CLI $gh is not available"
         return $?
@@ -48,10 +63,7 @@ cut_preflight_check_competing_release() {
         cut_preflight_block competing-release "could not inspect open release PRs with $gh"
         return $?
     fi
-    if command -v jq >/dev/null 2>&1 && printf '%s' "$prs" | jq -e --arg v "$version" '
-        any(.[]; ((.title // "") + " " + (.headRefName // "")) |
-        test("release[ /_-]*" + $v + "|v" + $v; "i"))
-    ' >/dev/null 2>&1; then
+    if printf '%s' "$prs" | cut_preflight_has_competing_pr "$own_pr" "$own_branch"; then
         cut_preflight_block competing-release "an open release PR already targets $version"
         return $?
     fi
@@ -65,10 +77,8 @@ cut_preflight_check_competing_release() {
         cut_preflight_block competing-release "merge queue response did not contain repository.mergeQueue.entries.nodes"
         return $?
     fi
-    competing="$(printf '%s' "$queue" | jq -r \
-        '.data.repository.mergeQueue.entries.nodes[]?.pullRequest
-         | [(.title // ""), (.headRefName // "")] | join(" ")')"
-    if printf '%s' "$competing" | grep -Eiq "release[ /_-]*${version}|v${version}"; then
+    if printf '%s' "$queue" | jq '.data.repository.mergeQueue.entries.nodes | map(.pullRequest)' \
+        | cut_preflight_has_competing_pr "$own_pr" "$own_branch"; then
         cut_preflight_block competing-release "a release pull request is already in the merge queue"
         return $?
     fi
@@ -247,7 +257,8 @@ cut_preflight_check_changelog() {
         return 0
     fi
     if ! grep -Eq '^## \[Unreleased\]' "$changelog"; then
-        cut_preflight_block changelog-heading "CHANGELOG.md has no Unreleased section and no $version heading"
+        cut_preflight_block changelog-heading \
+            "$changelog has no Unreleased section and no $version heading; copy the reviewed section into this release worktree and commit it"
         return $?
     fi
     local tmp="$changelog.cut.$$"
@@ -266,7 +277,7 @@ cut_preflight_check_changelog() {
     ' "$changelog" >"$tmp"
     mv "$tmp" "$changelog"
     cut_preflight_block changelog-heading \
-        "created CHANGELOG.md heading for $version; fill the section, commit it, then resume"
+        "created CHANGELOG.md heading for $version in $worktree; fill this release worktree's section, commit it, then resume"
     return $?
 }
 
@@ -336,6 +347,27 @@ cut_preflight_check_integration() {
     fi
 }
 
+cut_preflight_check_announce_token() {
+    # An external announcer owns its authentication. An embargo deliberately
+    # permits publication while announcement stages remain pending.
+    [[ -n "${CAS_RELEASE_TRAIN_ANNOUNCE_CMD:-}${CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD:-}" ]] && return 0
+    if ! declare -F release_train_announce_proxy_toml >/dev/null 2>&1; then
+        # shellcheck disable=SC1091
+        source "$script_dir/release-train.d/announce.sh"
+    fi
+    release_train_announcement_embargo_active && return 0
+    local output proxy_toml
+    proxy_toml="$(release_train_announce_proxy_toml)"
+    if ! output="$(CAS_RELEASE_TRAIN_PROXY_TOML="$proxy_toml" \
+        python3 "$script_dir/release-train-announce.py" --check-token 2>&1)"; then
+        printf '%s\n' "$output" >"$run_dir/preflight-announce-token.log"
+        printf '%s\n' "$output" >&2
+        cut_preflight_block announce-token \
+            "Violet token resolution failed; set VIOLET_SLACK_TOKEN_ENV to the intended credential variable name; inspect $run_dir/preflight-announce-token.log"
+        return $?
+    fi
+}
+
 cut_preflight_check_receipts() {
     local record commit branch
     while IFS=$'\t' read -r record commit branch; do
@@ -366,6 +398,7 @@ cut_stage_preflight() {
     cut_preflight_check_changelog || return 1
     cut_preflight_check_changelog_lint || return 1
     cut_preflight_check_draft || return 1
+    cut_preflight_check_announce_token || return 1
     cut_preflight_check_integration || return 1
     cut_preflight_check_receipts
     printf 'preflight passed version=%s worktree=%s\n' "$version" "$worktree"

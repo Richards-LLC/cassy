@@ -381,13 +381,16 @@ commit, push unless delivery_mode=local_merge, then `{prefix}task action=close i
 reason=\"...\"` or hand off before starting another. Successful task action=start is authoritative \
 assignment acceptance; no prose ACK is required. Add milestone notes with `{prefix}task \
 action=notes id=<task-id> note_type=progress notes=\"...\"`. Read the cas-worker skill at \
-startup; its conditional references cover checks, delivery and recovery. Load only \
-`{prefix}task` and `{prefix}coordination`; the supervisor `{prefix}factory` tool is not yours, \
-except server_start/server_list for an assigned server task. Ordinary updates reach the \
+startup; its conditional references cover checks, delivery and recovery. Load \
+`{prefix}task` and `{prefix}coordination`. For an assigned QA-pass task, also load \
+`{prefix}verification` and record your own verdict with `{prefix}verification action=qa_record \
+task_id=<delivery-id> status=approved|rejected summary=\"...\" ledger_path=<LEDGER.md>`. \
+Recording the verdict closes the QA task. The supervisor `{prefix}factory` tool is not yours, \
+except server_start/server_list/server_stop (owned servers only) for an assigned server task. Ordinary updates reach the \
 inbox on the next turn. Only authenticated typed blocker, merge, verification or lifecycle \
 events wake an idle supervisor: blocker=true for blockers, merge_request=true for merges. \
 A blocker needs a task note, status=blocked, and `{prefix}coordination action=message \
-target=supervisor blocker=true summary=\"...\" message=\"...\"`. For verification-required close, \
+target=supervisor blocker=true summary=\"...\" message=\"...\"`. For implementation-task verification-required close, \
 ask the supervisor to verify and close on your behalf. For MERGE REQUIRED, request the merge \
 of your delivered branch and SHA, then re-close after it lands; local_merge stays local. \
 WORK HALTED: a legitimate task action=start on your new assignment clears the urgent-stop halt. \
@@ -460,6 +463,8 @@ pub const PROTECTED_OPERATOR_ENV: &[&str] = &[
 // exposing a credential value or adding a public struct field. Pty::spawn
 // consumes it as launch metadata rather than passing it to the child process.
 const WORKER_CREDENTIAL_GRANT_ENV: &str = "CAS_FACTORY_WORKER_CREDENTIAL_GRANT";
+/// Names-only warning consumed in the spawn receipt, never passed to the child.
+pub const WORKER_CREDENTIAL_WARNING_ENV: &str = "CAS_FACTORY_WORKER_CREDENTIAL_WARNING";
 
 fn worker_credential_grant_nonce() -> &'static str {
     static NONCE: OnceLock<String> = OnceLock::new();
@@ -975,6 +980,50 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
+    /// Executable behind the optional `nice` wrapper, without inspecting harness
+    /// arguments such as `--model`. Accept short/long adjustment options and `--`;
+    /// an incomplete or unknown wrapper option leaves the command as `nice`.
+    pub fn effective_command(&self) -> &str {
+        if self.command != "nice" {
+            return &self.command;
+        }
+        let mut args = self.args.iter().map(String::as_str);
+        while let Some(arg) = args.next() {
+            match arg {
+                "--" => {
+                    return args
+                        .next()
+                        .filter(|cmd| !cmd.is_empty())
+                        .unwrap_or(&self.command);
+                }
+                "-n" | "--adjustment" => {
+                    if args
+                        .next()
+                        .and_then(|level| level.parse::<i32>().ok())
+                        .is_none()
+                    {
+                        return &self.command;
+                    }
+                }
+                _ => {
+                    if let Some(level) = arg
+                        .strip_prefix("--adjustment=")
+                        .or_else(|| arg.strip_prefix("-n"))
+                    {
+                        if level.parse::<i32>().is_err() {
+                            return &self.command;
+                        }
+                    } else if arg.starts_with('-') || arg.is_empty() {
+                        return &self.command;
+                    } else {
+                        return arg;
+                    }
+                }
+            }
+        }
+        &self.command
+    }
+
     /// Mark a protected environment name as an explicit worker credential grant.
     ///
     /// Only the factory config builder should call this for names authorized by
@@ -2260,16 +2309,6 @@ pub struct Pty {
     exit_status_pending: bool,
 }
 
-/// Whether a configured command ultimately launches the Codex harness.
-///
-/// Factory workers may be started through `nice -n … codex` to keep a busy
-/// compile from starving the supervisor.  This classification feeds prompt
-/// submission timing as well as the spawn preflight, so it must describe the
-/// executable behind the wrapper rather than only the outer command.
-fn command_launches_codex(command: &str, args: &[String]) -> bool {
-    command == "codex" || (command == "nice" && args.iter().any(|arg| arg == "codex"))
-}
-
 /// Audit the actual executable and its provider's account environment. Do not
 /// infer the worker CLI from the supervisor's inherited metadata.
 #[derive(Debug)]
@@ -2281,6 +2320,7 @@ struct WorkerSpawnAudit<'a> {
     account_env: &'static str,
     account: String,
     source: &'static str,
+    credential_warning: Option<&'a str>,
 }
 
 fn worker_spawn_audit(
@@ -2297,12 +2337,7 @@ fn worker_spawn_audit(
     if env("CAS_AGENT_ROLE") != Some("worker") {
         return None;
     }
-    // This is the exact wrapper emitted by maybe_wrap_with_nice.
-    let cli = if config.command == "nice" && config.args.first().map(String::as_str) == Some("-n") {
-        config.args.get(2).map(String::as_str).unwrap_or("nice")
-    } else {
-        &config.command
-    };
+    let cli = config.effective_command();
     let (account_env, source_env, default) = match cli {
         "claude" => (
             "CLAUDE_CONFIG_DIR",
@@ -2339,15 +2374,19 @@ fn worker_spawn_audit(
         account_env,
         account,
         source,
+        credential_warning: env(WORKER_CREDENTIAL_WARNING_ENV),
     })
 }
 
 impl Pty {
     /// Spawn a new PTY with the given configuration
     pub fn spawn(id: impl Into<String>, mut config: PtyConfig) -> Result<Self> {
+        if let Some((_, reason)) = config.env.iter().find(|(key, _)| key == "CAS_FACTORY_WORKER_LAUNCH_ERROR") {
+            return Err(Error::pty(reason.clone()));
+        }
         config.apply_worker_credential_policy();
         let id = id.into();
-        let is_codex = command_launches_codex(&config.command, &config.args);
+        let is_codex = config.effective_command() == "codex";
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
         // `mcp_servers.cs.command=cas`, but Codex can only launch it if the `cas`
@@ -2395,13 +2434,14 @@ impl Pty {
         }
 
         for (key, value) in &config.env {
-            if key != WORKER_CREDENTIAL_GRANT_ENV {
+            if key != WORKER_CREDENTIAL_GRANT_ENV && key != WORKER_CREDENTIAL_WARNING_ENV {
                 cmd.env(key, value);
             }
         }
         for key in &config.env_remove {
             cmd.env_remove(key);
         }
+        cmd.env_remove(WORKER_CREDENTIAL_WARNING_ENV);
 
         // Strip CLAUDECODE to prevent nested-session detection in spawned Claude CLI
         cmd.env_remove("CLAUDECODE");
@@ -2442,6 +2482,10 @@ impl Pty {
             .map_err(|e| Error::pty(format!("Failed to spawn command: {e}")))?;
 
         if let Some(audit) = worker_spawn_audit(&config, |key| std::env::var(key).ok()) {
+            if let Some(warning) = audit.credential_warning {
+                tracing::warn!(worker = audit.worker, cli = audit.cli, credentials = warning,
+                    "factory worker credential warning; review factory.worker_credential_env");
+            }
             tracing::info!(
                 worker = audit.worker,
                 cli = audit.cli,
@@ -3177,6 +3221,48 @@ mod cpr_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nice_non_codex_spawn_ignores_codex_argument_cas_046c() {
+        let mut pty = Pty::spawn(
+            "nice-harness-probe",
+            PtyConfig {
+                command: "nice".into(),
+                args: ["-n", "10", "sh", "-c", "exit 0", "--model", "codex"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                ..PtyConfig::default()
+            },
+        )
+        .expect("the wrapped shell must spawn");
+        let is_codex = pty.is_codex;
+        pty.child.wait().expect("the probe must exit");
+        assert!(!is_codex, "a model argument must not select Codex prompt timing");
+    }
+
+    #[test]
+    fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
+        for (args, cli, account_env) in [
+            (vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex", "CODEX_HOME"),
+            (vec!["-n10", "claude", "--effort", "high", "--model", "codex"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--", "codex", "--model", "large"], "codex", "CODEX_HOME"),
+        ] {
+            let config = PtyConfig {
+                command: "nice".into(),
+                args: args.into_iter().map(str::to_string).collect(),
+                env: vec![("CAS_AGENT_ROLE".into(), "worker".into())],
+                ..PtyConfig::default()
+            };
+            assert_eq!(config.effective_command() == "codex", cli == "codex", "{:?}", config.args);
+            let audit = worker_spawn_audit(&config, |_| Some("/selected-account".into())).unwrap();
+            assert_eq!(audit.cli, cli);
+            assert_eq!(audit.account_env, account_env);
+            assert_eq!(audit.account, "/selected-account");
+        }
+    }
+
     #[test]
     fn worker_spawn_audit_tracks_launched_cli_and_provider_account() {
         for cli in ["codex", "claude", "grok", "opencode"] {
@@ -3605,6 +3691,25 @@ mod tests {
         };
         supervisor.apply_worker_credential_policy();
         assert!(supervisor.env_remove.is_empty());
+    }
+
+    #[test]
+    fn worker_spawn_receipt_retains_names_only_credential_warning_cas_82bc() {
+        for cli in ["claude", "codex"] {
+            let config = PtyConfig {
+                command: cli.into(),
+                env: vec![
+                    ("CAS_AGENT_ROLE".into(), "worker".into()),
+                    (WORKER_CREDENTIAL_WARNING_ENV.into(),
+                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into()),
+                ],
+                ..Default::default()
+            };
+            let audit = worker_spawn_audit(&config, |_| None).unwrap();
+            assert_eq!(audit.cli, cli);
+            assert_eq!(audit.credential_warning,
+                Some("missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN"));
+        }
     }
 
     #[test]
@@ -5721,9 +5826,14 @@ mod tests {
                 None,
             );
 
-            assert!(command_launches_codex(&config.command, &config.args));
+            assert_eq!(config.effective_command(), "codex");
             assert!(
-                !command_launches_codex("nice", &["-n".into(), "10".into(), "claude".into()]),
+                PtyConfig {
+                    command: "nice".into(),
+                    args: vec!["-n".into(), "10".into(), "claude".into()],
+                    ..PtyConfig::default()
+                }
+                .effective_command() != "codex",
                 "the wrapper test must not classify every niced harness as Codex"
             );
         }

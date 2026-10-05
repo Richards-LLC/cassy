@@ -102,7 +102,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Any close of the palette settles the flag render() reopens it from.
     expect(source).toContain("palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };");
     // Paired machines replaces the palette and clears the flag itself too.
-    expect(source).toContain("const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");
+    // cas-460a: it also remembers its opener so its close can hand focus back.
+    expect(source).toContain("const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");
     // No other code closes the palette dialog behind the flag's back.
     const closes = source.match(/#command-palette['"]\)\?\.close\(\)/g) ?? [];
     expect(closes).toHaveLength(1);
@@ -409,7 +410,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("keeps palette rows project-led while indexing project names and optional session summaries", async () => {
     // Behaviour is pinned in palette-commands.test.ts (cas-cfcb); this keeps main.ts on that one renderer.
     const [source, palette] = await Promise.all([readSource("main.ts"), readFile(new URL("palette-commands.ts", import.meta.url), "utf8")]);
-    expect(source).toContain("sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)))");
+    expect(source).toContain("sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)), { current, needsYou: conversationNeedsYou(machine.id, session.name) })");
     expect(palette).toContain("<span>Jump to ${escapeHtml(project ?? session.name)}</span>");
     expect(palette).toContain('data-search-text="${escapeHtml(searchText)}"');
     expect(source).toContain('command.dataset.searchText ?? ""');
@@ -1040,25 +1041,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows)");
   });
 
-  // Contract: turns a reachable revoked hub into a terminal auth stop.
-  // Consumer: HubConnectionSupervisor and Commander connection view.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("turns a reachable revoked hub into a terminal auth stop", async () => {
-    const source = await readFile(new URL("connection.ts", import.meta.url), "utf8");
-    expect(source).toContain('new URL("/v1/health", this.machine.baseUrl)');
-    expect(source).toContain('mode: "no-cors"');
-    expect(source).toContain("const reachable = await this.hubIsReachable()");
-    expect(source).toContain("if (reachable)");
-    expect(source).toContain("this.desired = false");
-    expect(source).toContain("this.eventAbort?.abort()");
-    expect(source).toContain('this.transition("failed", "auth", { reason: detail, authFailure: kind })');
-    expect(source).toContain("this.callbacks.onAuthFailure?.(kind, detail)");
-  });
-
-  // Contract: turns a reachable hub with opaque authenticated reads into a re-pair stop.
+  // Contract: keeps retrying opaque authenticated reads without claiming a pairing refusal.
   // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("turns a reachable hub with opaque authenticated reads into a re-pair stop", async () => {
+  it("keeps retrying opaque authenticated reads without claiming a pairing refusal", async () => {
     vi.stubGlobal("window", globalThis);
     const { privateKey, publicKey } = await createDeviceKey();
     const machine = {
@@ -1081,20 +1067,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     supervisor.start();
 
-    await vi.waitFor(() => {
-      expect(callbacks.onAuthFailure).toHaveBeenCalledWith(
-        "needs-pairing",
-        "Hub is reachable but this Cassy Cloud is no longer paired. Re-pair to continue.",
-      );
-    });
-    expect(supervisor.snapshot()).toMatchObject({
-      phase: "failed", stage: "auth", authFailure: "needs-pairing",
-    });
-    expect(callbacks.onState).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
-    // cas-d636: an opaque failure is confirmed before it ends the pairing: the
-    // hub still answers its health probe and an authenticated read still fails.
+    await vi.waitFor(() => expect(supervisor.snapshot()).toMatchObject({ phase: "backoff", stage: "auth" }));
+    expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+    expect(supervisor.snapshot().authFailure).toBeUndefined();
+    expect(callbacks.onState).toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
+    // A successful public probe does not classify an opaque fetch rejection.
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
-      "/v1/health", "/v1/machine", "/v1/sessions", "/v1/health", "/v1/machine",
+      "/v1/health", "/v1/machine", "/v1/sessions",
     ]);
     const [main, connectionView] = await Promise.all([
       readSource("main.ts"),
@@ -1312,7 +1291,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Plain words naming the machine (cas-a447), not the protocol retry line.
     // The words now live in connection-state-view so the refusal and the
     // disabled controls share them (journey F9).
-    expect(source).toContain(": lostConnectionBanner(where, snapshot.fatal === true);");
+    expect(source).toContain(": lostConnectionBanner(where, snapshot.fatal === true, snapshot.reason);");
     // cas-d15c: a stream the hub closed below a still-connected machine names the conversation.
     expect(source).toContain("? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)");
     expect(connectionView).toContain("`Lost connection to ${machineLabel}. Reconnecting…`");
@@ -1332,7 +1311,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');
     expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
     // A retrying drop is the banner's to tell; the rail defers to it (cas-90d4).
-    expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)))) return;");
+    expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)), connectionStates.get(machine.id))) return;");
     expect(source).not.toContain('headline: "Terminal transport problem"');
     // While the session is known to be down the banner says so; no toast repeats it over the banner (cas-00cc).
     expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");');

@@ -1,10 +1,12 @@
 import "../src/styles.css";
+import { renderAttentionNoticeFixture } from "./attention-notice";
+import { renderFleetOpsFixture } from "./fleet-ops";
 import { renderConversationFixture } from "./conversations";
 import { attentionCounts, createAttentionItem } from "../src/attention";
 import { renderAttentionPanel } from "../src/attention-view";
-import { renderConnectionSurfaceInto } from "../src/connection-state-view";
+import { lostConnectionBanner, renderConnectionSurfaceInto } from "../src/connection-state-view";
 import { DeferredRenderScheduler } from "../src/deferred-render";
-import { renderFleetBoardInto, type FleetBoardModel } from "../src/fleet-board";
+import { FleetBoardRenderer, renderFleetBoardInto, type FleetBoardModel } from "../src/fleet-board";
 import { pairingDialogCancellationActive } from "../src/pairing-dialog";
 import { pairingExchangeFailure } from "../src/pairing-messages";
 import { pairDialogMarkup } from "../src/pair-dialog-markup";
@@ -18,20 +20,30 @@ import { LaunchSheet, type LaunchHost, type LaunchResult } from "../src/launch-s
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
 
 export const FIXTURE_NAMES = [
-  "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-machine-label-overlong", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
-  "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
-  "conversation-sessions", "conversation-earlier", "conversation-dated", "conversations-sessions",
+  "conversation-attachment", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard",
+  "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
+  "conversations-session-ended",
+  "conversations-session-end-error",
+  "conversation-needs-pairing",
   "fleet-populated",
+  "fleet-twins",
   "fleet-empty",
   "session-canvas",
   "session-workers",
   "transcript",
   "attention-0",
   "attention-12",
+  "attention-notice-details",
+  "fleet-ops-menu",
+  "fleet-ops-confirm",
+  "fleet-ops-undo",
+  "drawer-attention-open",
   "operator-thread",
   "connection-failed-retry",
+  "connection-fatal-browser",
   "pairing-step-1",
   "pairing-email",
   "pairing-code",
@@ -42,6 +54,9 @@ export const FIXTURE_NAMES = [
   "conversation-mic-idle",
   "conversation-mic-listening",
   "conversation-mic-unavailable",
+  "conversation-draft-too-long",
+  "conversation-draft-not-saved",
+  "conversation-unconfirmed-dismissed",
   "conversations-loading",
   "conversations-unpaired",
   "launch-form",
@@ -52,6 +67,8 @@ export const FIXTURE_NAMES = [
   "launch-offline",
   "launch-account",
   "launch-account-unavailable",
+  "launch-account-default-out",
+  "launch-grant-command",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -82,6 +99,19 @@ function session(name: string, supervisor: string, workers: string[], liveness: 
 }
 
 function fleetModel(): FleetBoardModel {
+  if (fixtureName === "fleet-twins") {
+    const machines = [
+      { id: "atlas", label: "Atlas · Linux", state: "live", phase: "Live", selected: true },
+      { id: "attic", label: "Attic · Linux", state: "live", phase: "Live", selected: false },
+      { id: "atlas2", label: "Atlas2 · Linux", state: "live", phase: "Live", selected: false },
+    ];
+    const names = ["brisk-otter-5", "patient-pelican-19", "patient-pelican-9"];
+    return { machines, sessions: machines.flatMap((machine, index) =>
+      (index === 0 ? names : index === 1 ? names.slice(0, 2) : names.slice(2)).map((name) => ({
+        machineId: machine.id, machineLabel: machine.label, session: name, supervisor: name,
+        project: "cas-src", role: "supervisor" as const, workerCount: 0, status: "live", current: false,
+      }))) };
+  }
   const machines = [
     { id: "atlas", label: "Atlas laptop", state: "live", phase: "Live", selected: true },
     { id: "forge", label: "Forge desktop", state: "degraded", phase: "Unsteady", selected: false },
@@ -112,8 +142,8 @@ function attentionItems(count: number): AttentionItem[] {
   }));
 }
 
-function renderRail(machineCount: number): HTMLElement {
-  const navigation = element("aside", "machine-navigation");
+function renderRail(machineCount: number, drawerOpen = false): HTMLElement {
+  const navigation = element("aside", `machine-navigation${drawerOpen ? " drawer-open" : ""}`);
   navigation.setAttribute("aria-label", "Machines and sessions");
   const rail = element("div", "machine-rail");
   const mark = button("", "rail-control commander-mark");
@@ -133,13 +163,32 @@ function renderRail(machineCount: number): HTMLElement {
   rail.append(pair);
   navigation.append(rail);
   const drawer = element("div", "machine-drawer");
-  drawer.setAttribute("aria-hidden", "true");
-  drawer.setAttribute("inert", "");
+  if (!drawerOpen) {
+    drawer.setAttribute("aria-hidden", "true");
+    drawer.setAttribute("inert", "");
+  }
   const drawerHeader = element("header", "drawer-header");
   drawerHeader.append(element("strong"), button("", "drawer-close"));
   const drawerTree = element("nav");
   drawerTree.id = "machine-tree";
   drawerTree.setAttribute("aria-label", "Machine sessions");
+  // cas-bad9: the open drawer lists every machine and the selected machine's
+  // sessions, in main.ts machineTreeGroup's markup, so a phone render shows
+  // whether anything paints over a row.
+  if (drawerOpen) {
+    for (const [index, machine] of ["Atlas laptop", "Forge desktop", "Studio Mac"].entries()) {
+      const group = element("section", `machine-group${index === 0 ? " active" : ""}`);
+      const row = button("", "machine-row");
+      row.append(element("span", `machine-state ${index === 1 ? "degraded" : "live"}`), element("strong", undefined, machine), element("small", undefined, index === 1 ? "Reconnecting" : "live"));
+      group.append(row);
+      if (index === 0) {
+        const sessions = element("div", "session-tree");
+        sessions.append(button("cas-src · bright-otter", "nav-item active"), button("gabber-studio · calm-otter", "nav-item"));
+        group.append(sessions);
+      }
+      drawerTree.append(group);
+    }
+  }
   drawer.append(drawerHeader, drawerTree);
   navigation.append(drawer);
   return navigation;
@@ -151,7 +200,7 @@ function renderHeader(openSession: boolean): HTMLElement {
   const heading = element("h1", openSession ? "toolbar-session-title" : undefined);
   const picker = button("", "session-picker-toggle");
   picker.append(
-    element("span", "session-picker-name", openSession ? (["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
+    element("span", "session-picker-name", openSession ? (["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "drawer-attention-open"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
     element("span", "session-picker-caret", "▾"),
   );
   picker.lastElementChild?.setAttribute("aria-hidden", "true");
@@ -371,7 +420,7 @@ function appendOpenPairingDialog(view: PairingFixture): void {
   }
 }
 
-type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-offline" | "launch-account" | "launch-account-unavailable";
+type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-grant-command" | "launch-offline" | "launch-account" | "launch-account-unavailable" | "launch-account-default-out";
 
 /**
  * The production New session sheet (LaunchSheet, cas-0f51) driven through its
@@ -385,9 +434,10 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     machines: () => [
       // cas-0e14: the offline view's machine is reconnecting.
       { id: "atlas", label: "Atlas · Linux", scopes: [...control, "session-launch"], ...(view === "launch-offline" ? { connection: "Reconnecting" } : {}) },
-      { id: "studio", label: "Studio Mac · macOS", scopes: control },
+      // cas-cee5: a read-only pairing cannot allow launch here, so the sheet shows the command to run on the machine.
+      { id: "studio", label: "Studio Mac · macOS", scopes: view === "launch-grant-command" ? ["machine-read", "session-read"] : control },
     ],
-    currentMachineId: () => (view === "launch-grant" ? "studio" : "atlas"),
+    currentMachineId: () => (view === "launch-grant" || view === "launch-grant-command" ? "studio" : "atlas"),
     origin: window.location.origin,
     projects: async () => ({
       projects: [
@@ -399,7 +449,9 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     }),
     profiles: async () => ({
       claude: { installed: true, profiles: [
-        { name: "main", logged_in: true, is_default: true },
+        // cas-c107: the default account logged out, so one row shows the
+        // account's "Default" beside the logged-out Copy control.
+        { name: "main", logged_in: view !== "launch-account-default-out", is_default: true },
         { name: "support@petrastella.io", logged_in: true, is_default: false },
         { name: "customer-success-escalations@petrastella-international.example", logged_in: true, is_default: false },
         { name: "old@petrastella.io", logged_in: false, is_default: false },
@@ -419,7 +471,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     copy: async () => {},
   };
   const sheet = new LaunchSheet(host);
-  sheet.open(view === "launch-grant" ? "studio" : "atlas");
+  sheet.open(view === "launch-grant" || view === "launch-grant-command" ? "studio" : "atlas");
   const dialog = document.querySelector<HTMLDialogElement>("#launch-dialog");
   if (!dialog?.open) throw new Error("Launch fixture sheet did not open");
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -430,7 +482,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     dialog.querySelector<HTMLInputElement>('[data-launch-list="browse"] input[type=radio]')?.click();
     return;
   }
-  if (view === "launch-account" || view === "launch-account-unavailable") {
+  if (view === "launch-account" || view === "launch-account-unavailable" || view === "launch-account-default-out") {
     dialog.querySelector<HTMLInputElement>('[data-launch-list="known"] input[type=radio]')!.click();
     if (view === "launch-account-unavailable") dialog.querySelector<HTMLInputElement>('input[name="launch-cli"][value="codex"]')!.click();
     else dialog.querySelector<HTMLInputElement>('input[name="launch-account"][value^="customer-success"]')!.click();
@@ -447,8 +499,9 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
 
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
-  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry"].includes(fixtureName);
-  const shell = element("div", `shell ${["session-canvas", "session-workers", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}`);
+  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry", "connection-fatal-browser", "drawer-attention-open"].includes(fixtureName);
+  const drawerOpen = fixtureName === "drawer-attention-open";
+  const shell = element("div", `shell ${["session-canvas", "session-workers", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}${drawerOpen ? " drawer-open" : ""}`);
   shell.dataset.fixture = fixtureName;
   const signature = shellSignature({
     machineId: machineCount ? "atlas" : undefined,
@@ -456,7 +509,7 @@ function renderShell(): void {
     machineIds: machineCount ? ["atlas", "forge"] : [],
     sessionKeys: openSession ? ["atlas/bright-otter"] : [],
     catalogLoaded: true,
-    drawerOpen: false,
+    drawerOpen,
     attentionCollapsed: false,
     contextTab: "attention",
     fleetEmpty: fixtureName === "fleet-empty",
@@ -474,14 +527,15 @@ function renderShell(): void {
   const scheduler = new DeferredRenderScheduler({ render: () => {}, afterGesture: (run) => run() });
   scheduler.settled();
   shell.dataset.renderSignature = signature;
-  shell.append(renderRail(machineCount));
+  shell.append(renderRail(machineCount, drawerOpen));
   const main = element("main");
   main.append(renderHeader(openSession));
-  if (fixtureName === "fleet-populated") {
+  if (fixtureName === "fleet-populated" || fixtureName === "fleet-twins") {
     const grid = element("section", "pane-grid");
     const board = element("div", "fleet-board");
     board.setAttribute("aria-label", "Fleet");
-    renderFleetBoardInto(board, fleetModel(), { open: () => {} });
+    if (fixtureName === "fleet-twins") new FleetBoardRenderer().render(board, fleetModel(), { open: () => {} });
+    else renderFleetBoardInto(board, fleetModel(), { open: () => {} });
     grid.append(board);
     main.append(grid);
   } else if (fixtureName === "fleet-empty") {
@@ -501,7 +555,7 @@ function renderShell(): void {
     secondary.append(collapsed, renderTerminalPlaceholder("steady-badger", "worker", true));
     grid.append(primary, secondary);
     main.append(grid);
-  } else if (["session-canvas", "attention-0", "attention-12", "operator-thread"].includes(fixtureName)) {
+  } else if (["session-canvas", "attention-0", "attention-12", "operator-thread", "drawer-attention-open"].includes(fixtureName)) {
     // The default view: supervisor only, with the hidden-workers line (cas-6261).
     const grid = element("section", "pane-grid pane-layout workers-hidden");
     const primary = element("div", "primary-pane-slot");
@@ -516,6 +570,17 @@ function renderShell(): void {
     primary.append(renderTranscript());
     grid.append(primary, element("div", "secondary-pane-strip"));
     main.append(grid);
+  } else if (fixtureName === "connection-fatal-browser") {
+    const grid = element("section", "pane-grid pane-layout single-pane terminal-disconnected");
+    const primary = element("div", "primary-pane-slot");
+    primary.append(renderTranscript());
+    const banner = element("div", "terminal-disconnected-banner");
+    banner.setAttribute("role", "status");
+    banner.dataset.scope = "machine";
+    banner.append(element("span", "banner-text", lostConnectionBanner("Atlas · Linux", true,
+      "This browser is missing AbortSignal.timeout, which Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer.")));
+    grid.append(banner, primary, element("div", "secondary-pane-strip"));
+    main.append(grid);
   } else if (fixtureName === "connection-failed-retry") {
     main.append(renderConnection());
   } else {
@@ -527,7 +592,7 @@ function renderShell(): void {
     main.append(grid);
   }
   shell.append(main);
-  if (["attention-0", "attention-12", "operator-thread"].includes(fixtureName)) shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
+  if (["attention-0", "attention-12", "operator-thread", "drawer-attention-open"].includes(fixtureName)) shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
   app.replaceChildren(shell);
   renderRestingToast();
   if (fixtureName.startsWith("pairing")) appendOpenPairingDialog(fixtureName as PairingFixture);
@@ -541,5 +606,7 @@ function renderShell(): void {
   }
 }
 
-if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines" || fixtureName === "paired-machines-down") renderConversationFixture(app, fixtureName);
+if (fixtureName === "attention-notice-details") renderAttentionNoticeFixture(app);
+else if (fixtureName.startsWith("fleet-ops-")) renderFleetOpsFixture(app, fixtureName);
+else if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines" || fixtureName === "paired-machines-down") renderConversationFixture(app, fixtureName);
 else renderShell();

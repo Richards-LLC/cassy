@@ -491,6 +491,7 @@ fn is_control_scope(scope: Scope) -> bool {
             | Scope::SessionLaunch
             | Scope::MessageSend
             | Scope::PaneInterrupt
+            | Scope::FactoryOperate
             | Scope::FactoryManage
             | Scope::HubAdmin
     )

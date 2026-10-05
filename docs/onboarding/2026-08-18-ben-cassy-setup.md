@@ -95,7 +95,7 @@ project with one resolvable default team is adopted automatically.
 ## 5. Run Commander hub as a service
 
 The hub is the machine-local service that pairs with
-`https://hub.petrastella.io`. It binds to loopback. Tailscale Serve is optional
+`https://hub.petrastella.io`. It binds to loopback. Tailscale Serve is requested by default
 and exposes it to the Petra Stella tailnet over HTTPS.
 
 ```zsh
@@ -107,12 +107,13 @@ cas hub pair
 ```
 
 On macOS, this installs a user-level `launchd` service that starts at login and
-survives reboots, but remains loopback-only because Tailscale Serve cannot
-publish from launchd's bootstrap namespace. For Commander pairing, run
-`cas hub service uninstall && cas hub start --tailscale-serve` from an
-interactive shell. In Commander, choose **Pair a machine** and complete the
-code flow. `cas hub service uninstall` removes supervision without deleting hub
-identity or approved devices.
+survives reboots, requesting Tailscale Serve by default. Check `cas hub status`
+for `Tailscale Serve: OK` before pairing from a phone. If the selected Tailscale
+CLI cannot publish in the LaunchAgent session, the hub stays loopback-only;
+check `tailscale status` and retry `cas hub restart`. Use `--no-tailscale-serve`
+or host `[hub] tailscale_serve = false` for loopback-only use. In Commander,
+choose **Pair a machine** and complete the code flow. `cas hub service uninstall`
+removes supervision without deleting hub identity or approved devices.
 
 ## 6. Install `cas-update` for source-checkout maintenance
 

@@ -29,6 +29,7 @@ fn spec(name: &str, command: &str, cwd: &Path, shared: bool) -> ServerSpec {
         expected_port: None,
         owner_task: Some("cas-7c93".to_string()),
         owner_worker: Some("young-finch-81".to_string()),
+        owner_agent_id: None,
         factory_session: Some("registry-test".to_string()),
         shared,
     }
@@ -302,7 +303,7 @@ fn started_server_is_reparented_and_never_a_zombie_child() {
     let cas_root = temp.path().to_path_buf();
     let record = start(
         &cas_root,
-        &spec("short-lived", "sleep 0.2", temp.path(), false),
+        &spec("short-lived", "sleep 0.5", temp.path(), false),
     )
     .unwrap();
 
@@ -323,7 +324,7 @@ fn stop_does_not_claim_a_legacy_wrapper_is_the_whole_workload() {
     let cas_root = temp.path().to_path_buf();
     let mut record = start(
         &cas_root,
-        &spec("legacy-gone", "sleep 0.02", temp.path(), false),
+        &spec("legacy-gone", "sleep 0.4", temp.path(), false),
     )
     .unwrap();
     assert!(wait_until_gone(record.pid));
@@ -451,7 +452,7 @@ fn server_output_is_captured_to_a_log_not_inherited() {
         &cas_root,
         &spec(
             "chatty",
-            "echo hello-from-server; sleep 0.1",
+            "echo hello-from-server; sleep 0.5",
             temp.path(),
             false,
         ),
@@ -724,4 +725,201 @@ fn shared_server_uses_a_sibling_scope_that_survives_worker_reap() {
     let outcome = super::stop_with_scope_ops(&cas_root, &shared, &scope_ops).unwrap();
     assert!(matches!(outcome, StopOutcome::Stopped { .. }));
     assert!(wait_until_gone(shared.pid));
+}
+
+/// Docker workloads belong to the daemon, outside the client's process group.
+#[cfg(unix)]
+fn docker_stop_fixture(client_gone: bool, reused: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let docker = temp.path().join("docker");
+    let daemon_pid = temp.path().join("daemon.pid");
+    let stopped = temp.path().join("stopped");
+    fs::write(&docker, format!(r#"#!/bin/sh
+case "$1" in
+run)
+  shift
+  cidfile=""
+  if [ "$1" = "--cidfile" ]; then cidfile="$2"; shift 2; fi
+  /usr/bin/python3 -c 'import subprocess; print(subprocess.Popen(["sleep", "300"], start_new_session=True).pid)' > '{pid}'
+  if [ -n "$cidfile" ]; then printf '%064d' 1 > "$cidfile"; fi
+  sleep 300
+  ;;
+stop)
+  kill "$(cat '{pid}')"
+  printf '%s' "$3" > '{stopped}'
+  ;;
+inspect)
+  if [ -f '{stopped}' ]; then printf 'false\n'; else printf 'true\n'; fi
+  ;;
+esac
+"#, pid=daemon_pid.display(), stopped=stopped.display())).unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+    let cas_root = temp.path().join("registry");
+    let mut record = start(
+        &cas_root,
+        &spec(
+            "docker",
+            &format!("{} run --rm example", docker.display()),
+            temp.path(),
+            true,
+        ),
+    )
+    .unwrap();
+    for _ in 0..100 {
+        if fs::read_to_string(&daemon_pid).is_ok_and(|s| s.trim().parse::<u32>().is_ok()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let pid: u32 = fs::read_to_string(&daemon_pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    struct ContainerGuard(u32);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0 as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+    let _guard = ContainerGuard(pid);
+    if client_gone {
+        terminate_server(&record, &FakeScopeOps::default()).unwrap();
+        record.cgroup = None;
+        record.state = ServerState::Dead;
+        write_record(&cas_root, &record).unwrap();
+    }
+    if reused {
+        let original = record.clone();
+        record.pid = std::process::id();
+        record.pid_starttime = Some(0);
+        let result = stop(&cas_root, &record).unwrap();
+        assert!(matches!(result, StopOutcome::RefusedUnverified(_)));
+        // Our live test process proves the unrelated replacement was spared.
+        terminate_server(&original, &FakeScopeOps::default()).unwrap();
+    } else {
+        stop(&cas_root, &record).unwrap();
+    }
+    assert!(
+        wait_until_gone(pid),
+        "server_stop leaked daemon-owned container pid {pid}"
+    );
+    assert_eq!(
+        fs::read_to_string(stopped).unwrap(),
+        format!("{:064}", 1),
+        "stop must target the captured immutable container ID"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_9723_stop_docker_run_reaps_daemon_owned_container() {
+    docker_stop_fixture(false, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_9723_stop_docker_run_after_client_exit() {
+    docker_stop_fixture(true, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_9723_stop_docker_container_spares_reused_client_pid() {
+    docker_stop_fixture(false, true);
+}
+
+#[cfg(unix)]
+fn detached_docker_start_fixture(running: Option<bool>) {
+    let temp = tempfile::tempdir().unwrap();
+    let docker = temp.path().join("docker");
+    let state = temp.path().join("running");
+    let inspected_id = temp.path().join("inspected-id");
+    fs::write(
+        &state,
+        match running {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "removed",
+        },
+    )
+    .unwrap();
+    // An explicit executable exercises Docker dispatch without changing PATH
+    // for parallel tests. The run client exits before the startup grace.
+    crate::test_paths::warm_stub(
+        &docker,
+        &format!(
+            r#"#!/bin/sh
+case "$1" in
+run)
+  printf '%064d' 1 > "$3"
+  printf 'detached container diagnostic\n'
+  printf '%064d\n' 1
+  exit 0
+  ;;
+inspect)
+  printf '%s' "$3" > '{inspected}'
+  if [ "$(cat '{state}')" = removed ]; then
+    printf 'Error: No such object: removed-id\n' >&2
+    exit 1
+  fi
+  cat '{state}'
+  ;;
+stop) printf 'false' > '{state}' ;;
+esac
+"#,
+            inspected = inspected_id.display(),
+            state = state.display(),
+        ),
+    );
+    let cas_root = temp.path().join("registry");
+    let result = start(
+        &cas_root,
+        &spec(
+            "detached",
+            &format!("{} run --detach example", docker.display()),
+            temp.path(),
+            true,
+        ),
+    );
+    if running == Some(true) {
+        let record = result.expect("a running container survives its exited client");
+        assert_eq!(record.state, ServerState::Running);
+        assert_ne!(liveness(&record), ServerLiveness::Live);
+        assert_eq!(fs::read_to_string(&state).unwrap(), "true");
+        assert_eq!(
+            fs::read_to_string(&inspected_id).unwrap(),
+            format!("{:064}", 1),
+            "startup must inspect the captured immutable container ID"
+        );
+        stop(&cas_root, &record).unwrap();
+        assert_eq!(fs::read_to_string(&state).unwrap(), "false");
+    } else {
+        let error = result.expect_err("an exited container must fail startup");
+        assert!(error.to_string().contains("detached container diagnostic"));
+        let records = list(&cas_root).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, ServerState::Dead);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_7694_detached_docker_start_checks_container_instead_of_client() {
+    detached_docker_start_fixture(Some(true));
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_7694_detached_docker_exited_container_fails_with_log_tail() {
+    detached_docker_start_fixture(Some(false));
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_7694_detached_docker_missing_container_fails_with_log_tail() {
+    detached_docker_start_fixture(None);
 }

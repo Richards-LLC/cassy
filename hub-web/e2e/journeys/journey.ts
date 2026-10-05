@@ -7,15 +7,20 @@
 // scripts/journey-eval.sh adds trace.zip, trace-actions.txt and bundle.json,
 // the cas-qa-craft evidence-bundle shape with producer "journey".
 import { test as base, expect, type Page } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
 import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
+import { claimReceiptDirectory } from "./receipt-directory.mjs";
 
 export { expect };
 
-export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? fileURLToPath(new URL("../.results/journeys", import.meta.url)));
+// The default receipt root sits inside the Playwright output directory
+// (JOURNEY_OUTPUT or e2e/.results), which Playwright empties at the start of
+// every run, so a rerun never finds the previous run's receipt claims.
+// journey-eval.sh passes its own fresh JOURNEY_RECEIPTS directory.
+export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? join(process.env.JOURNEY_OUTPUT ?? fileURLToPath(new URL("../.results", import.meta.url)), "journeys"));
 
 type Stage = { title: string; slug: string; ms: number; screenshot: string };
 
@@ -40,8 +45,37 @@ function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
 }
 
-export const test = base.extend<{ journey: Journey }>({
-  page: async ({ page }, use) => {
+/**
+ * The keyboard platform a journey's browser declares (cas-2a33). Commander
+ * names the palette chord from navigator.userAgentData.platform, else
+ * navigator.platform (applePlatform): "⌘K" on Apple, "Ctrl K" elsewhere.
+ * The Desktop Chrome device only overrides the user agent, so what a run saw
+ * depended on the host: a Windows UA beside a real "MacIntel" platform, and
+ * on some Chromium builds no userAgentData at all, so a macOS host read ⌘K
+ * where a Linux CI host read Ctrl K. Every journey now declares one platform,
+ * consistently in both properties: Linux by default, and macOS where a test
+ * asks for it with test.use({ journeyPlatform: "mac" }).
+ */
+export type JourneyPlatform = "linux" | "mac";
+
+const PLATFORM_NAMES: Record<JourneyPlatform, { platform: string; uaPlatform: string }> = {
+  linux: { platform: "Linux x86_64", uaPlatform: "Linux" },
+  mac: { platform: "MacIntel", uaPlatform: "macOS" },
+};
+
+export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlatform }>({
+  journeyPlatform: ["linux", { option: true }],
+  page: async ({ page, journeyPlatform }, use) => {
+    await page.addInitScript(({ platform, uaPlatform }) => {
+      const real = (navigator as unknown as { userAgentData?: object }).userAgentData;
+      const data = real
+        ? new Proxy(real, { get: (target, key) => key === "platform" ? uaPlatform : Reflect.get(target, key, target) })
+        : { platform: uaPlatform, mobile: false, brands: [] };
+      // On the navigator itself, so it shadows whatever the host's Chromium
+      // puts on Navigator.prototype (or leaves off it).
+      Object.defineProperty(navigator, "platform", { get: () => platform, configurable: true });
+      Object.defineProperty(navigator, "userAgentData", { get: () => data, configurable: true });
+    }, PLATFORM_NAMES[journeyPlatform]);
     // Install before navigation; time flows normally from a known instant.
     // Freezing Date would stop the app aging receipts and heartbeat deadlines.
     await page.clock.install({ time: startJourneyClock() });
@@ -62,7 +96,7 @@ export const test = base.extend<{ journey: Journey }>({
       ? testInfo.title.replace(/^[A-Z]+-J[0-9]+\s*/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96)
       : undefined;
     const dir = part ? join(RECEIPTS, id, "parts", part) : join(RECEIPTS, id);
-    mkdirSync(dir, { recursive: true });
+    claimReceiptDirectory(dir, testInfo.title);
     const stages: Stage[] = [];
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));

@@ -10,6 +10,9 @@ const TAIL_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Liveness {
+    /// cas-5129 (GH #1054): a live Claude harness with no transcript yet. Its
+    /// session has never received a prompt, which is not the same as working.
+    AwaitingFirstPrompt,
     Executing,
     WaitingForInput,
     BudgetAborted,
@@ -19,6 +22,7 @@ pub(crate) enum Liveness {
 impl Liveness {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::AwaitingFirstPrompt => "awaiting_first_prompt",
             Self::Executing => "executing",
             Self::WaitingForInput => "waiting_for_input",
             Self::BudgetAborted => "budget_aborted",
@@ -251,8 +255,15 @@ pub(crate) fn observe(
         .and_then(|p| p.metadata().ok())
         .and_then(|m| m.modified().ok())
         .map(|at| (now - DateTime::<Utc>::from(at)).num_seconds().max(0));
+    // cas-5129: Claude writes its transcript on the first prompt, so a live
+    // Claude harness without one has not started a session. Report that
+    // rather than reading a booting TUI's CPU as `executing`.
+    let claude_without_transcript =
+        cli == SupervisorCli::Claude && path.is_none_or(|path| !path.exists());
     let state = if process.alive == Some(false) {
         Liveness::Dead
+    } else if last.is_none() && claude_without_transcript {
+        Liveness::AwaitingFirstPrompt
     } else if let Some(event) = &last {
         if event.state == Liveness::Executing
             && (now - event.at).num_seconds() > stall_secs

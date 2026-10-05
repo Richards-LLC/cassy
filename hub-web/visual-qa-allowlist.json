@@ -83,12 +83,22 @@
     {
       "type": "clipped-content",
       "selector": "#paired-machines-toggle > .machine-badge-state",
-      "reason": "cas-0739 accepts the single-line phone footer's outage-state ellipsis for a long machine name: the span carries the full words as its title and in the button's spoken name, and Paired machines opens on that machine."
+      "reason": "cas-0739 accepts the single-line phone footer's outage-state ellipsis for a long machine name; since cas-cae9 the outage words lead (\"Can't reach Build Server…\"), so the ellipsis shortens the name, never the verb. The span carries the full words as its title and in the button's spoken name, and Paired machines opens on that machine."
     },
     {
       "type": "content-overflow",
       "selector": "#paired-machines-toggle > .machine-badge-state",
-      "reason": "cas-0739 accepts the single-line phone footer's outage-state ellipsis for a long machine name: the span carries the full words as its title and in the button's spoken name, and Paired machines opens on that machine."
+      "reason": "cas-0739 accepts the single-line phone footer's outage-state ellipsis for a long machine name; since cas-cae9 the outage words lead (\"Can't reach Build Server…\"), so the ellipsis shortens the name, never the verb. The span carries the full words as its title and in the button's spoken name, and Paired machines opens on that machine."
+    },
+    {
+      "type": "clipped-content",
+      "selector": "#paired-machines-toggle > span:nth-child(2)",
+      "reason": "cas-c19d accepts the single-line phone footer's ellipsis on an overlong machine name (about 691px at 390): the label carries the full name as its title and in the button's spoken name, the 8px gap and the state stay visible, and Paired machines shows the name whole."
+    },
+    {
+      "type": "content-overflow",
+      "selector": "#paired-machines-toggle > span:nth-child(2)",
+      "reason": "cas-c19d accepts the shared runner's companion overflow finding for the same overlong-machine-name ellipsis: the label carries the full name as its title and in the button's spoken name, and Paired machines shows the name whole."
     }
   ]
 }

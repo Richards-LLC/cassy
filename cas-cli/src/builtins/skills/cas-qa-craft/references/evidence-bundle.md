@@ -78,8 +78,13 @@ journey evaluation scores polish for it.
   carry no credential: no storage state, cookie, session JWT, bearer token
   or auth header, including the headers Playwright records in `trace.zip`'s
   network log. Close refuses such a bundle and names the file, never the
-  value. Log in through a setup project that is not traced, and redact
-  header values before listing the trace.
+  value. Log in through a setup project that is not traced. Before listing
+  the trace, replace each entire cookie or authorization value with exactly
+  `REDACTED`, `[REDACTED]`, `<redacted>`, `***`, or an empty value. These
+  placeholders pass in JSON headers, text headers and cookie arrays; a real
+  value of 8 or more characters is refused. A placeholder embedded in a real
+  value does not exempt it. Saved storage-state files, session JWTs, bearer
+  tokens and API tokens remain refused.
 
 ## Config
 

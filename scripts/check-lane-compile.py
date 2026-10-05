@@ -157,14 +157,26 @@ def prove(repo, target, source):
                      input=b"Capped lane compile preview\n", env=env)
         with tempfile.TemporaryDirectory(prefix="lane-compile-", dir=previews) as scratch:
             preview = Path(scratch) / "preview"
+            # Durable provenance plus an OS lifetime lock lets explicit GC
+            # distinguish a crashed preview from a live proof. Naming alone
+            # must never authorize checkout removal.
+            owner = (Path(scratch) / ".cas-lane-compile.lock").open("a")
+            fcntl.flock(owner, fcntl.LOCK_EX)
+            (Path(scratch) / ".cas-lane-compile.json").write_text(json.dumps({
+                "version": 1, "git_common_dir": str(common_dir(repo)), "head": commit,
+            }) + "\n")
             try:
                 git(repo, "worktree", "add", "--detach", str(preview), commit, stderr=subprocess.STDOUT)
                 package_args = [arg for package in packages for arg in ("-p", package)]
-                for selector in ("--lib", "--tests"):
+                for index, selector in enumerate(("--lib", "--tests")):
                     command = [os.environ.get("CAS_LANE_CHECK_CAS", "cas"), "factory", "worker-check",
                                "--cas-root", str(root), "--", *package_args, selector]
                     print("Capped check: " + shlex.join(command), flush=True)
-                    subprocess.run(command, cwd=preview, env=env, check=True)
+                    # cas-f616: a later step continues the PASS just recorded at this
+                    # commit, so the load its predecessor raised does not refuse it.
+                    # worker-check verifies that PASS; the builder cap still applies.
+                    step_env = dict(env, CAS_WORKER_CHECK_CONTINUES_PASS="1") if index else env
+                    subprocess.run(command, cwd=preview, env=step_env, check=True)
                     key = hashlib.sha256(os.fsencode(preview.resolve())).hexdigest()
                     worker_receipt = root / "worker-checks" / key / f"{commit}.json"
                     try:
@@ -190,8 +202,12 @@ def prove(repo, target, source):
                 temporary.write_text(json.dumps(proof, sort_keys=True) + "\n")
                 temporary.replace(path)
             finally:
-                if preview.exists():
-                    git(repo, "worktree", "remove", "--force", str(preview))
+                try:
+                    if preview.exists():
+                        git(repo, "worktree", "remove", "--force", str(preview))
+                finally:
+                    fcntl.flock(owner, fcntl.LOCK_UN)
+                    owner.close()
         require(repo, base, source_sha, tree)
 
 

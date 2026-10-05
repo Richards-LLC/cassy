@@ -67,8 +67,8 @@ export type AskRetirement = "dismissed" | "session-ended";
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
- * event sorted after a turn stamped by a clock that runs ahead keeps its own
- * time on screen (cas-ac1f). */
+ * event keeps its own time (cas-ac1f), and a reloaded turn keeps the time this
+ * browser recorded even if the machine's stamp changed (cas-940f). */
 /** `clockAhead` marks a live supervisor turn from a machine whose clock this
  * thread has seen running ahead: its time is the arrival time, as a reloaded
  * copy of it would show, and says so the same way (cas-1f13). */
@@ -78,7 +78,11 @@ export type AskRetirement = "dismissed" | "session-ended";
  * counts from a later reply's arrival (cas-1185), and a machine stamp later
  * than the arrival shows the arrival instead, so it cannot drift with the
  * render clock (cas-1f13). */
-export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; arrivedAt?: number; clockAhead?: boolean; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; arrivedAt?: number; clockAhead?: boolean; session?: string };
+/** `seenLive` marks a supervisor turn this browser saw arrive live, in this
+ * visit or an earlier one: its arrival is a time this browser observed, so it
+ * carries the mark that visit gave it instead of one derived from the
+ * machine's stamp (cas-9e33). */
+export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; arrivedAt?: number; clockAhead?: boolean; seenLive?: boolean; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; arrivedAt?: number; clockAhead?: boolean; seenLive?: boolean; session?: string };
 
 /**
  * The machine's durable sequence for a turn: its prompt-queue row id. Operator
@@ -137,19 +141,55 @@ export class ConversationHistory {
   private readonly arrivals = new Map<string, number>();
   /** Turns this page saw arrive live: only they measure the machine's lead. */
   private readonly liveArrivals = new Set<string>();
+  /**
+   * Supervisor turns a visit saw arrive live, and whether it marked each
+   * "machine clock ahead" (cas-9e33). A reload shows the mark the visit
+   * showed: a first turn from a machine not yet known to run ahead stays
+   * unmarked, and one the visit marked stays marked.
+   */
+  private readonly liveMarks = new Map<string, boolean>();
   private skewMs?: number;
 
   /** Seed the times a previous visit recorded (cas-8d52). */
-  seedArrivals(arrivals: { skew?: number; at: Record<string, number> }): void {
+  seedArrivals(arrivals: { skew?: number; at: Record<string, number>; live?: Record<string, boolean> }): void {
     for (const [key, at] of Object.entries(arrivals.at)) if (!this.arrivals.has(key)) this.arrivals.set(key, at);
+    for (const [key, marked] of Object.entries(arrivals.live ?? {})) if (!this.liveMarks.has(key)) this.liveMarks.set(key, marked);
     if (this.skewMs === undefined && arrivals.skew !== undefined) this.skewMs = arrivals.skew;
   }
 
-  /** What to keep for the next visit: the newest turns' times and the measured lead. */
-  arrivalsRecord(limit = 400): { skew?: number; at: Record<string, number> } {
+  /** What to keep for the next visit: the newest turns' times, the measured lead and the live turns' marks. */
+  arrivalsRecord(limit = 400): { skew?: number; at: Record<string, number>; live?: Record<string, boolean> } {
     const at: Record<string, number> = {};
     for (const [key, value] of [...this.arrivals].sort(([, a], [, b]) => a - b).slice(-limit)) at[key] = value;
-    return { ...(this.skewMs === undefined ? {} : { skew: this.skewMs }), at };
+    const live: Record<string, boolean> = {};
+    for (const [key, marked] of this.liveMarks) if (key in at) live[key] = marked;
+    return { ...(this.skewMs === undefined ? {} : { skew: this.skewMs }), at, ...(Object.keys(live).length ? { live } : {}) };
+  }
+
+  /**
+   * The machine clock's measured lead over this browser (ms, positive when
+   * ahead), once a turn seen live has come back with the machine's stamp.
+   */
+  machineLead(): number | undefined {
+    return this.skewMs;
+  }
+
+  /**
+   * The thread's newest confirmed activity, at the time the thread shows it
+   * (cas-24fe): a turn's arrival here, never a machine stamp that reads in
+   * this browser's future. Only confirmed turns count (cas-b00c): a supervisor
+   * turn, or an operator message the machine acknowledged.
+   */
+  lastActivityAt(): number | undefined {
+    let latest: number | undefined;
+    for (const event of this.events) {
+      if (event.kind === "send" && event.value.notificationId === undefined) continue;
+      const at = event.shownAt ?? event.at;
+      if (at === undefined || !Number.isFinite(at)) continue;
+      const shown = Math.min(at, event.arrivedAt ?? at);
+      if (latest === undefined || shown > latest) latest = shown;
+    }
+    return latest;
   }
 
   /**
@@ -160,12 +200,13 @@ export class ConversationHistory {
   private arrivalFor(key: string, stamped: number | undefined, now: number): number {
     const seen = this.arrivals.get(key);
     if (seen !== undefined) {
-      if (stamped !== undefined && this.liveArrivals.has(key)) this.skewMs = stamped - seen;
+      if (stamped !== undefined && (this.liveArrivals.has(key) || this.liveMarks.has(key))) this.skewMs = stamped - seen;
       return Math.min(seen, now);
     }
     const shown = stamped !== undefined && this.skewMs !== undefined ? Math.min(stamped - this.skewMs, now) : now;
-    // The time this visit shows it is the time the next visit shows it.
-    this.arrivals.set(key, shown);
+    // Keep the time actually displayed, not a later history-page hydration
+    // time: that record becomes authoritative on reload (cas-940f).
+    this.arrivals.set(key, Math.min(stamped ?? shown, shown));
     return shown;
   }
   private insert(event: ConversationEvent): void {
@@ -394,6 +435,7 @@ export class ConversationHistory {
       return;
     }
     this.observeStamp(at, now);
+    const shownAt = this.arrivals.get(`s:${message.notification_id}`);
     this.insertDurable({
       kind: "send",
       value: {
@@ -407,6 +449,7 @@ export class ConversationHistory {
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
       at,
+      ...(shownAt === undefined ? {} : { shownAt }),
       arrivedAt: this.arrivalFor(`s:${message.notification_id}`, at, now),
       session: message.session,
     });
@@ -661,7 +704,7 @@ export class ConversationHistory {
     }
     return undefined;
   }
-  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number, arrivedAt: number = Date.now(), placement: "time" | "durable" = "time", clockAhead = false): void {
+  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number, arrivedAt: number = Date.now(), placement: "time" | "durable" = "time", clockAhead = false, seenLive = false): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
     const normalized: OperatorReply = {
       ...reply,
@@ -669,7 +712,7 @@ export class ConversationHistory {
       kind: reply.kind ?? "answer",
       attachments: reply.attachments ?? [],
     };
-    const event: ConversationEvent = { kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), arrivedAt, ...(clockAhead ? { clockAhead } : {}), session };
+    const event: ConversationEvent = { kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), arrivedAt, ...(clockAhead ? { clockAhead } : {}), ...(seenLive ? { seenLive } : {}), session };
     if (placement === "durable") this.insertDurable(event);
     else this.insert(event);
     for (const event of this.events) {
@@ -684,9 +727,12 @@ export class ConversationHistory {
    * answer and read as already acknowledged.
    */
   receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
-    if (!this.arrivals.has(`r:${reply.notification_id}`)) { this.arrivals.set(`r:${reply.notification_id}`, at); this.liveArrivals.add(`r:${reply.notification_id}`); }
+    const id = `r:${reply.notification_id}`;
+    if (!this.arrivals.has(id)) { this.arrivals.set(id, at); this.liveArrivals.add(id); }
+    // cas-9e33: keep the mark this visit shows, so a reload shows it too.
+    if (!this.liveMarks.has(id) && !this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) this.liveMarks.set(id, this.machineAhead);
     const key = Math.max(at, this.latestAt());
-    this.reply(reply, key, session, key === at ? undefined : at, at, "time", this.machineAhead);
+    this.reply(reply, key, session, key === at ? undefined : at, at, "time", this.machineAhead, true);
   }
 
   /** Merge a durable supervisor turn in the machine's sequence, keeping its own stamp (cas-1f13). */
@@ -698,7 +744,10 @@ export class ConversationHistory {
       return;
     }
     this.observeStamp(stamped, now);
-    this.reply(live, stamped, reply.session, undefined, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable");
+    // cas-9e33: a turn a visit saw arrive live keeps the mark that visit gave it.
+    const marked = this.liveMarks.get(`r:${reply.notification_id}`);
+    const shownAt = this.arrivals.get(`r:${reply.notification_id}`);
+    this.reply(live, stamped, reply.session, shownAt, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable", marked === true, marked !== undefined);
   }
 }
 

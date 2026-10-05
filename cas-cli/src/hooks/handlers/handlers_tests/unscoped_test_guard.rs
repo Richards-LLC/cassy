@@ -186,11 +186,15 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
             if command.ends_with('&') {
                 assert!(rewritten.ends_with("2>&1 &"));
             }
+            // cas-980d: Codex applies updatedInput only with an allow
+            // decision; without it Codex runs the original command.
             if harness == "codex" {
-                assert!(
+                assert_eq!(
                     value
                         .pointer("/hookSpecificOutput/permissionDecision")
-                        .is_none()
+                        .and_then(|v| v.as_str()),
+                    Some("allow"),
+                    "{value}"
                 );
             }
         }
@@ -304,4 +308,200 @@ fn supervisor_retains_full_suite_authority() {
     let out = handle_pre_tool_use(&input("cargo nextest run -p cas", "supervisor"), None)
         .expect("handler ok");
     assert!(deny_reason(&out).is_none());
+}
+
+/// cas-cf70 fixture: a Makefile with one script-only target and the shapes
+/// that must stay refused.
+fn cf70_makefile_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("cas-cli")).unwrap();
+    std::fs::write(
+        dir.path().join("cas-cli/Makefile"),
+        "CARGO ?= cargo\n\
+         .PHONY: test-ci-tiers test-rust\n\
+         \n\
+         # Script-only CI fixtures.\n\
+         test-ci-tiers:\n\
+         \tcd .. && bash scripts/test-a.sh\n\
+         \tcd .. && python3 scripts/test-b.py\n\
+         \tcd .. && ./scripts/test-c.sh\n\
+         \n\
+         test-rust:\n\
+         \t$(CARGO) nextest run -p cas\n\
+         \n\
+         test-literal-cargo:\n\
+         \tcargo test -p cas\n\
+         \n\
+         test-needs-rust: test-rust\n\
+         \tcd .. && bash scripts/test-a.sh\n\
+         \n\
+         test-submake:\n\
+         \tmake test-rust\n\
+         \n\
+         test-variable:\n\
+         \t$(RUNNER) scripts/test-a.sh\n\
+         \n\
+         check:\n\
+         \t$(CARGO) check -p cas\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// cas-cf70: `make -C cas-cli test-ci-tiers` runs only Python and Bash CI
+/// fixtures, which the Makefile shows; the build guard admits it, read from
+/// the target's own recipe.
+#[test]
+fn script_only_make_target_is_admitted_cas_cf70() {
+    let dir = cf70_makefile_dir();
+    let mut request = input("make -C cas-cli test-ci-tiers", "worker");
+    request.cwd = dir.path().to_str().unwrap().into();
+    let out = handle_pre_tool_use(&request, None).expect("handler ok");
+    assert!(
+        deny_reason(&out).is_none_or(|reason| !reason.contains("NO WORKER RUST BUILDS")),
+        "a script-only target is not a Rust build: {out:?}"
+    );
+
+    // The real target in this repository, as reported.
+    let root = crate::test_paths::workspace_root();
+    let mut request = input("make -C cas-cli test-ci-tiers", "worker");
+    request.cwd = root.to_str().unwrap().into();
+    let out = handle_pre_tool_use(&request, None).expect("handler ok");
+    assert!(
+        deny_reason(&out).is_none_or(|reason| !reason.contains("NO WORKER RUST BUILDS")),
+        "cas-cli/Makefile test-ci-tiers runs only CI fixtures: {out:?}"
+    );
+}
+
+/// cas-cf70: the admission comes from the target, not from `make`: Rust
+/// recipes, Rust prerequisites, sub-makes, unexpanded variables, unknown
+/// targets, a mixed target list and an unreadable Makefile stay refused.
+#[test]
+fn rust_or_unprovable_make_targets_stay_refused_cas_cf70() {
+    let dir = cf70_makefile_dir();
+    for command in [
+        "make -C cas-cli test-rust",
+        "make -C cas-cli test-literal-cargo",
+        "make -C cas-cli test-needs-rust",
+        "make -C cas-cli test-submake",
+        "make -C cas-cli test-variable",
+        "make -C cas-cli test-unknown",
+        "make -C cas-cli check",
+        "make -C cas-cli test-ci-tiers test-rust",
+        "make -C missing test-ci-tiers",
+        "bash -c 'make -C cas-cli test-rust'",
+    ] {
+        let mut request = input(command, "worker");
+        request.cwd = dir.path().to_str().unwrap().into();
+        let out = handle_pre_tool_use(&request, None).expect("handler ok");
+        let reason = deny_reason(&out).unwrap_or_else(|| panic!("expected deny for {command:?}"));
+        assert!(reason.contains("NO WORKER RUST BUILDS"), "{command:?}: {reason}");
+    }
+}
+
+/// What Codex runs for a Bash call given a PreToolUse hook's stdout. This
+/// mirrors codex-rs/hooks/src/engine/output_parser.rs (`parse_pre_tool_use`
+/// and `unsupported_pre_tool_use_hook_specific_output`):
+/// - `updatedInput` without `permissionDecision: "allow"` is invalid;
+/// - `allow` without `updatedInput` is invalid;
+/// - an invalid output fails open, so the original command runs;
+/// - a deny with a reason blocks;
+/// - only `allow` plus `updatedInput.command` replaces the command.
+/// `None` means Codex blocks the call.
+fn codex_effective_command(hook_stdout: &serde_json::Value, original: &str) -> Option<String> {
+    let Some(specific) = hook_stdout.get("hookSpecificOutput") else {
+        return Some(original.to_string());
+    };
+    assert_eq!(specific["hookEventName"], "PreToolUse", "Codex requires hookEventName");
+    let decision = specific.get("permissionDecision").and_then(|v| v.as_str());
+    let updated = specific.get("updatedInput");
+    let invalid = (updated.is_some() && decision != Some("allow"))
+        || (decision == Some("allow") && updated.is_none())
+        || decision == Some("ask");
+    if invalid {
+        return Some(original.to_string());
+    }
+    if decision == Some("deny") {
+        return None;
+    }
+    match (decision, updated) {
+        (Some("allow"), Some(updated)) => Some(
+            updated["command"]
+                .as_str()
+                .expect("Codex maps updatedInput.command back to exec_command's cmd")
+                .to_string(),
+        ),
+        _ => Some(original.to_string()),
+    }
+}
+
+/// cas-980d: a Codex worker's capped `cargo check`, issued through
+/// `functions.exec` → `tools.exec_command` (code mode), must run through
+/// `cas factory worker-check`. Observed: it ran as raw cargo with no runner and
+/// no slot lock, because the hook returned `updatedInput` without
+/// `permissionDecision: "allow"`, which Codex treats as invalid and fails open.
+///
+/// Codex sends a nested code-mode call through the same registry hook path as
+/// a direct one (code_mode/mod.rs `handle_tool_call_with_source` with
+/// `ToolCallSource::CodeMode` → registry.rs `dispatch_any_with_state` →
+/// `run_pre_tool_use_hooks`). `exec_command`'s payload is `tool_name: "Bash"`
+/// and `tool_input: {"command": <cmd>}` (unified_exec/exec_command.rs
+/// `pre_tool_use_payload`). The payloads below follow Codex's PreToolUse input
+/// schema field for field, so the hook is fed exactly what Codex sends.
+#[test]
+fn codex_nested_exec_command_check_runs_through_the_capped_runner_cas_980d() {
+    use crate::test_support::TestEnvGuard;
+    let dir = tempfile::tempdir().unwrap();
+    init_ignored_log_repo(dir.path());
+    let worktree = dir.path().to_str().unwrap();
+    let root = dir.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    // A Codex worker's hook process: the harness wrapper and the worker's own
+    // environment, with no agent_role field in the payload.
+    let _env = TestEnvGuard::with_vars(&[
+        ("CAS_HOOK_HARNESS", "codex"),
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_CLONE_PATH", worktree),
+    ]);
+    let codex_payload = |tool_use_id: &str, command: &str| -> HookInput {
+        serde_json::from_value(serde_json::json!({
+            "session_id": "codex-worker-session",
+            "turn_id": "turn-7",
+            "transcript_path": null,
+            "cwd": worktree,
+            "hook_event_name": "PreToolUse",
+            "model": "gpt-codex",
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_use_id": tool_use_id,
+            "tool_input": { "command": command },
+        }))
+        .expect("Codex's PreToolUse payload deserializes")
+    };
+
+    for (dispatch, tool_use_id) in [("direct exec_command", "call_direct"), ("functions.exec → exec_command", "call_nested")] {
+        for command in [
+            "cargo check -p cas --tests",
+            "cargo check -p cas --tests > target/worker-check.log 2>&1 &",
+        ] {
+            let out = handle_pre_tool_use(&codex_payload(tool_use_id, command), Some(&root)).unwrap();
+            let stdout = serde_json::to_value(&out).unwrap();
+            let runs = codex_effective_command(&stdout, command)
+                .unwrap_or_else(|| panic!("{dispatch}: {command} was blocked: {stdout}"));
+            assert!(
+                runs.contains("factory worker-check --cas-root"),
+                "{dispatch}: Codex would run `{runs}` for `{command}`, not the capped runner: {stdout}"
+            );
+            assert!(runs.contains("-- -p cas --tests"), "{runs}");
+            if command.ends_with('&') {
+                assert!(runs.ends_with("> target/worker-check.log 2>&1 &"), "{runs}");
+            }
+        }
+    }
+
+    // A guard that denies the rewritten command still blocks it in Codex.
+    let command = "cargo check -p cas --tests > /tmp/worker-check.log 2>&1 &";
+    let out = handle_pre_tool_use(&codex_payload("call_nested", command), Some(&root)).unwrap();
+    let stdout = serde_json::to_value(&out).unwrap();
+    assert_eq!(codex_effective_command(&stdout, command), None, "{stdout}");
 }

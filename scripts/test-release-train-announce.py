@@ -2,6 +2,8 @@
 """Exercise draft lint and the last validation before Violet writes."""
 
 import importlib.util
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +16,14 @@ SCRIPT = Path(__file__).with_name("release-train-announce.py")
 spec = importlib.util.spec_from_file_location("announce", SCRIPT)
 announce = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(announce)
+
+# Compatibility fixtures use the reviewed manifest, preserving installed-host aliases.
+LEGACY_TOKEN_PREFIX = announce.load_report_adapter().LEGACY_TOKEN_PREFIX
+LEGACY_ENV_PREFIX = LEGACY_TOKEN_PREFIX.split("_", 1)[0] + "_"
+TOKEN_A = LEGACY_TOKEN_PREFIX + "_A"
+TOKEN_B = LEGACY_TOKEN_PREFIX + "_B"
+TOKEN_MISSING = LEGACY_TOKEN_PREFIX + "_MISSING"
+TOKEN_OTHER_HOST = LEGACY_TOKEN_PREFIX + "_OTHER_HOST"
 
 BODIES = (
     "*Live on production — User — Cassy v9.99.8*\n"
@@ -168,6 +178,159 @@ class Announce(unittest.TestCase):
         self.assertEqual([item.get("reply_to") for item in writes], [None, "1", None, "3"])
         values = dict(line.split("=", 1) for line in self.receipt.read_text().splitlines())
         self.assertEqual(values["DEV_REPLY_ID"], "4")
+
+
+class TokenPreflight(unittest.TestCase):
+    """Exercise the real --cut dispatcher without publishing or using host secrets."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.worktree = self.root / "release"
+        self.worktree.mkdir()
+        self.run = self.root / "artifacts/v9.99.8-release"
+        self.env = {name: value for name, value in os.environ.items()
+                    if not name.startswith(("VIOLET_", LEGACY_ENV_PREFIX, "CAS_RELEASE_"))}
+        self.env.update(
+            CLAUDE_CONFIG_DIR=str(self.root),
+            CAS_CREDENTIALS_FILE=str(self.root / "credentials.env"),
+            CAS_RELEASE_ARTIFACTS_ROOT=str(self.root / "artifacts"),
+            CAS_RELEASE_TRAIN_RUN_DIR=str(self.run),
+            CAS_RELEASE_TRAIN_DATE="2099-01-02",
+            CAS_RELEASE_TRAIN_CAS="/usr/bin/false",
+            CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING="1",
+            CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN="1",
+            CAS_RELEASE_TRAIN_ASSEMBLE_CMD='printf "assemble reached\\n"; exit 1',
+            CAS_RELEASE_ENV_FILE=str(self.worktree / "release.env"),
+            CAS_RELEASE_GATE_HOME_DIR=str(self.root / "scratch"),
+        )
+        self.env.update({TOKEN_A: "sentinel-secret-alpha",
+                         TOKEN_B: "sentinel-secret-beta"})
+        self.git("init", "-q", "-b", "release/9.99.8")
+        self.git("config", "user.name", "Token Preflight Test")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "core.hooksPath", "/dev/null")
+        (self.worktree / "release.env").write_text("")
+        (self.worktree / "CHANGELOG.md").write_text("# Changelog\n\n## [9.99.8] - 2099-01-02\n\n- fixture\n")
+        draft = self.worktree / "docs/release-notes/2099-01-02-v9.99.8-slack.md"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("\n\n".join(f"```text\n{body}\n```" for body in BODIES))
+        zig = self.worktree / ".context/zig/zig"
+        zig.parent.mkdir(parents=True)
+        zig.write_text("#!/bin/sh\nexit 0\n")
+        zig.chmod(0o755)
+        self.env["ZIG"] = str(zig)
+        self.git("add", ".")
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "seed")
+        head = self.git("rev-parse", "HEAD").strip()
+        self.git("update-ref", "refs/remotes/origin/main", head)
+        integration = self.worktree / ".cas/merge-sweeps/integration.json"
+        integration.parent.mkdir(parents=True)
+        integration.write_text(json.dumps({"status": "PASSED", "base": head}))
+        self.git("add", ".")
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "receipt")
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.worktree), *args],
+                                       stderr=subprocess.PIPE, text=True)
+
+    def cut(self):
+        result = subprocess.run(
+            ["bash", str(SCRIPT.with_name("release-train.sh")), "9.99.8", str(self.worktree), "--cut"],
+            env=self.env, capture_output=True, text=True, timeout=30,
+        )
+        output = result.stdout + result.stderr
+        for value in ("sentinel-secret-alpha", "sentinel-secret-beta"):
+            self.assertNotIn(value, output)
+            for path in self.run.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(value, path.read_text())
+        self.assertNotIn("stage publish: start", output)
+        return result, output
+
+    def test_ambiguous_tokens_block_cut_before_assemble(self):
+        result, output = self.cut()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("BLOCKER announce-token:", output)
+        self.assertIn(TOKEN_A, output)
+        self.assertIn(TOKEN_B, output)
+        self.assertIn("set VIOLET_SLACK_TOKEN_ENV", output)
+        self.assertNotIn("assemble reached", output)
+        self.assertFalse((self.run / "stage.preflight.done").exists())
+
+    def assert_preflight_passes(self):
+        _, output = self.cut()
+        self.assertIn("assemble reached", output)
+        self.assertNotIn("BLOCKER announce-token:", output)
+        self.assertTrue((self.run / "stage.preflight.done").is_file())
+
+    def test_explicit_selector_unblocks_cut(self):
+        self.env["VIOLET_SLACK_TOKEN_ENV"] = TOKEN_A
+        self.assert_preflight_passes()
+
+    def test_missing_explicit_token_blocks_cut(self):
+        self.env["VIOLET_SLACK_TOKEN_ENV"] = TOKEN_MISSING
+        _, output = self.cut()
+        self.assertIn("BLOCKER announce-token:", output)
+        self.assertIn(f"credential variable {TOKEN_MISSING} is unset or empty", output)
+        self.assertNotIn("assemble reached", output)
+
+    def test_credential_file_ambiguity_blocks_cut(self):
+        del self.env[TOKEN_A]
+        del self.env[TOKEN_B]
+        Path(self.env["CAS_CREDENTIALS_FILE"]).write_text(
+            f'export {TOKEN_A}="sentinel-secret-alpha"\n'
+            f'{TOKEN_B}=sentinel-secret-beta\n')
+        _, output = self.cut()
+        self.assertIn("BLOCKER announce-token:", output)
+        self.assertIn("multiple Violet token variables found", output)
+        self.assertNotIn("assemble reached", output)
+
+    def test_default_proxy_selects_canonical_alias_from_credentials(self):
+        proxy = self.worktree / ".cas/proxy.toml"
+        proxy.write_text(f'auth = "env:{TOKEN_A}"\n')
+        self.git("add", ".")
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "proxy")
+        del self.env[TOKEN_A]
+        Path(self.env["CAS_CREDENTIALS_FILE"]).write_text(
+            'VIOLET_SLACK_TOKEN_A=sentinel-secret-alpha\n')
+        self.assert_preflight_passes()
+
+    def test_unavailable_proxy_token_falls_back_to_machine_registration(self):
+        proxy = self.root / "other-host-proxy.toml"
+        proxy.write_text(f'auth = "env:{TOKEN_OTHER_HOST}"\n')
+        self.env["CAS_RELEASE_TRAIN_PROXY_TOML"] = str(proxy)
+        (self.root / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"violet": {"headers": {
+                "Authorization": f"Bearer ${{{TOKEN_A}}}"}}}}))
+        self.assert_preflight_passes()
+
+    def test_absent_tokens_block_cut(self):
+        del self.env[TOKEN_A]
+        del self.env[TOKEN_B]
+        _, output = self.cut()
+        self.assertIn("BLOCKER announce-token:", output)
+        self.assertIn("no Violet token found", output)
+        self.assertNotIn("assemble reached", output)
+
+    def test_external_announcer_and_embargo_keep_their_auth_contract(self):
+        for name in ("CAS_RELEASE_TRAIN_ANNOUNCE_CMD", "CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD",
+                     "CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO"):
+            with self.subTest(name=name):
+                self.env[name] = "fixture"
+                self.assert_preflight_passes()
+                del self.env[name]
+                (self.run / "stage.preflight.done").unlink()
+
+    def test_check_token_never_creates_a_network_client(self):
+        adapter = announce.load_report_adapter()
+        self.env["VIOLET_SLACK_TOKEN_ENV"] = TOKEN_A
+        with patch.dict(os.environ, self.env, clear=True), \
+                patch.object(announce, "load_report_adapter", return_value=adapter), \
+                patch.object(adapter, "McpClient") as client:
+            self.assertEqual(announce.main([str(SCRIPT), "--check-token"]), 0)
+            client.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -366,7 +366,10 @@ impl CasCore {
 
         if let Some(peer) = peer {
             // Fire-and-forget - don't block on notification result
-            let _ = peer.notify_resource_list_changed().await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                peer.notify_resource_list_changed(),
+            ).await;
         }
     }
 
@@ -920,7 +923,7 @@ mod resources;
 mod runtime;
 
 #[cfg(feature = "mcp-proxy")]
-pub(crate) use runtime::install_proxy_policy;
+pub(crate) use runtime::{install_proxy_policy, load_proxy_config_for_process};
 pub use runtime::run_server;
 #[cfg(feature = "mcp-proxy")]
 pub use runtime::{

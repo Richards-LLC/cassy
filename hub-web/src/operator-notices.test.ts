@@ -27,7 +27,7 @@ describe("system notices (cas-e829)", () => {
     const first = planNotice("atlas", "Accounting-rapid-gazelle-52", watchdog({ source: "relay-watchdog", subject: 3196290 }), (fp) => known.has(fp));
     expect(first).toMatchObject({ action: "raise", fingerprint: "notice:atlas:Accounting-rapid-gazelle-52:3196290" });
     if (first.action !== "raise") throw new Error("expected a raise");
-    expect(first.content).toMatchObject({ headline: "Supervisor hasn't seen: worker died: daring-robin-43 (9m)", severity: "warning", action: "view_pane" });
+    expect(first.content).toMatchObject({ headline: "The supervisor missed an update: a worker stopped", severity: "warning", action: "view_pane" });
     known.add(first.fingerprint);
     // The same relay again (a reload replays history): nothing new.
     expect(planNotice("atlas", "Accounting-rapid-gazelle-52", { ...watchdog({ source: "relay-watchdog", subject: 3196290 }), notification_id: 3196302 }, (fp) => known.has(fp)).action).toBe("none");
@@ -45,7 +45,7 @@ describe("system notices (cas-e829)", () => {
     const plan = planNotice("atlas", "s", watchdog({ source: "relay-watchdog", subject: 7 }), () => false);
     if (plan.action !== "raise") throw new Error("expected a raise");
     const item = createAttentionItem({ id: "i", machineId: "atlas", machineLabel: "Atlas", session: "s", kind: NOTICE_KIND, createdAt: "2026-10-01T19:35:00Z" }, plan.content);
-    expect(attentionContent(item)).toMatchObject({ headline: "Supervisor hasn't seen: worker died: daring-robin-43 (9m)", severity: "warning", action: "view_pane", fingerprint: "notice:atlas:s:7" });
+    expect(attentionContent(item)).toMatchObject({ headline: "The supervisor missed an update: a worker stopped", severity: "warning", action: "view_pane", fingerprint: "notice:atlas:s:7" });
   });
 });
 
@@ -69,5 +69,20 @@ describe("notice age (cas-5c22)", () => {
     expect(conversationAttentionBadge(0)).toMatchObject({ hidden: true });
     expect(conversationAttentionBadge(1)).toEqual({ hidden: false, text: "1", label: "Attention: 1 item for this session" });
     expect(conversationAttentionBadge(3).label).toBe("Attention: 3 items for this session");
+  });
+});
+
+// cas-7cb3: a watchdog's relative age is a historical diagnostic, not current copy.
+describe("delivery notice copy", () => {
+  it("keeps a stale age only in Details, and names the stopped worker plainly", () => {
+    const raw = watchdog({ source: "relay-watchdog", subject: 3196290 });
+    const plan = planNotice("atlas", "Accounting-rapid-gazelle-52", raw, () => false);
+    if (plan.action !== "raise") throw new Error("expected raise");
+    expect(plan.content.headline).toBe("The supervisor missed an update: a worker stopped");
+    expect(plan.content.detail).toBe("Worker daring-robin-43 stopped. The update did not reach the supervisor.");
+    expect(JSON.stringify(plan.content.payload)).toContain("9 minutes ago");
+    const legacy = createAttentionItem({ id: "old", machineId: "atlas", machineLabel: "Atlas", session: "s", kind: NOTICE_KIND, createdAt: "2026-09-30T17:49:00Z" }, { headline: raw.summary!, detail: raw.message, severity: "warning", action: "view_pane" });
+    expect(attentionContent(legacy).headline).toBe(plan.content.headline);
+    expect(attentionContent(legacy).detail).not.toMatch(/9m|9 minutes ago|worker died/);
   });
 });

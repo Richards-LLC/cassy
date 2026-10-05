@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,8 +13,21 @@ const here = fileURLToPath(new URL('.', import.meta.url));
 const fixture = (name) => join(here, 'visual-qa-fixtures', name);
 const repoRoot = join(here, '..');
 
+/**
+ * cas-9ebd: where the historical acceptance runs keep their renders. It was a
+ * Linux-only /home/pippenz/.cas/artifacts/cas-f868, which does not exist on
+ * macOS or a CI runner. VISUAL_QA_ARTIFACTS_ROOT keeps them somewhere durable
+ * (a task's artifacts directory); by default they go under the OS temp dir,
+ * like every other run in this file.
+ */
+async function acceptanceDir(prefix) {
+  const root = join(process.env.VISUAL_QA_ARTIFACTS_ROOT || tmpdir(), 'cas-f868');
+  await mkdir(root, { recursive: true });
+  return mkdtemp(join(root, prefix));
+}
+
 async function revisionFixture(revision) {
-  const dir = await mkdtemp(join('/home/pippenz/.cas/artifacts/cas-f868', 'visual-qa-revision-'));
+  const dir = await acceptanceDir('visual-qa-revision-');
   const path = join(dir, `${revision}.html`);
   const html = execFileSync('git', ['show', `${revision}:docs/factory/2026-09-06-model-lane-rubric-review.html`], { cwd: repoRoot, encoding: 'utf8' });
   await writeFile(path, html);
@@ -75,6 +88,28 @@ test('passes the clean fixture in light and dark at both required widths', async
   assert.match(markdown, /^# Visual QA — PASS\n/);
   assert.deepEqual(json.schemes, ['light', 'dark']);
   assert.deepEqual(json.viewports.map(({ width }) => width), [1280, 390]);
+});
+
+test('measures the settled colour of a 100 ms colour transition, identically on every run', async () => {
+  const runs = [];
+  for (let run = 0; run < 3; run += 1) {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-transition-'));
+    const result = await runVisualQa({
+      urls: [fixture('transition.html')],
+      artifactDir,
+      strict: true,
+      schemes: ['light', 'dark'],
+      viewports: [
+        { name: 'desktop', width: 1280, height: 800 },
+        { name: 'phone', width: 390, height: 800 },
+      ],
+    });
+    runs.push(result.findings.map(({ type, selector, scheme, viewport }) => `${type} ${selector} ${scheme} ${viewport.width}`));
+    assert.deepEqual(runs.at(-1), [], `run ${run + 1} measured a colour before the transition settled`);
+    assert.equal(result.status, 'PASS');
+  }
+  assert.deepEqual(runs[1], runs[0]);
+  assert.deepEqual(runs[2], runs[0]);
 });
 
 test('parses computed OKLCH colors without false invisible-text findings', async () => {
@@ -218,7 +253,7 @@ test('reports content lost when JavaScript is disabled or print media applies', 
 });
 
 test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
-  const artifactDir = await mkdtemp(join('/home/pippenz/.cas/artifacts/cas-f868', 'visual-qa-acceptance-'));
+  const artifactDir = await acceptanceDir('visual-qa-acceptance-');
   const exemplarNames = ['product-page.html', 'report.html', 'dashboard.html', 'before-after.html'];
   for (const name of exemplarNames) {
     const result = await acceptanceRender(
@@ -341,4 +376,79 @@ test('the command line takes --journey', async () => {
   assert.match(output, /FAIL journey-expectation \[submit-error\] #email/);
   const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
   assert.equal(report.journeyRuns.length, 3);
+});
+
+test('text a vertical scroller reaches is not clipped; a fixed-height hidden box still is (cas-0d16)', async () => {
+  const run = (name) => mkdtemp(join(tmpdir(), `visual-qa-${name}-`)).then((artifactDir) => runVisualQa({
+    urls: [fixture(`${name}.html`)],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  }));
+
+  // overflow-x: hidden; overflow-y: auto inside an overflow: hidden panel:
+  // the keys below the fold are reachable by scrolling.
+  const reachable = await run('scroller-reachable');
+  assert.deepEqual(reachable.findings.filter((finding) => finding.type === 'clipped-content'), []);
+  assert.equal(reachable.status, 'PASS', JSON.stringify(reachable.findings, null, 2));
+
+  const clipped = await run('clip-box');
+  assert.equal(clipped.status, 'FAIL');
+  assert.ok(
+    clipped.findings.some((finding) => finding.type === 'clipped-content' && finding.reason === 'text-bounds-exceed-overflow-ancestor'),
+    JSON.stringify(clipped.findings, null, 2),
+  );
+});
+
+test('text folded inside a closed <details> is not clipped; an open disclosure that clips still is (cas-b7f2)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-details-'));
+  const result = await runVisualQa({
+    urls: [fixture('details-disclosure.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  });
+  const clipped = result.findings.filter((finding) => finding.type === 'clipped-content');
+  // Folded content has a layout box past the scroller's range but is not
+  // drawn; opening its summary brings it into the range (cas-6b75 QA F01).
+  assert.deepEqual(clipped.filter((finding) => /Folded turn|machine:read/.test(finding.textSample ?? '')), [], JSON.stringify(clipped, null, 2));
+  // The summaries are drawn and still checked: none is clipped.
+  assert.deepEqual(clipped.filter((finding) => /Earlier session|Technical details/.test(finding.textSample ?? '')), []);
+  // A real clip inside an open disclosure still fails.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(clipped.some((finding) => /lost below the edge/.test(finding.textSample ?? '')), JSON.stringify(result.findings, null, 2));
+  // Every clip found is that real one: its lost line or the box that loses it.
+  assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '') && !finding.elementPath.endsWith('div.clip')), [], JSON.stringify(clipped, null, 2));
+});
+
+test('visually hidden helpers, an intentional ellipsis and closed drawers pass strict; real defects still fail (GH #1081)', async () => {
+  const run = (name) => mkdtemp(join(tmpdir(), `visual-qa-${name}-`)).then((artifactDir) => runVisualQa({
+    urls: [fixture(`${name}.html`)],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  }));
+
+  const hidden = await run('hidden-helpers');
+  assert.equal(hidden.status, 'PASS', JSON.stringify(hidden.findings, null, 2));
+  assert.equal(hidden.findings.length, 0);
+
+  const real = await run('real-defects');
+  assert.equal(real.status, 'FAIL');
+  const has = (type, selector) => real.findings.some((finding) => finding.type === type && finding.elementPath.includes(selector));
+  assert.ok(has('content-overflow', 'div:nth-of-type(1)') || real.findings.some((finding) => finding.type === 'content-overflow' && finding.selector === '#box'), JSON.stringify(real.findings, null, 2));
+  assert.ok(real.findings.some((finding) => finding.type === 'clipped-content' && finding.elementPath.includes('div.alert')), JSON.stringify(real.findings, null, 2));
+  assert.ok(real.findings.some((finding) => finding.type === 'outside-viewport' && finding.selector === '#lost'), JSON.stringify(real.findings, null, 2));
 });

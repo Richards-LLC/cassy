@@ -37,7 +37,7 @@ impl Drop for TestEnvGuardNesting {
     }
 }
 
-/// The one ambient `CAS_*` variable a guarded test keeps: the wall-clock budget
+/// An ambient `CAS_*` variable a guarded test keeps: the wall-clock budget
 /// for the `cas init` watchdog.
 ///
 /// It carries no store, root, or account identity — only how long a child `cas
@@ -53,7 +53,12 @@ pub(crate) const AMBIENT_INIT_TIMEOUT_SECS: &str = "CAS_INIT_TIMEOUT_SECS";
 /// Pure so the exemption is stated once and tested without mutating
 /// process-global environment.
 pub(crate) fn is_scrubbed_ambient_env_key(key: &str) -> bool {
-    if key == AMBIENT_INIT_TIMEOUT_SECS {
+    // These are safety controls, not store selectors. Dropping the tripwires
+    // silently lets a fixture reach the operator's host registry (cas-88a0).
+    if matches!(
+        key,
+        AMBIENT_INIT_TIMEOUT_SECS | "CAS_TEST_PROTECTED_DBS" | "CAS_TEST_PROTECTED_HOME"
+    ) {
         return false;
     }
     key.starts_with("CAS_")
@@ -240,8 +245,9 @@ impl TestEnvGuard {
     }
 
     /// Keep test fixtures independent from the factory process that launched
-    /// the test binary. Every `CAS_*` variable is ambient Cassy state, and the
-    /// account-home variables are the non-CAS part of the factory contract.
+    /// the test binary. `CAS_*` variables other than the watchdog budget and
+    /// protected-store tripwires are ambient Cassy state; account-home
+    /// variables are the non-CAS part of the factory contract.
     /// Tests that need one of these values set it explicitly after constructing
     /// the guard; Drop restores the caller's environment.
     fn scrub_ambient_cas_environment(&mut self) {
@@ -275,7 +281,6 @@ impl Drop for TestEnvGuard {
 #[cfg(test)]
 mod ambient_scrub_tests {
     use super::*;
-
     #[test]
     fn ambient_cas_and_factory_state_is_scrubbed() {
         for key in [
@@ -301,6 +306,19 @@ mod ambient_scrub_tests {
         // 300s default that a saturated release gate had just raised, and the
         // gate failed on wall clock rather than on anything about the tree.
         assert!(!is_scrubbed_ambient_env_key(AMBIENT_INIT_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn protected_host_tripwires_survive_the_ambient_scrub() {
+        for key in ["CAS_TEST_PROTECTED_DBS", "CAS_TEST_PROTECTED_HOME"] {
+            assert!(!is_scrubbed_ambient_env_key(key), "{key} must remain armed");
+        }
+        for key in [
+            "CAS_TEST_PROTECTED_DBS_EXTRA",
+            "CAS_TEST_PROTECTED_HOME_ROOT",
+        ] {
+            assert!(is_scrubbed_ambient_env_key(key), "{key} is not a tripwire");
+        }
     }
 
     #[test]

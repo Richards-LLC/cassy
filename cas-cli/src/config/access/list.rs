@@ -18,7 +18,14 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
-            ("jev.gate.shadow".into(), self.get("jev.gate.shadow").unwrap()),
+            (
+                "hub.tailscale_serve".to_string(),
+                self.get("hub.tailscale_serve").unwrap(),
+            ),
+            (
+                "jev.gate.shadow".into(),
+                self.get("jev.gate.shadow").unwrap(),
+            ),
             ("jev.model".into(), self.get("jev.model").unwrap()),
             ("jev.key_file".into(), self.get("jev.key_file").unwrap()),
             ("jev.enabled".into(), self.get("jev.enabled").unwrap()),
@@ -151,6 +158,9 @@ impl Config {
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
             // Factory section (cas-1a05): the keys `get` and `set` accept.
+            ("factory.supervisor_only_mcp".to_string(), factory.worker_policy.supervisor_only_mcp.join(",")),
+            ("factory.supervisor_only_env".to_string(), factory.worker_policy.supervisor_only_env.join(",")),
+            ("factory.worker_credential_env".to_string(), factory.worker_policy.worker_credential_env.join(",")),
             (
                 "factory.artifacts_root".to_string(),
                 factory
@@ -173,6 +183,14 @@ impl Config {
             (
                 "factory.max_concurrent_builders".to_string(),
                 factory.max_concurrent_builders.to_string(),
+            ),
+            (
+                "factory.spawn_min_free_gib".to_string(),
+                factory.spawn_min_free_gib.to_string(),
+            ),
+            (
+                "factory.prompt_retention_days".to_string(),
+                factory.prompt_retention_days.to_string(),
             ),
             (
                 "factory.worker_build_jobs".to_string(),
@@ -234,6 +252,10 @@ impl Config {
             (
                 "qa.terminal_render_paths".to_string(),
                 qa.terminal_render_paths.join(","),
+            ),
+            (
+                "qa.terminal_interaction_paths".to_string(),
+                qa.terminal_interaction_paths.join(","),
             ),
             (
                 "qa.user_facing_paths".to_string(),

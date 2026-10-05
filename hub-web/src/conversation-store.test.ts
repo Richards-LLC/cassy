@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { arrivalStore, ConversationStore, draftStore, MAX_ARRIVALS, MAX_PENDING_SENDS, PENDING_SEND_BOUNDS, pendingSendStore, purgeConversations, validArrivals, validDraft, validPendingSend, validPendingSends, type PendingSend } from "./conversation-store";
 
 function memoryStorage(initial: Record<string, string> = {}) {
@@ -67,6 +67,113 @@ describe("conversation store (cas-7752, shared with cas-e7b1)", () => {
   });
 });
 
+describe("stored conversation cleanup on load", () => {
+  const key = "cas-commander-conversation:test:v1";
+  const valid = { value: "Keep this conversation", updatedAt: 123 };
+
+  it("removes a planted 2 MB conversation and malformed entries in one rewrite, preserving the valid neighbour", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({
+      "atlas:planted": { value: "x".repeat(2_000_000), updatedAt: 200 },
+      "atlas:broken": null,
+      "atlas:invalid": { value: 7, updatedAt: 100 },
+      "atlas:valid": valid,
+    }) });
+    const set = vi.spyOn(storage, "setItem");
+    const remove = vi.spyOn(storage, "removeItem");
+    const store = new ConversationStore(storage, "test", text);
+    expect([...store.entries()]).toEqual([["atlas:valid", valid.value]]);
+    expect(JSON.parse(storage.getItem(key)!)).toEqual({ "atlas:valid": valid });
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(remove).not.toHaveBeenCalled();
+    expect(store.get("atlas:valid")).toBe(valid.value);
+    expect(store.entries().size).toBe(1);
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["{not json", "[]", "null", "3", '\"foreign\"', ""])("removes an unparseable or invalid namespace %j", (raw) => {
+    const storage = memoryStorage({ [key]: raw });
+    const remove = vi.spyOn(storage, "removeItem");
+    const set = vi.spyOn(storage, "setItem");
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.entries().size).toBe(0);
+    expect(storage.getItem(key)).toBeNull();
+    expect(store.get("atlas:valid")).toBeUndefined();
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("removes a namespace when every entry was dropped", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({ "atlas:bad": { value: 3 } }) });
+    const remove = vi.spyOn(storage, "removeItem");
+    expect(new ConversationStore(storage, "test", text).entries().size).toBe(0);
+    expect(storage.getItem(key)).toBeNull();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])("never writes a valid or absent namespace (present=%s)", (present) => {
+    const raw = JSON.stringify({ "atlas:valid": valid });
+    const storage = memoryStorage(present ? { [key]: raw } : {});
+    const set = vi.spyOn(storage, "setItem");
+    const remove = vi.spyOn(storage, "removeItem");
+    const store = new ConversationStore(storage, "test", text);
+    store.entries();
+    expect(store.get("atlas:valid")).toBe(present ? valid.value : undefined);
+    store.entries();
+    expect(storage.getItem(key)).toBe(present ? raw : null);
+    expect(set).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a denied rewrite and attempts cleanup once per store load", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({ "atlas:bad": null, "atlas:valid": valid }) });
+    const set = vi.spyOn(storage, "setItem").mockImplementation(() => { throw new Error("quota"); });
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.get("atlas:valid")).toBe(valid.value);
+    expect(store.entries().size).toBe(1);
+    expect(store.get("atlas:bad")).toBeUndefined();
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(new ConversationStore(storage, "test", text).get("atlas:valid")).toBe(valid.value);
+    expect(set).toHaveBeenCalledTimes(2);
+  });
+
+  it("tolerates a denied removal without retrying on every read", () => {
+    const storage = memoryStorage({ [key]: "{not json" });
+    const remove = vi.spyOn(storage, "removeItem").mockImplementation(() => { throw new Error("denied"); });
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.entries().size).toBe(0);
+    expect(store.get("atlas:valid")).toBeUndefined();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires an unreadable namespace once and still tolerates storage denial", () => {
+    const storage = memoryStorage({ [key]: "unreadable" });
+    vi.spyOn(storage, "getItem").mockImplementation(() => { throw new Error("denied"); });
+    const remove = vi.spyOn(storage, "removeItem");
+    const store = new ConversationStore(storage, "test", text);
+    expect(store.entries().size).toBe(0);
+    expect(store.get("atlas:valid")).toBeUndefined();
+    expect(storage.values.has(key)).toBe(false);
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a value whose validator cannot read it and preserves its neighbour", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({ "atlas:bad": { value: "unreadable" }, "atlas:valid": valid }) });
+    const validate = (raw: unknown) => { if (raw === "unreadable") throw new Error("cannot read"); return text(raw); };
+    expect(new ConversationStore(storage, "test", validate).get("atlas:valid")).toBe(valid.value);
+    expect(JSON.parse(storage.getItem(key)!)).toEqual({ "atlas:valid": valid });
+  });
+
+  it("also retires the least recent conversations dropped by the load bound", () => {
+    const storage = memoryStorage({ [key]: JSON.stringify({
+      "atlas:old": { value: "old", updatedAt: 1 },
+      "atlas:valid": valid,
+    }) });
+    const store = new ConversationStore(storage, "test", text, { maxConversations: 1 });
+    expect([...store.entries()]).toEqual([["atlas:valid", valid.value]]);
+    expect(JSON.parse(storage.getItem(key)!)).toEqual({ "atlas:valid": valid });
+  });
+});
+
 describe("drafts across a reload (cas-7752)", () => {
   it("a draft comes back for its conversation with its caret, and a blank or sent draft is gone", () => {
     const storage = memoryStorage();
@@ -77,6 +184,32 @@ describe("drafts across a reload (cas-7752)", () => {
     draftStore(storage).save("atlas:patient-pelican-9", { text: "again", caret: 5 });
     draftStore(storage).save("atlas:patient-pelican-9", undefined);
     expect(draftStore(storage).load().size).toBe(0);
+  });
+
+  it("says whether a draft was kept: under the bound as before, a 70k draft is too long and an older copy goes (cas-adfc)", () => {
+    const storage = memoryStorage();
+    const drafts = draftStore(storage);
+    expect(drafts.save("atlas:pelican", { text: "short", caret: 5 })).toBe("kept");
+    expect(draftStore(storage).load().get("atlas:pelican")).toEqual({ text: "short", caret: 5 });
+    expect(drafts.save("atlas:pelican", { text: "z".repeat(70_000), caret: 70_000 })).toBe("too-long");
+    // The shorter copy is not restored in its place: a reload shows no stale draft.
+    expect(draftStore(storage).load().size).toBe(0);
+    expect(drafts.save("atlas:pelican", { text: "z".repeat(1_000), caret: 0 })).toBe("kept");
+    expect(draftStore(storage).load().get("atlas:pelican")?.text).toHaveLength(1_000);
+    expect(drafts.save("atlas:pelican", { text: "  ", caret: 0 })).toBe("cleared");
+    expect(drafts.save("atlas:pelican", undefined)).toBe("cleared");
+    expect(draftStore(storage).load().size).toBe(0);
+  });
+
+  it("measures the bound on the stored form, so the edge is exact (cas-adfc)", () => {
+    const storage = memoryStorage();
+    const fits = (n: number) => JSON.stringify({ text: "a".repeat(n), caret: 0 }).length;
+    const edge = 64_000 - fits(0);
+    expect(fits(edge)).toBe(64_000);
+    expect(draftStore(storage).save("a:s", { text: "a".repeat(edge), caret: 0 })).toBe("kept");
+    expect(draftStore(storage).save("a:s", { text: "a".repeat(edge + 1), caret: 0 })).toBe("too-long");
+    expect(new ConversationStore(storage, "t", text, { maxValueChars: 5 }).set("a:s", "abc")).toBe(true);
+    expect(new ConversationStore(storage, "t", text, { maxValueChars: 5 }).set("a:s", "abcd")).toBe(false);
   });
 
   it("clamps a caret outside the text", () => {
@@ -209,6 +342,14 @@ describe("turn times store (cas-8d52)", () => {
     expect(Object.keys(kept.at)).toHaveLength(MAX_ARRIVALS);
     expect(kept.at["r:0"]).toBeUndefined();
   });
+  it("keeps each live turn's clock-ahead mark only for a kept supervisor turn (cas-9e33)", () => {
+    expect(validArrivals({ at: { "r:1": 10, "s:2": 20 }, live: { "r:1": false, "s:2": true, "r:3": true, "r:x": true } })).toEqual({ at: { "r:1": 10, "s:2": 20 }, live: { "r:1": false } });
+    expect(validArrivals({ at: { "r:1": 10 }, live: { "r:1": "yes" } })).toEqual({ at: { "r:1": 10 } });
+    expect(validArrivals({ at: { "r:1": 10 }, live: ["r:1"] })).toEqual({ at: { "r:1": 10 } });
+    const storage = memoryStorage();
+    arrivalStore(storage).save("atlas:pelican", { at: { "r:1": 100, "r:2": 200 }, live: { "r:1": false, "r:2": true } });
+    expect(arrivalStore(storage).load().get("atlas:pelican")).toEqual({ at: { "r:1": 100, "r:2": 200 }, live: { "r:1": false, "r:2": true } });
+  });
   it("round-trips per conversation and is purged with its machine", () => {
     const storage = memoryStorage();
     const store = arrivalStore(storage);
@@ -219,5 +360,40 @@ describe("turn times store (cas-8d52)", () => {
     expect([...arrivalStore(storage).load().keys()]).toEqual(["studio:otter"]);
     store.save("studio:otter", { at: {} });
     expect(arrivalStore(storage).load().size).toBe(0);
+  });
+});
+
+describe("a draft the browser refuses to store says so (cas-f657)", () => {
+  /** A Storage with a byte quota, as a browser's localStorage is: setItem past it throws QuotaExceededError. */
+  function quotaStorage(quotaChars: number) {
+    const data = new Map<string, string>();
+    const used = () => [...data].reduce((sum, [key, value]) => sum + key.length + value.length, 0);
+    return {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        const before = data.get(key);
+        const next = used() - (before === undefined ? 0 : key.length + before.length) + key.length + value.length;
+        if (next > quotaChars) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+        data.set(key, value);
+      },
+      removeItem: (key: string) => { data.delete(key); },
+    };
+  }
+
+  it("reports not-saved when a full localStorage throws on the draft's write, and keeps nothing stale", () => {
+    const storage = quotaStorage(8_000);
+    // Another page's data fills the quota first.
+    storage.setItem("other-app:cache", "x".repeat(7_900));
+    const drafts = draftStore(storage);
+    expect(drafts.save("atlas:pelican", { text: "a reply that will not fit on disk", caret: 0 })).toBe("not-saved");
+    expect(draftStore(storage).load().size).toBe(0);
+    // Room again (the other page cleared its cache): the same draft is kept.
+    storage.removeItem("other-app:cache");
+    expect(drafts.save("atlas:pelican", { text: "a reply that will not fit on disk", caret: 0 })).toBe("kept");
+    expect(draftStore(storage).load().get("atlas:pelican")?.text).toBe("a reply that will not fit on disk");
+  });
+
+  it("still reports too-long, not not-saved, for a draft over the store's own bound", () => {
+    expect(draftStore(quotaStorage(8_000)).save("atlas:pelican", { text: "z".repeat(70_000), caret: 0 })).toBe("too-long");
   });
 });

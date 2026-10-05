@@ -368,6 +368,7 @@ impl TaskStore for SyncingTaskStore {
             self.cancel_staged_after_local_failure(&intent);
             return Err(error);
         }
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.fulfill_upsert(&intent)?;
         Ok(())
     }
@@ -394,6 +395,7 @@ impl TaskStore for SyncingTaskStore {
             self.cancel_staged_after_local_failure(&intent);
             return Err(error);
         }
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         let task_sync_result = self.fulfill_upsert(&intent);
         let persisted = self
             .persisted_for_queue(task)
@@ -436,6 +438,7 @@ impl TaskStore for SyncingTaskStore {
                 return Err(error);
             }
         };
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.fulfill_upsert(&intent)?;
         Ok(persisted_at)
     }
@@ -468,6 +471,7 @@ impl TaskStore for SyncingTaskStore {
                 return Err(error);
             }
         };
+        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
         self.fulfill_upsert(&intent)?;
         Ok(persisted_at)
     }
@@ -842,6 +846,29 @@ mod tests {
         assert_eq!(pending[0].entity_type, EntityType::Task);
         assert_eq!(pending[0].entity_id, task.id);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
+    }
+
+    #[tokio::test]
+    async fn mcp_commit_receipt_survives_projection_failure_but_not_rollback_cas_e4a8() {
+        use crate::mcp::tools::service::mutation_receipt::{Receipt, scope};
+        let (temp, store) = create_test_store();
+        install_task_enqueue_failure(temp.path(), "");
+        let task = Task::new("task-committed-receipt".into(), "committed".into());
+        let receipt = Receipt::new("task", "create", None);
+        scope(receipt.clone(), async {
+            assert_degraded(store.add(&task).unwrap_err(), "add", &task.id);
+        }).await;
+        assert!(receipt.commit.get().unwrap().description.contains(&task.id));
+        assert_eq!(store.get(&task.id).unwrap().title, "committed");
+
+        remove_task_enqueue_failure(temp.path());
+        let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_receipt BEFORE INSERT ON task_mutation_receipts BEGIN SELECT RAISE(ABORT, 'rollback'); END;").unwrap();
+        let task = Task::new("task-rollback-receipt".into(), "rolled back".into());
+        let receipt = Receipt::new("task", "create", None);
+        scope(receipt.clone(), async { assert!(store.add(&task).is_err()); }).await;
+        assert!(receipt.commit.get().is_none(), "a rollback must remain unconfirmed");
+        assert!(matches!(store.get(&task.id), Err(StoreError::TaskNotFound(_))));
     }
 
     #[test]

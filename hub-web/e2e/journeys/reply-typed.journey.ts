@@ -23,9 +23,10 @@ async function swipeAway(locator: import("@playwright/test").Locator, dx: number
 }
 
 test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
-  // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
-  // loaded host, so it gets the headroom HUB-J3 has.
-  test.setTimeout(120_000);
+  // Nineteen stages; on a loaded host (load ~50) the full run took 108 s of
+  // the old 120 s budget (cas-f657 QA N2). Every wait inside is event-driven,
+  // so the budget only needs headroom, as HUB-J3 has.
+  test.setTimeout(240_000);
   await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -49,10 +50,14 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions");
     await expectDraft(page, composer, "Please verify the gate first.\nKeep this half-written reply.", testInfo);
     await expect(composer).toBeFocused();
+    // The same field keeps the caret where it was: a collapsed selection at 7.
+    // selectionDirection is not part of that: for a collapsed caret it is
+    // platform-defined ("none" on macOS Chromium, "forward" elsewhere), so
+    // pinning it failed every macOS run without saying anything (cas-d2b5).
     expect(await composer.evaluate((field: HTMLTextAreaElement) => ({
       sameNode: field === (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField,
-      start: field.selectionStart, end: field.selectionEnd, direction: field.selectionDirection,
-    }))).toEqual({ sameNode: true, start: 7, end: 7, direction: "forward" });
+      start: field.selectionStart, end: field.selectionEnd,
+    }))).toEqual({ sameNode: true, start: 7, end: 7 });
   });
 
   await journey.stage("Restore the draft and focus after switching conversations rebuilds the shell", async () => {
@@ -99,7 +104,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.getByRole("log")).toMatchAriaSnapshot(`
       - group /^You, \\d{1,2}:\\d{2}/:
         - paragraph: Please keep the release notes short this time.
-      - group /^patient-pelican-9, \\d{1,2}:\\d{2}/:
+      - group /^cas-src supervisor, \\d{1,2}:\\d{2}/:
         - paragraph: Understood — two lines per item, no process talk.
     `);
     await expect(page.locator("#conversation-connection")).toMatchAriaSnapshot(`- status: Live`);
@@ -518,5 +523,47 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.locator(".conversation-pane-slot :is(.terminal-connecting, .conversation-opening)")).toHaveCount(0, { timeout: 10_000 });
     await page.waitForTimeout(500);
     await expect(search).toBeFocused();
+  });
+
+  await journey.stage("A draft too long to keep across a reload says so", async () => {
+    // cas-adfc: a draft over the store's 64k bound is not kept on disk; the
+    // composer says so instead of losing it silently on the next reload.
+    const note = page.locator("#message-draft-note");
+    await expect(note).toBeHidden();
+    await composer.fill("a".repeat(70_000));
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText("This draft is too long to keep if the page reloads. Send it, or copy it somewhere safe, before you leave.");
+    await composer.fill("Short enough to keep.");
+    await expect(note).toBeHidden();
+    await page.reload();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(composer).toHaveValue("Short enough to keep.");
+    await expect(note).toBeHidden();
+  });
+
+  await journey.stage("A draft the full browser storage refuses says so, and stays on screen", async () => {
+    // cas-f657: localStorage is full, so writing the drafts entry throws
+    // QuotaExceededError. The draft stays in the field, the composer says it
+    // won't survive a reload, and the field is described by that note.
+    const note = page.locator("#message-draft-note");
+    await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      (window as unknown as { restoreSetItem: () => void }).restoreSetItem = () => { Storage.prototype.setItem = original; };
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key.includes(":drafts:")) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+        return original.call(this, key, value);
+      };
+    });
+    await composer.fill("A reply typed while the browser's storage is full.");
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText("This browser couldn't save this draft (its storage is full or blocked), so it won't survive a reload. Send it, or copy it somewhere safe, before you leave.");
+    await expect(composer).toHaveAttribute("aria-describedby", /\bmessage-draft-note\b/);
+    await expect(composer).toHaveValue("A reply typed while the browser's storage is full.");
+    // Room again: the next keystroke saves it, and the note goes.
+    await page.evaluate(() => (window as unknown as { restoreSetItem: () => void }).restoreSetItem());
+    await composer.press("End");
+    await composer.pressSequentially("!");
+    await expect(note).toBeHidden();
+    await expect(composer).not.toHaveAttribute("aria-describedby", /\bmessage-draft-note\b/);
   });
 });

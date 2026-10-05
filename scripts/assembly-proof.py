@@ -7,10 +7,13 @@ No PASS is published until CI script tests, native nextest and archive-mode
 in a plain clone all pass. Rust rows supply their zero-test guards.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import csv
 import fcntl
 import fnmatch
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -23,12 +26,39 @@ import tomllib
 
 FORMAT = 2
 MAX_AGE = 86400
+GIB = 1024 ** 3
+# Soundwave serial proof 7e4c6f50874fb738e0a4d59dfe54a7cbe191b07466dfa8ba09dd7cc27d49e23e
+# (abd6817b5), GNU time -v: maximum
+# single-process RSS 7,293,348 KiB; MemAvailable fell ~6–7 GB at jobs=16.
+# Round the large cas rustc/link unit up to 8 GiB per producer. Dependency
+# jobs are much smaller; 256 MiB/job and 2 GiB for scripts are assumptions,
+# to be checked against supervisor peak-RSS/PSI samples on both hosts.
+COMPILE_JOB_BYTES = GIB // 4
+PRODUCER_BYTES = 8 * GIB
+SCRIPT_BYTES = 2 * GIB
+TEST_FIXED_BYTES = 4 * GIB
+TEST_THREAD_BYTES = GIB // 4
+# Soundwave incremental cas relink, b86ec0c2e + train9, 2026-10-05:
+# .cas/perf-98a0/link-rss.log, 0.5s ps sampler: max cc/mold 2.089 GiB,
+# rustc 4.555 GiB; 30 link processes peaked at 9.75 GiB summed. Round links
+# conservatively to 2.1 GiB/slot. Retain the cold-proof 8 GiB producer bound
+# above rather than assume incremental rustc RSS covers cold code generation.
+LINK_BYTES = math.ceil(2.1 * GIB)
+GUARD_HEADROOM_BYTES = 2 * GIB
+# Exact harness/session names: scrub these from the environment passed to every
+# test row as well as its fingerprint. Do not ignore CAS_FACTORY_* wholesale;
+# build controls and unknown future variables remain test inputs.
 IDENTITY = {"CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
-            "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT"}
+            "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT",
+            "AI_AGENT", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CAS_CLONE_PATH",
+            "CAS_FACTORY_MODE", "CAS_FACTORY_SUPERVISOR_CLI", "CAS_FACTORY_WORKER_CLI"}
 VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR",
             "VERIFIED_TEST_LOG",
             # Train output locations do not change the compiled/tested candidate.
-            "CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR"}
+            "CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR",
+            # Publishing sources this file after assembly; any loaded build or
+            # test variables are still included by their own names.
+            "CAS_RELEASE_ENV_FILE"}
 
 
 def digest(value):
@@ -129,15 +159,33 @@ def code_input(root, revision="HEAD"):
             mode_type = entry.split(b" ", 2)[:2]
             entry = b" ".join(mode_type + [digest(normalized[path.decode()]).encode()]) + b"\t" + path
         prose = path == b"CHANGELOG.md" or path.startswith(
-            (b"docs/release-notes/", b"docs/release-reports/"))
+            (b"docs/release-notes/", b"docs/release-reports/")) or (
+                path.startswith(b"docs/qa/journey-evaluations/") and path.endswith(b".md"))
         if not prose or any(path == item or path.startswith(item.rstrip(b"/") + b"/")
                             for item in embedded):
             material.append(entry)
     return digest(b"\0".join(material))
 
 
+def with_cargo_bin(env):
+    """The PATH release-portable.sh gives the gate and the train.
+
+    release_portable_path_add_cargo_bin appends an existing Cargo bin directory
+    missing from PATH. A proof run from a shell without it (a macOS agent or
+    launchd shell) otherwise keys a different PATH than the gate and train that
+    look it up, so the receipt never matched there (cas-db34).
+    """
+    home = env.get("CARGO_HOME") or (env.get("HOME", "") + "/.cargo")
+    cargo_bin = home + "/bin"
+    path = env.get("PATH", "")
+    if Path(cargo_bin).is_dir() and cargo_bin not in path.split(":"):
+        env["PATH"] = f"{path}:{cargo_bin}" if path else cargo_bin
+    return env
+
+
 def test_environment(root):
     env = {key: value for key, value in os.environ.items() if key not in IDENTITY}
+    with_cargo_bin(env)
     env.setdefault("CAS_INIT_TIMEOUT_SECS", "900")
     if "ZIG" in env:
         zig = Path(env["ZIG"])
@@ -174,6 +222,12 @@ def inputs(root):
 
 
 def environment_material(root, env):
+    """Hash the scrubbed test environment conservatively.
+
+    Include every remaining variable, even unknown CAS_* names, except the
+    explicit output/shell controls above and release gate/train orchestration.
+    Local config bytes and resolved Zig bytes are additional inputs.
+    """
     material = {}
     for key, value in env.items():
         if (key in VOLATILE or key.startswith("CAS_RELEASE_GATE_")
@@ -319,6 +373,28 @@ def run_row(root, row, env, log_dir):
         raise ValueError(f"assembly {row} did not report a pass: {log}")
     result = {"status": "PASS", "row": row, "checkout": str(root), "log": str(log),
               "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip()}
+    for filename, key in (("timing.tsv", "timing"), ("compile-timing.tsv", "compile_timing")):
+        timing_path = Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / filename
+        if timing_path.is_file():
+            with timing_path.open() as stream:
+                timings = list(csv.DictReader(stream, delimiter="\t"))
+            if len(timings) != 1 or timings[0]["row"] != row or timings[0]["status"] != "0":
+                raise ValueError(f"assembly {row} has invalid {filename}: {timing_path}")
+            result[key] = timings[0]
+            wall, user, system = (float(timings[0][name]) for name in ("wall_s", "user_s", "system_s"))
+            if any(not math.isfinite(value) or value < 0 for value in (wall, user, system)):
+                raise ValueError(f"assembly {row} has invalid CPU timing: {timing_path}")
+            result[key]["average_cores_busy"] = round((user + system) / wall, 3) if wall else 0
+    admission_path = Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / "memory-admission.json"
+    if admission_path.is_file():
+        result["test_memory"] = json.loads(admission_path.read_text())
+    for filename, key in (("compile-memory.jsonl", "compile_memory"), ("link-rss.jsonl", "link_rss")):
+        event_path = Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / filename
+        if event_path.is_file():
+            events = [json.loads(line) for line in event_path.read_text().splitlines()]
+            result[key] = events
+            if any(event.get("action", "").endswith("abort") or event.get("estimate_exceeded") for event in events):
+                raise ValueError(f"assembly {row} has unsafe memory evidence: {event_path}")
     if row == "ci-script-tests":
         return result
     passed = re.findall(r"PASS: ([1-9][0-9]*) test\(s\) passed", raw)
@@ -326,6 +402,167 @@ def run_row(root, row, env, log_dir):
         raise ValueError(f"assembly {row} did not report a nonempty test pass: {log}")
     result["passed"] = sum(map(int, passed))
     return result
+
+
+def positive_knob(env, name):
+    configured = env.get(name)
+    if configured is not None:
+        if not re.fullmatch(r"[1-9][0-9]*", configured):
+            raise ValueError(name + " must be a positive integer")
+        return int(configured)
+    return None
+
+
+def cpu_count():
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
+def memory_snapshot():
+    if platform.system() == "Darwin":
+        total = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]))
+        vm = subprocess.check_output(["vm_stat"], text=True)
+        page_size = int(re.search(r"page size of ([0-9]+) bytes", vm)[1])
+        pages = {name: int(value) for name, value in
+                 re.findall(r"^([^:]+):\s*([0-9]+)\.", vm, re.M)}
+        # Do not count compressed or purgeable pages separately: they overlap
+        # resident categories. This is a conservative vm_stat approximation.
+        available = sum(pages[name] for name in
+                        ("Pages free", "Pages inactive", "Pages speculative")) * page_size
+        source = "sysctl hw.memsize + vm_stat free/inactive/speculative"
+    else:
+        fields = {name: int(value) * 1024 for name, value in
+                  re.findall(r"^([^:]+):\s*([0-9]+) kB", Path("/proc/meminfo").read_text(), re.M)}
+        total, available = fields["MemTotal"], fields["MemAvailable"]
+        source = "/proc/meminfo MemTotal/MemAvailable"
+    if not 0 < total or not 0 <= available <= total:
+        raise ValueError("invalid physical memory snapshot")
+    return {"total_bytes": total, "available_bytes": available, "source": source}
+
+
+def memory_budget(env):
+    try:
+        snapshot = memory_snapshot()
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+        raise ValueError("cannot safely admit assembly without a memory snapshot: " + str(exc)) from exc
+    configured = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB")
+    reserve = configured * GIB if configured is not None else max(8 * GIB, snapshot["total_bytes"] // 4)
+    return dict(snapshot, reserve_bytes=reserve,
+                budget_bytes=max(0, snapshot["available_bytes"] - reserve))
+
+
+def execution_plan(env):
+    positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS")
+    positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS")
+    memory = memory_budget(env)
+    requested = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS")
+    cores = cpu_count()
+    cap = min(requested or cores, max(1, cores // 2))
+    jobs = min(cap, max(0, (memory["budget_bytes"] - 2 * PRODUCER_BYTES - SCRIPT_BYTES
+                           - LINK_BYTES - GUARD_HEADROOM_BYTES)
+                        // (2 * COMPILE_JOB_BYTES)))
+    mode = "concurrent" if jobs else "serial"
+    reason = ("two producers and script tier fit above memory reserve" if jobs else
+              "insufficient available memory for two producers plus script tier; using serial legs")
+    return dict(memory, mode=mode, reason=reason, cores=cores, requested_compile_jobs=requested,
+                compile_jobs=jobs, per_job_bytes=COMPILE_JOB_BYTES,
+                producer_overhead_bytes=PRODUCER_BYTES, script_bytes=SCRIPT_BYTES,
+                link_jobs=1, per_link_bytes=LINK_BYTES, guard_headroom_bytes=GUARD_HEADROOM_BYTES,
+                link_estimate_source="soundwave b86ec0c2e + train9 incremental relink, 2026-10-05, .cas/perf-98a0/link-rss.log: max ld.mold 2190228 KiB (2.089 GiB), rustc 4775752 KiB (4.555 GiB), 0.5s ps; links rounded to 2.1 GiB; cold producer bound remains 8 GiB",
+                estimate_source="8 GiB large unit rounded from measured 7293348 KiB max RSS, soundwave proof 7e4c6f50 (abd6817b5); 256 MiB/dependency job and 2 GiB scripts assumed",
+                phases=[])
+
+
+def admit_phase(env, execution, phase, compile_phase=False):
+    wait_secs = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS") or 600
+    poll_secs = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 2
+    started = time.monotonic()
+    while True:
+        memory = memory_budget(env)
+        if phase == "ci-script-tests":
+            count = int(memory["budget_bytes"] >= SCRIPT_BYTES)
+        elif compile_phase:
+            cap = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS") or cpu_count()
+            count = min(cap, max(0, (memory["budget_bytes"] - PRODUCER_BYTES - LINK_BYTES
+                                    - GUARD_HEADROOM_BYTES) // COMPILE_JOB_BYTES))
+        else:
+            count = min(cpu_count(), max(0, (memory["budget_bytes"] - TEST_FIXED_BYTES) // TEST_THREAD_BYTES))
+        elapsed = time.monotonic() - started
+        event = dict(memory, phase=phase, admitted=bool(count), elapsed_s=round(elapsed, 3),
+                     deadline_s=wait_secs,
+                     **({"compile_jobs": count} if compile_phase else {"test_threads": count}))
+        execution["phases"].append(event)
+        print("assembly memory admission: " + json.dumps(event, sort_keys=True), flush=True)
+        if count:
+            return str(count)
+        if elapsed >= wait_secs:
+            raise ValueError(f"assembly {phase} cannot fit above memory reserve after {wait_secs}s")
+        time.sleep(min(poll_secs, wait_secs - elapsed))
+
+
+def run_contexts(root, clone, env, log_dir, clone_target, execution):
+    # Builds and script fixtures have independent checkouts/targets/logs. Test
+    # groups only constrain one nextest process, and host ports/hub processes
+    # are not all globally locked: serialize consumers after script admission.
+    # Clone preparation may have taken time: admit against current memory,
+    # not the earlier receipt snapshot. Knobs never bypass memory admission.
+    env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_LINK_GUARD_DIR=str(clone_target.parent / "linker-guards"))
+    execution.update(execution_plan(env))
+    print("assembly scheduling: " + json.dumps(execution, sort_keys=True), flush=True)
+    if execution["budget_bytes"] < SCRIPT_BYTES:
+        admit_phase(env, execution, "ci-script-tests")
+        samples = execution["phases"]
+        execution.update(execution_plan(env))
+        execution["phases"] = samples
+    if execution["mode"] == "serial":
+        scripts = run_row(root, "ci-script-tests", env, log_dir)
+        results = []
+        for checkout, row in ((root, "nextest"), (clone, "archive-mode")):
+            row_env = dict(env, CARGO_BUILD_JOBS=admit_phase(env, execution, row + "-compile", True),
+                           CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps(env_policy(env)))
+            if row == "archive-mode":
+                row_env["CARGO_TARGET_DIR"] = str(clone_target)
+            results.append(run_row(checkout, row, row_env, log_dir))
+        return scripts, *results
+    with tempfile.TemporaryDirectory(prefix="assembly-sync-", dir=log_dir) as directory:
+        sync = Path(directory)
+        (sync / "owner").write_text(str(os.getpid()))
+        native_env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR=str(sync),
+                          CARGO_BUILD_JOBS=str(execution["compile_jobs"]),
+                          CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps(env_policy(env)))
+        clone_env = dict(native_env, CARGO_TARGET_DIR=str(clone_target))
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            scripts = executor.submit(run_row, root, "ci-script-tests", env, log_dir)
+            native = executor.submit(run_row, root, "nextest", native_env, log_dir)
+            archive = executor.submit(run_row, clone, "archive-mode", clone_env, log_dir)
+            try:
+                script_result = scripts.result()
+                # Finish both producers before tests: no rustc/link peak can
+                # overlap a consumer's debug processes and tmpfs fixtures.
+                while not all((sync / ("compiled-" + row)).exists()
+                              for row in ("nextest", "archive-mode")):
+                    for future in (native, archive):
+                        if future.done():
+                            future.result()  # surface compile failure, abort waiter
+                    time.sleep(0.1)
+                write(sync / "release-nextest", int(admit_phase(env, execution, "nextest-tests")))
+                native_result = native.result()
+                write(sync / "release-archive-mode", int(admit_phase(env, execution, "archive-mode-tests")))
+                return script_result, native_result, archive.result()
+            finally:
+                # Failed scripts/builds cannot strand the other consumer, or
+                # grant a PASS; join children before removing clone and sync.
+                (sync / "abort").touch()
+
+
+def env_policy(env):
+    """Only admission knobs cross the shell boundary, never the full env."""
+    return {key: env[key] for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS",
+                                    "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
+                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS",
+                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") if key in env}
 
 
 def prove(root):
@@ -347,8 +584,8 @@ def prove(root):
         write(path, record)
         log_dir = path.parent / (path.stem + "-logs")
         log_dir.mkdir(exist_ok=True)
-        record["script_tests"] = run_row(root, "ci-script-tests", env, log_dir)
-        record["contexts"]["worktree"] = run_row(root, "nextest", env, log_dir)
+        record["execution"] = execution_plan(env)
+        write(path, record)
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
         with tempfile.TemporaryDirectory(prefix="assembly-clone-", dir=scratch.parent) as directory:
@@ -357,10 +594,14 @@ def prove(root):
                             str(common_dir(root)), str(clone)], check=True)
             subprocess.run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
             no_cas_ancestor(clone)
-            clone_env = dict(env)
             # Reuse compiled dependencies; Cargo invalidates producer paths.
-            clone_env["CARGO_TARGET_DIR"] = str(path.parent.parent / "assembly-target")
-            record["contexts"]["clone"] = run_row(clone, "archive-mode", clone_env, log_dir)
+            try:
+                script_result, native_result, archive_result = run_contexts(
+                    root, clone, env, log_dir, path.parent.parent / "assembly-target", record["execution"])
+            finally:
+                write(path, record)  # retain admission/fallback evidence on failure
+            record["script_tests"] = script_result
+            record["contexts"] = {"worktree": native_result, "clone": archive_result}
         current, _ = inputs(root)
         if current != expected or git(root, "rev-parse", "HEAD").decode().strip() != head:
             raise ValueError("assembly inputs changed while tests ran")

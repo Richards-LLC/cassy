@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      /* cas-b7f2: a scroller holding collapsed disclosures. A closed
+         <details> keeps a layout box for its content without drawing it, so
+         that content sits past the scroller's range until it is opened. */
+      .log { height: 140px; overflow-x: hidden; overflow-y: auto; margin: 0; padding: 0 8px; }
+      /* A disclosure that is open inside a fixed-height hidden box: its third
+         line is really lost below the edge. */
+      .clip { height: 48px; overflow: hidden; }
+      .clip p { margin: 0; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Disclosures</h1>
+      <section class="log" id="log">
+        <p>The newest turn is on screen.</p>
+        <p>An earlier turn is on screen too.</p>
+        <details>
+          <summary>Earlier session one</summary>
+          <p>Folded turn one: hidden until the operator opens it.</p>
+        </details>
+        <details>
+          <summary>Earlier session two</summary>
+          <p>Folded turn two: hidden until the operator opens it.</p>
+          <p>Folded turn three: hidden until the operator opens it.</p>
+        </details>
+        <details>
+          <summary>Technical details</summary>
+          <dl><dt>Scopes</dt><dd>machine:read, session:read, pane:read, pane:input, message:send</dd></dl>
+        </details>
+      </section>
+      <details open>
+        <summary>Opened notes</summary>
+        <div class="clip">
+          <p>The first line fits.</p>
+          <p>The second line fits.</p>
+          <p>This open line is lost below the edge.</p>
+        </div>
+      </details>
+    </main>
+  </body>
+</html>

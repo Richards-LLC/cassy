@@ -28,7 +28,7 @@ user-facing change they never ran.
 
 | Question | Decision |
 | --- | --- |
-| What is required | The cas-c3b8 bundle, contract v1 (`~/.cas/artifacts/cas-c3b8/bundle-contract.md`). This is a `bundle.json` manifest plus its files, under `<artifacts_root>/<task-id>/`, cited by a `platform_proof` note `qa-bundle: <abs>/bundle.json`. |
+| What is required | The cas-c3b8 bundle, contract v1 (`~/.cas/artifacts/cas-c3b8/bundle-contract.md`). This is a `bundle.json` manifest plus its files, under `<artifacts_root>/<project-key>/<task-id>/`, cited by a `platform_proof` note `qa-bundle: <abs>/bundle.json`. |
 | Who must produce it | The implementer, for a delivery that is **web user-facing** (see Eligibility). |
 | Where it is enforced | **Before the merge gate** in `cas_task_close_with_completion`, after repo and branch resolution (`~4745`). It runs on every close attempt until the task closes, so the first close cannot park and the re-close cannot finish without a valid bundle for the delivered head. |
 | Staleness | Every listed file's mtime and `created_at` must be later than the delivered head's committer time. `head_sha` must equal the delivered head, or be a descendant of it. |
@@ -62,7 +62,30 @@ This gate adds one refinement, because the bundle is a Playwright artifact:
 | --- | --- |
 | Journey, or `user_facing_paths` match (a web surface) | The cas-c3b8 bundle (§2) |
 | `demo_statement` only, with no web surface in the diff (for example a CLI change) | `<task>/LEDGER.md`: non-empty, fresher than the delivered head, with ≥1 row whose verdict is `PASS` and label is `real-build`. The contract says CLI-only cells produce no Playwright bundle (§2 of the contract). |
-| …and the diff touches `qa.terminal_render_paths` (terminal rendering) | Also a cas-cli-craft terminal-qa receipt: a `report.md` under `<task>/terminal-qa/` whose first line starts `terminal-qa: PASS` and which is fresher than the delivered head. |
+| …and the diff touches `qa.terminal_render_paths` outside interactive surfaces | Also a cas-cli-craft terminal-qa receipt: a `report.md` under `<task>/terminal-qa/` whose first line starts `terminal-qa: PASS` and which is fresher than the delivered head. |
+| Interactive surfaces in `qa.terminal_interaction_paths` | The fresh real-build PASS ledger exercises the live TUI/PTY interaction; a command stdout capture is not required. Defaults cover factory UI, cas-pty and cas-mux. |
+
+Every changed surface path is classified independently. A factory input or
+geometry change cannot exempt another CLI/output path in the same delivery.
+The default output globs include `**/cli/**`; matching CLI command paths always
+require terminal-qa while output checks are enabled, even if an interaction
+glob also matches or a stored configuration retains older output globs. Other projects
+can configure interaction globs for their TUI modules; an empty list restores
+terminal-qa for all output matches. The ledger's freshness and real-build PASS
+checks still apply, and web/journey bundles and skip-marker gates are unchanged.
+
+A supervisor `qa_waive` bound to the exact delivered SHA satisfies the ledger
+and terminal receipt tier on worker re-close. It does not waive web bundles or
+unexplained test skip/focus markers; a waiver for another tip does not apply.
+
+A fresh ledger may instead contain a deployed check with verdict `DEFERRED`,
+label `deployed-verification`, and evidence cell
+`deferred: deployed-verification owner=<registered supervisor id or unique name>`.
+The close handler validates the owner's registered supervisor role and records
+`POST-DEPLOY OBLIGATION` with the full delivered SHA, ledger path, row and owner.
+The row remains deferred, never PASS. The delivery can park and close after its
+ordinary merge gates without waiting for a deployed PASS. Terminal rendering
+still requires its separate terminal-qa receipt unless explicitly waived.
 
 Where the diff comes from:
 
@@ -83,11 +106,21 @@ The gate finds the citation first. The newest task note containing
 `qa-bundle: <path>` gives the path, but citations under `independent-qa/` are
 skipped. cas-619f cites each reviewer round on the same delivery task, and a
 later round must never shadow the implementer's bundle. That path must canonicalise inside
-`<artifacts_root>/<task-id>/`; a symlink escape fails, using the
+`<artifacts_root>/<project-key>/<task-id>/`; a symlink escape fails, using the
 `artifacts::paths` resolution. It must not be under `independent-qa/`,
 because a reviewer's bundle is not the implementer's evidence. The check
 does not look for a `platform_proof` token, because the existing
 risk=platform check owns that token.
+
+The close gate and PreToolUse workspace contract resolve the configured
+artifact base and project namespace together. New evidence and repair hints
+always use that writable namespace. Existing flat `<artifacts_root>/<task-id>/`
+evidence remains readable. If an old flat citation names a missing file and
+the same relative file exists in the scoped task directory, the gate validates
+that scoped file without changing the task's historical notes. It still checks
+containment, task and commit identity, freshness, and trace results. Existing
+historical files, another project's citations and paths containing `..` are
+never substituted.
 
 Checks, in order. Each rejection names the failing key and the command
 that produces it:
@@ -277,3 +310,20 @@ The cas-c3b8 contract addendum (#32364) exempts `journey` bundles from the
 polish keys. The supervisor ruled that the exemption covers only the release
 journey evaluation. A journey bundle without polish proof cannot close a
 delivery, so the gate keeps requiring polish.
+
+### Integration batches
+
+A registered supervisor can stage a parked delivery with
+`task action=update id=<task> merged_into=<batch-ref>@<exact-tip-sha>`.
+Cassy requires the pinned batch to contain the delivery's recorded anchor and
+content, and records its base, tip and supervisor. `task show` and `epic_status`
+expose the staged receipt; staged tasks stop generating worker-idle merge nags.
+An empty `merged_into` clears staging. Reopening invalidates the receipt.
+
+Ordinary close recognizes a target-reachable squash whose own first-parent
+changed-path set, final blobs and modes exactly match `batch-base..batch-tip`.
+The squash parent may differ from the batch base. Missing or extra paths and
+changed final content fail containment. The original delivery anchor remains
+its QA and executable-hook identity; batch containment supplies merge evidence
+and does not waive review or evidence requirements. `commit_receipt=<squash>`
+can name the integration explicitly; it does not require `supervisor_override`.

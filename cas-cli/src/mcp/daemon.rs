@@ -488,11 +488,7 @@ impl EmbeddedDaemon {
 
         eprintln!("[Cassy] Proxy config changed, reloading...");
 
-        let cfg = cmcp_core::config::Config::load_merged(if proxy_path.exists() {
-            Some(&proxy_path)
-        } else {
-            None
-        });
+        let cfg = crate::mcp::server::load_proxy_config_for_process(&self.config.cas_root);
 
         match cfg {
             Ok(cfg) => {
@@ -2246,12 +2242,7 @@ fn init_code_watcher(config: &EmbeddedDaemonConfig) -> Option<Arc<std::sync::Mut
 
     // Build watch paths - use configured paths or default to project root
     let watch_paths = if config.code_watch_paths.is_empty() {
-        // Default: watch the project directory (parent of .cas)
-        if let Some(project_root) = config.cas_root.parent() {
-            vec![project_root.to_path_buf()]
-        } else {
-            return None;
-        }
+        vec![crate::daemon::indexing::code_project_root(&config.cas_root)]
     } else {
         config.code_watch_paths.clone()
     };

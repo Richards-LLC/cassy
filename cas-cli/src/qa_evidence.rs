@@ -189,7 +189,7 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
         .last()
 }
 
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => dirs::home_dir()
             .map(|home| home.join(rest))
@@ -851,8 +851,59 @@ fn visual_qa_page(target: &str) -> String {
     }
 }
 
+/// Placeholder a per-render random id fragment is compared as.
+const RANDOM_ID_PLACEHOLDER: &str = "<uuid>";
+
+/// cas-7c15 (GH #1078): `text` with every UUID-shaped fragment
+/// (8-4-4-4-12 hex digits, either case) replaced by [`RANDOM_ID_PLACEHOLDER`].
+/// Frameworks mint such ids per render (Quasar's `#f_<uuid>` focus inputs),
+/// so the same element carries a different id in the delivered and the base
+/// run. A fragment glued to further hex digits is not UUID-shaped and stays.
+fn normalize_random_ids(text: &str) -> String {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    const LEN: usize = 36;
+    let bytes = text.as_bytes();
+    let is_uuid_at = |start: usize| {
+        if start + LEN > bytes.len() {
+            return false;
+        }
+        let mut at = start;
+        for (index, group) in GROUPS.iter().enumerate() {
+            if index > 0 {
+                if bytes[at] != b'-' {
+                    return false;
+                }
+                at += 1;
+            }
+            if !bytes[at..at + group].iter().all(u8::is_ascii_hexdigit) {
+                return false;
+            }
+            at += group;
+        }
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_hexdigit();
+        let after_ok = at == bytes.len() || !bytes[at].is_ascii_hexdigit();
+        before_ok && after_ok
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if is_uuid_at(index) {
+            out.push_str(&text[copied..index]);
+            out.push_str(RANDOM_ID_PLACEHOLDER);
+            index += LEN;
+            copied = index;
+        } else {
+            index += 1;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 /// What a finding is compared by across two runs: its type, element, the
-/// element it collides with, page, scheme and viewport.
+/// element it collides with, page, scheme and viewport. Per-render random
+/// ids are normalised first ([`normalize_random_ids`], cas-7c15).
 fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
     let text = |pointer: &str| {
         finding
@@ -875,6 +926,7 @@ fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
         text("/scheme"),
         viewport,
     ]
+    .map(|part| normalize_random_ids(&part))
     .join(" | ")
 }
 
@@ -1094,15 +1146,15 @@ fn secret_patterns() -> &'static [(&'static str, regex::Regex)] {
             ),
             (
                 "a cookie or authorization header value",
-                r#"(?i)"name"\s*:\s*"(?:cookie|set-cookie|authorization)"\s*,\s*"value"\s*:\s*"[^"]{8,}""#,
+                r#"(?i)"name"\s*:\s*"(?:cookie|set-cookie|authorization)"\s*,\s*"value"\s*:\s*(?P<json_value>"(?:\\.|[^"\\])*")"#,
             ),
             (
                 "a cookie or authorization header value",
-                r"(?im)^\s*(?:cookie|set-cookie|authorization)\s*:\s*\S{8,}",
+                r"(?im)^[\t ]*(?:cookie|set-cookie|authorization)[\t ]*:[\t ]*(?P<header_value>[^\r\n]*)",
             ),
             (
                 "a saved browser storage state (cookies)",
-                r#""cookies"\s*:\s*\[\s*\{[^\]]*"value"\s*:\s*"[^"]{8,}""#,
+                r#""cookies"\s*:\s*\[(?P<cookie_values>(?:[^"\]]|"(?:\\.|[^"\\])*")*)"#,
             ),
         ]
         .into_iter()
@@ -1117,8 +1169,42 @@ const SECRET_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 fn first_secret(text: &str) -> Option<&'static str> {
     secret_patterns()
         .iter()
-        .find(|(_, pattern)| pattern.is_match(text))
+        .find(|(_, pattern)| {
+            pattern.captures_iter(text).any(|captures| {
+                if let Some(value) = captures.name("json_value") {
+                    json_value_has_secret(value.as_str())
+                } else if let Some(value) = captures.name("header_value") {
+                    // HTTP optional whitespace is outside the header value.
+                    value_has_secret(value.as_str().trim_matches([' ', '\t']))
+                } else if let Some(values) = captures.name("cookie_values") {
+                    static VALUES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+                    VALUES
+                        .get_or_init(|| {
+                            regex::Regex::new(r#""value"\s*:\s*("(?:\\.|[^"\\])*")"#)
+                                .expect("cookie value pattern")
+                        })
+                        .captures_iter(values.as_str())
+                        .any(|value| json_value_has_secret(&value[1]))
+                } else {
+                    // JWT, bearer and API token detection has no exemptions.
+                    true
+                }
+            })
+        })
         .map(|(kind, _)| *kind)
+}
+
+fn value_has_secret(value: &str) -> bool {
+    value.chars().count() >= 8
+        && !matches!(value, "REDACTED" | "[REDACTED]" | "<redacted>" | "***" | "")
+}
+
+fn json_value_has_secret(quoted_value: &str) -> bool {
+    match serde_json::from_str::<String>(quoted_value) {
+        Ok(value) => value_has_secret(&value),
+        // Malformed JSON must not turn into a redaction exemption.
+        Err(_) => quoted_value.trim_matches('"').chars().count() >= 8,
+    }
 }
 
 /// cas-a6ab: an authenticated deployed run must not carry credentials into
@@ -1127,7 +1213,7 @@ fn first_secret(text: &str) -> Option<&'static str> {
 /// the kind of secret, never its value. A saved storage-state file anywhere
 /// in the bundle is refused by name.
 fn check_no_secrets(bundle_dir: &Path, listed: &[(String, PathBuf)]) -> Result<(), EvidenceRefusal> {
-    let fix = "re-record without credentials: never copy a storage state, cookie, token or auth header into the bundle; redact header values from the trace before listing it".to_string();
+    let fix = "re-record without credentials: saved storage-state files and real cookie/authorization values of 8 or more characters are refused; redact each entire value to exactly REDACTED, [REDACTED], <redacted>, ***, or empty before listing the trace; JWT, bearer and API tokens remain refused".to_string();
     if let Ok(entries) = std::fs::read_dir(bundle_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
@@ -1404,8 +1490,24 @@ fn expect_has_expect_ancestor(
 }
 
 /// Validate `<task>/LEDGER.md` for a demo-only (non-web) delivery: present,
-/// non-empty, fresher than the delivered commit, with at least one PASS row.
+/// non-empty and fresher than the delivered commit. A real-build PASS or a
+/// deployed-verification deferral is required; the close handler authenticates
+/// deferred owners and records their post-deploy obligations.
 pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
+    validate_ledger_receipt(ctx).map(|receipt| receipt.0)
+}
+
+/// A deployed check deferred to a registered supervisor. This is not a PASS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredDeployedVerification {
+    pub row_id: String,
+    pub owner: String,
+    pub ledger: PathBuf,
+}
+
+fn validate_ledger_receipt(
+    ctx: &EvidenceContext<'_>,
+) -> Result<(PathBuf, Vec<DeferredDeployedVerification>), EvidenceRefusal> {
     let ledger = ctx.task_artifacts_dir.join("LEDGER.md");
     let command = format!(
         "walk the demo_statement and write the evidence ledger to {} (cas-qa-craft references/evidence-ledger.md)",
@@ -1435,7 +1537,9 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             command,
         ));
     }
-    let has_pass = body.lines().any(|line| {
+    let mut has_pass = false;
+    let mut deferred = Vec::new();
+    for line in body.lines() {
         let cells: Vec<&str> = line
             .trim()
             .trim_matches('|')
@@ -1443,9 +1547,35 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             .map(str::trim)
             .collect();
         // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
-        cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build")
-    });
-    if !has_pass {
+        has_pass |= cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build");
+        if cells.get(4) != Some(&"DEFERRED") || cells.get(5) != Some(&"deployed-verification") {
+            continue;
+        }
+        let owner = cells
+            .get(6)
+            .and_then(|cell| cell.strip_prefix("deferred: deployed-verification owner="));
+        let Some(owner) = owner.filter(|owner| {
+            !owner.is_empty() && !owner.chars().any(|c| c.is_whitespace() || c.is_control())
+        }) else {
+            return Err(EvidenceRefusal::new(
+                "invalid deployed-verification deferral: expected `deferred: deployed-verification owner=<registered supervisor>`",
+                command,
+            ));
+        };
+        let row_id = cells[0];
+        if row_id.is_empty() {
+            return Err(EvidenceRefusal::new(
+                "invalid deployed-verification deferral: row id is empty",
+                command,
+            ));
+        }
+        deferred.push(DeferredDeployedVerification {
+            row_id: row_id.into(),
+            owner: owner.into(),
+            ledger: ledger.clone(),
+        });
+    }
+    if !has_pass && deferred.is_empty() {
         return Err(EvidenceRefusal::new(
             format!(
                 "unproven: {} has no row with verdict PASS and label real-build",
@@ -1454,7 +1584,7 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             command,
         ));
     }
-    Ok(ledger)
+    Ok((ledger, deferred))
 }
 
 /// First line of a passing cas-cli-craft `scripts/terminal-qa.mjs` report.
@@ -1726,7 +1856,8 @@ pub enum EvidenceTier {
     Bundle,
     /// demo_statement only, no web surface in the diff: the evidence ledger
     /// with a real-build PASS row, plus a cas-cli-craft terminal-qa PASS
-    /// receipt when the diff changes terminal rendering.
+    /// receipt when the diff changes command output. Interactive TUI/PTY
+    /// surfaces can use the ledger alone, as classified by the close gate.
     Ledger { terminal_qa: bool },
 }
 
@@ -1735,6 +1866,8 @@ pub enum EvidenceTier {
 pub struct GatePass {
     /// Decision-note lines to append at close (allowed skips, receipts).
     pub notes: Vec<String>,
+    /// The close handler must authenticate each owner before accepting these.
+    pub deferred_deployed: Vec<DeferredDeployedVerification>,
 }
 
 /// Run the evidence and skip-marker checks and render the rejection text.
@@ -1795,15 +1928,25 @@ pub fn run_close_gate_with_write_dir(
     }
     let why = reasons.join("; ");
     let reject = |refusal: EvidenceRefusal, what: &str| {
+        let mut command = refusal.command.replace(
+            ctx.task_artifacts_dir.to_string_lossy().as_ref(),
+            write_dir.to_string_lossy().as_ref(),
+        );
+        // Generic repair hints (for example malformed manifests) do not name
+        // a path. Historical evidence is read-only to factory workers, so
+        // make the writable replacement and its citation explicit as well.
+        if ctx.task_artifacts_dir != write_dir
+            && !command.contains(write_dir.to_string_lossy().as_ref())
+        {
+            let write_ctx = EvidenceContext { task_artifacts_dir: write_dir, ..*ctx };
+            command.push_str(&format!("; {}", cite_command(&write_ctx)));
+        }
         format!(
             "TASK CLOSE REJECTED: {task} is user-facing ({why}) and its {what} is {problem}. \
              Next: {command}. Then retry close. Contract: {CONTRACT_REFERENCE}.",
             task = ctx.task_id,
             problem = refusal.problem,
-            command = refusal.command.replace(
-                ctx.task_artifacts_dir.to_string_lossy().as_ref(),
-                write_dir.to_string_lossy().as_ref(),
-            ),
+            command = command,
         )
     };
     match tier {
@@ -1819,8 +1962,9 @@ pub fn run_close_gate_with_write_dir(
             ));
         }
         EvidenceTier::Ledger { terminal_qa } => {
-            let ledger =
-                validate_ledger(ctx).map_err(|refusal| reject(refusal, "QA evidence ledger"))?;
+            let (ledger, deferred) = validate_ledger_receipt(ctx)
+                .map_err(|refusal| reject(refusal, "QA evidence ledger"))?;
+            pass.deferred_deployed = deferred;
             pass.notes.push(format!(
                 "QA evidence ledger accepted: {}.",
                 ledger.display()

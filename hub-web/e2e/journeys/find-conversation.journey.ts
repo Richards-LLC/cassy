@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { test, expect, RECEIPTS } from "./journey";
+import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
@@ -11,6 +11,48 @@ const FORGE: Machine = {
   label: "Forge build box with an unusual hostname · Linux",
   sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live", last_activity_at: journeyStamp(-3 * 3_600_000), last_activity: "supervisor → swift-lark-3" }],
 };
+
+for (const width of [1280, 390]) for (const long of [true, false]) {
+  test(`HUB-J3 a ${long ? "wrapped" : "short"} footer name keeps its status dot on the first line at ${width} (cas-94eb)`, journeyPart, async ({ page, journey }) => {
+    const label = long ? "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap" : "Atlas · Linux";
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await journey.hub({ machines: [{ ...ATLAS, label }], paired: [ATLAS.id] });
+    await journey.stage("Read the machine name and its connection together", async () => {
+      await journey.open();
+      const footer = page.locator("#paired-machines-toggle");
+      await expect(footer.locator(".machine-badge-state")).toHaveText("Connected");
+      await expect(footer.locator("span").nth(1)).toHaveAttribute("title", label);
+      const geometry = await footer.evaluate((button) => {
+        const name = button.children[1] as HTMLElement;
+        const range = document.createRange();
+        range.setStart(name.firstChild!, 0); range.setEnd(name.firstChild!, 1);
+        const first = range.getBoundingClientRect();
+        const dot = button.children[0]!.getBoundingClientRect();
+        const state = button.children[2]!.getBoundingClientRect();
+        const bounds = button.getBoundingClientRect();
+        return { firstTop: first.top, firstBottom: first.bottom, nameHeight: name.getBoundingClientRect().height,
+          dotCentre: dot.top + dot.height / 2, dotRight: dot.right, nameLeft: first.left, stateCentre: state.top + state.height / 2,
+          stateRight: state.right, right: bounds.right, textFits: name.scrollWidth <= name.clientWidth + 1 };
+      });
+      expect(geometry.dotCentre, "status dot belongs to the label's first line").toBeGreaterThanOrEqual(geometry.firstTop);
+      expect(geometry.dotCentre, "status dot belongs to the label's first line").toBeLessThanOrEqual(geometry.firstBottom);
+      expect(geometry.dotRight).toBeLessThan(geometry.nameLeft);
+      expect(geometry.stateRight).toBeLessThanOrEqual(geometry.right);
+      if (width === 1280 && long) {
+        expect(geometry.nameHeight).toBeGreaterThan(geometry.firstBottom - geometry.firstTop);
+        expect(geometry.textFits, "the full desktop machine name wraps inside the footer").toBe(true);
+      }
+      if (!long) {
+        expect(geometry.stateCentre, "short names keep their state on the same row").toBeGreaterThanOrEqual(geometry.firstTop);
+        expect(geometry.stateCentre).toBeLessThanOrEqual(geometry.firstBottom);
+      }
+      await footer.focus(); await page.keyboard.press("Enter");
+      await expect(page.locator("#paired-machines-list h3")).toHaveText(label);
+      await page.locator("#paired-machines-close").click();
+      await expect(footer).toBeFocused();
+    });
+  });
+}
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
   // Fourteen stages, two searches, three page loads and the palette. On a
@@ -33,6 +75,22 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator(".conversation-list-top #pair-toggle")).toBeVisible();
   };
   const filter = page.getByRole("searchbox", { name: "Filter commands" });
+  /**
+   * cas-d4a9: the name Chromium's accessibility tree gives a node, which is
+   * what a screen reader speaks. CSS generated content counts toward it unless
+   * it carries empty alternative text.
+   */
+  const spokenName = async (selector: string) => {
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+      const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector });
+      const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
+      return String(nodes[0]?.name?.value ?? "");
+    } finally {
+      await cdp.detach();
+    }
+  };
   // Ctrl/Cmd+K lands in the list search; pressed again from there, it opens
   // the command palette.
   const openPaletteFromKeyboard = async () => {
@@ -114,6 +172,22 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await search.fill("atlas");
     await expect(list.getByRole("button")).toHaveCount(1);
     await expect(list.getByRole("button").first()).toContainText("cas-src");
+    // cas-786a (journey F29): the row Enter opens carries its "Enter ↵" hint
+    // and its unread count side by side, never one drawn over the other. Every
+    // point of the count is the count's own, not the hint painted on top.
+    await expect(list.locator('.conversation-row[data-enter-target="true"]').getByLabel("1 unread")).toBeVisible();
+    const covered = await list.locator('.conversation-row[data-enter-target="true"] .conversation-unread').evaluate((badge) => {
+      const box = badge.getBoundingClientRect();
+      const points = [[0.5, 0.5], [0.15, 0.2], [0.85, 0.2], [0.15, 0.8], [0.85, 0.8]].map(([x, y]) => [box.left + box.width * x, box.top + box.height * y]);
+      return points.filter(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit !== badge && !badge.contains(hit); }).length;
+    });
+    expect.soft(covered, "points of the unread count covered by the Enter hint").toBe(0);
+    // cas-d4a9: the "Enter ↵" hint is for the eye. The row is still heard by
+    // its own name and unread count, not "… Enter ↵ 1 unread"; the field's
+    // aria-activedescendant already says which row Enter opens.
+    const hinted = '.conversation-sidebar .conversation-row[data-enter-target="true"]';
+    expect(await spokenName(hinted), "the row's spoken name").not.toContain("Enter");
+    expect(await page.locator(hinted).ariaSnapshot(), "the row's aria snapshot").not.toContain("Enter");
     await search.fill(OTTER);
     await expect(list.getByRole("button")).toHaveCount(1);
     await expect(list.getByRole("button").first()).toContainText("gabber-studio");
@@ -238,7 +312,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(enterTarget).toHaveCount(1);
     await expect(enterTarget).toContainText("Jump to lighthouse");
     await expect(filter).toHaveAttribute("aria-activedescendant", (await enterTarget.getAttribute("id"))!);
-    expect(await enterTarget.evaluate((node) => getComputedStyle(node, "::after").content), "the Enter hint").toBe('"Enter ↵"');
+    // The hint is drawn with empty alternative text, so it is seen and not
+    // read into the command's name (cas-d4a9).
+    expect(await enterTarget.evaluate((node) => getComputedStyle(node, "::after").content), "the Enter hint").toBe('"Enter ↵" / ""');
+    expect(await spokenName('#command-palette .palette-command[data-enter-target="true"]'), "the command's spoken name").not.toContain("Enter");
+    expect(await enterTarget.ariaSnapshot(), "the command's aria snapshot").not.toContain("Enter");
     // A project name finds its session too, and the row names that project.
     const rows = palette.locator(".palette-command");
     await filter.fill("gabber");
@@ -374,7 +452,34 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await filter.press("Enter");
     await expect(palette).toBeHidden();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    // cas-786a (journey F30): with no filter, Enter goes to the next
+    // conversation that needs the operator, never the one already open, and
+    // the open one says so. gabber-studio gets a reply while cas-src is open
+    // (visited once since the reload, so its machine is attached).
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
+    await expect.poll(() => hub.hasSocket(OTTER)).toBe(true);
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    hub.supervisorSays(OTTER, "The Mac tests are green.", { kind: "status" });
+    await expect(list.getByRole("button", { name: /gabber-studio/ }).getByLabel("1 unread")).toBeVisible();
     await reopen();
+    const current = palette.locator('.palette-command[data-palette-current="true"]');
+    await expect(current).toHaveCount(1);
+    await expect(current).toContainText("Jump to cas-src");
+    await expect(current).toHaveAttribute("aria-current", "true");
+    expect(await current.locator("small").evaluate((node) => getComputedStyle(node, "::before").content), "the open conversation says so").toContain('"Open now · "');
+    const enterTarget = palette.locator('.palette-command[data-enter-target="true"]');
+    await expect(enterTarget).toHaveCount(1);
+    await expect(enterTarget).toContainText("Jump to gabber-studio");
+    await expect(filter).toHaveAttribute("aria-activedescendant", (await enterTarget.getAttribute("id"))!);
+    await filter.press("Enter");
+    await expect(palette).toBeHidden();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
+    // Nothing waits now: Enter offers the first other conversation, here cas-src.
+    await reopen();
+    await expect(current).toContainText("Jump to gabber-studio");
+    await expect(enterTarget).toContainText("Jump to cas-src");
     // Typing after the reopen filters from scratch.
     await filter.pressSequentially(OTTER.slice(0, 6));
     await expect(commands.visible().first()).toContainText("Jump to gabber-studio");
@@ -477,7 +582,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const headerHost = () => page.locator(".conversation-identity .host-where").evaluate((line) => {
       const machine = line.querySelector<HTMLElement>(".host-machine")!;
       const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
-      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0 && machine.scrollWidth > machine.clientWidth + 1 };
+      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector<HTMLElement>(".host-os")?.getBoundingClientRect().width ?? 0) > 1 && machine.scrollWidth > machine.clientWidth + 1 };
     });
     for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 1280").toBeGreaterThanOrEqual(15.5); expect(header.osCut, "OS word cut at 1280").toBe(false); }
     await page.setViewportSize({ width: 390, height: 844 });
@@ -486,7 +591,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const fitted = await meta.evaluate((line) => {
       const machine = line.querySelector<HTMLElement>(".proj2-machine")!;
       const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
-      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0, title: line.getAttribute("title") };
+      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector<HTMLElement>(".host-os")?.getBoundingClientRect().width ?? 0) > 1, title: line.getAttribute("title") };
     });
     expect(fitted.machineChars, "the machine keeps 16ch at 390px").toBeGreaterThanOrEqual(15.5);
     expect(fitted.os, "the OS word goes before the name is cut").toBe(false);
@@ -528,5 +633,32 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const alarm = seen.pane.filter((text) => /Terminal unavailable|interrupted|retrying|Try again|relay|attempt|diagnostic|handshake/i.test(text));
     expect(alarm, "retry wording on the default surface while it opened").toEqual([]);
     await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Connected");
+  });
+});
+
+// cas-2a33: the journeys above run on a browser that declares Linux, so they
+// read "Ctrl K". On a Mac every surface names the palette chord "⌘K" instead,
+// never both, and ⌘K reaches the search and then the palette.
+test.describe("on a Mac", () => {
+  test.use({ journeyPlatform: "mac" });
+
+  test("HUB-J3 on a Mac, every surface names the palette chord ⌘K (cas-2a33)", journeyPart, async ({ page, journey }) => {
+    await journey.stage("On a Mac, the search, the palette and Terminal view all say ⌘K, and ⌘K opens them", async () => {
+      await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+      await journey.open();
+      const search = page.getByRole("searchbox", { name: "Search conversations" });
+      await expect(search).toHaveAttribute("placeholder", "Search conversations (⌘K)");
+      await page.keyboard.press("Meta+k");
+      await expect(search).toBeFocused();
+      await page.keyboard.press("Meta+k");
+      await expect(page.getByRole("searchbox", { name: "Filter commands" })).toBeFocused();
+      await page.keyboard.press("Escape");
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await page.locator("#conversation-terminal").click();
+      const paletteButton = page.getByRole("button", { name: "Open command palette (⌘K)", exact: true });
+      await expect(paletteButton).toHaveText("⌘K");
+      await expect(paletteButton).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
+      await expect(page.locator("body")).not.toContainText("Ctrl K");
+    });
   });
 });

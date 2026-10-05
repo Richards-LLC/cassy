@@ -592,6 +592,14 @@ impl FactoryApp {
     /// the test constructor will fail to compile otherwise, which is the
     /// intended canary.
     #[cfg(test)]
+    pub(crate) fn for_test_at(cas_dir: PathBuf) -> Self {
+        let mut app = Self::for_test();
+        app.project_dir = cas_dir.parent().unwrap().to_path_buf();
+        app.cas_dir = cas_dir;
+        app
+    }
+
+    #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         use cas_factory::EpicState;
         use cas_mux::SupervisorCli;

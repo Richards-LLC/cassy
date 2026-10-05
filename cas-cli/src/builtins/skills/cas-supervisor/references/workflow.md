@@ -216,6 +216,46 @@ compare-and-swap advances the epic, covering merge drivers and concurrent lanes.
 Rust merges use the detached venue's clean-target-checkout rule; commit or stash
 target-checkout dirt first. Other projects retain their existing merge policy.
 
+### Wall-clock is a resource
+
+A reviewed delivery or an idle worker that waits costs the epic time. Apply
+these rules every turn:
+
+- **Merge non-Rust deliveries at once.** A docs, scripts or web lane needs no
+  compile proof. Merge it as soon as review passes; never queue it behind a
+  Rust proof.
+- **Cap Rust lanes, not the fleet.** Keep Rust-compiling lanes at or below
+  `[factory] max_concurrent_builders`. Give every extra worker non-Rust work.
+- **Leave nothing waiting.** In the turn you review or merge a delivery,
+  assign its idle worker the next task. A reviewed delivery is either merging,
+  under a running proof, or blocked on a named cause.
+- **Prefer parallel proofs to serial waits.** Start every independent proof
+  before you wait on any of them. With two or more reviewed Rust lanes parked,
+  prove them together against their predicted merged trees, then merge them in
+  the predicted order.
+
+A predicted-tree proof for Rust lanes A then B on epic tip E chains each
+predicted merge onto the previous one:
+
+```bash
+E=$(git rev-parse epic/<slug>)
+T1=$(git merge-tree --write-tree "$E" factory/<worker-a>)
+C1=$(git commit-tree "$T1" -p "$E" -p factory/<worker-a> -m "predicted merge: worker-a")
+python3 scripts/check-lane-compile.py . "$E" factory/<worker-a> --prove > <artifacts>/lane-a.log 2>&1 &
+python3 scripts/check-lane-compile.py . "$C1" factory/<worker-b> --prove > <artifacts>/lane-b.log 2>&1 &
+```
+
+For a third lane, predict `T2` and `C2` from `C1` and lane B the same way and
+prove lane C against `C2`. `git merge-tree` must exit zero; a conflict means
+that lane needs a rebase, so end the chain before it. Each proof is one capped
+builder, so run no more at once than the cap leaves free.
+
+Each receipt is keyed to its merged tree. Merge A, then B, with
+`worktree_merge`. Merging A produces `T1`, so B's merge produces the tree
+already proved and its preflight finds the receipt without compiling. If
+another lane lands first, the order changes, or the actual merge tree differs,
+the preflight names the missing proof; rerun that one.
+
 A documented manual Git merge in a project that permits it uses the same
 preflight, from the target checkout immediately before the merge:
 
@@ -268,10 +308,16 @@ Rust build and suite run once, at Phase 4 assembly.
    `git grep -n '<old contract token>' -- '*test*'` (narrow the path/spec as needed).
    Update or reject the lane when those tests prove an unreviewed caller contract.
 2. **Read the lane CI signal.** Inspect `gh run list --branch factory/<worker>` at
-   review time. `worktree_merge` also reports its best-effort CI workflow verdict, but
-   this explicit review check catches a new run or a result that arrived after the
-   merge command's lookup. A red or unknown result is a review signal, not a v1 merge
-   refusal: investigate and record the decision rather than silently ignoring it.
+   review time. `worktree_merge` inspects the delivery range. It uses the tip's
+   runs when they include code checks (a multi-commit push runs CI on the tip),
+   otherwise the latest non-docs commit's runs; the receipt names that SHA.
+   Skipped validation beside Docs Lint does not count as code evidence. A pure
+   docs delivery can use Docs Lint at its tip. Red CI and documentation-only
+   success for a code delivery refuse the merge unless a live registered
+   supervisor supplies `supervisor_override=true`, `task_id`, and a non-empty
+   `reason`; the decision is logged on the task. Pending, unavailable and
+   no-checks results stay advisory, with code validation reported as unconfirmed.
+   Investigate these results and record the decision; the lookup never polls.
 
 Three flags that are routinely confused — they are independent (cas-0b32 / cas-369f):
 

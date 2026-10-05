@@ -333,7 +333,7 @@ pub fn claim_qa_pass(
     match active.reviewer_agent_id.as_deref() {
         Some(existing) if existing == reviewer_agent_id => {}
         Some(existing) => {
-            return Err(StoreError::Parse(format!(
+            return Err(StoreError::Other(format!(
                 "QA pass {} is already claimed by {existing}",
                 active.id
             )));
@@ -354,9 +354,38 @@ pub fn claim_qa_pass(
 /// reset. The same round and deadline remain in place for the next reviewer.
 /// Other task IDs and resolved rounds are left untouched.
 pub fn release_qa_claim_for_task(cas_dir: &Path, qa_task_id: &str) -> Result<bool> {
+    release_qa_claim(cas_dir, qa_task_id, None)
+}
+
+/// Recovery may release only the reviewer whose task binding it is clearing.
+/// Refuse a different claimant instead of dropping a replacement's review.
+pub fn release_qa_claim_for_reviewer(
+    cas_dir: &Path,
+    qa_task_id: &str,
+    reviewer: &str,
+) -> Result<bool> {
+    release_qa_claim(cas_dir, qa_task_id, Some(reviewer))
+}
+
+fn release_qa_claim(cas_dir: &Path, qa_task_id: &str, reviewer: Option<&str>) -> Result<bool> {
     let conn = open_conn(cas_dir)?;
     let conn = conn.lock().map_err(lock_err)?;
     let tx = ImmediateTx::new(&conn)?;
+    if let Some(reviewer) = reviewer {
+        let conflicting: Option<String> = tx
+            .query_row(
+                "SELECT reviewer_agent_id FROM qa_passes
+             WHERE qa_task_id = ?1 AND state = 'claimed' AND reviewer_agent_id != ?2",
+                params![qa_task_id, reviewer],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = conflicting {
+            return Err(StoreError::Other(format!(
+                "QA task {qa_task_id} claim changed from '{reviewer}' to '{existing}'; recovery refused"
+            )));
+        }
+    }
     let changed = tx.execute(
         "UPDATE qa_passes SET reviewer_agent_id = NULL, state = 'pending'
          WHERE qa_task_id = ?1 AND state = 'claimed'",
@@ -544,6 +573,53 @@ pub fn withdraw_open_qa_pass(
     Ok(Some(pass))
 }
 
+/// Withdraw the open round whose QA work item is `qa_task_id` (cas-7877).
+///
+/// Cancelling the work item is the supervisor saying this review will not
+/// happen. Leaving its pass pending kept the delivery gated and made the next
+/// park open a "re-review" of a round nobody ran. Only a pending or claimed
+/// round is withdrawn; a recorded verdict stands.
+pub fn withdraw_qa_pass_for_qa_task(
+    cas_dir: &Path,
+    qa_task_id: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<QaPass>> {
+    if reason.trim().is_empty() {
+        return Err(StoreError::Parse(
+            "withdrawing a QA round needs a reason".to_string(),
+        ));
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let active = tx
+        .query_row(
+            &format!(
+                "SELECT {COLUMNS} FROM qa_passes
+                 WHERE qa_task_id = ?1 AND state IN ('pending', 'claimed') LIMIT 1"
+            ),
+            params![qa_task_id],
+            parse_row,
+        )
+        .optional()?;
+    let Some(active) = active else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    tx.execute(
+        "UPDATE qa_passes SET state = 'superseded', summary = ?2, resolved_at = ?3 WHERE id = ?1",
+        params![
+            active.id,
+            format!("{QA_PASS_WITHDRAWN_PREFIX}{}", reason.trim()),
+            now.to_rfc3339(),
+        ],
+    )?;
+    let pass = by_id_with_conn(&tx, &active.id)?;
+    tx.commit()?;
+    Ok(Some(pass))
+}
+
 /// Latest round for a task, after lazily timing out an expired one.
 pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Result<Option<QaPass>> {
     let conn = open_conn(cas_dir)?;
@@ -714,6 +790,7 @@ mod tests {
 
         let second = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap_err();
         assert!(second.to_string().contains("already claimed"), "{second}");
+        assert!(!second.to_string().contains("parse error:"), "{second}");
 
         let released = release_qa_claim_for_task(dir.path(), "cas-qa1").unwrap();
         assert!(released, "reset releases the QA work item's active claim");
@@ -727,6 +804,29 @@ mod tests {
         assert_eq!(reclaimed.id, opened.id);
         assert_eq!(reclaimed.state, QaPassState::Claimed);
         assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement"));
+    }
+
+    #[test]
+    fn recovery_only_releases_expected_reviewer_cas_3172() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let opened = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        set_qa_task(dir.path(), &opened.id, "cas-qa1").unwrap();
+        let claimed = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap();
+        assert!(release_qa_claim_for_reviewer(dir.path(), "cas-qa1", "dead-reviewer").is_err());
+        assert_eq!(latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap(), claimed);
+        assert!(release_qa_claim_for_reviewer(dir.path(), "cas-qa1", "replacement").unwrap());
+        let pending = latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap();
+        assert_eq!(pending.id, opened.id);
+        assert_eq!(pending.deadline_at, opened.deadline_at);
+        assert_eq!(pending.state, QaPassState::Pending);
+        assert!(!release_qa_claim_for_reviewer(dir.path(), "cas-qa1", "replacement").unwrap());
+        assert!(!release_qa_claim_for_reviewer(dir.path(), "ordinary-task", "replacement").unwrap());
+        claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap();
+        let resolved = resolve_qa_pass(dir.path(), "cas-ui1", "replacement", QaVerdict::Approved,
+            "passed", None, "/qa/LEDGER.md", now).unwrap();
+        assert!(!release_qa_claim_for_reviewer(dir.path(), "cas-qa1", "replacement").unwrap());
+        assert_eq!(latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap(), resolved);
     }
 
     #[test]

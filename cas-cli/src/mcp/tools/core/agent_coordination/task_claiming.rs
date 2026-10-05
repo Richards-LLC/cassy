@@ -359,7 +359,33 @@ impl CasCore {
         // Get the registered agent ID (matches how claim works)
         let agent_id = self.get_agent_id()?;
 
-        match agent_store.release_lease(&req.task_id, &agent_id) {
+        // GH #1098: a registered live supervisor can return a worker's
+        // task to the pool without waiting for its exhausted conversation.
+        // Environment roles and force=true do not grant this authority.
+        let is_live_supervisor = agent_store.get(&agent_id).is_ok_and(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
+        });
+        let release_result = if is_live_supervisor {
+            agent_store
+                .release_lease_for_task(
+                    &req.task_id,
+                    &format!("Supervisor release requested by {agent_id}"),
+                )
+                .and_then(|released| {
+                    if released {
+                        Ok(())
+                    } else {
+                        Err(cas_store::StoreError::NotFound(format!(
+                            "No active lease found for task {}",
+                            req.task_id
+                        )))
+                    }
+                })
+        } else {
+            agent_store.release_lease(&req.task_id, &agent_id)
+        };
+
+        match release_result {
             Ok(()) => {
                 let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
@@ -414,7 +440,12 @@ impl CasCore {
                 // still be in a non-open state from a dead session. Flip it
                 // back to Open with an audit note rather than surfacing the
                 // raw "no lease" error to the caller.
-                let err_str = e.to_string();
+                // The store represents ownership refusal as Parse; report
+                // its actual diagnostic without claiming malformed input.
+                let err_str = match &e {
+                    cas_store::StoreError::Parse(message) => message.clone(),
+                    _ => e.to_string(),
+                };
                 let is_not_found = err_str.contains("No active lease found");
 
                 if is_not_found {
@@ -460,7 +491,7 @@ impl CasCore {
 
                 Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!("Failed to release task: {e}")),
+                    message: Cow::from(format!("Failed to release task: {err_str}")),
                     data: None,
                 })
             }
@@ -829,17 +860,8 @@ impl CasCore {
                             data: None,
                         });
                     }
-                    // Supervisor force-transfer: release the live worker's lease.
+                    // Defer releasing the live lease until target/branch validation succeeds.
                     let holder = l.agent_id.clone();
-                    agent_store
-                        .release_lease_for_task(&req.task_id, "Supervisor force-transfer")
-                        .map_err(|e| McpError {
-                            code: ErrorCode::INTERNAL_ERROR,
-                            message: Cow::from(format!(
-                                "Supervisor force-transfer: failed to release live lease: {e}"
-                            )),
-                            data: None,
-                        })?;
                     Some(holder)
                 } else {
                     return Err(McpError {
@@ -913,6 +935,26 @@ impl CasCore {
             });
         }
 
+        // Validate/copy the branch before releasing a lease or changing the
+        // assignment. A rejected adoption leaves the old owner working.
+        let adoption = if req.adopt_branch.unwrap_or(false) {
+            Some(super::branch_adoption::adopt_task_branch(&self.cas_root, &task, &target_agent)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("BRANCH ADOPTION REFUSED: {error}")),
+                    data: None,
+                })?)
+        } else {
+            None
+        };
+
+        // cas-1638: notes and the receipt name the worker; an id given as
+        // `to_agent` stays visible beside the name it resolved to.
+        let target_label = if target_agent.name == req.to_agent.trim() {
+            target_agent.name.clone()
+        } else {
+            format!("{} (given as {})", target_agent.name, req.to_agent.trim())
+        };
         // Add handoff note (plus supervisor-override audit entry when applicable) to task
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
         let handoff_note = if let Some(prior_holder) = &prior_lease_holder {
@@ -925,7 +967,7 @@ impl CasCore {
             format!(
                 "[{timestamp}] SUPERVISOR FORCE-TRANSFER by {agent_id}: \
                  released live lease from '{prior_holder}', reassigned to '{}'{}",
-                req.to_agent, note_suffix
+                target_label, note_suffix
             )
         } else if transferred_without_lease {
             let note_suffix = req
@@ -936,15 +978,15 @@ impl CasCore {
             format!(
                 "[{timestamp}] TRANSFER WITHOUT LEASE by {agent_id} (task status: {}), \
                  reassigned to '{}'{}",
-                task.status, req.to_agent, note_suffix
+                task.status, target_label, note_suffix
             )
         } else if let Some(note) = &req.note {
             format!(
                 "[{timestamp}] Handoff from {agent_id} to {}: {note}",
-                req.to_agent
+                target_label
             )
         } else {
-            format!("[{timestamp}] Handoff from {agent_id} to {}", req.to_agent)
+            format!("[{timestamp}] Handoff from {agent_id} to {}", target_label)
         };
 
         if task.notes.is_empty() {
@@ -952,15 +994,28 @@ impl CasCore {
         } else {
             task.notes = format!("{}\n\n{}", task.notes, handoff_note);
         }
+        // cas-1638: assignees are display names (cas-dbbb). Close builds
+        // factory/<assignee>-<task> and factory/<assignee>, so a session or
+        // agent id stored here names a branch that never exists.
+        let target_name = target_agent.name.clone();
         // cas-e33f (GH #1004): the task's commits stay on the handing-off
         // agent's factory branch. Record it so a close by the new assignee
         // measures that branch instead of a non-existent factory/<to_agent>.
-        if let Some(prior) = task.assignee.clone().filter(|prior| *prior != req.to_agent) {
+        if let Some(prior) = task.assignee.clone().filter(|prior| *prior != target_name) {
             task.deliverables
                 .record_handoff_branch(&format!("factory/{prior}"));
         }
+        if let Some(adoption) = &adoption {
+            task.deliverables.record_handoff_branch(&adoption.source_branch);
+            task.deliverables.parked_branch = Some(adoption.branch.clone());
+            task.deliverables.factory_branch_anchor = Some(adoption.tip.clone());
+            task.notes.push_str(&format!(
+                "\n[{timestamp}] BRANCH ADOPTED: {} -> {} at {} by {agent_id}",
+                adoption.source_branch, adoption.branch, adoption.tip,
+            ));
+        }
         // Update assignee to the target agent
-        task.assignee = Some(req.to_agent.clone());
+        task.assignee = Some(target_name);
         task.updated_at = chrono::Utc::now();
 
         task_store.update(&task).map_err(|e| McpError {
@@ -969,10 +1024,17 @@ impl CasCore {
             data: None,
         })?;
 
-        // Release our lease (only needed for the normal transfer path; the
-        // supervisor force-transfer path already released the live lease above,
-        // and a transfer without a lease has none to release).
-        if prior_lease_holder.is_none() && !transferred_without_lease {
+        // Release the prior lease after assignment and any branch adoption
+        // succeed. A transfer without a lease has nothing to release.
+        if prior_lease_holder.is_some() {
+            agent_store
+                .release_lease_for_task(&req.task_id, "Supervisor force-transfer")
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Supervisor force-transfer: failed to release live lease: {e}")),
+                    data: None,
+                })?;
+        } else if !transferred_without_lease {
             agent_store
                 .release_lease(&req.task_id, &agent_id)
                 .map_err(|e| McpError {
@@ -994,12 +1056,12 @@ impl CasCore {
             Ok(ClaimResult::Success(_)) => {
                 format!(
                     "Task claimed for {} - they can start immediately",
-                    req.to_agent
+                    target_label
                 )
             }
             _ => format!(
                 "Task released - {} will need to claim it manually",
-                req.to_agent
+                target_label
             ),
         };
 
@@ -1009,14 +1071,20 @@ impl CasCore {
             ""
         };
 
+        let adoption_note = adoption.as_ref().map(|adoption| format!(
+            "\nBranch adopted on {} at {} in the receiver's registered worktree.",
+            adoption.branch, adoption.tip,
+        )).unwrap_or_default();
+
         Ok(Self::success(format!(
-            "Transferred task {} from {} to {}\n{}\nNote: {}{}",
+            "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
             req.task_id,
             agent_id,
-            req.to_agent,
+            target_label,
             claim_msg,
             req.note.as_deref().unwrap_or("(none)"),
-            override_note
+            override_note,
+            adoption_note
         )))
     }
 
@@ -1181,10 +1249,14 @@ fn resolve_transfer_target(
     if let Ok(agent) = agent_store.get(token) {
         return Some(agent);
     }
+    // A name, or (cas-1638) the harness session id a registration now
+    // carries after a context reset moved it off its registration id.
     agent_store
         .list(None)
         .ok()?
         .into_iter()
-        .filter(|agent| agent.name.eq_ignore_ascii_case(token))
+        .filter(|agent| {
+            agent.name.eq_ignore_ascii_case(token) || agent.cc_session_id.as_deref() == Some(token)
+        })
         .max_by_key(|agent| (agent.is_alive(), agent.last_heartbeat, agent.registered_at))
 }

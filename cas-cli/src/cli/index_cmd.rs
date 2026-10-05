@@ -46,10 +46,7 @@ pub fn execute(cmd: &IndexCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
 }
 
 fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    let project_root = cas_root
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let project_root = crate::daemon::indexing::code_project_root(cas_root);
 
     let config = Config::load(cas_root).unwrap_or_default();
     let code_config = config.code();
@@ -119,6 +116,7 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
                 "files_scanned": files.len(),
                 "files_indexed": result.files_indexed,
                 "symbols_indexed": result.symbols_indexed,
+                "files_deferred": result.files_deferred,
                 "total_files": total_files,
                 "total_symbols": total_symbols,
                 "elapsed_ms": elapsed.as_millis(),

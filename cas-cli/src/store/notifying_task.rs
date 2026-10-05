@@ -81,12 +81,14 @@ impl TaskStore for NotifyingTaskStore {
 
     fn add(&self, task: &Task) -> Result<()> {
         self.inner.add(task)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.notify_created(task);
         Ok(())
     }
 
     fn add_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<()> {
         self.inner.add_with_mutation_receipt(task, receipt_id)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.notify_created(task);
         Ok(())
     }
@@ -100,6 +102,7 @@ impl TaskStore for NotifyingTaskStore {
     ) -> Result<()> {
         self.inner
             .create_atomic(task, blocked_by, epic_id, created_by)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.notify_created(task);
         Ok(())
     }
@@ -115,6 +118,7 @@ impl TaskStore for NotifyingTaskStore {
         self.inner.create_atomic_with_mutation_receipt(
             task, blocked_by, epic_id, created_by, receipt_id,
         )?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.notify_created(task);
         Ok(())
     }
@@ -136,6 +140,7 @@ impl TaskStore for NotifyingTaskStore {
         let old_status = self.inner.get(&task.id).ok().map(|t| t.status);
 
         let persisted_at = self.inner.update(task)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.notify_updated(task, old_status);
         Ok(persisted_at)
     }
@@ -151,6 +156,7 @@ impl TaskStore for NotifyingTaskStore {
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         let task = self.inner.get(task_id)?;
         let persisted_at = self.inner.append_note(task_id, formatted_note)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
         self.notify_updated(&task, Some(task.status));
         Ok(persisted_at)
     }
@@ -167,6 +173,7 @@ impl TaskStore for NotifyingTaskStore {
             formatted_note,
             receipt_id,
         )?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
         self.notify_updated(&task, Some(task.status));
         Ok(persisted_at)
     }
@@ -174,6 +181,7 @@ impl TaskStore for NotifyingTaskStore {
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
         let old_status = self.inner.get(&task.id).ok().map(|t| t.status);
         let persisted_at = self.inner.update_with_mutation_receipt(task, receipt_id)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         self.notify_updated(task, old_status);
         Ok(persisted_at)
     }

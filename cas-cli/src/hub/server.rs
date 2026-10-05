@@ -40,6 +40,11 @@ pub struct HubState<R: SessionReadModel> {
     effective_origins: Vec<String>,
     response_transport: TransportSecurity,
     launches: Arc<Mutex<HashMap<std::path::PathBuf, (String, Instant, String)>>>,
+    /// Outcomes of recent structured operations by (device, op_id), so a
+    /// retried op_id replays its first outcome instead of running again
+    /// (cas-566b). Held across the whole operation, which also serializes
+    /// operations on this hub.
+    operations: Arc<tokio::sync::Mutex<HashMap<(String, String), OperationReplay>>>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -61,6 +66,7 @@ impl<R: SessionReadModel> HubState<R> {
             effective_origins: Vec::new(),
             response_transport: TransportSecurity::Plaintext,
             launches: Arc::new(Mutex::new(HashMap::new())),
+            operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -135,6 +141,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route(
             "/v1/sessions/{session}",
             delete(end_session::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/operations",
+            post(session_operation::<R>).options(preflight::<R>),
         )
         .route(
             "/v1/sessions/{session}/status",
@@ -754,11 +764,51 @@ async fn end_session<R: SessionReadModel>(
         .as_ref()
         .map(|context| context.device_id.clone())
         .unwrap_or_else(|| "local".to_string());
+    // cas-566b (brief O8): End session was the one Commander mutation with no
+    // audit row. Like launch, it is refused when the requested row cannot be
+    // written, and its outcome is recorded after it runs.
+    let audited = state.auth.clone().zip(context.clone());
+    if let Some((auth, context)) = audited.as_ref()
+        && let Err(error) = auth.audit_operation(
+            context,
+            "requested",
+            "session_end",
+            Scope::FactoryManage,
+            &session,
+            None,
+            chrono::Utc::now(),
+        )
+    {
+        return with_cors(
+            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            &headers,
+        );
+    }
     let name = session.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         crate::cli::factory::end_session_by_name(&name)
     })
     .await;
+    if let Some((auth, context)) = audited.as_ref() {
+        let (audit_outcome, detail) = match &outcome {
+            Ok(Ok(crate::cli::factory::EndSessionOutcome::NotFound)) => ("not_found", None),
+            Ok(Ok(crate::cli::factory::EndSessionOutcome::Ended)) => ("ended", None),
+            Ok(Ok(_)) => ("cleaned_stale", None),
+            Ok(Err(error)) => ("failed", Some(error.to_string())),
+            Err(error) => ("failed", Some(error.to_string())),
+        };
+        if let Err(error) = auth.audit_operation(
+            context,
+            audit_outcome,
+            "session_end",
+            Scope::FactoryManage,
+            &session,
+            detail,
+            chrono::Utc::now(),
+        ) {
+            tracing::warn!(%error, %session, "cas-566b: End session outcome audit row could not be written");
+        }
+    }
     let response = match outcome {
         Ok(Ok(crate::cli::factory::EndSessionOutcome::NotFound)) => generic_not_found(),
         Ok(Ok(outcome)) => {
@@ -782,6 +832,429 @@ async fn end_session<R: SessionReadModel>(
         ),
     };
     with_cors(response, &headers)
+}
+
+/// How long a structured operation's outcome is replayed for a retried
+/// `op_id` (cas-566b): long enough to cover a dropped response and its retry.
+const OPERATION_REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone)]
+struct OperationReplay {
+    at: Instant,
+    status: StatusCode,
+    body: serde_json::Value,
+}
+
+/// `POST /v1/sessions/{s}/operations` (fleet-operations brief, cas-566b).
+#[derive(Debug, Deserialize)]
+struct OperationRequest {
+    op_id: String,
+    /// Parsed by [`parse_fleet_operation`] so an unknown or malformed kind
+    /// gets a JSON error, not the extractor's plain-text 422.
+    op: serde_json::Value,
+    #[serde(default)]
+    expected: serde_json::Value,
+}
+
+/// Parse `op` by hand so a malformed or unknown kind gets a JSON error, not
+/// the extractor's plain-text 422. Every kind the wire contract names is
+/// implemented (S1-S3).
+fn parse_fleet_operation(op: serde_json::Value) -> Result<FleetOperation, String> {
+    serde_json::from_value::<FleetOperation>(op).map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum FleetOperation {
+    /// O1: ask the session's supervisor to merge an awaiting-merge task.
+    RequestMerge { task_id: String },
+    /// O2: pin the session to an epic, or clear the pin.
+    FocusEpic {
+        #[serde(default)]
+        epic_id: Option<String>,
+        #[serde(default)]
+        clear: bool,
+    },
+    /// O3: add 1-4 workers, optionally starting one on a ready task.
+    SpawnWorkers {
+        count: u8,
+        #[serde(default)]
+        task_id: Option<String>,
+    },
+    /// O4: pause (hold) or resume (release) a worker.
+    SetWorkerHold { worker: String, hold: bool },
+    /// O6: restart a worker in place; it loses its in-flight context.
+    RecycleWorker { worker: String },
+    /// O7: stop a worker. One worker per operation, so `expected` names it.
+    ShutdownWorkers {
+        workers: Vec<String>,
+        #[serde(default)]
+        force: bool,
+    },
+    /// O5: assign a task to a worker, or unassign it (null), through the
+    /// supervisor's task_update (S3, cas-31f0).
+    AssignTask {
+        task_id: String,
+        #[serde(default)]
+        assignee: Option<String>,
+    },
+}
+
+impl FleetOperation {
+    fn action(&self) -> &'static str {
+        match self {
+            Self::RequestMerge { .. } => "operation:request_merge",
+            Self::FocusEpic { .. } => "operation:focus_epic",
+            Self::SpawnWorkers { .. } => "operation:spawn_workers",
+            Self::SetWorkerHold { .. } => "operation:set_worker_hold",
+            Self::RecycleWorker { .. } => "operation:recycle_worker",
+            Self::ShutdownWorkers { .. } => "operation:shutdown_workers",
+            Self::AssignTask { .. } => "operation:assign_task",
+        }
+    }
+
+    /// O1 is an explicit supervisor message. Reversible and additive
+    /// operations need `factory:operate`; destructive ones (restart, stop)
+    /// need `factory:manage` (brief: distinct scopes for destructive actions).
+    fn scope(&self) -> Scope {
+        match self {
+            Self::RequestMerge { .. } => Scope::MessageSend,
+            Self::FocusEpic { .. }
+            | Self::SpawnWorkers { .. }
+            | Self::SetWorkerHold { .. }
+            | Self::AssignTask { .. } => Scope::FactoryOperate,
+            Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } => Scope::FactoryManage,
+        }
+    }
+
+    fn subject(&self) -> String {
+        match self {
+            Self::RequestMerge { task_id } => format!("task={task_id}"),
+            Self::FocusEpic { epic_id, clear } => match (epic_id, clear) {
+                (_, true) => "epic=<clear>".to_string(),
+                (Some(epic_id), false) => format!("epic={epic_id}"),
+                (None, false) => "epic=<none>".to_string(),
+            },
+            Self::SpawnWorkers { count, task_id } => match task_id {
+                Some(task_id) => format!("count={count} task={task_id}"),
+                None => format!("count={count}"),
+            },
+            Self::SetWorkerHold { worker, hold } => format!("worker={worker} hold={hold}"),
+            Self::RecycleWorker { worker } => format!("worker={worker}"),
+            Self::ShutdownWorkers { workers, force } => {
+                format!("workers={} force={force}", workers.join(","))
+            }
+            Self::AssignTask { task_id, assignee } => format!(
+                "task={task_id} assignee={}",
+                assignee.as_deref().unwrap_or("<none>")
+            ),
+        }
+    }
+}
+
+/// One structured fleet operation from Commander (cas-566b): authorized by
+/// the operation's own scope (never the terminal lease), replayed for a
+/// retried `op_id`, refused as `stale` with no side effects when `expected`
+/// no longer holds, audited as requested and outcome rows, and followed by a
+/// `FleetChanged` event when it changed the fleet.
+async fn session_operation<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<OperationRequest>,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/operations");
+    let operation = match parse_fleet_operation(request.op) {
+        Ok(operation) => operation,
+        Err(detail) => {
+            return with_cors(
+                launch_error(StatusCode::BAD_REQUEST, "invalid_operation", &detail),
+                &headers,
+            );
+        }
+    };
+    let scope = operation.scope();
+    let context = match authorize(&state, HubAction::Mutation, scope, &headers, "POST", &uri) {
+        Ok(Some(context)) => context,
+        Ok(None) => return with_cors(unauthorized(), &headers),
+        Err(error) if error.to_string() == "scope denied" => {
+            return with_cors(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error":"scope_denied", "required_scope":scope.as_str()})),
+                )
+                    .into_response(),
+                &headers,
+            );
+        }
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    let Some(auth) = state.auth.clone() else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let op_id = request.op_id.trim().to_string();
+    if op_id.is_empty() || op_id.len() > 128 {
+        return with_cors(
+            launch_error(StatusCode::BAD_REQUEST, "invalid_op_id", "op_id must be 1-128 characters"),
+            &headers,
+        );
+    }
+
+    let mut replays = state.operations.lock().await;
+    replays.retain(|_, replay| replay.at.elapsed() < OPERATION_REPLAY_TTL);
+    let key = (context.device_id.clone(), op_id.clone());
+    if let Some(replay) = replays.get(&key) {
+        return with_cors((replay.status, Json(replay.body.clone())).into_response(), &headers);
+    }
+
+    let sessions = match state.catalog.list().await {
+        Ok(sessions) => sessions,
+        Err(error) => return with_cors(internal_error(error), &headers),
+    };
+    let Some(cas_dir) = sessions
+        .iter()
+        .find(|candidate| candidate.name == session)
+        .and_then(|candidate| candidate.project_dir.as_deref())
+        .map(|project| std::path::Path::new(project).join(".cas"))
+    else {
+        return with_cors(generic_not_found(), &headers);
+    };
+
+    let now = chrono::Utc::now();
+    if auth.ensure_active_context(&context, now).is_err() {
+        return with_cors(
+            launch_error(StatusCode::UNAUTHORIZED, "revoked", "device credential is no longer active"),
+            &headers,
+        );
+    }
+    let action = operation.action();
+    let subject = operation.subject();
+    if let Err(error) =
+        auth.audit_operation(&context, "requested", action, scope, &session, Some(subject.clone()), now)
+    {
+        return with_cors(
+            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            &headers,
+        );
+    }
+
+    let attribution = verified_attribution(&context);
+    let operation_session = session.clone();
+    let expected = request.expected;
+    let outcome =
+        run_fleet_operation(cas_dir, operation_session, operation, expected, attribution).await;
+
+    use crate::ops::fleet::OperationError;
+    let (status, body, audit_outcome, detail) = match outcome {
+        Ok(result) => (
+            StatusCode::OK,
+            serde_json::json!({"op_id": op_id, "outcome": result}),
+            "allowed",
+            subject,
+        ),
+        Err(OperationError::Stale(current)) => (
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": "stale", "current": current}),
+            "stale",
+            format!("{subject}; current={current}"),
+        ),
+        Err(OperationError::NotFound(detail)) => (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error": "not_found", "detail": detail}),
+            "not_found",
+            format!("{subject}; {detail}"),
+        ),
+        Err(OperationError::Invalid(detail)) => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "invalid_operation", "detail": detail}),
+            "invalid",
+            format!("{subject}; {detail}"),
+        ),
+        Err(OperationError::Failed(detail)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "operation_failed", "detail": detail}),
+            "failed",
+            format!("{subject}; {detail}"),
+        ),
+    };
+    if let Err(error) =
+        auth.audit_operation(&context, audit_outcome, action, scope, &session, Some(detail), chrono::Utc::now())
+    {
+        tracing::warn!(%error, %session, action, "cas-566b: operation outcome audit row could not be written");
+    }
+    if status == StatusCode::OK {
+        state.events.fleet_changed(&session);
+    }
+    replays.insert(
+        key,
+        OperationReplay {
+            at: Instant::now(),
+            status,
+            body: body.clone(),
+        },
+    );
+    drop(replays);
+    with_cors((status, Json(body)).into_response(), &headers)
+}
+
+/// Run one operation through the shared facade, checking `expected` first.
+/// Store work runs on a blocking thread; worker operations then await the
+/// same `CasService` body their MCP action runs.
+async fn run_fleet_operation(
+    cas_dir: std::path::PathBuf,
+    session: String,
+    operation: FleetOperation,
+    expected: serde_json::Value,
+    attribution: MessageAttribution,
+) -> Result<serde_json::Value, crate::ops::fleet::OperationError> {
+    use crate::ops::fleet::{self, OperationError, WorkerExpected, WorkerOperation};
+    let (kind, worker, operation) = match operation {
+        FleetOperation::SpawnWorkers { count, task_id } => {
+            if !(1..=4).contains(&count) {
+                return Err(OperationError::Invalid(
+                    "count must be between 1 and 4".to_string(),
+                ));
+            }
+            ("spawn_workers", None, WorkerOperation::Spawn { count, task_id })
+        }
+        FleetOperation::SetWorkerHold { worker, hold } => (
+            "set_worker_hold",
+            Some(worker.clone()),
+            WorkerOperation::Hold { worker, hold },
+        ),
+        FleetOperation::RecycleWorker { worker } => (
+            "recycle_worker",
+            Some(worker.clone()),
+            WorkerOperation::Recycle { worker },
+        ),
+        FleetOperation::ShutdownWorkers { workers, force } => {
+            let [worker] = <[String; 1]>::try_from(workers).map_err(|_| {
+                OperationError::Invalid(
+                    "shutdown_workers stops exactly one worker per operation".to_string(),
+                )
+            })?;
+            (
+                "shutdown_workers",
+                Some(worker.clone()),
+                WorkerOperation::Shutdown { worker, force },
+            )
+        }
+        // O5 runs the supervisor's async task_update on the hub's runtime.
+        FleetOperation::AssignTask { task_id, assignee } => {
+            return run_assign_task(&cas_dir, &task_id, assignee.as_deref(), expected, &attribution)
+                .await;
+        }
+        other => {
+            return tokio::task::spawn_blocking(move || {
+                run_store_operation(&cas_dir, &session, other, expected, &attribution)
+            })
+            .await
+            .unwrap_or_else(|error| Err(OperationError::Failed(error.to_string())));
+        }
+    };
+    if let Some(worker) = worker {
+        let expected: WorkerExpected = serde_json::from_value(expected).map_err(|error| {
+            OperationError::Invalid(format!(
+                "expected must name the worker and the generation you saw: {error}"
+            ))
+        })?;
+        let (dir, name) = (cas_dir.clone(), session.clone());
+        tokio::task::spawn_blocking(move || {
+            fleet::check_worker_generation(&dir, &name, &worker, &expected)
+        })
+        .await
+        .unwrap_or_else(|error| Err(OperationError::Failed(error.to_string())))?;
+    }
+    let detail = fleet::run_worker_operation(&cas_dir, &session, operation).await?;
+    Ok(serde_json::json!({"kind": kind, "detail": detail}))
+}
+
+/// O1 and O2: operations that only touch the session's stores.
+fn run_store_operation(
+    cas_dir: &std::path::Path,
+    session: &str,
+    operation: FleetOperation,
+    expected: serde_json::Value,
+    attribution: &MessageAttribution,
+) -> Result<serde_json::Value, crate::ops::fleet::OperationError> {
+    use crate::ops::fleet::{self, FocusEpic, OperationError};
+    match operation {
+        FleetOperation::RequestMerge { task_id } => {
+            let expected: fleet::RequestMergeExpected = serde_json::from_value(expected)
+                .map_err(|error| {
+                    OperationError::Invalid(format!(
+                        "expected must name the task's status and tip: {error}"
+                    ))
+                })?;
+            let notification_id =
+                fleet::request_merge(cas_dir, session, &task_id, &expected, attribution)?;
+            Ok(serde_json::json!({
+                "kind": "request_merge",
+                "task_id": task_id,
+                "notification_id": notification_id,
+            }))
+        }
+        FleetOperation::FocusEpic { epic_id, clear } => {
+            #[derive(Deserialize)]
+            struct Expected {
+                epic_id: Option<String>,
+            }
+            let expected: Expected = serde_json::from_value(expected).map_err(|error| {
+                OperationError::Invalid(format!(
+                    "expected must name the epic the session is focused on (or null): {error}"
+                ))
+            })?;
+            let current = fleet::pinned_epic(session);
+            if current != expected.epic_id {
+                return Err(OperationError::Stale(serde_json::json!({"epic_id": current})));
+            }
+            let request = match (clear, epic_id.as_deref().map(str::trim)) {
+                (true, _) => FocusEpic::Clear,
+                (false, Some(epic_id)) if !epic_id.is_empty() => FocusEpic::Pin {
+                    epic_id,
+                    delivery_mode: None,
+                },
+                _ => {
+                    return Err(OperationError::Invalid(
+                        "focus_epic needs an epic_id or clear=true".to_string(),
+                    ));
+                }
+            };
+            let cas_root = cas_dir;
+            let text = fleet::focus_epic(cas_root, session, request)?;
+            let now = fleet::pinned_epic(session);
+            Ok(serde_json::json!({
+                "kind": "focus_epic",
+                "epic_id": now,
+                "prior_epic_id": current,
+                "detail": text,
+                // S3 (cas-31f0): Undo sends this as a new operation.
+                "inverse": fleet::focus_epic_inverse(current.as_deref(), now.as_deref()),
+            }))
+        }
+        worker => Err(OperationError::Failed(format!(
+            "{} is a worker operation, not a store operation",
+            worker.action()
+        ))),
+    }
+}
+
+/// O5 (S3, cas-31f0): the precondition names the task's `updated_at` and
+/// assignee as the operator saw them.
+async fn run_assign_task(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    assignee: Option<&str>,
+    expected: serde_json::Value,
+    attribution: &MessageAttribution,
+) -> Result<serde_json::Value, crate::ops::fleet::OperationError> {
+    use crate::ops::fleet::{self, OperationError};
+    let expected: fleet::AssignTaskExpected = serde_json::from_value(expected).map_err(|error| {
+        OperationError::Invalid(format!(
+            "expected must name the task's updated_at and current assignee (or null): {error}"
+        ))
+    })?;
+    fleet::assign_task(cas_dir, task_id, assignee, &expected, attribution).await
 }
 
 fn launch_error(status: StatusCode, code: &str, detail: &str) -> Response {
@@ -2061,14 +2534,20 @@ async fn grant_own_scopes<R: SessionReadModel>(
         Ok(context) => context,
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
-    if request.add.len() != 1 || request.add[0] != "session-launch" {
-        return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_scope", "detail":"Only session-launch may be added"}))).into_response(), &headers);
-    }
-    match auth.grant_own_session_launch(&context, chrono::Utc::now()) {
+    // cas-9b08: session launch and factory:operate are the only scopes a
+    // device may add itself; factory:manage and hub:admin need an invitation.
+    let scope = match request.add.as_slice() {
+        [one] if one == "session-launch" => Scope::SessionLaunch,
+        [one] if one == "factory-operate" => Scope::FactoryOperate,
+        _ => {
+            return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_scope", "detail":"Only session-launch or factory-operate may be added"}))).into_response(), &headers);
+        }
+    };
+    match auth.grant_own_scope(&context, scope, chrono::Utc::now()) {
         Ok(scopes) => with_cors(Json(serde_json::json!({"scopes":scopes})).into_response(), &headers),
-        Err(error) if error.to_string() == "scope denied" => with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "detail":"Pair with a control invitation to allow starting sessions"}))).into_response(), &headers),
+        Err(error) if error.to_string() == "scope denied" => with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "detail": if scope == Scope::FactoryOperate { "Pair with a control invitation to allow managing workers" } else { "Pair with a control invitation to allow starting sessions" }}))).into_response(), &headers),
         Err(error) => {
-            tracing::error!(%error, "session launch self-grant failed");
+            tracing::error!(%error, scope = scope.as_str(), "self-grant failed");
             with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"grant_failed"}))).into_response(), &headers)
         }
     }

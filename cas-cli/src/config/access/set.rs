@@ -38,6 +38,13 @@ impl Config {
         };
 
         match key {
+            "hub.tailscale_serve" => {
+                self.hub
+                    .get_or_insert_with(Default::default)
+                    .tailscale_serve = Some(value.parse().map_err(|_| {
+                    MemError::Parse("Invalid boolean for hub.tailscale_serve".into())
+                })?);
+            }
             "jev.gate.shadow" => {
                 self.jev.get_or_insert_with(Default::default).gate.shadow = value.parse()
                     .map_err(|_| MemError::Parse("Invalid boolean for jev.gate.shadow".into()))?;
@@ -71,6 +78,22 @@ impl Config {
                 factory.max_concurrent_builders = value.parse().map_err(|_| {
                     MemError::Parse(format!(
                         "Invalid integer value for factory.max_concurrent_builders: {value}"
+                    ))
+                })?;
+            }
+            "factory.spawn_min_free_gib" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.spawn_min_free_gib = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.spawn_min_free_gib: {value}"
+                    ))
+                })?;
+            }
+            "factory.prompt_retention_days" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.prompt_retention_days = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.prompt_retention_days: {value}"
                     ))
                 })?;
             }
@@ -144,6 +167,18 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let root = value.trim();
                 factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
+            }
+            "factory.supervisor_only_mcp" | "factory.supervisor_only_env" | "factory.worker_credential_env" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let names = value.split(',').map(str::trim).filter(|name| !name.is_empty())
+                    .map(str::to_string).collect();
+                if key == "factory.supervisor_only_mcp" {
+                    factory.worker_policy.supervisor_only_mcp = names;
+                } else if key == "factory.supervisor_only_env" {
+                    factory.worker_policy.supervisor_only_env = names;
+                } else {
+                    factory.worker_policy.worker_credential_env = names;
+                }
             }
             "factory.ai_enrichment.enabled" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
@@ -466,6 +501,15 @@ impl Config {
             "qa.terminal_render_paths" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.terminal_render_paths = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|glob| !glob.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            "qa.terminal_interaction_paths" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.terminal_interaction_paths = value
                     .split(',')
                     .map(str::trim)
                     .filter(|glob| !glob.is_empty())

@@ -18,6 +18,15 @@ release_train_announce_draft_path() {
     printf '%s\n' "${CAS_RELEASE_TRAIN_DRAFT:-$worktree/docs/release-notes/${date_part}-v${version}-slack.md}"
 }
 
+release_train_announce_proxy_toml() {
+    if [[ -n "${CAS_RELEASE_TRAIN_PROXY_TOML:-}" ]]; then
+        printf '%s\n' "$CAS_RELEASE_TRAIN_PROXY_TOML"
+    else
+        git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
+            | sed 's#/\.git$#/.cas/proxy.toml#'
+    fi
+}
+
 release_train_announce_receipt_field() {
     local key="$1"
     sed -n "s/^${key}=//p" "$run_dir/announce.receipt" | head -n1
@@ -104,11 +113,7 @@ release_train_announce() {
         return 1
     fi
     post_cmd="${CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD:-}"
-    proxy_toml="${CAS_RELEASE_TRAIN_PROXY_TOML:-}"
-    if [[ -z "$proxy_toml" ]]; then
-        proxy_toml="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
-            | sed 's#/\.git$#/.cas/proxy.toml#')"
-    fi
+    proxy_toml="$(release_train_announce_proxy_toml)"
     if [[ -n "$post_cmd" ]]; then
         CAS_RELEASE_TRAIN_ANNOUNCE_BODY_DIR="$body_dir" \
         CAS_RELEASE_TRAIN_ANNOUNCE_RECEIPT="$receipt" \

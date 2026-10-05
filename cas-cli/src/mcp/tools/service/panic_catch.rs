@@ -72,7 +72,13 @@ where
     // `.instrument(current())` forwards the MCP request id + tool name
     // span from the caller into the spawned task — tokio::spawn does
     // not propagate tracing context automatically.
-    let handle = tokio::spawn(fut.instrument(tracing::Span::current()));
+    let receipt = super::mutation_receipt::current();
+    let handle = tokio::spawn(async move {
+        match receipt {
+            Some(receipt) => super::mutation_receipt::scope(receipt, fut).await,
+            None => fut.await,
+        }
+    }.instrument(tracing::Span::current()));
     // Dropping a JoinHandle does NOT abort the task. This guard makes
     // caller-side cancellation (future drop, server_handler's 55s
     // timeout) cascade into the spawned task. No-op if the handler

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux-only runner provisioning: the pinned Linux archive and GNU coreutils are required.
 # Install the pinned GitHub runner and register it in the pre-created,
 # selected-repository/selected-workflow group. Run from a trusted checkout:
 #   RUNNER_SLOT=2 SCCACHE_SOURCE="$(command -v sccache)" \
@@ -21,6 +22,8 @@ mount_guard_source="$repo_root/scripts/check-cassy-actions-cache-mount.sh"
 mount_guard_dest="$runner_root/check-cache-mount.sh"
 job_lock_source="$repo_root/scripts/cassy-actions-cache-job-lock.sh"
 job_lock_dest="$runner_root/cache-job-lock.sh"
+process_identity_source="$repo_root/scripts/cassy-actions-process-identity.sh"
+process_identity_dest="$runner_root/cassy-actions-process-identity.sh"
 job_started_dest="$runner_root/cache-job-started.sh"
 job_completed_dest="$runner_root/cache-job-completed.sh"
 job_lock_state="$runner_root/job-locks"
@@ -62,7 +65,8 @@ if [[ -z "${RUNNER_TOKEN:-}" ]]; then
     exit 1
 fi
 if [[ ! -f "$unit_source" || ! -f "$wrapper_source" || ! -x "$pruner_source" ||
-      ! -x "$mount_guard_source" || ! -x "$job_lock_source" || ! -f "$prune_service_source" ||
+      ! -x "$mount_guard_source" || ! -x "$job_lock_source" || ! -f "$process_identity_source" ||
+      ! -f "$prune_service_source" ||
       ! -f "$prune_timer_source" ]]; then
     echo "runner service, cache guard, or pruning files are missing" >&2
     exit 1
@@ -131,6 +135,7 @@ fi
 install -o "$runner_user" -g "$runner_user" -m 0755 \
     "$wrapper_source" "$wrapper_dest"
 install -o root -g root -m 0755 "$mount_guard_source" "$mount_guard_dest"
+install -o root -g root -m 0644 "$process_identity_source" "$process_identity_dest"
 install -o root -g root -m 0755 "$job_lock_source" "$job_lock_dest"
 ln -sfn "$(basename -- "$job_lock_dest")" "$job_started_dest"
 ln -sfn "$(basename -- "$job_lock_dest")" "$job_completed_dest"

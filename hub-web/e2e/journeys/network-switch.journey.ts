@@ -488,17 +488,184 @@ test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'conn
     await expect(page.locator("#toast")).not.toContainText("connection dropped");
     expect(await page.locator("body").ariaSnapshot()).not.toContain("connection dropped");
     // Nor does control come back by itself: the pairing must be repaired first,
-    // and the controls say so instead of promising a reconnect.
-    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    // and the controls say so instead of promising a reconnect. The banner
+    // above says what is wrong, so the line says only the step (journey F42);
+    // the controls' own reason keeps the whole sentence.
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
+    await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", "Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
     // Heartbeats keep ticking: the refusal must stand on every surface (it
     // turned "live" again on the next beat, cas-05c0 QA).
     for (let beat = 0; beat < 3; beat++) await clock.advance(5_000);
     await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
-    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
     await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
     await expect(page.locator("[data-machine-latency]")).toHaveText("Needs pairing");
     await expect(page.locator("#attention-panel .attention-title").filter({ hasText: "Machine needs pairing" })).toBeVisible();
     await expect(page.getByText(/return when it reconnects|Reconnecting/).filter({ visible: true })).toHaveCount(0);
+  });
+});
+
+// cas-d1fa (WCAG 2.1.2): the terminal input took every Tab, so a keyboard
+// user who landed in it could never leave. Without control the terminal
+// cannot use Tab at all, so Tab and Shift+Tab move focus on; in control, Tab
+// is the program's, and Ctrl+Alt+M (or the header's Leave terminal) leaves,
+// as the header says, outside the terminal, so no program row is covered.
+const offBody = (page: Page) => page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body);
+const terminalInput = (page: Page) => page.locator(".t3-ghostty-input");
+
+test("HUB-J12 network switch: without control, Tab and Shift+Tab leave the terminal input and reach Re-pair (cas-d1fa)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("A refused pairing in Terminal view: Tab and Shift+Tab leave the terminal and reach Re-pair", async () => {
+    const { hub, clock } = await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    // cas-c945 tells the outage once: the controls' reason no longer repeats the banner's machine sentence.
+    await expect(page.locator("#session-controls-reason")).toHaveText("Re-pair it to take control and interrupt.");
+    await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
+    const input = terminalInput(page);
+    await input.focus();
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Tab lands on a real control, not the page").toBe(true);
+    await input.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Shift+Tab lands on a real control, not the page").toBe(true);
+    // From the terminal, the keyboard reaches Re-pair.
+    await input.focus();
+    let reached = false;
+    for (let press = 0; press < 40 && !reached; press++) {
+      await page.keyboard.press("Tab");
+      reached = await page.evaluate(() => /Re-pair/.test((document.activeElement as HTMLElement | null)?.innerText ?? ""));
+    }
+    expect(reached, "Tab from the terminal reaches Re-pair").toBe(true);
+  });
+});
+
+test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M or Leave terminal leaves it, with no program row covered (cas-d1fa)", journeyPart, async ({ page, journey }) => {
+  const input = terminalInput(page);
+  const leave = page.getByRole("button", { name: "Leave terminal", exact: true });
+  const hintText = "Tab goes to the terminal. Ctrl+Alt+M leaves it.";
+  await journey.stage("In control, the header says how the keyboard leaves the terminal, covering no program row", async () => {
+    await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    await input.focus();
+    // QA round 1 F09: nothing is drawn over the terminal. No visible element
+    // other than the canvas (and what contains it) overlaps the band that
+    // holds its last program rows, the bottom 48px with its padding. Measured
+    // by geometry, not hit-testing: the round-1 hint ignored the pointer.
+    const covered = await input.evaluate((field) => {
+      const canvas = field.parentElement!.querySelector<HTMLCanvasElement>(".t3-ghostty-canvas")!;
+      const box = canvas.getBoundingClientRect();
+      const band = { top: box.bottom - 48, bottom: box.bottom, left: box.left, right: box.right };
+      return [...document.querySelectorAll<HTMLElement>("body *")].filter((element) => {
+        if (element === canvas || element.contains(canvas)) return false;
+        if (!element.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1 && rect.left < band.right && rect.right > band.left && rect.top < band.bottom && rect.bottom > band.top;
+      }).map((element) => `${element.tagName}.${element.className}`);
+    });
+    expect(covered, "no element covers the terminal's last row").toEqual([]);
+    await expect(leave).toBeVisible();
+    await expect(leave).toHaveAttribute("aria-keyshortcuts", "Control+Alt+M");
+    await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
+    await expect(input).toHaveAccessibleDescription(hintText);
+  });
+  await journey.stage("The escape key is on screen beside Leave at 1280 and on a phone", async () => {
+    // cas-7d25: a compact Leave control still shows its key, so a sighted
+    // keyboard user can learn it without hovering.
+    for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await input.focus();
+      await expect(leave).toBeVisible();
+      await expect(leave.locator("kbd"), `Ctrl+Alt+M on screen at ${viewport.width}`).toBeVisible();
+      await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
+      expect(await leave.locator("kbd").evaluate((key) => key.getBoundingClientRect().width), `the key has room at ${viewport.width}`).toBeGreaterThan(20);
+      // On one line with the control, inside the pane's own header.
+      const placed = await leave.evaluate((button) => {
+        const box = button.getBoundingClientRect();
+        const key = button.querySelector("kbd")!.getBoundingClientRect();
+        const header = button.closest("header")!.getBoundingClientRect();
+        return { oneLine: key.top >= box.top - 1 && key.bottom <= box.bottom + 1, inHeader: key.top >= header.top - 1 && key.bottom <= header.bottom + 1 };
+      });
+      expect(placed, `Ctrl+Alt+M sits on the control's line inside the pane header at ${viewport.width}`).toEqual({ oneLine: true, inHeader: true });
+      await expect(leave).toHaveAccessibleName("Leave terminal");
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+  });
+  await journey.stage("Tab stays in the terminal; Ctrl+Alt+M leaves it for the next control", async () => {
+    await input.focus();
+    await page.keyboard.press("Tab");
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Control+Alt+m");
+    await expect(input).not.toBeFocused();
+    expect(await offBody(page), "Ctrl+Alt+M lands on a real control, not the page").toBe(true);
+  });
+  await journey.stage("The header's Leave terminal takes focus out of the terminal too", async () => {
+    await input.focus();
+    await leave.click();
+    await expect(input).not.toBeFocused();
+    await expect(leave).toBeFocused();
+  });
+});
+
+// cas-2072 (found in cas-7d25 QA, F01): at 1280 the Leave key chip trimmed the
+// pane's name to "patient-pelican…" and left an "Ea…" activity stub. The tail
+// digits are what tell twin codenames apart (cas-d141), so the name stays whole
+// and the activity line shows whole or not at all.
+test("HUB-J12 network switch: in control, the pane's whole name shows beside Leave and its key, at 1280 and on a phone (cas-2072)", journeyPart, async ({ page, journey }) => {
+  const input = terminalInput(page);
+  const leave = page.getByRole("button", { name: "Leave terminal", exact: true });
+  const header = page.locator(".pane-header").filter({ has: leave });
+  const drawer = page.locator("#machine-drawer-toggle");
+  /**
+   * What the in-control header paints, measured from the laid-out text rather
+   * than rounded scroll widths: F01's trim was a fraction of a pixel.
+   */
+  const painted = () => header.evaluate((head) => {
+    const text = (element: Element) => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect(); };
+    const title = head.querySelector<HTMLElement>(".pane-title")!;
+    const activity = head.querySelector<HTMLElement>(".pane-last-activity")!;
+    const key = head.querySelector<HTMLElement>(".pane-leave kbd")!;
+    const name = title.getBoundingClientRect(), nameText = text(title);
+    const box = activity.getBoundingClientRect(), words = text(activity);
+    const inside = words.left >= box.left - 0.02 && words.right <= box.right + 0.02 && words.top >= box.top - 0.02 && words.bottom <= box.bottom + 0.02;
+    const outside = words.top >= box.bottom - 0.02 || words.right <= box.left + 0.02 || box.width < 1 || !activity.checkVisibility();
+    const bounds = head.getBoundingClientRect();
+    return {
+      name: title.textContent,
+      nameWhole: nameText.left >= name.left - 0.02 && nameText.right <= name.right + 0.02,
+      activity: inside ? "whole" : outside ? "whole or hidden" : "cut",
+      key: key.checkVisibility() && key.getBoundingClientRect().width > 20,
+      controlsInside: [...head.querySelectorAll<HTMLElement>(".pane-layout-controls button")].filter((button) => button.checkVisibility()).every((button) => button.getBoundingClientRect().right <= bounds.right + 0.02),
+    };
+  }).then((shown) => ({ ...shown, activity: shown.activity === "cut" ? "cut" : "whole or hidden" }));
+  const whole = { name: "patient-pelican-9", nameWhole: true, activity: "whole or hidden", key: true, controlsInside: true };
+  await journey.stage("In control at 1280 with the drawer closed, the name and the key show whole, and the activity line whole or not at all", async () => {
+    await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await input.focus();
+    await expect(leave).toBeVisible();
+    expect.soft(await painted(), "drawer closed at 1280").toEqual(whole);
+  });
+  await journey.stage("With the drawer open, the name, the key and every control still fit", async () => {
+    await drawer.click();
+    await expect(drawer).toHaveAttribute("aria-expanded", "true");
+    await input.focus();
+    expect.soft(await painted(), "drawer open at 1280").toEqual(whole);
+    await page.locator("#machine-drawer-close").click();
+  });
+  await journey.stage("On a phone, the name and the key stay whole", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await input.focus();
+    expect.soft(await painted(), "on a phone").toEqual(whole);
   });
 });
 
@@ -530,6 +697,44 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
   });
 });
 
+// cas-460a: a pairing revoked while Paired machines is open rebuilds the shell
+// under the dialog. Escape must still hand focus back to the footer control
+// that opened it, not to the page; Enter on that control opens it again.
+test("HUB-J12 network switch: Paired machines returns focus to its footer opener across a revoked pairing (cas-460a)", journeyPart, async ({ page, journey }) => {
+  const footer = page.locator("#paired-machines-toggle");
+  const dialog = page.getByRole("dialog", { name: "Paired machines" });
+  let revoke: () => Promise<void> = async () => {};
+  await journey.stage("Open Paired machines from the footer by keyboard while the machine is live", async () => {
+    const { hub, clock, header } = await connected(page);
+    revoke = async () => {
+      hub.refuseProofs("atlas", 1_000, "revoked", false);
+      await hub.down("atlas", { sockets: "close" });
+      await hub.up("atlas");
+      await clock.advance(1_000);
+      await expect(header).toHaveText(" · Needs pairing");
+    };
+    await footer.focus();
+    await expect(footer).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+  });
+  await journey.stage("The pairing is revoked while it is open; Escape returns to the footer", async () => {
+    await revoke();
+    await expect(dialog.locator(".paired-machine-state").first()).toContainText("Needs pairing");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#paired-machines-toggle")).toBeFocused();
+  });
+  await journey.stage("Enter on the footer opens it again, and Escape returns there again", async () => {
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#paired-machines-toggle")).toBeFocused();
+  });
+});
+
 // cas-7752: drafts are kept on disk per conversation, so a revoked pairing
 // must take them with it — and the renders after it must not write them back.
 test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (cas-7752)", journeyPart, async ({ page, journey }) => {
@@ -551,6 +756,16 @@ test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (c
     await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("A private draft for Atlas and more");
     await clock.advance(15_000);
     expect(await stored()).not.toContain("atlas:");
+    // cas-b452 (journey F37): the list and the open conversation agree. Long
+    // past the catalog's freshness, the open conversation's row is still
+    // listed, open and marked Needs pairing; the list never empties beside it.
+    const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+    const row = list.getByRole("button", { name: /cas-src/ });
+    await expect(row).toBeVisible();
+    await expect(row).toHaveAttribute("aria-current", "true");
+    await expect(row).toContainText("Needs pairing");
+    await expect(page.locator("#conversation-empty")).toBeHidden();
+    await expect(page.locator(".hub-footer-meta")).toContainText("1 conversation");
   });
 });
 
@@ -705,9 +920,11 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
     await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Connected", { timeout: 30_000 });
-    // Pairing lands on the machine; open its conversation again.
-    await chooseConversation(page);
+    // cas-b452 (journey F39): Re-pair was started from the cas-src
+    // conversation, so it lands back in it, live, with no click to find it again.
     await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toHaveAttribute("aria-current", "true");
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   await journey.stage("Told plainly that starting sessions needs allowing again, even after a reload (cas-093d)", async () => {
@@ -793,6 +1010,20 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
     // The dismissed-messages chip takes the caution tone for messages only not confirmed.
     for (let index = 0; index < 3; index += 1) await log.getByRole("button", { name: "Dismiss this notice", exact: true }).first().click();
     await expect(page.locator(".conversation-unsent")).toHaveAttribute("data-tone", "caution");
+    // cas-6a96 (journey F36): the thread's notice said "2 messages not
+    // confirmed" over a chip saying "Show 3 messages not confirmed". The chip
+    // counts what was dismissed, and now says so; no two counts of the same
+    // thing disagree, on screen or to a screen reader.
+    const chip = page.getByRole("button", { name: "Show 3 dismissed messages, not confirmed", exact: true });
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("3 dismissed");
+    await expect(log.locator('.conversation-unconfirmed[role="status"] b')).toHaveText("2 messages not confirmed");
+    const counts = await page.evaluate(() => {
+      const said = [document.body.innerText, ...[...document.querySelectorAll("[aria-label]")].map((node) => node.getAttribute("aria-label") ?? "")].join("\n");
+      return [...said.matchAll(/(\d+) (?:messages?|dismissed)[^\n]*?not (?:sent or not )?confirmed/g)].map((match) => `${match[0].includes("dismissed") ? "dismissed" : "thread"}:${match[1]}`);
+    });
+    expect([...new Set(counts.filter((said) => said.startsWith("thread:")))], "every count of the thread's not-confirmed messages agrees").toEqual(["thread:2"]);
+    expect([...new Set(counts.filter((said) => said.startsWith("dismissed:")))], "every count of the dismissed ones agrees").toEqual(["dismissed:3"]);
   });
 });
 
@@ -842,31 +1073,61 @@ test("HUB-J12 network switch: an oversized stored waiting message is not sent af
 // still shows the conversation's kept messages straight away: the waiting
 // message is on screen, saying it waits, before the session is back, and it
 // goes out once when the session attaches.
-test("HUB-J12 network switch: kept messages show before the session attaches after a reload (cas-fc2c)", async ({ page }) => {
-  const { hub, clock, held } = await connected(page);
-  hub.upstreamLost(PELICAN);
-  await sendNow(page, "Kept while the session is away");
-  await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-  // The reloaded page's attach is held: the session cannot attach yet.
-  const releaseAttach = hub.holdAttach(PELICAN);
-  await page.reload();
-  await chooseConversation(page);
-  await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-  await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
-  expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
-  // A keyboard reader is in the thread when the session comes back.
-  await page.locator(".conversation-reading.thread").focus();
-  // The session comes back: the thread is the same one, and the message goes once.
-  hub.upstreamBack(PELICAN);
-  const next = hub.nextSend();
-  releaseAttach();
-  await clock.advance(1_000);
-  expect((await next).text).toBe("Kept while the session is away");
-  await expect(held).toHaveCount(0);
-  // The reader stays in the thread that took over, not on the page.
-  await expect(page.locator(".conversation-reading.thread")).toBeFocused();
-  await expect(page.getByRole("log")).toHaveCount(1);
-  await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).toHaveCount(1);
-  await clock.advance(15_000);
-  expect(sentTimes(hub, "Kept while the session is away")).toBe(1);
+test("HUB-J12 network switch: kept messages show before the session attaches after a reload (cas-fc2c)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Kept messages show before attach, then send once without moving the reader", async () => {
+    const { hub, clock, held } = await connected(page);
+    hub.upstreamLost(PELICAN);
+    await sendNow(page, "Kept while the session is away");
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    // The reloaded page's attach is held: the session cannot attach yet.
+    const releaseAttach = hub.holdAttach(PELICAN);
+    await page.reload();
+    await chooseConversation(page);
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
+    expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
+    // A keyboard reader is in the thread when the session comes back.
+    await page.locator(".conversation-reading.thread").focus();
+    // The session comes back: the thread is the same one, and the message goes once.
+    hub.upstreamBack(PELICAN);
+    const next = hub.nextSend();
+    releaseAttach();
+    await clock.advance(1_000);
+    expect((await next).text).toBe("Kept while the session is away");
+    await expect(held).toHaveCount(0);
+    // The reader stays in the thread that took over, not on the page.
+    await expect(page.locator(".conversation-reading.thread")).toBeFocused();
+    await expect(page.getByRole("log")).toHaveCount(1);
+    await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).toHaveCount(1);
+    await clock.advance(15_000);
+    expect(sentTimes(hub, "Kept while the session is away")).toBe(1);
+  });
+});
+
+
+test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("The stopped connection explains what to do", async () => {
+    const { hub, clock } = await connected(page);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".pane").first()).toBeVisible();
+    // Exercise the real fatal transport branch, after a successful connection.
+    // A missing required browser API cannot be fixed by another network retry.
+    await page.evaluate(() => { Object.defineProperty(AbortSignal, "timeout", { value: undefined, configurable: true }); });
+    await hub.down("atlas", { sockets: "close" });
+    await clock.advance(2_000);
+    const banner = page.locator(".terminal-disconnected-banner .banner-text");
+    await expect(banner).toHaveText("Lost connection to Atlas · Linux. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
+    await expect(page.locator(".connection-summary")).toContainText("Unreachable");
+    await page.getByRole("tab", { name: "Workers & Tasks", exact: true }).click();
+    await expect(page.locator(".status-stale").filter({ visible: true })).toHaveText(/^Not live — This browser is missing a feature Cassy Cloud needs\./);
+    await page.getByRole("tab", { name: "Attention", exact: true }).click();
+    await expect(page.locator("#attention-panel").getByText("Lost connection to Atlas · Linux", { exact: true })).toHaveCount(1);
+    // No automatic reconnect is claimed on any visible surface.
+    await expect(page.getByText(/reconnecting|return when it reconnects/i).filter({ visible: true })).toHaveCount(0);
+    await expect(page.locator("#session-controls-reason")).toHaveText("Update your browser, then reload to use control and interrupts.");
+    await expect(banner).toMatchAriaSnapshot("- text: Lost connection to Atlas · Linux. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
+    await page.keyboard.press("Control+k");
+    await page.locator("#palette-paired-machines").click();
+    await expect(page.locator("#paired-machines-list .paired-machine-state")).toHaveText("Unreachable");
+  });
 });

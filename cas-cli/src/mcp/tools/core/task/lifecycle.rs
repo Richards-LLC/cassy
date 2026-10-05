@@ -94,6 +94,7 @@ const RELATED_RECALL_LIMIT: usize = 3;
 const RELATED_RECALL_CHAR_CAP: usize = 1_200;
 const EPIC_PLANNING_RACE_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
 const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
+const GENERIC_TITLE_SIMILARITY_THRESHOLD: f64 = 0.95;
 const DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD: f64 = 0.2;
 const MIN_SHARED_DISTINCTIVE_IDENTIFIERS: usize = 2;
 
@@ -442,6 +443,25 @@ fn description_similarity(left: &str, right: &str) -> f64 {
     left.intersection(&right).count() as f64 / union as f64
 }
 
+// Generic planning language is not a code identifier merely because it is
+// uppercase, quoted, or joined with a prose slash (GH #1108). Underscores,
+// extensions and line numbers remain technical markers; quoted domain names
+// such as Inbox/ideas are retained for the GH #679 duplicate contract.
+fn is_generic_task_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    lower.split(['/', '-']).all(|part| matches!(part,
+        "a" | "an" | "the" | "and" | "or" | "not" | "no" | "do" | "does" | "is"
+        | "are" | "be" | "been" | "to" | "of" | "for" | "in" | "on" | "with" | "without"
+        | "before" | "after" | "all" | "only" | "when" | "then" | "this" | "that"
+        | "must" | "should" | "can" | "will" | "use" | "using" | "add" | "remove"
+        | "update" | "create" | "publish" | "prepare" | "review" | "report" | "reports"
+        | "task" | "tasks" | "release" | "releases" | "note" | "notes" | "test" | "tests"
+        | "change" | "changes" | "output" | "input" | "result" | "results" | "status"
+        | "file" | "files" | "command" | "commands" | "code" | "service" | "build"
+        | "batch" | "done" | "true" | "false" | "none" | "warning" | "warnings"
+    ))
+}
+
 fn distinctive_identifier_terms(text: &str) -> std::collections::HashSet<String> {
     let mut identifiers = std::collections::HashSet::new();
 
@@ -506,6 +526,7 @@ fn distinctive_identifier_terms(text: &str) -> std::collections::HashSet<String>
         }
     }
 
+    identifiers.retain(|identifier| !is_generic_task_token(identifier));
     identifiers
 }
 
@@ -527,7 +548,16 @@ fn task_similarity(
         })
         .collect::<Vec<_>>();
     shared_identifiers.sort_unstable();
-    if title_score >= DUPLICATE_TITLE_SIMILARITY_THRESHOLD {
+    let candidate_title = title_terms(title);
+    let existing_title = title_terms(existing_title);
+    let generic_title_overlap = candidate_title.intersection(&existing_title)
+        .all(|term| is_generic_task_token(term));
+    let title_threshold = if generic_title_overlap && shared_identifiers.is_empty() {
+        GENERIC_TITLE_SIMILARITY_THRESHOLD
+    } else {
+        DUPLICATE_TITLE_SIMILARITY_THRESHOLD
+    };
+    if title_score >= title_threshold {
         return Some((title_score, shared_identifiers));
     }
 
@@ -1181,6 +1211,12 @@ impl CasCore {
                 }
             })?;
 
+        crate::mcp::tools::service::mutation_receipt::task_committed(&id);
+        let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
+            Ok(_) => String::new(),
+            Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
+        };
+
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
         // cas-3e41 (GH #993): every task create, not only an epic, pushes the
@@ -1247,12 +1283,13 @@ impl CasCore {
                                 "Warning: Failed to resolve a fresh epic base '{trunk}': {error}"
                             );
                             return Ok(Self::success(format!(
-                                "Created task: {} - {} (P{}){}{}",
+                                "Created task: {} - {} (P{}){}{}{}",
                                 id,
                                 task.title,
                                 task.priority.0,
                                 related_context,
                                 no_code_external_ref_guidance(&task),
+                                assignment_warning,
                             )));
                         }
                     };
@@ -1369,12 +1406,13 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}",
+            "Created task: {} - {} (P{}){}{}{}",
             id,
             task.title,
             task.priority.0,
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
+            assignment_warning,
         )))
     }
 
@@ -2616,6 +2654,42 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn generic_identifier_overlap_does_not_warn_cas_b8ad() {
+        let mut env = TestEnvGuard::temp_home();
+        for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
+            "CAS_AGENT_NAME", "CAS_ROOT", "CAS_CLONE_PATH", "CAS_SESSION_ID"] {
+            env.remove(key);
+        }
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.cas_task_create(Parameters(described_task_request(
+            "Publish batch one release notes",
+            "Do NOT repeat before/after report. Describe payment chargeback rollout with ledger audit.",
+        ))).await.unwrap();
+        core.cas_task_create(Parameters(described_task_request(
+            "Publish batch two release notes",
+            "Do NOT repeat before/after report. Describe search ranking rollout with cursor query.",
+        ))).await.expect("NOT and before/after are generic prose, not shared identifiers");
+    }
+
+    #[tokio::test]
+    async fn generic_only_title_overlap_requires_near_identity_cas_b8ad() {
+        let mut env = TestEnvGuard::temp_home();
+        for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
+            "CAS_AGENT_NAME", "CAS_ROOT", "CAS_CLONE_PATH", "CAS_SESSION_ID"] {
+            env.remove(key);
+        }
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.cas_task_create(Parameters(plain_task_request("Publish release notes report"))).await.unwrap();
+        core.cas_task_create(Parameters(plain_task_request("Publish release notes report before")))
+            .await.expect("generic-only title overlap needs a higher threshold");
+        let warning = core.cas_task_create(Parameters(plain_task_request("Publish release notes report")))
+            .await.expect_err("an exact duplicate title still warns");
+        assert!(warning.message.contains("DUPLICATE TASK WARNING"), "{warning:?}");
+    }
+
+    #[tokio::test]
     async fn duplicate_description_warning_flags_the_gh679_pair() {
         let temp = TempDir::new().expect("temporary project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
@@ -3007,6 +3081,63 @@ mod related_recall_response_tests {
             .find(|task| task.title == "Invalid target task")
             .expect("task persisted despite invalid target");
         assert!(invalid_target_task.deliverables.work_target.is_none());
+    }
+
+    #[tokio::test]
+    async fn gh1123_create_with_live_assignee_queues_dispatch() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "assigned-worker".into(), cas_types::AgentRole::Worker);
+        worker.factory_session = Some("assignment-session".into());
+        worker.metadata.insert("cli".into(), "codex".into());
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        let mut request = plain_task_request("Assigned creation dispatch");
+        request.assignee = Some(worker.name.clone());
+        core.cas_task_create(Parameters(request)).await.unwrap();
+        let task = core.open_task_store().unwrap().list(None).unwrap().pop().unwrap();
+        let queue = crate::store::open_prompt_queue_store(&core.cas_root).unwrap();
+        let rows = queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap();
+        assert_eq!(rows.len(), 1, "assigned creation must persist one dispatch without a director tick");
+        assert_eq!(rows[0].target, worker.name);
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(rows[0].prompt.contains(&format!("action=start id={}", task.id)));
+        assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
+        // A later director tick shares the producer; it cannot duplicate this dispatch.
+        crate::task_assignment::enqueue(&core.cas_root, &task).unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 1);
+        let mut dependent = plain_task_request("Dependent dashboard calibration");
+        dependent.assignee = Some(worker.name.clone());
+        dependent.blocked_by = Some(task.id.clone());
+        // Ordinary blocks permit parallel preparation in the current ready policy.
+        core.cas_task_create(Parameters(dependent)).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        let mut config = crate::config::Config::load(&core.cas_root).unwrap();
+        let mut orchestration = config.orchestration();
+        orchestration.auto_prompt.on_task_assigned = false;
+        config.orchestration = Some(orchestration.clone());
+        config.save(&core.cas_root).unwrap();
+        let mut disabled = plain_task_request("Disabled dispatch nutrition study");
+        disabled.assignee = Some(worker.id.clone());
+        core.cas_task_create(Parameters(disabled)).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        orchestration.auto_prompt.on_task_assigned = true;
+        config.orchestration = Some(orchestration);
+        config.save(&core.cas_root).unwrap();
+        let mut next = cas_types::Agent::new_with_role("next-worker-id".into(), "next-worker".into(), cas_types::AgentRole::Worker);
+        next.factory_session = worker.factory_session.clone();
+        core.open_agent_store().unwrap().register(&next).unwrap();
+        let update = serde_json::from_value(serde_json::json!({"id": task.id, "assignee": next.name})).unwrap();
+        core.cas_task_update(Parameters(update)).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&next.name], Some("assignment-session"), 10).unwrap().len(), 1,
+            "reassignment must use the same durable producer");
+        worker.mark_shutdown();
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        let mut retired = plain_task_request("Retired billing workflow");
+        retired.assignee = Some(worker.id.clone());
+        core.cas_task_create(Parameters(retired)).await.unwrap();
+        core.cas_task_create(Parameters(plain_task_request("Unassigned storage cleanup"))).await.unwrap();
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+
     }
 
     #[tokio::test]

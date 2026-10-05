@@ -64,14 +64,54 @@ pub fn verification_on_closed_message(task_id: &str) -> String {
 }
 
 /// Error when close/verify is attempted under an urgent halt flag.
-pub fn halt_blocks_task_work_message(tool: &str) -> String {
-    format!(
-        "WORK HALTED: supervisor issued an urgent stop. \
-         Refusing `{tool}` until you respond to that instruction. \
-         Send `{prefix}coordination action=message target=supervisor summary=\"...\" message=\"...\"` with your acknowledgement or question, then retry `{tool}`. \
-         If you cannot respond, call `{prefix}task action=mine` and only start a task that is assigned to you.",
-        prefix = crate::mcp::tools::core::guidance::caller_prefix(),
-    )
+///
+/// cas-4a8e1 (GH #1064): a halt bound to its urgent names that notification
+/// and the exact acknowledgement that discharges it; the worker's inbox may
+/// be empty by then, so "respond to that instruction" alone left it guessing
+/// which one.
+pub fn halt_blocks_task_work_message(tool: &str, prompt_id: Option<i64>) -> String {
+    let prefix = crate::mcp::tools::core::guidance::caller_prefix();
+    match prompt_id {
+        Some(id) => format!(
+            "WORK HALTED: supervisor issued an urgent stop (notification {id}). \
+             Refusing `{tool}` until you answer it. \
+             Acknowledge it with `{prefix}coordination action=message_ack notification_id={id}`, \
+             or reply with `{prefix}coordination action=message target=supervisor summary=\"...\" message=\"...\"`, then retry `{tool}`. \
+             If you cannot respond, call `{prefix}task action=mine` and only start a task that is assigned to you."
+        ),
+        None => format!(
+            "WORK HALTED: supervisor issued an urgent stop. \
+             Refusing `{tool}` until you respond to that instruction. \
+             Send `{prefix}coordination action=message target=supervisor summary=\"...\" message=\"...\"` with your acknowledgement or question, then retry `{tool}`. \
+             If you cannot respond, call `{prefix}task action=mine` and only start a task that is assigned to you."
+        ),
+    }
+}
+
+/// Whether a worker's reply to the supervisor discharges the halt bound to an
+/// urgent (cas-4a8e1, GH #1064).
+///
+/// The urgent must have reached the worker before the reply was written:
+/// acknowledged, surfaced and answered (`assumed_seen`), drained or injected
+/// (legacy `delivered`), or handed to its transport no later than the reply.
+/// A reply that could not have followed the urgent (still pending, or handed
+/// off after the reply) leaves the halt in place. cas-85fd/cas-dcf2 asked for
+/// an explicit acknowledgement here; in practice workers answer an interrupt
+/// with an ordinary message, which left the halt to veto an unrelated close
+/// 73 minutes later with an empty inbox.
+pub fn reply_discharges_halt(
+    report: &cas_store::MessageDeliveryReport,
+    reply_enqueued_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    report.confirmed_at.is_some()
+        || report.assumed_seen_at.is_some()
+        || report
+            .delivered_at
+            .is_some_and(|delivered| delivered <= reply_enqueued_at)
+        || matches!(
+            report.legacy_status,
+            cas_store::MessageStatus::Delivered | cas_store::MessageStatus::Confirmed
+        )
 }
 
 /// True when agent metadata marks task work as halted after urgent stop.
@@ -531,7 +571,7 @@ mod tests {
 
     #[test]
     fn cas_85fd_halt_recovery_names_no_unassigned_task() {
-        let message = halt_blocks_task_work_message("task action=close");
+        let message = halt_blocks_task_work_message("task action=close", None);
         assert!(message.contains("target=supervisor"));
         assert!(message.contains("then retry"));
         assert!(

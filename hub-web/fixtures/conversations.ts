@@ -1,9 +1,11 @@
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
+import { fleetControlGate } from '../src/fleet-permissions';
+import type { Scope } from '../src/types';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
-import { ConversationView } from '../src/conversation-view';
-import { applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
-import { applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
+import { ConversationView, terminalOfferReason } from '../src/conversation-view';
+import { applyKeyboardViewport, applyTerminalOffer, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
+import { applyDraftNote, applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
 import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
 import { installAttachmentSheet } from '../src/attachment-sheet';
@@ -92,7 +94,7 @@ export function fixtureManySessionRows(): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
   const supervisor = sessions ? 'calm-puma-34' : FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-sessions', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long'].includes(state);
+  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-session-end-error', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long', 'conversations-machine-label-overlong'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
   // First run: the catalog is loaded and empty, so the welcome offers pairing.
@@ -104,14 +106,40 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     ? { id: 'studio-mac', label: 'Studio Mac', host: 'Studio Mac · macOS', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
     : state === 'conversation-empty'
       ? { id: 'bench-1', label: 'Bench', host: 'Bench · Linux', projectDir: '/projects/cas-hub-static', project: 'cas-hub-static' }
+    // cas-1451 / cas-6b75: an empty session on a machine with a long name, as
+    // HUB-J9's rack: the card keeps the machine whole ahead of the codename,
+    // and its Terminal view is a full target on a phone.
+    : state === 'conversation-empty-long-machine'
+      ? { id: 'bench-1', label: 'Build Server Rack Seven · Windows', host: 'Build Server Rack Seven · Windows', projectDir: '/projects/infra', project: 'infra' }
       : state === 'conversation-sessions' || state === 'conversation-earlier'
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
-  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' ? fixtureManySessionRows() : fixtureConversationRows(selected);
-  new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {}, async () => {});
+  // cas-b452: Atlas's pairing was revoked with its conversation open; its rows stay listed, reading Needs pairing.
+  const needsPairing = state === 'conversation-needs-pairing';
+  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' || state === 'conversations-session-end-error' ? fixtureManySessionRows()
+    : needsPairing ? fixtureConversationRows(selected).map((row) => row.machineId === 'atlas-linux' ? { ...row, connection: 'Needs pairing', interrupted: true } : row)
+    : fixtureConversationRows(selected);
+  const conversationList = new ConversationList();
+  const listNode = app.querySelector<HTMLElement>('#conversation-list')!;
+  // Ending a session drops its row, as main.ts does once the hub confirms.
+  let shownRows = listRows;
+  const endSession = async (ended: ConversationRow): Promise<void> => {
+    if (state === 'conversations-session-end-error') throw new Error('End session request failed (500)');
+    shownRows = groupConversationRows(shownRows.filter((row) => row.key !== ended.key));
+    conversationList.render(listNode, shownRows, () => {}, endSession);
+  };
+  conversationList.render(listNode, listRows, () => {}, endSession);
   // The End session confirmation, open on the idle session (cas-55a4).
   if (state === 'conversation-sessions') app.querySelectorAll<HTMLButtonElement>('#conversation-list .conversation-end-ask')[1]?.click();
+  // cas-f60a: noble-cheetah-84 just ended; the list says so where its row was.
+  if (state === 'conversations-session-ended' || state === 'conversations-session-end-error') {
+    const control = [...listNode.querySelectorAll<HTMLElement>('.conversation-end')].find((node) => node.previousElementSibling?.textContent?.includes('noble-cheetah-84'));
+    control?.querySelector<HTMLButtonElement>('.conversation-end-ask')?.click();
+    const confirm = control?.querySelector<HTMLButtonElement>('.conversation-end-confirm');
+    if (state === 'conversations-session-end-error') confirm?.focus();
+    confirm?.click();
+  }
   // cas-0739: Bench can't be reached; the register lists it first and the footer names it.
   const machines = loading || unpaired ? [] : state === 'paired-machines-down'
     ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'bench-1' ? { ...machine, connection: "Can't reach · retrying", connected: false, lastSeen: 'Not yet seen in this visit' } : machine))
@@ -119,7 +147,13 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       // cas-0739 QA round 1: a long machine name down; the footer state must
       // not collide with the label (phone) or squeeze it (desktop).
       ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'bench-1' ? { ...machine, label: 'Build Server Rack Seven Downstairs · Windows', connection: "Can't reach · retrying", connected: false, lastSeen: 'Not yet seen in this visit' } : machine))
-      : FIXTURE_MACHINES;
+      : state === 'conversations-machine-label-overlong'
+        // cas-c19d: one connected machine whose name is about 691px wide at
+        // 390, so the phone footer shows the label itself beside its state.
+        ? [{ ...FIXTURE_MACHINES[0]!, label: 'soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap' }]
+      : needsPairing
+        ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'atlas-linux' ? { ...machine, connection: 'Needs pairing', connected: false } : machine))
+        : FIXTURE_MACHINES;
   // The list's empty line, exactly as main.ts renderConversationList sets it.
   const empty = app.querySelector<HTMLElement>('#conversation-empty')!;
   empty.hidden = listRows.length > 0;
@@ -130,7 +164,21 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // The footer counts conversations, not machines: it must equal the rows rendered above.
   app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, listRows.length, 'fixture', loading);
   app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
-  renderPairedMachines(app.querySelector('#paired-machines-list')!, machines, async () => {});
+  // cas-d382: the register names each pairing's fleet permissions: one holds
+  // both, one is a control pairing (may allow managing workers, Stop and
+  // restart is not allowed), one is read-only (commands for both).
+  const fleetScopes: Scope[][] = [
+    ['machine-read', 'session-read', 'pane-read', 'pane-input', 'message-send', 'pane-interrupt', 'factory-operate', 'factory-manage'],
+    ['machine-read', 'session-read', 'pane-read', 'pane-input', 'message-send', 'pane-interrupt'],
+    ['machine-read', 'session-read', 'pane-read'],
+  ];
+  const registerRows = state === 'paired-machines'
+    ? machines.map((machine, index) => {
+      const scopes = fleetScopes[index % fleetScopes.length]!;
+      return { ...machine, fleet: { operate: fleetControlGate(scopes, 'add-workers', 'https://commander.example'), manage: fleetControlGate(scopes, 'stop-worker', 'https://commander.example') } };
+    })
+    : machines;
+  renderPairedMachines(app.querySelector('#paired-machines-list')!, registerRows, async () => {});
   const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;
   app.querySelector<HTMLElement>('#paired-machines-toggle')!.onclick = () => dialog.showModal();
   app.querySelector<HTMLElement>('#paired-machines-close')!.onclick = () => dialog.close();
@@ -212,6 +260,22 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(61, 60, 'The lint warning is the only failure.', 'answer', at(9, 33));
     // An answer to a question from yesterday's ended session stays here and names it.
     history.reply({ notification_id: 62, reply_to: 3196200, reply_to_session: 'gabber-studio-noble-cheetah-84', message: 'The mixdown preview you asked about yesterday is in renders/.', summary: '', device_id: 'fixture', kind: 'answer' }, at(9, 35));
+  } else if (state === 'conversation-clock-ahead') {
+    // cas-9e33 / cas-24fe: a reload of a thread whose machine clock runs five
+    // minutes ahead. The first answer arrived live before anything showed the
+    // lead, so it stays unmarked, as that visit showed it. The answer after
+    // the reload arrived once the lead was known and says so. Times are
+    // relative to now: a machine stamp is only "ahead" of this browser's clock.
+    const AHEAD = 5 * 60_000;
+    const now = Date.now();
+    const first = { notification_id: 71, reply_to: null, message: 'The release gate is green; tagging 3.26.0 now.', summary: '', device_id: 'fixture', operator_label: 'Daniel', kind: 'answer' as const, attachments: [] };
+    const visit = new ConversationHistory();
+    visit.receive(first, now - 30 * 60_000);
+    history.seedArrivals(visit.arrivalsRecord());
+    history.hydrateReply({ ...first, at: new Date(now - 30 * 60_000 + AHEAD).toISOString() }, now - 28 * 60_000);
+    history.submit('push', supervisor, 'Push the tag when the notes are ready.', now - 20 * 60_000);
+    history.acknowledge({ client_ref: 'push', notification_id: 70, target: supervisor, stamped: true });
+    history.receive({ notification_id: 72, reply_to: null, message: 'Tagged and pushed. The release notes are drafting.', summary: '', device_id: 'fixture', operator_label: 'Daniel', kind: 'receipt', attachments: [] }, now - 4 * 60_000);
   } else if (state === 'conversation-evidence') {
     history.submit('flake', supervisor, 'Did pass two clear the flake?', at(9, 28));
     history.acknowledge({ client_ref: 'flake', notification_id: 61, target: supervisor, stamped: true });
@@ -223,7 +287,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));
     history.acknowledge({ client_ref: 'report', notification_id: 70, target: supervisor, stamped: true });
     reply(71, 70, 'Gate green on all 14 targets. 3.26.0 is tagged and the brief is attached; the report card has the per-target timings.', 'receipt', at(9, 52), REPORT_CARD_ATTACHMENTS);
-  } else if (state === 'conversation-empty') {
+  } else if (state === 'conversation-empty' || state === 'conversation-empty-long-machine') {
     // empty.html: nothing in the thread, the last thing said as a faint echo.
     echo = 'Promoted the hub to production on Monday.';
   } else if (state === 'conversation-sessions' || state === 'conversation-earlier') {
@@ -242,6 +306,29 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // A phone composer mid-draft: the field holds text, the send pill is in the accent.
     reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
     draft = 'Cut 3.26.0 once the gate is green, then post the release notes.';
+  } else if (state === 'conversation-draft-too-long') {
+    // cas-adfc: a draft over the store's 64k bound; the composer says it will not survive a reload.
+    reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
+    draft = 'Release notes for 3.26.0, pasted whole. '.repeat(1_800);
+  } else if (state === 'conversation-draft-not-saved') {
+    // cas-f657: an ordinary draft the browser's full storage refused; the composer says it won't survive a reload.
+    reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
+    draft = 'Ship it once the Mac lane is green, and tag 3.26.1.';
+  } else if (state === 'conversation-unconfirmed-dismissed') {
+    // cas-6a96 (journey F36): three not confirmed and dismissed, then a run of
+    // two still in the thread. The thread notice counts its two; the chip
+    // counts the three dismissed and says so.
+    for (const [id, text, mm] of [['a', 'Is the gate green?', 30], ['b', 'Did the Mac tests start?', 31], ['c', 'Ship it if both are green', 32]] as const) {
+      history.submit(id, supervisor, text, at(9, mm));
+      history.unconfirmSilent(at(9, mm) + 20_000);
+    }
+    for (const id of ['a', 'b', 'c']) history.dismissSend(id);
+    history.submit('d', supervisor, 'Status, please', at(9, 34));
+    history.acknowledge({ client_ref: 'd', notification_id: 90, target: supervisor, stamped: true });
+    for (const [id, text, mm] of [['e', 'Gate still red?', 36], ['f', 'Hold the train', 37]] as const) {
+      history.submit(id, supervisor, text, at(9, mm));
+      history.unconfirmSilent(at(9, mm) + 20_000);
+    }
   } else if (state === 'conversation-opening') {
     // cas-813a: the one opening line, while the first history page is on its way.
   } else if (state !== 'conversation') {
@@ -254,10 +341,12 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
   const sessionFixture = state === 'conversation-sessions';
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture || state === 'conversation-empty-long-machine' ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
   // The earlier session the operator opened to read (cas-55a4).
   if (sessionFixture) { const open = view.element.querySelector<HTMLDetailsElement>('details.earlier-session'); if (open) open.open = true; }
+  // cas-6b75: the pairing is gone, so the header's Terminal view says why it can't open.
+  if (needsPairing) applyTerminalOffer(document, terminalOfferReason('Needs pairing', 'Atlas · Linux'));
   // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
   const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
   // Dictation writes interim words into the field while the mic listens.
@@ -267,6 +356,9 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor, machine.project);
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
+  applyDraftNote(slot, state === 'conversation-draft-too-long' ? 'too-long' : state === 'conversation-draft-not-saved' ? 'not-saved' : false);
+  // The dismissed-messages chip sits at the top of the composer region, as main.ts places it.
+  if (!view.unsent.hidden) slot.prepend(view.unsent);
   if (state === 'conversation-keyboard') {
     // A phone keyboard on a browser that ignores interactive-widget: the visual
     // viewport is 300px shorter than the layout one; the shell follows it and

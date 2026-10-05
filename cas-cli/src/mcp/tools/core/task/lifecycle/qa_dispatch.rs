@@ -2242,6 +2242,42 @@ mod stale_anchor_rebind_tests_cas_00eb {
         assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty(), "unknown delivery opens no foreign QA round");
     }
 
+    #[test]
+    fn cas_de60_shared_lane_with_older_own_commits_still_requires_delivery_receipt() {
+        let mut env = TestEnvGuard::temp_home();
+        let (f, foreign) = shared_lane_close_fixture(&mut env, false);
+        let repo = f.dir.path();
+        git(repo, &["branch", "-f", "factory/worker", &f.tip]);
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["cherry-pick", &foreign]);
+        let shared_tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "epic"]);
+        git(repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge reused lane"]);
+        let result = f.core.independent_qa_close_gate(&f.task, repo, "epic", None, None);
+        let QaCloseGate::Refuse(text) = result else { panic!("a reused lane is not a task delivery tip"); };
+        assert!(text.contains("commit_receipt"), "{text}");
+        assert!(!text.contains(&format!("commit_receipt={shared_tip}")), "do not recommend a foreign receipt: {text}");
+        assert!(cas_store::list_qa_passes(&repo.join(".cas"), &f.task.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cas_de60_recorded_anchor_and_receipt_remain_valid_with_foreign_shared_lane() {
+        for recorded_anchor in [true, false] {
+            let mut env = TestEnvGuard::temp_home();
+            let (mut f, foreign) = shared_lane_close_fixture(&mut env, false);
+            if recorded_anchor {
+                f.task.deliverables.factory_branch_anchor = Some(f.tip.clone());
+            }
+            let receipt = (!recorded_anchor).then_some(f.tip.as_str());
+            let result = f.core.independent_qa_close_gate(&f.task, f.dir.path(), "epic", receipt, None);
+            assert!(matches!(result, QaCloseGate::Refuse(_)), "unreviewed own delivery needs QA");
+            let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
+            assert_eq!(passes.len(), 1);
+            assert_eq!(passes[0].bound_head, f.tip);
+            assert_ne!(passes[0].bound_head, foreign);
+        }
+    }
+
     /// AC2: qa_request on a parked task whose pending pass is bound to the
     /// stale anchor retires that pass and opens one at the tip, with the
     /// rebind on record.

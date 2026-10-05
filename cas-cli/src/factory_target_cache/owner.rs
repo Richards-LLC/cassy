@@ -345,6 +345,7 @@ mod tests {
     fn provenance_precedes_data_and_never_adopts_legacy_cas_f96d() {
         let (_temp, root, worker) = fixture();
         let lease = acquire(&root, &worker).unwrap().unwrap();
+        let record_path = lease.record_path.clone();
         assert!(
             fs::read_dir(worker.join("target"))
                 .unwrap()
@@ -361,6 +362,13 @@ mod tests {
         fs::rename(worker.join("target"), worker.join("old-target")).unwrap();
         fs::create_dir(worker.join("target")).unwrap();
         fs::write(worker.join("target/legacy-output"), b"legacy").unwrap();
+        // Model filesystem inode reuse: all inode fields can match the new
+        // legacy directory, but its missing generation marker still refuses.
+        let mut record: Record = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        let reused = fs::metadata(worker.join("target")).unwrap();
+        record.target_dev = reused.dev();
+        record.target_ino = reused.ino();
+        write_record(&record_path, &record).unwrap();
         // Even an old marker at this path cannot adopt a replacement inode.
         assert!(acquire(&root, &worker).unwrap().is_none());
         assert!(for_retirement(&root, &worker).unwrap().is_none());

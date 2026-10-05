@@ -559,6 +559,10 @@ pre { font-family: var(--font-mono); }
   border-radius: var(--radius-card);
   font-size: var(--fs-meta);
 }
+/* cas-7c37f F02: without the tint, forced colors still draw the notice's edge. */
+@media (forced-colors: active) {
+  .compatibility-warning { border: 1px solid CanvasText; }
+}
 
 main {
   min-width: 0;
@@ -3411,6 +3415,10 @@ dialog form > *,
 .conversation-flag { width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--warn-text); }
 .conversation-unread { min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
 .conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
+/* cas-7c37f F01: the list's permission notice keeps the empty copy's 18px
+ * inset at every width, so its tint never runs to the panel edge, and sits one
+ * rhythm step under the copy that owns the "Can't reach…" sentence. */
+.conversation-sidebar > #network-access-help { margin: 0 18px var(--space-6); }
 /* F14: until storage and the first catalog answer arrive, the list shows its
  * own shape, not a claim ("Not paired", "No live supervisors") it cannot make yet. */
 .conversation-empty[data-state="loading"] { margin: 0; }

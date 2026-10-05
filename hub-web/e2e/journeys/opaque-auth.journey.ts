@@ -86,8 +86,11 @@ test("HUB-J12 denied Local network access explains site settings without re-pair
   });
   await journey.stage("The browser permission has a visible next step, including without a conversation", async () => {
     await page.goto("./");
-    await expect(page.locator("#network-access-help")).toHaveText("Can't reach soundwave. Allow Local network access for this page in your browser's site settings. Reconnecting…");
+    await expect(page.locator("#network-access-help")).toHaveText("To reach soundwave, allow Local network access for this page in your browser's site settings.");
     await expect(page.getByText(/needs pairing|was revoked/i).filter({ visible: true })).toHaveCount(0);
+    // cas-7c37f: one owner for the outage sentence; the notice carries only the remedy.
+    await expect(page.locator("#conversation-empty")).toHaveText(/^Can't reach your paired machines yet\./);
+    expect(await page.locator(".conversation-sidebar").evaluate(aside => ((aside as HTMLElement).innerText.match(/Can't reach [^·\n]*?\./g) ?? []).length)).toBe(1);
   });
   for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     for (const scheme of ["light", "dark"] as const) {
@@ -97,6 +100,13 @@ test("HUB-J12 denied Local network access explains site settings without re-pair
         await expect(page.locator("html")).toHaveAttribute("data-scheme", scheme);
         await expect(page.locator("#network-access-help")).toBeInViewport();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        // cas-7c37f: the notice shares the empty copy's 18px column, never the panel edge.
+        const edges = await page.evaluate(() => {
+          const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+          const aside = box(".conversation-sidebar"), help = box("#network-access-help"), empty = box("#conversation-empty");
+          return { left: help.left - aside.left, right: aside.right - help.right, emptyLeft: empty.left - aside.left, emptyRight: aside.right - empty.right };
+        });
+        expect(edges).toEqual({ left: 18, right: 18, emptyLeft: 18, emptyRight: 18 });
         const contrast = await page.locator("#network-access-help").evaluate(element => {
           const rgba = (color: string) => {
             const channels = color.match(/[\d.]+/g)!.map(Number);
@@ -127,4 +137,10 @@ test("HUB-J12 denied Local network access explains site settings without re-pair
       });
     }
   }
+  await journey.stage("Under forced colors the notice keeps a visible edge", async () => {
+    await page.emulateMedia({ forcedColors: "active" });
+    expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+    const border = await page.locator("#network-access-help").evaluate(element => getComputedStyle(element).borderTopWidth);
+    expect(border).toBe("1px");
+  });
 });

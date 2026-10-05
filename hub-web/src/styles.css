@@ -2289,6 +2289,9 @@ button.chip:disabled { cursor: default; }
   /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
   #conversation-interrupt { padding: 0 var(--space-2); }
   #conversation-interrupt .action-icon { display: none; }
+  /* The header actions take room from the identity, so on a phone the host line
+     names the machine without its OS word; the line's title keeps it whole. */
+  .conversation-identity .host-os { display: none; }
 
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */

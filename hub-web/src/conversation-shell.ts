@@ -380,7 +380,8 @@ export function fitMachineLine(line: HTMLElement | null | undefined, available: 
   const separator = line.querySelector<HTMLElement>(":scope > .host-sep, :scope > .proj2-sep");
   const gap = separator?.getBoundingClientRect().width || 3 * ch;
   if (machine.scrollWidth + gap + codename.scrollWidth <= available + 1) return;
-  if (machine.querySelector(".host-os")) line.classList.add("os-dropped");
+  // A phone already hides the OS word (styles.css); only a rendered one can be dropped.
+  if (machine.querySelector(".host-os")?.getClientRects().length) line.classList.add("os-dropped");
   if (machine.scrollWidth > MACHINE_KEEP_CH * ch) line.classList.add("machine-long");
   const kept = Math.min(machine.scrollWidth, MACHINE_KEEP_CH * ch);
   if (kept + gap + Math.min(codename.scrollWidth, CODENAME_KEEP_CH * ch) > available + 1) line.classList.add("codename-squeezed");

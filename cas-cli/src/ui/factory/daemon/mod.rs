@@ -7,7 +7,7 @@
 //! - Receives input from clients and processes it
 //! - Persists across TUI attach/detach cycles
 
-use crate::ui::factory::app::{FactoryApp, FactoryConfig, WorkerSpawnResult};
+use crate::ui::factory::app::{FactoryApp, FactoryConfig};
 use crate::ui::factory::buffer_backend::BufferBackend;
 use crate::ui::factory::session::SessionManager;
 use ratatui::Terminal;

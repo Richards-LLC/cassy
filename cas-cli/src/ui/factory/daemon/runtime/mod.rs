@@ -13,8 +13,6 @@ mod output;
 pub(super) mod pane_size;
 #[cfg(test)]
 mod provisioning_tests;
-mod output;
-pub(super) mod pane_size;
 pub mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod send_dedupe;

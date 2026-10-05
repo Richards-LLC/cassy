@@ -6,7 +6,7 @@ Hero form: The existing Connection log's evidence ledger, with its cause, layer,
 Distinctive move: A machine labelled Unsteady keeps its measured cause in the log even while its session attachment remains live; RTT and throughput estimates do not invent a changed route.
 Omitted: New layout, colours, controls or recovery policy. Existing Commander tokens, dialog, banners and Details hierarchy carry the correction.
 
-An unchanged notice retains its Details and Copy nodes when the rail's outage explanation changes. Copy receives the latest callback; changed copied payload replaces the old control. Connection/lease-only shell rebuilds retain the panel for the same view and roster; a changed roster restores the corresponding control by notice identity. Browser offline/online and wake hints retain their immediate recovery; a reported underlying transport-type change still probes, while quality-only changes leave the four-heartbeat rule in charge.
+An unchanged notice retains its Details and Copy nodes when the rail's outage explanation changes. Copy receives the latest callback; changed copied payload replaces the old control. Connection/lease-only shell rebuilds retain the panel for the same conversation and roster; a changed roster restores the corresponding control by notice identity. Browser offline/online and wake hints retain their immediate recovery; a reported underlying transport-type change still probes, while quality-only changes leave the four-heartbeat rule in charge.
 
 ## Critique
 
@@ -21,3 +21,5 @@ Scored by true-parrot-22 on 2026-10-05 from the built dialog and the real produc
 | Accessibility | 4 | Actual keyboard/export/focus restoration and isolated forced-colors, reduced-motion and contrast-more queries pass; no blanket Android or live-radio claim. |
 
 Mechanical receipt: task artifacts `scoped-panel-visual/visual-qa.json` (local built-dialog snapshot, not whole-product polish); interaction receipt `copy-corrected/journeys/HUB-J15`. Final evidence paths and SHA are in `cas-2b3a5/LEDGER.md` beside the fresh bundle.
+
+Integration with cas-0546 keeps its conversation-only shell and read-only Raw output drawer. The notice panel follows the selected machine/session and unchanged roster. Browser installation inventory remains in Paired machines; the removed Terminal drawer contributes no controls or handlers. Rebased proof is bound separately in the task ledger.

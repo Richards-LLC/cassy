@@ -172,9 +172,10 @@ describe("journal privacy and immutable replay", () => {
   });
   it("the newly committed reply remains durable at the cap even when all timestamps tie", async () => {
     const { a } = journals();
-    for (let id = 1; id <= 401; id++) expect(await a.persistReply(scope, { ...reply, notification_id: id }, fence)).toBe(true);
+    for (let id = 1; id <= 400; id++) expect(await a.persistReply(scope, { ...reply, notification_id: id }, fence)).toBe(true);
+    expect(await a.persistReply(scope, { ...reply, notification_id: 999999999 }, fence)).toBe(true);
     const rows = (await a.read(scope)).replies;
-    expect(rows).toHaveLength(400); expect(rows.some(row => row.reply.notification_id === 401)).toBe(true);
+    expect(rows).toHaveLength(400); expect(rows.some(row => row.reply.notification_id === 999999999)).toBe(true);
   });
   it("future account enrollment fails closed until the enrolled journal contract exists", async () => {
     const { a } = journals();

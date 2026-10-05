@@ -266,6 +266,13 @@ export class HubConnectionSupervisor {
   private readonly diagnostics = new ConnectionDiagnostics();
   private connectionGeneration = 0;
   private catalogRequest?: Promise<HubSession[]>;
+  /** Shared SSE/multiplex lane: at most one event-driven catalog start/s. */
+  private readonly eventCatalog = new CoalescedRefresh(async () => {
+    if (!this.desired) return;
+    const stream = this.eventAbort;
+    try { await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)])); }
+    catch (error) { if (stream === this.eventAbort && !stream?.signal.aborted) stream?.abort(error); }
+  }, () => {});
   /**
    * The connection was lost (heartbeats failed, the network went offline, a
    * reconnect failed) since it was last live. Sockets from before the loss may
@@ -778,9 +785,6 @@ export class HubConnectionSupervisor {
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "";
     let replaying = false;
-    const catalog = new CoalescedRefresh(() => this.refreshSessions(anySignal([signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)])), error => {
-      if (!signal.aborted) this.eventAbort?.abort(error);
-    });
     try {
       for (;;) {
         signal.throwIfAborted();
@@ -806,7 +810,7 @@ export class HubConnectionSupervisor {
               this.recordEventRecovery("viewer_lagged", requestId);
               throw new EventRecoveryError("viewer_lagged", requestId);
             } else this.deliverMachineEvent(event, replaying);
-            void catalog.request();
+            void this.eventCatalog.request();
           }
           boundary = buffer.indexOf("\n\n");
         }
@@ -1580,7 +1584,7 @@ export class HubConnectionSupervisor {
     }
     if (envelope.channel === "events" && envelope.event) {
       this.deliverMachineEvent(envelope.event as Record<string, unknown>);
-      await this.refreshSessions(anySignal([this.eventAbort?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+      void this.eventCatalog.request();
       return;
     }
     const session = typeof envelope.channel === "string" && envelope.channel.startsWith("pty:")

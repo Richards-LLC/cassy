@@ -37,6 +37,8 @@ const DPOP_REPLAY_MINUTES: i64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PairingExchangeError {
+    #[error("installation generation conflict")]
+    Conflict,
     /// Five exchanges from the same bound controller origin are already inside the one-minute window.
     #[error("pairing exchange throttled")]
     Throttled { retry_after_seconds: u64 },
@@ -889,7 +891,10 @@ impl AuthStore {
         now: DateTime<Utc>,
     ) -> std::result::Result<DeviceCredential, PairingExchangeError> {
         if exchange.installation.is_some() {
-            return self.prepare_installation(exchange, now).map_err(Into::into);
+            return self.prepare_installation(exchange, now).map_err(|error| {
+                if error.is::<installation::InstallationConflict>() { PairingExchangeError::Conflict }
+                else { match error.downcast::<PairingExchangeError>() { Ok(error) => error, Err(error) => error.into() } }
+            });
         }
         validate_origin(&exchange.controller_origin)?;
         let token_hash = hash_b64(exchange.token.as_bytes());

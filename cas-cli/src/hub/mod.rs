@@ -36,7 +36,7 @@ pub use auth::{
     read_audit_health,
 };
 pub use auth::{
-    AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
+    AccountEnrollment, InstallationAction, InstallationProof, AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
     PairingExchange, PairingExchangeError, PairingInvitation, PairingPrefill, PublicJwk, Scope,
     WsTicket, required_scope,
 };
@@ -181,6 +181,8 @@ pub fn validate_control_bind(addr: SocketAddr, transport: TransportSecurity) -> 
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
+    #[serde(default)]
+    pub installation_protocol: u32,
     pub schema_version: u32,
     pub ready: bool,
 }
@@ -188,6 +190,7 @@ pub struct HealthResponse {
 impl HealthResponse {
     pub fn ready() -> Self {
         Self {
+            installation_protocol: 1,
             schema_version: HUB_SCHEMA_VERSION,
             ready: true,
         }

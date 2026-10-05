@@ -5,6 +5,7 @@ import type { PairingInstallIdentity, Scope, StoredMachine } from "./types";
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface ExchangeOptions {
+  rotateKey?: boolean;
   installation?: {operation_id: string; credential: string; device_id: string | null; expected_generation: number; proof: string; previous_proof: string | null};
   commitPrepared?: () => Promise<void>;
   abortPrepared?: () => Promise<void>;
@@ -111,6 +112,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     throw new PairingExchangeError(unreachableHubMessage(endpoint.origin), { recoverable: true });
   }
   ensureCurrent(options);
+  if (response.status === 409 && options.installation) throw new PairingExchangeError("Another tab updated this installation. Retry pairing to use its current access.", { recoverable: true });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     const failure = pairingExchangeFailure({

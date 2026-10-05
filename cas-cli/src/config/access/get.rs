@@ -19,6 +19,13 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "hub.tailscale_serve" => Some(
+                self.hub
+                    .as_ref()
+                    .and_then(|hub| hub.tailscale_serve)
+                    .unwrap_or(true)
+                    .to_string(),
+            ),
             "jev.gate.shadow" => Some(self.jev.clone().unwrap_or_default().gate.shadow.to_string()),
             "jev.model" => Some(self.jev.clone().unwrap_or_default().model),
             "jev.key_file" => Some(

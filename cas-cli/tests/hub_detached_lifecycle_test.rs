@@ -15,12 +15,20 @@ use std::process::Command;
 
 use serde_json::Value;
 
+fn fixture_tailscale(home: &Path, path: &OsStr) -> PathBuf {
+    std::env::split_paths(path)
+        .map(|dir| dir.join("tailscale"))
+        .find(|cli| cli.starts_with(home) && cli.is_file())
+        .unwrap_or_else(|| home.join("missing-tailscale"))
+}
+
 fn cas_command(home: &Path, path: &OsStr) -> Command {
     let mut command = Command::new(cas::test_paths::cas_binary());
     command
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
+        .env("TAILSCALE", fixture_tailscale(home, path))
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     command
 }

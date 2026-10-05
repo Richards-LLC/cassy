@@ -25,12 +25,20 @@ fn install_tailscale_mock(_home: &Path, path: &Path, script: &str) {
     cas::test_paths::warm_stub(path, script);
 }
 
+fn fixture_tailscale(home: &Path, path: &OsStr) -> PathBuf {
+    std::env::split_paths(path)
+        .map(|dir| dir.join("tailscale"))
+        .find(|cli| cli.starts_with(home) && cli.is_file())
+        .unwrap_or_else(|| home.join("missing-tailscale"))
+}
+
 fn cas_command(home: &Path, path: &OsStr) -> Command {
     let mut command = Command::new(cas::test_paths::cas_binary());
     command
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
+        .env("TAILSCALE", fixture_tailscale(home, path))
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     command
 }
@@ -41,6 +49,7 @@ fn cas_process_command(home: &Path, path: &OsStr) -> std::process::Command {
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
+        .env("TAILSCALE", fixture_tailscale(home, path))
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     command
 }
@@ -73,6 +82,344 @@ fn legacy_hub_command(binary: &Path, home: &Path, bin: &Path) -> ProcessCommand 
     let path = std::env::join_paths([bin, Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
     command.env_clear().env("HOME", home).env("PATH", path).env("CAS_SKIP_FACTORY_TOOLING", "1");
     command
+}
+
+/// Exercise default publication through the actual CLI and post-swap receipt.
+#[cfg(unix)]
+#[test]
+fn flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    install_tailscale_mock(
+        home.path(),
+        &bin.join("tailscale"),
+        include_str!("fixtures/hub_update_mock_tailscale.sh"),
+    );
+    fs::write(home.path().join("mock-port"), "10035").unwrap();
+    fs::write(
+        home.path().join("mock-dns-name"),
+        "no-such-default-hub.invalid.",
+    )
+    .unwrap();
+    let start = cas_command(home.path(), bin.as_os_str())
+        .args([
+            "--json",
+            "hub",
+            "start",
+            "--port",
+            "0",
+            "--tailscale-serve-port",
+            "10035",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&start.stdout).unwrap();
+    assert!(
+        initial["public_url"].is_string(),
+        "flagless start: {initial}"
+    );
+    let restart = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "restart", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(
+        restart.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    assert_eq!(
+        paths.read_process_record().unwrap().tailscale_serve_port,
+        Some(10035)
+    );
+    // Model binary replacement: the real loopback process remains the old hub.
+    let mut old = paths.read_process_record().unwrap();
+    old.version = "old-default-policy".to_owned();
+    paths.write_process_record(&old).unwrap();
+    let receipt_path = home.path().join("default-update.json");
+    let update = cas_command(home.path(), bin.as_os_str())
+        .args([
+            "--json",
+            "update",
+            "--post-swap",
+            "--from",
+            "old-default-policy",
+            "--refresh-receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["hub_restart"]["verified"], true, "{receipt}");
+    assert!(
+        receipt["hub_restart"]["public_url"].is_string(),
+        "{receipt}"
+    );
+    fs::write(
+        home.path().join(".cas/config.toml"),
+        "[hub]\ntailscale_serve = false\n",
+    )
+    .unwrap();
+    let disabled = cas_command(home.path(), bin.as_os_str())
+        .args([
+            "--json",
+            "update",
+            "--post-swap",
+            "--from",
+            "old-default-policy",
+            "--refresh-receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        disabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disabled.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["hub_restart"]["verified"], true, "{receipt}");
+    assert!(receipt["hub_restart"]["public_url"].is_null(), "{receipt}");
+    assert!(!home.path().join("mock-route").exists());
+    let enabled = cas_command(home.path(), bin.as_os_str())
+        .args([
+            "--json",
+            "hub",
+            "start",
+            "--port",
+            "0",
+            "--tailscale-serve",
+            "--tailscale-serve-port",
+            "10035",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    assert!(paths.read_process_record().unwrap().public_url.is_some());
+    let explicit_off = cas_command(home.path(), bin.as_os_str())
+        .args([
+            "--json",
+            "hub",
+            "start",
+            "--port",
+            "0",
+            "--no-tailscale-serve",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        explicit_off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit_off.stderr)
+    );
+    assert!(paths.read_process_record().unwrap().public_url.is_none());
+    assert!(!home.path().join("mock-route").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_starts_known_stopped_hub_and_serve_failure_keeps_update_successful() {
+    let home = private_home();
+    let path = system_path();
+    let start = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "hub",
+            "start",
+            "--port",
+            "0",
+            "--no-tailscale-serve",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let stop = cas_command(home.path(), &path)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(home.path().join(".cas/hub/machine-id").is_file());
+    let receipt_path = home.path().join("loopback-update.json");
+    let update = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "update",
+            "--post-swap",
+            "--from",
+            "old",
+            "--refresh-receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let hub = &receipt["hub_restart"];
+    assert_eq!(hub["action"], "started", "{receipt}");
+    assert_eq!(hub["verified"], true, "{receipt}");
+    assert_eq!(hub["loopback_verified"], true, "{receipt}");
+    assert_eq!(hub["transport_verified"], false, "{receipt}");
+    assert_eq!(hub["recovery_attempted"], false, "{receipt}");
+    assert!(hub["failure"].is_null(), "{receipt}");
+    let warning = hub["transport_warning"].as_str().unwrap();
+    assert!(warning.contains("Tailscale Serve inactive"), "{warning}");
+    assert!(hub["remedy"].as_str().unwrap().contains("cas hub restart"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn post_swap_starts_an_installed_stopped_service_with_default_serve_policy() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let binary = cas::test_paths::cas_binary();
+    let unit = home.path().join(".config/systemd/user/cas-hub.service");
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(&unit, format!("[Service]\nExecStart={} hub serve --bind 127.0.0.1 --port {port} --launched-by service\nRestart=on-failure\n", binary.display())).unwrap();
+    let manager = bin.join("systemctl");
+    cas::test_paths::warm_stub(
+        &manager,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/manager-calls"
+case "$*" in
+  '--user --version'|'--user daemon-reload') exit 0 ;;
+  '--user is-active --quiet cas-hub.service') exit 1 ;;
+  '--user restart cas-hub.service')
+    if [ "$TEST_START_FAIL" = 1 ]; then exit 9; fi
+    if /usr/bin/grep -q -- '--tailscale-serve ' "$HOME/.config/systemd/user/cas-hub.service"; then
+      publication=--tailscale-serve
+    else
+      publication=--no-tailscale-serve
+    fi
+    /usr/bin/setsid "$TEST_CAS_BINARY" hub serve --bind 127.0.0.1 --port "$CAS_HUB_SERVICE_PORT" --launched-by service "$publication" >> "$HOME/service.log" 2>&1 < /dev/null &
+    exit 0 ;;
+  *) exit 9 ;;
+esac
+"#,
+    );
+    let receipt_path = home.path().join("service-update.json");
+    let update = cas_command(home.path(), bin.as_os_str())
+        .env("CAS_HUB_SYSTEMCTL", &manager)
+        .env("TEST_CAS_BINARY", &binary)
+        .env("CAS_HUB_LAUNCHD_LABEL", "test.cas.d8e7")
+        .env("CAS_HUB_SERVICE_PORT", port.to_string())
+        .args([
+            "--json",
+            "update",
+            "--post-swap",
+            "--from",
+            "old",
+            "--refresh-receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let hub = &receipt["hub_restart"];
+    assert_eq!(hub["action"], "started", "{receipt}");
+    assert_eq!(hub["via"], "service", "{receipt}");
+    assert_eq!(hub["verified"], true, "{receipt}");
+    assert_eq!(hub["loopback_verified"], true, "{receipt}");
+    assert_eq!(hub["transport_verified"], false, "{receipt}");
+    assert!(
+        hub["transport_warning"]
+            .as_str()
+            .unwrap()
+            .contains("Tailscale Serve inactive")
+    );
+    let definition = fs::read_to_string(unit).unwrap();
+    assert!(definition.contains("--tailscale-serve --tailscale-serve-port 443"));
+    assert!(
+        definition.contains(&format!("--port {port}")),
+        "listener preserved"
+    );
+    assert!(
+        fs::read_to_string(home.path().join("manager-calls"))
+            .unwrap()
+            .contains("--user restart cas-hub.service")
+    );
+    assert_eq!(
+        cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"))
+            .read_process_record()
+            .unwrap()
+            .launched_by
+            .as_deref(),
+        Some("service")
+    );
+    let stop = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let failed_start = cas_command(home.path(), bin.as_os_str())
+        .env("CAS_HUB_SYSTEMCTL", &manager)
+        .env("TEST_START_FAIL", "1")
+        .env("CAS_HUB_LAUNCHD_LABEL", "test.cas.d8e7")
+        .env("CAS_HUB_SERVICE_PORT", port.to_string())
+        .args([
+            "--json",
+            "update",
+            "--post-swap",
+            "--from",
+            "old",
+            "--refresh-receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        failed_start.status.success(),
+        "best-effort start must not fail update: {}",
+        String::from_utf8_lossy(&failed_start.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(
+        receipt["hub_restart"]["action"], "start_failed",
+        "{receipt}"
+    );
+    assert_eq!(receipt["hub_restart"]["verified"], false, "{receipt}");
+    assert!(receipt["hub_restart"]["failure"].is_string(), "{receipt}");
 }
 
 /// Run only through scripts/run-hub-update-legacy-matrix.sh, which builds the
@@ -176,7 +523,11 @@ fn real_legacy_hubs_recover_through_new_post_swap_step() {
                 let expected_state = if iteration != 0 || state == "healthy" { "running" } else if state == "dead_route" { "exited" } else if state == "stuck_starting" { "startup_wedged" } else { state };
                 assert_eq!(receipt["hub_restart"]["prior_state"], expected_state, "{tag}/{state}/{iteration}: {receipt}");
                 let expected_action = if iteration == 0 {
-                    "restarted"
+                    if state == "dead_route" {
+                        "started"
+                    } else {
+                        "restarted"
+                    }
                 } else {
                     "verified"
                 };

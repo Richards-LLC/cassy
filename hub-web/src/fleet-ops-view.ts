@@ -127,11 +127,16 @@ function noteLine(document: Document, context: FleetOpsViewContext, rowKey: stri
  * in the row header's mono face (cas-d2df), so "Could not stop swift-lark-3: …"
  * visibly names the row it sits in. The text content is unchanged.
  */
+/** Characters of mono identifier that fit the 1280 rail's ~180px note line. */
+const SUBJECT_WHOLE_MAX = 24;
+
 function appendWithSubject(document: Document, line: HTMLElement, text: string, subject: string): void {
   const at = subject ? text.indexOf(subject) : -1;
   if (at < 0) { line.textContent = text; return; }
   const name = document.createElement("span");
-  name.className = "fleet-ops-note-subject";
+  // A name that fits the rail's narrowest line stays whole; a longer one
+  // wraps at its hyphens like the rest of the sentence.
+  name.className = subject.length <= SUBJECT_WHOLE_MAX ? "fleet-ops-note-subject fleet-ops-note-subject--whole" : "fleet-ops-note-subject";
   name.textContent = subject;
   line.append(text.slice(0, at), name, text.slice(at + subject.length));
 }

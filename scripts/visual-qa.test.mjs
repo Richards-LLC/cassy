@@ -133,7 +133,7 @@ test('parses computed OKLCH colors without false invisible-text findings', async
     #colored-background { color: oklch(95% 0.02 250); background: oklch(25% 0.04 250); }
     #transparent { color: oklch(20% 0 0 / 0); }
     #low-contrast { color: oklch(95% 0 0); }
-    #unsupported { color: color(display-p3 0 0 0); }
+    #wide-gamut { color: color(display-p3 0 0 0); }
   </style>
 </head>
 <body>
@@ -143,7 +143,7 @@ test('parses computed OKLCH colors without false invisible-text findings', async
   <p id="colored-background">OKLCH text on OKLCH background is visible.</p>
   <p id="transparent">Transparent OKLCH text is invisible.</p>
   <p id="low-contrast">Pale OKLCH text has low contrast.</p>
-  <p id="unsupported">Other CSS color formats need a contrast check.</p>
+  <p id="wide-gamut">Wide gamut text is also checked.</p>
 </body>
 </html>
 `);
@@ -159,7 +159,7 @@ test('parses computed OKLCH colors without false invisible-text findings', async
   assert.deepEqual(invisible.map((finding) => finding.selector), ['#transparent']);
   assert.equal(invisible[0].reason, 'color-alpha-0');
   assert.ok(result.findings.some((finding) => finding.type === 'contrast' && finding.selector === '#low-contrast'));
-  assert.deepEqual(result.infoFindings.filter((finding) => finding.type === 'unverifiable-contrast').map((finding) => finding.selector), ['#unsupported']);
+  assert.deepEqual(result.infoFindings.filter((finding) => finding.type === 'unverifiable-contrast'), []);
 });
 
 test('allowlist requires a reason and suppresses intentional findings', async () => {
@@ -285,6 +285,76 @@ const both = {
     { name: 'phone', width: 390, height: 800 },
   ],
 };
+
+test('CSS Color 4 hover keeps the opaque review button above its gold tray (cas-3dac)', async () => {
+  const artifactDir = await acceptanceDir('visual-qa-color4-hover-');
+  const result = await runVisualQa({
+    urls: [fixture('color4-hover.html')], artifactDir, strict: true,
+    schemes: ['light'], viewports: both.viewports,
+    journey: { name: 'review', states: [
+      { name: 'hover', steps: [{ hover: '#review' }] },
+      { name: 'focus', steps: [{ focus: '#review' }] },
+    ] },
+  });
+  const review = result.findings.filter((finding) => finding.selector === '#review');
+  assert.deepEqual(review, [], `opaque hover must not use the tray: ${JSON.stringify(review)}`);
+  const controls = result.findings.filter((finding) => finding.type === 'contrast' && finding.selector === '#low-contrast');
+  assert.equal(controls.length, 6, 'real low contrast survives in rest/hover/focus at both widths');
+  for (const control of controls) {
+    assert.deepEqual(control.background, [221, 218, 214]);
+    assert.equal(control.ratio, 1);
+    // The production inspector's background, with the captured button's ink.
+    const luminance = (rgb) => rgb.reduce((sum, c, i) => {
+      const s = c / 255;
+      return sum + (s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4) * [0.2126, 0.7152, 0.0722][i];
+    }, 0);
+    const ratio = (luminance(control.background) + 0.05) / (luminance([27, 29, 36]) + 0.05);
+    assert.ok(ratio >= 12, `hover must measure at least 12:1, not the old 2.57:1: ${ratio}`);
+  }
+});
+
+test('browser CSS Color 4 spaces and alpha keep both visible and truly defective text checked (cas-3dac)', async () => {
+  const artifactDir = await acceptanceDir('visual-qa-color4-spaces-');
+  const path = join(artifactDir, 'colors.html');
+  const dark = [
+    'color(srgb 0.2 0.2 0.2)', 'color(srgb 20% 20% 20%)', 'color(srgb-linear 0.03 0.03 0.03)',
+    'color(display-p3 0.2 0.2 0.2)', 'color(a98-rgb 0.2 0.2 0.2)',
+    'color(prophoto-rgb 0.2 0.2 0.2)', 'color(rec2020 0.2 0.2 0.2)',
+    'color(xyz 0.03 0.03 0.03)', 'color(xyz-d50 0.03 0.03 0.03)', 'color(xyz-d65 0.03 0.03 0.03)',
+    'lab(20% 0 0)', 'lch(20% 0 120deg)', 'oklab(20% 0 0)', 'oklch(20% 0 0)',
+    'hsl(120deg 0% 20%)', 'hwb(120deg 20% 80%)', 'color-mix(in srgb, black 80%, white)',
+  ];
+  await writeFile(path, `<!doctype html><html lang="en"><meta charset="utf-8">
+    <style>body{margin:0;font:16px/1.4 Arial;background:white;color:black}p{margin:4px;padding:2px}</style>
+    ${dark.map((color, i) => `<p id="space-${i}" style="color:${color}">Visible CSS color ${i}</p>`).join('')}
+    <p id="transparent" style="color:color(srgb 0 0 0 / 0)">Invisible text</p>
+    <p id="half" style="color:color(srgb 0 0 0 / 50%)">Genuinely low contrast alpha</p>
+    <p id="pale" style="color:lab(90% 0 0)">Genuinely low contrast Lab</p></html>`);
+  const result = await runVisualQa({ urls: [path], artifactDir, strict: true,
+    schemes: ['light'], viewports: [{ name: 'desktop', width: 1280, height: 800 }] });
+  assert.deepEqual(result.infoFindings.filter((finding) => finding.type === 'unverifiable-contrast'), []);
+  assert.deepEqual(result.findings.filter((finding) => finding.type === 'invisible-text').map((finding) => finding.selector), ['#transparent']);
+  assert.deepEqual(result.findings.filter((finding) => finding.type === 'contrast').map((finding) => finding.selector), ['#half', '#pale']);
+  assert.ok(result.findings.find((finding) => finding.selector === '#half').ratio > 3.9);
+});
+
+test('opaque CSS Color 4 layers hide ancestor images, while own images and translucent layers remain unverifiable (cas-3dac)', async () => {
+  const artifactDir = await acceptanceDir('visual-qa-color4-layers-');
+  const path = join(artifactDir, 'layers.html');
+  await writeFile(path, `<!doctype html><html lang="en"><meta charset="utf-8">
+    <style>body{margin:0;font:16px/1.5 Arial;background:white;color:black}
+    .gradient{padding:16px;background:linear-gradient(90deg,black,white)}
+    p{padding:12px;margin:12px;background:color(srgb 1 1 1)}
+    #exposed{background:transparent}#partial{background:color(srgb 1 1 1 / .999)}
+    #own{background-image:linear-gradient(90deg,white,black)}</style>
+    <div class="gradient"><p id="covered">Opaque layer over gradient</p>
+    <p id="exposed">Exposed ancestor image</p><p id="partial">Translucent layer over image</p>
+    <p id="own">Its own image still paints above its opaque color</p></div></html>`);
+  const result = await runVisualQa({ urls: [path], artifactDir, strict: true,
+    schemes: ['light'], viewports: [{ name: 'phone', width: 390, height: 800 }] });
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.infoFindings.filter((finding) => finding.type === 'unverifiable-contrast').map((finding) => finding.selector), ['#exposed', '#partial', '#own']);
+});
 
 test('a resting-page run misses the planted post-interaction defect', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-rest-'));

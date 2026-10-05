@@ -4704,6 +4704,163 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
 }
 
 // =============================================================================
+fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git").arg("-C").arg(path)
+        .args(args).output().unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+struct BranchAdoptionFixture {
+    temp: tempfile::TempDir,
+    destination: tempfile::TempDir,
+    service: CasService,
+    task: Task,
+    source: Agent,
+    receiver: Agent,
+    tip: String,
+}
+
+fn branch_adoption_fixture(env: &mut TestEnvGuard) -> BranchAdoptionFixture {
+    let (temp, core) = setup_cas_as(env, AgentRole::Worker);
+    let root = temp.path();
+    let destination = tempfile::TempDir::new().unwrap();
+    branch_transfer_git(root, &["init", "-b", "factory/test-agent"]);
+    branch_transfer_git(root, &["config", "user.name", "Test"]);
+    branch_transfer_git(root, &["config", "user.email", "test@example.test"]);
+    std::fs::write(root.join(".gitignore"), ".cas/\n").unwrap();
+    branch_transfer_git(root, &["add", ".gitignore"]);
+    branch_transfer_git(root, &["commit", "-m", "base"]);
+    branch_transfer_git(root, &["worktree", "add", "-b", "factory/new-worker",
+        destination.path().to_str().unwrap()]);
+    std::fs::write(root.join("delivery.txt"), "inherited work").unwrap();
+    branch_transfer_git(root, &["add", "delivery.txt"]);
+    branch_transfer_git(root, &["commit", "-m", "delivery"]);
+    let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
+    let cas_dir = root.join(".cas");
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let source_id = format!("test-session-{}", std::process::id());
+    let mut source = agents.get(&source_id).unwrap();
+    source.metadata.insert("clone_path".into(), root.display().to_string());
+    agents.update(&source).unwrap();
+    let mut receiver = Agent::new_with_role("new-worker-id".into(), "new-worker".into(), AgentRole::Worker);
+    receiver.metadata.insert("clone_path".into(), destination.path().display().to_string());
+    agents.register(&receiver).unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = Task::new("cas-branch1100".into(), "Branch transfer".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    task.assignee = Some(source.name.clone());
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    tasks.add(&task).unwrap();
+    assert!(agents.try_claim(&task.id, &source.id, 600, None).unwrap().is_success());
+    let service = CasService::new(core, None);
+    BranchAdoptionFixture { temp, destination, service, task, source, receiver, tip }
+}
+
+#[tokio::test]
+async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
+    for mode in ["dirty", "dirty-force", "diverged", "foreign"] {
+        let mut env = TestEnvGuard::temp_home();
+        let fixture = branch_adoption_fixture(&mut env);
+        let foreign = tempfile::TempDir::new().unwrap();
+        let cas_dir = fixture.temp.path().join(".cas");
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut original_holder = fixture.source.id.clone();
+        if mode == "dirty-force" {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let mut supervisor = fixture.source.clone();
+            supervisor.role = AgentRole::Supervisor;
+            agents.update(&supervisor).unwrap();
+            let holder = Agent::new_with_role("live-holder".into(), "live-holder".into(), AgentRole::Worker);
+            agents.register(&holder).unwrap();
+            agents.release_lease(&fixture.task.id, &fixture.source.id).unwrap();
+            assert!(agents.try_claim(&fixture.task.id, &holder.id, 600, None).unwrap().is_success());
+            original_holder = holder.id;
+        }
+        if mode == "foreign" {
+            branch_transfer_git(foreign.path(), &["init", "-b", "factory/new-worker"]);
+            branch_transfer_git(foreign.path(), &["config", "user.name", "Test"]);
+            branch_transfer_git(foreign.path(), &["config", "user.email", "test@example.test"]);
+            branch_transfer_git(foreign.path(), &["commit", "--allow-empty", "-m", "foreign"]);
+            let mut receiver = fixture.receiver.clone();
+            receiver.metadata.insert("clone_path".into(), foreign.path().display().to_string());
+            agents.update(&receiver).unwrap();
+        } else {
+            std::fs::write(fixture.destination.path().join("own-work.txt"), "keep me").unwrap();
+            if mode == "diverged" {
+                branch_transfer_git(fixture.destination.path(), &["add", "own-work.txt"]);
+                branch_transfer_git(fixture.destination.path(), &["commit", "-m", "divergent receiver work"]);
+            }
+        }
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "transfer", "id": fixture.task.id, "to_agent": fixture.receiver.name,
+            "adopt_branch": true, "supervisor_override": mode == "dirty-force",
+        })).unwrap();
+        let error = fixture.service.task(Parameters(request)).await.expect_err(mode);
+        assert!(error.message.contains("BRANCH ADOPTION REFUSED"), "{mode}: {error:?}");
+        let after = open_task_store(&cas_dir).unwrap().get(&fixture.task.id).unwrap();
+        assert_eq!(after.assignee, fixture.task.assignee, "{mode}");
+        assert_eq!(after.deliverables.parked_branch, fixture.task.deliverables.parked_branch, "{mode}");
+        assert_eq!(agents.get_lease(&fixture.task.id).unwrap().unwrap().agent_id, original_holder, "{mode}");
+        assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), "factory/new-worker");
+    }
+}
+
+#[tokio::test]
+async fn transfer_adopt_branch_rebinds_delivery_and_real_commit_guard_cas_38a7() {
+    let mut env = TestEnvGuard::temp_home();
+    let BranchAdoptionFixture { temp, destination, service, task, source, receiver, tip } = branch_adoption_fixture(&mut env);
+    let root = temp.path();
+    let cas_dir = root.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    // A later task advances the source branch; adoption must copy this task's
+    // recorded delivery, without grafting that unrelated later commit.
+    std::fs::write(root.join("later-task.txt"), "separate work").unwrap();
+    branch_transfer_git(root, &["add", "later-task.txt"]);
+    branch_transfer_git(root, &["commit", "-m", "later task"]);
+    let source_head = branch_transfer_git(root, &["rev-parse", "HEAD"]);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+    })).unwrap();
+    service.task(Parameters(request)).await.expect("branch adoption transfer");
+    let expected = "factory/new-worker-cas-branch1100";
+    assert_eq!(branch_transfer_git(destination.path(), &["branch", "--show-current"]), expected);
+    assert_eq!(branch_transfer_git(destination.path(), &["rev-parse", "HEAD"]), tip);
+    assert_eq!(std::fs::read_to_string(destination.path().join("delivery.txt")).unwrap(), "inherited work");
+    assert!(!destination.path().join("later-task.txt").exists());
+    assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), source_head);
+
+    let after = tasks.get(&task.id).unwrap();
+    assert_eq!(after.assignee.as_deref(), Some("new-worker"));
+    assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected));
+    assert_eq!(after.deliverables.factory_branch_anchor, Some(tip));
+    assert!(after.deliverables.handoff_branches.contains(&"factory/test-agent".into()));
+
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_CLONE_PATH", destination.path());
+    env.set("CAS_AGENT_NAME", &receiver.name);
+    env.set("CAS_AGENT_ID", &receiver.id);
+    let hook = |session: &str| -> cas::hooks::HookInput {
+        serde_json::from_value(serde_json::json!({
+            "session_id": session, "cwd": destination.path(), "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m continued"},
+        })).unwrap()
+    };
+    let allowed = cas::hooks::handle_pre_tool_use(&hook(&receiver.id), Some(&cas_dir)).unwrap();
+    let allowed = serde_json::to_value(allowed).unwrap();
+    assert_eq!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("allow"), "{allowed}");
+    std::fs::write(destination.path().join("continued.txt"), "new owner work").unwrap();
+    branch_transfer_git(destination.path(), &["add", "continued.txt"]);
+    branch_transfer_git(destination.path(), &["commit", "-m", "continued"]);
+    env.set("CAS_AGENT_NAME", &source.name);
+    env.set("CAS_AGENT_ID", &source.id);
+    let denied = cas::hooks::handle_pre_tool_use(&hook(&source.id), Some(&cas_dir)).unwrap();
+    let denied = serde_json::to_value(denied).unwrap();
+    assert_eq!(denied.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{denied}");
+}
+
 // cas-3ed5: supervisor force-transfer (bypass live-worker lease without shutdown)
 // =============================================================================
 
@@ -4817,6 +4974,7 @@ async fn test_supervisor_force_transfer_live_worker_task() {
 
     // Supervisor force-transfers the task to the target worker.
     let transfer_req = TaskTransferRequest {
+        adopt_branch: None,
         task_id: task_id.clone(),
         to_agent: "target-worker-id".to_string(),
         note: Some("Supervisor reassign — rebalancing workload".to_string()),
@@ -4924,6 +5082,7 @@ async fn test_non_supervisor_cannot_force_transfer() {
     // Caller is a plain worker (no supervisor role) — must be rejected.
     // Do NOT set CAS_AGENT_ROLE=supervisor.
     let transfer_req = TaskTransferRequest {
+        adopt_branch: None,
         task_id: task_id.clone(),
         to_agent: "target-agent-id".to_string(),
         note: None,
@@ -5001,6 +5160,7 @@ async fn transfer_accepts_a_worker_name_and_picks_its_live_registration() {
 
     let result = worker_core
         .cas_task_transfer(Parameters(TaskTransferRequest {
+            adopt_branch: None,
             task_id: task_id.clone(),
             to_agent: "calm-otter-4".to_string(),
             note: Some("handing over".to_string()),
@@ -5046,6 +5206,7 @@ async fn a_blocked_task_without_a_lease_transfers_from_its_assignee() {
 
     worker_core
         .cas_task_transfer(Parameters(TaskTransferRequest {
+            adopt_branch: None,
             task_id: task_id.clone(),
             to_agent: "steady-wren-3".to_string(),
             note: None,
@@ -5083,6 +5244,7 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
     task_store.update(&task).expect("block task");
 
     let request = || TaskTransferRequest {
+        adopt_branch: None,
         task_id: task_id.clone(),
         to_agent: "steady-wren-3".to_string(),
         note: None,
@@ -5104,6 +5266,7 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
     let _role_guard = ScopedSupervisorRole::enter(&mut test_env);
     supervisor_core
         .cas_task_transfer(Parameters(TaskTransferRequest {
+            adopt_branch: None,
             supervisor_override: Some(true),
             ..request()
         }))
@@ -5149,6 +5312,7 @@ async fn transfer_by_session_id_stores_the_worker_name_cas_1638() {
         let task_id = create_task_for_transfer(&worker_core, &format!("Transfer to {name}")).await;
         supervisor_core
             .cas_task_transfer(Parameters(TaskTransferRequest {
+                adopt_branch: None,
                 task_id: task_id.clone(),
                 to_agent: to_agent.to_string(),
                 note: None,
@@ -5255,6 +5419,7 @@ async fn transfer_then_close_parks_the_named_factory_branch_cas_1638() {
             extract_text(
                 supervisor
                     .cas_task_transfer(Parameters(TaskTransferRequest {
+                        adopt_branch: None,
                         task_id: task_id.clone(),
                         to_agent: token.to_string(),
                         note: None,

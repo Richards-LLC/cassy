@@ -718,6 +718,7 @@ impl CasService {
                     ),
                 )
             })?,
+            adopt_branch: req.adopt_branch,
             note: req.notes,
             // Keep the one-release close-gate alias usable for transfer while
             // exposing the surviving name consistently at the unified boundary.

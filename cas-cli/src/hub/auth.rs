@@ -2,7 +2,9 @@
 //!
 //! Implements H2-PERM-01 through H2-AUDIT-06 from the binding Commander ADR.
 
+mod account;
 mod installation;
+pub use account::{CHALLENGE_TTL_SECONDS, EnrollmentAssertion, EnrollmentRefusal};
 pub use installation::{AccountEnrollment, InstallationAction, InstallationProof};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -566,6 +568,10 @@ struct PersistedState {
     dpop_jtis: Vec<ReplayRecord>,
     source_attempts: Vec<SourceAttempt>,
     leases: BTreeMap<String, LeaseRecord>,
+    #[serde(default)]
+    account_challenges: Vec<account::AccountChallenge>,
+    #[serde(default)]
+    account_bindings: Vec<account::AccountBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1164,7 +1170,8 @@ impl AuthStore {
         self.persist(&state)?;
         Ok(DeviceCredential {
             credential_generation: generation,
-            account_enrollment: AccountEnrollment::Unenrolled,
+            // A refresh keeps the installation key, so its binding holds.
+            account_enrollment: account::enrollment_for(&state, &state.devices[device_index]),
             device_id: device.device_id,
             credential_id: state.devices[device_index].credential_id.clone(),
             credential: rotated,
@@ -1229,15 +1236,20 @@ impl AuthStore {
         Ok(context)
     }
 
+    /// The hub's host-level state directory (`~/.cas/hub`).
+    pub fn state_dir(&self) -> &Path {
+        &self.0.root
+    }
+
     pub fn list_devices(&self) -> Result<Vec<DeviceSummary>> {
-        Ok(self
-            .lock()?
+        let state = self.lock()?;
+        Ok(state
             .devices
             .iter()
             .map(|device| DeviceSummary {
                 credential_generation: device.credential_generation,
                 key_fingerprint: device.public_key_thumbprint.clone(),
-                account_enrollment: AccountEnrollment::Unenrolled,
+                account_enrollment: account::enrollment_for(&state, device),
                 device_id: device.device_id.clone(),
                 credential_id: device.credential_id.clone(),
                 device_label: device.device_label.clone(),

@@ -33,7 +33,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     await inventory(page);
     await expect(page.locator(".installation-inventory-row")).toHaveCount(1);
     await expect(page.locator(".installation-inventory-row")).toContainText("Generation 5");
-    await expect(page.locator(".installation-inventory-row")).toContainText("Un-enrolled");
+    await expect(page.locator(".installation-inventory-row")).toContainText("Not in an operator inbox");
     await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
   });
 

@@ -58,6 +58,60 @@ async fn installation_revoke_ends_open_sse_and_refuses_inventory_credential() {
     assert_eq!(app.oneshot(request("/v1/auth/devices")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
 }
 
+/// cas-4634: the account challenge is issued to an authenticated device,
+/// and an enrollment assertion on a hub with no operator-inbox principal is
+/// refused with a closed code, leaving the installation unenrolled.
+#[tokio::test]
+async fn account_enrollment_routes_need_a_session_and_an_enrolled_hub() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let signing = SigningKey::random(&mut OsRng);
+    let now = Utc::now();
+    let invitation = auth.mint_pairing("https://controller.example", Scope::default_read_only(), now).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", Scope::default_read_only());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![fixture_session("factory-a")])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let post = |path: &str, body: &str, signed: bool| {
+        let mut request = Request::post(path)
+            .header("origin", "https://controller.example")
+            .header("content-type", "application/json");
+        if signed {
+            request = request
+                .header("authorization", format!("DPoP {}", credential.credential))
+                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", path, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+        }
+        request.body(Body::from(body.to_owned())).unwrap()
+    };
+    let refused = app.clone().oneshot(post("/v1/auth/account/challenge", "{}", false)).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let issued = app.clone().oneshot(post("/v1/auth/account/challenge", "{}", true)).await.unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued: serde_json::Value = serde_json::from_slice(&to_bytes(issued.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(issued["hub_id"], "machine-test");
+    assert!(issued["hub_challenge"].as_str().is_some_and(|challenge| challenge.len() >= 32));
+    let enrollment = app.clone().oneshot(post("/v1/auth/account/enrollment", r#"{"assertion":"a.b.c"}"#, true)).await.unwrap();
+    assert_eq!(enrollment.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(&to_bytes(enrollment.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(body["error"], "hub_not_enrolled");
+    let inventory = app.oneshot(Request::get("/v1/auth/devices")
+        .header("origin", "https://controller.example")
+        .header("authorization", format!("DPoP {}", credential.credential))
+        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", "/v1/auth/devices", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(devices[0]["account_enrollment"]["state"], "unenrolled");
+}
+
 #[test]
 fn operator_reply_relay_reaches_another_authenticated_device() {
     let temp = private_tempdir();

@@ -9116,6 +9116,12 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(message)),
             };
             let has_delivery_window = task.task_type != TaskType::Epic || delivered_tip.is_some();
+            let tip_is_task_delivery = (task.task_type == TaskType::Epic && delivered_tip.is_some())
+                || req.commit_receipt.is_some()
+                || (supervisor_closing_merged_anchor
+                    && task.deliverables.factory_branch_anchor.is_some())
+                || parked_head.is_some()
+                || worker_worktree_path.is_some();
             // cas-b36b: an epic answers for its own resolved tip even when
             // the supervisor checkout holds an unrelated branch. cas-f0a6:
             // a merged child's anchor similarly replaces the checkout HEAD.
@@ -9135,6 +9141,20 @@ impl CasCore {
                 .as_ref()
                 .filter(|_| has_delivery_window)
                 .and_then(|window| {
+                    // cas-2d27: no-code ops have external proof, not the
+                    // supervisor checkout's unclaimed Rust delivery. Keep
+                    // positively identified task commits and every recorded
+                    // or explicitly supplied delivery on the ordinary path.
+                    if task.execution_note.as_deref() == Some("no-code")
+                        && !tip_is_task_delivery
+                        && !has_recorded_code_delivery(&task)
+                    {
+                        return task_attribution::identified_paths(
+                            proof_repo,
+                            &resolved_parent_branch,
+                            window,
+                        );
+                    }
                     task_attribution::paths(
                         proof_repo,
                         &resolved_parent_branch,
@@ -9201,12 +9221,6 @@ impl CasCore {
                 )));
             }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
-            let tip_is_task_delivery = (task.task_type == TaskType::Epic && delivered_tip.is_some())
-                || req.commit_receipt.is_some()
-                || (supervisor_closing_merged_anchor
-                    && task.deliverables.factory_branch_anchor.is_some())
-                || parked_head.is_some()
-                || worker_worktree_path.is_some();
             if let Some(range) = snapshot_gate_range(
                 proof_repo,
                 &resolved_parent_branch,

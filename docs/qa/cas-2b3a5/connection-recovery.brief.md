@@ -38,8 +38,10 @@ refreshes current state; it cannot recover expired history. SSE broadcast lag
 emits a marker and ends; multiplex lag emits a marker without dropping terminal
 channels. Both cause retained replay/catalog resync instead of silent skipping.
 
-SSE authenticates at open today; the heartbeat discovers subsequent refusal.
-This change does not claim continuous SSE authorization or device delivery ACK.
+The integrated installation protocol rechecks SSE authorization every 250ms and
+terminates the complete metadata/replay/live stream when access expires or is
+revoked. Lag markers and replay boundaries preserve that termination. Device
+delivery ACK remains outside this change.
 Safe hub audit sampling records the first and powers of two of refused/preflight
 buckets plus lag markers; raw requests are never recorded by this feature.
 

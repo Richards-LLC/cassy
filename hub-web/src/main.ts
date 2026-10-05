@@ -1631,7 +1631,6 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     if (!banner) {
       banner = document.createElement("div");
       banner.className = "terminal-disconnected-banner";
-      banner.setAttribute("role", "status");
       grid.prepend(banner);
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
@@ -1649,6 +1648,9 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     if (!words) {
       words = document.createElement("span");
       words.className = "banner-text";
+      // Announce the cause once; adjacent recovery controls stay discoverable
+      // without becoming part of the live-region announcement.
+      words.setAttribute("role", "status");
       banner.replaceChildren(words);
     }
     // cas-a6f0: still live but its heartbeats go unanswered: not lost yet.

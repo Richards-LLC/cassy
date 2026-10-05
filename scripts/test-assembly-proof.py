@@ -614,6 +614,7 @@ p.prove(root)
             with self.subTest(base=base), \
                     mock.patch.dict(proof.os.environ, {"CAS_RELEASE_GATE_HOME_DIR": base}, clear=True), \
                     mock.patch.object(proof, "no_cas_ancestor") as ancestry, \
+                    mock.patch.object(proof.release_scratch, "sweep", return_value={}), \
                     mock.patch.object(proof, "inputs", side_effect=RuntimeError("guard accepted")):
                 with self.assertRaisesRegex(RuntimeError, "guard accepted"):
                     proof.prove(self.root)

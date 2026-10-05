@@ -9778,6 +9778,57 @@ async fn cas_dcf2_wake_starvation_is_top_line_status_not_a_lifecycle_relay_gh390
     );
 }
 
+/// cas-d1659 (AC4): a busy worker's spent wake budget reads as pending for a
+/// busy recipient, not as an abandoned row that "will never be delivered".
+#[tokio::test]
+async fn cas_d1659_busy_recipient_status_is_pending_not_abandoned() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
+
+    let message_id = env
+        .prompt_queue()
+        .enqueue("supervisor", "watchful-koala-20", "blocking DDL ruling")
+        .expect("enqueue");
+    for _ in 0..3 {
+        env.prompt_queue()
+            .record_wake_gate_decline(message_id, "pane has not been silent long enough")
+            .expect("record busy wake decline");
+    }
+    env.prompt_queue()
+        .park_for_busy_recipient(
+            message_id,
+            Some("recipient busy: wake budget spent after 3 attempts"),
+            chrono::Utc::now() + chrono::Duration::minutes(2),
+        )
+        .expect("park for the busy recipient");
+
+    let mut status_req = coord_msg("message_status", "watchful-koala-20", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    assert!(
+        text.contains("stage: gated  pending_reason: awaiting_busy_recipient"),
+        "the busy-recipient state must be the status top line: {text}"
+    );
+    assert!(
+        text.contains("busy recipient: still pending"),
+        "status must say the message is still pending for a busy recipient: {text}"
+    );
+    assert!(
+        !text.contains("will never be delivered") && !text.contains("abandoned as undeliverable"),
+        "a busy recipient's message is neither abandoned nor on the selection deadline: {text}"
+    );
+}
+
 /// cas-4a27 (GH #334): the field reproduction had both halves at once: a
 /// supervisor's real response was indistinguishable from delayed spawn
 /// boilerplate, while the worker's escalation remained AwaitingAck because

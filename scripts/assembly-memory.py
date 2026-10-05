@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Memory guard and stable linker admission for assembly producers.
 
-Linkers share one host/user slot, independent of Cargo dependency job counts.
-The wrapper preserves the selected native linker and records child peak RSS.
+Linkers share memory-bounded host/user slots, independent of Cargo job counts.
+The wrapper preserves the selected native linker and records waited-driver RSS separately from the external link estimate.
 """
 import argparse
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import importlib.util
@@ -12,12 +13,13 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import resource
 import shlex
 import signal
+import stat
 import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 
@@ -44,50 +46,115 @@ def poll(env):
     return proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 1
 
 
+# Stable across native/archive TMPDIRs, proof roots and source-keyed wrappers.
+# Lease files are tiny; build and fixture scratch remains separately configured.
+LINK_LEASE_ROOT = Path("/var/tmp")
+
+
+def link_capacity(env, memory):
+    maximum = proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") or 8
+    return min(maximum, max(1, (memory["budget_bytes"] - proof.GUARD_HEADROOM_BYTES)
+                            // proof.LINK_BYTES))
+
+
+def lease_file(path):
+    # Never follow an injected link or share another user's admission state.
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    stream = os.fdopen(fd, "a+")
+    metadata = os.fstat(fd)
+    if metadata.st_uid != os.getuid() or not stat.S_ISREG(metadata.st_mode):
+        stream.close()
+        raise ValueError("assembly link lease is not an owned regular file")
+    return stream
+
+
+def claim_slot(directory, env):
+    """Sample and count every live lease under one atomic admission lock.
+
+    Count high-numbered slots too when capacity shrinks or another proof uses a
+    different cap. Free leases stay locked until selection is complete, so an
+    unstarted linker is charged its full estimate, not its current zero RSS.
+    """
+    with lease_file(directory / "admission.lock") as admission:
+        fcntl.flock(admission, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        memory = proof.memory_budget(env)
+        capacity = link_capacity(env, memory)
+        event = dict(memory, link_slots=capacity,
+                     configured_link_jobs=proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") or 8,
+                     active_links=0, admitted=False)
+        with ExitStack() as probes:
+            free = []
+            indices = set()
+            for path in directory.glob("slot-*.lock"):
+                match = re.fullmatch(r"slot-([0-9]+)\.lock", path.name)
+                if not match:
+                    continue
+                index = int(match[1])
+                indices.add(index)
+                candidate = probes.enter_context(lease_file(path))
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    free.append((index, candidate))
+                except BlockingIOError:
+                    event["active_links"] += 1
+            fits = memory["budget_bytes"] >= proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
+            if fits and event["active_links"] < capacity:
+                if free:
+                    index, selected = min(free, key=lambda item: item[0])
+                else:
+                    index = 0
+                    while index in indices:
+                        index += 1
+                    selected = probes.enter_context(lease_file(directory / f"slot-{index}.lock"))
+                    fcntl.flock(selected, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Duplicate the same open description before closing probes.
+                # It keeps the lease locked through the child and its descendants.
+                lease = os.fdopen(os.dup(selected.fileno()), "a+")
+                event.update(admitted=True, slot_index=index)
+                return lease, event
+            event["reason"] = "memory reserve/headroom" if not fits else "live link capacity occupied"
+            return None, event
+
+
 def link(command):
     env = settings(os.environ)
-    directory = Path(tempfile.gettempdir()) / f"cas-assembly-links-{os.getuid()}"
+    directory = LINK_LEASE_ROOT / f"cas-assembly-links-{os.getuid()}"
     if directory.is_symlink():
         raise ValueError("unsafe assembly link lease directory")
     directory.mkdir(mode=0o700, exist_ok=True)
-    if directory.stat().st_uid != os.getuid():
-        raise ValueError("assembly link lease has another owner")
-    lock_path = directory / "slot.lock"
-    if lock_path.is_symlink():
-        raise ValueError("unsafe assembly link lease")
+    metadata = directory.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise ValueError("assembly link directory must be private and owned")
+    # Validate before waiting, including under a busy admission lock.
+    proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS")
     started = time.monotonic()
     receipt = os.environ["CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG"]
-    with lock_path.open("a+") as lease:
-        # A bounded wait includes time queued behind another producer/linker.
-        while True:
-            memory = proof.memory_budget(env)
-            elapsed = time.monotonic() - started
-            event = dict(memory, phase="link", elapsed_s=round(elapsed, 3), admitted=False)
-            try:
-                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fits = memory["budget_bytes"] >= proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
-                event["admitted"] = fits
-                if fits:
-                    append(receipt, event)
-                    break
-                fcntl.flock(lease, fcntl.LOCK_UN)
-            except BlockingIOError:
-                event["reason"] = "another linker owns host slot"
-            append(receipt, event)
-            if elapsed >= deadline(env):
-                raise ValueError("assembly linker memory/slot deadline expired")
-            time.sleep(min(poll(env), deadline(env) - elapsed))
-        # Preserve the lease in descendants if a wrapper is killed abruptly.
+    while True:
+        elapsed = time.monotonic() - started
+        try:
+            lease, event = claim_slot(directory, env)
+        except BlockingIOError:
+            lease, event = None, {"admitted": False, "reason": "another link admission is in progress"}
+        event.update(phase="link", elapsed_s=round(elapsed, 3))
+        append(receipt, event)
+        if lease is not None:
+            break
+        if elapsed >= deadline(env):
+            raise ValueError("assembly linker memory/slot deadline expired")
+        time.sleep(min(poll(env), deadline(env) - elapsed))
+    with lease:
         child = subprocess.run(command, pass_fds=(lease.fileno(),))
         peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
         peak_bytes = int(peak if platform.system() == "Darwin" else peak * 1024)
         append(receipt, {"phase": "link-complete", "status": child.returncode,
-                         "peak_child_rss_bytes": peak_bytes, "estimate_bytes": proof.LINK_BYTES,
+                         "slot_index": event["slot_index"], "link_slots": event["link_slots"],
+                         "peak_waited_driver_rss_bytes": peak_bytes, "estimate_bytes": proof.LINK_BYTES,
+                         "rss_scope": "waited driver RSS; excludes mold workers",
                          "estimate_exceeded": peak_bytes > proof.LINK_BYTES,
                          "wall_s": round(time.monotonic() - started, 3),
-                         "measurement_source": "waited linker-driver child ru_maxrss (Linux KiB, macOS bytes); includes waited descendants"})
+                         "measurement_source": "waited driver ru_maxrss (Linux KiB, macOS bytes); excludes unwaited mold workers; not whole-link peak"})
         if peak_bytes > proof.LINK_BYTES:
-            print("assembly linker exceeded memory estimate; recalibration required", file=sys.stderr)
+            print("assembly linker driver exceeded memory estimate; recalibration required", file=sys.stderr)
             return 1
         return child.returncode
 

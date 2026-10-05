@@ -24727,6 +24727,132 @@ mod merge_state_gate_tests {
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
     }
 
+    /// A reopened delivery remains on origin after its retired author's
+    /// checkout switches to unrelated work. Exercise the public close entry,
+    /// rather than manufacturing pre-close hook evidence directly.
+    async fn retired_worker_receipt_close_cas_9ffa(status: TaskStatus, published: bool) {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, AgentStatus, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", "seed.txt", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+
+        let worker = "retired-raven-9ffa";
+        let branch = "factory/retired-raven-9ffa-cas-9ffa";
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join(worker);
+        git(p, &["worktree", "add", "-q", "-b", branch, wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-9ffa): original delivery"]);
+        let original = rev_parse_local(&wt, "HEAD");
+        std::fs::write(wt.join("delivery.rs"), "pub fn corrected_delivery() {}\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "fix(cas-9ffa): requested correction"]);
+        let corrected = rev_parse_local(&wt, "HEAD");
+        if published {
+            git(&wt, &["push", "-q", "origin", branch]);
+        }
+        git(&wt, &["checkout", "-q", "-b", "factory/retired-raven-9ffa-cas-other", "main"]);
+        std::fs::write(wt.join("other.rs"), "pub fn unrelated() {}\n").unwrap();
+        git(&wt, &["add", "other.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-other): unrelated task"]);
+        // No local delivery branch can authorize this close. Only the pushed
+        // per-task ref may establish the supervisor's explicit boundary.
+        git(p, &["branch", "-D", branch]);
+        assert!(!git_commit_is_ancestor(p, &corrected, "main"));
+        assert!(!git_commit_is_ancestor(&wt, &corrected, "HEAD"));
+
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-9ffa-fixture\"\n\n[verification]\nenabled = false\n").unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let mut retired = Agent::new_with_role(worker.into(), worker.into(), AgentRole::Worker);
+        retired.status = AgentStatus::Shutdown;
+        agents.register(&retired).unwrap();
+        let actor = "cas-9ffa-supervisor";
+        agents.register(&Agent::new_with_role(actor.into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task(worker);
+        task.id = "cas-9ffa".into();
+        task.status = status;
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.demo_statement = "Corrected delivery can receive an independent QA round".into();
+        task.deliverables.factory_branch_anchor = Some(original.clone());
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-9ffa-fixture".into(), target_branch: "main".into(),
+        });
+        task.notes = "Reopened after request_changes; assignee retired before re-parking".into();
+        store.add(&task).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "supervisor_override": true,
+            "commit_receipt": corrected, "reason": "Inspected the pushed corrected delivery of the retired worker",
+        })).unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let text = response.content.into_iter().filter_map(|content| match content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        let after = store.get(&task.id).unwrap();
+        let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
+        if published {
+            assert!(!text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
+            assert!(text.contains("MERGE REQUIRED"), "{text}");
+            assert_eq!(after.status, TaskStatus::AwaitingMerge, "{text}");
+            assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(corrected.as_str()), "{text}");
+            assert_eq!(after.deliverables.parked_branch.as_deref(), Some(branch), "{text}");
+            assert_eq!(rounds.len(), 1, "{text}");
+            assert_eq!(rounds[0].bound_head, corrected, "{text}");
+            assert_eq!(rounds[0].branch, branch, "{text}");
+        } else {
+            assert_eq!(response.is_error, Some(true), "{text}");
+            assert_eq!(after.status, status, "unpublished delivery must not be parked: {text}");
+            assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(original.as_str()));
+            assert!(rounds.is_empty(), "unpublished delivery must not dispatch QA: {text}");
+        }
+        assert_eq!(rev_parse_local(&wt, "HEAD"), rev_parse_local(&wt, "factory/retired-raven-9ffa-cas-other"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_parks_reopened_retired_workers_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_parks_inprogress_retired_workers_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::InProgress, true).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_refuses_unpublished_retired_workers_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false).await;
+    }
+
     /// cas-f1f4 (GH #1087): the gabber-studio cas-4c7d sequence through the
     /// real handler. A worker parks task A's anchor, commits task B on top in
     /// the same checkout, and the supervisor's close of A (which has no

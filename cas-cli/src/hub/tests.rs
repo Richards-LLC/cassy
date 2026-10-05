@@ -1472,9 +1472,32 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
     let relay_metadata =
         "name=\"cas-pairing-relay-origin\" content=\"https://petra-stella-cloud.vercel.app\"";
     assert!(html.contains(relay_metadata));
+    // cas-9b7d: the cloud operator inbox is the second reviewed origin. Its
+    // API is named exactly in connect-src (production, /api/operator/ only).
+    let inbox_metadata =
+        "name=\"cas-operator-inbox-origin\" content=\"https://petra-stella-cloud.vercel.app\"";
+    assert!(html.contains(inbox_metadata));
+    assert_eq!(
+        csp.matches(super::server::OPERATOR_INBOX_CSP_SOURCE).count(),
+        1,
+        "the operator inbox API source is pinned once in connect-src: {csp}"
+    );
+    let connect_src = csp
+        .split(';')
+        .map(str::trim)
+        .find(|directive| directive.starts_with("connect-src "))
+        .expect("connect-src directive");
+    assert_eq!(
+        connect_src,
+        "connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* https://petra-stella-cloud.vercel.app/api/operator/",
+        "connect-src names exactly the reviewed sources"
+    );
     assert!(
-        !html.replacen(relay_metadata, "", 1).contains("https://"),
-        "the reviewed pairing relay must be the embedded page's only external origin"
+        !html
+            .replacen(relay_metadata, "", 1)
+            .replacen(inbox_metadata, "", 1)
+            .contains("https://"),
+        "the reviewed pairing relay and operator inbox must be the embedded page's only external origins"
     );
     assert!(!html.contains("<script>"), "inline scripts are forbidden");
 

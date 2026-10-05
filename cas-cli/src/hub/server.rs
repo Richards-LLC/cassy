@@ -302,6 +302,11 @@ async fn commander_symbols_font() -> Response {
     )
 }
 
+/// cas-9b7d: the one reviewed cloud operator inbox API source in the hub's
+/// CSP connect-src (production origin, operator path prefix only).
+#[cfg(test)]
+pub(crate) const OPERATOR_INBOX_CSP_SOURCE: &str = "https://petra-stella-cloud.vercel.app/api/operator/";
+
 async fn security_headers(
     State(transport): State<TransportSecurity>,
     request: Request<Body>,
@@ -324,9 +329,19 @@ async fn security_headers(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // connect-src: `https:`/`wss:` reach the paired machines the operator
+    // chose (arbitrary hub hosts) and the loopback hub. Two cloud services are
+    // reviewed and named exactly (cas-9b7d): the pairing relay and, under
+    // OPERATOR_INBOX_CSP_SOURCE, the production cloud operator inbox API
+    // (`/api/operator/` only, no wildcard, nothing for non-production). They
+    // are the embedded page's only external origins (`h4_csp_03`).
     headers.insert(
         "content-security-policy",
-        HeaderValue::from_static("default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"),
+        HeaderValue::from_static(concat!(
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "https://petra-stella-cloud.vercel.app/api/operator/",
+            "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"
+        )),
     );
     response
 }

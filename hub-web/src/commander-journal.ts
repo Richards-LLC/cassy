@@ -400,7 +400,11 @@ export class CommanderJournal {
           const get = tx.objectStore("sends").get(key);
           get.onsuccess = () => {
             const row = validSendRow(get.result) ? get.result : undefined;
-            if (!row || row.receipt || row.revision !== claimed!.revision || row.owner !== this.owner) return;
+            // Caption persistence may advance the revision without changing
+            // ownership. Fence by the claim and immutable wire content instead.
+            if (!row?.send || row.receipt || row.owner !== this.owner || !row.flight || !sameFence(row.flight, fence)
+              || row.send.target !== claimed!.send!.target || row.send.text !== claimed!.send!.text
+              || row.send.replyTo !== claimed!.send!.replyTo) return;
             try { done(write()); } catch { done(undefined); }
           };
         };

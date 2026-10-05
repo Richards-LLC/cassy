@@ -153,6 +153,18 @@ describe("atomic Commander journal", () => {
     expect(writes).toBe(0);
     expect((await a.read(scope)).sends[0].state).toBe("sending");
   });
+  it("a receipt committed while the final credential check awaits prevents the retry wire write (cas-9dc6)", async () => {
+    const { db, b } = journals();
+    let reads = 0, writes = 0;
+    const a = new CommanderJournal(db, async () => {
+      if (++reads === 2) await b.acknowledge(scope, { client_ref: 'a', notification_id: 99, target: 'supervisor', stamped: true }, fence);
+      return fence;
+    }, () => 1_000, false);
+    await a.reconcile(scope, [], [send('a')], fence);
+    await a.dispatch(scope, 'a', fence, () => { writes++; return true; });
+    expect(writes).toBe(0);
+    expect((await a.read(scope)).receipts[0].notification_id).toBe(99);
+  });
   it("revocation purges private content and fences stale writers, imports and ACKs", async () => {
     const { a, b } = journals();
     await a.reconcile(scope, [], [send("a")], fence);

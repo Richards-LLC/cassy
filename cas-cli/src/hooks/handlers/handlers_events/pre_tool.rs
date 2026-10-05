@@ -1212,9 +1212,8 @@ fn worker_suite_command(command: &str, depth: usize) -> bool {
                     break;
                 }
                 "playwright" if args.first().is_some_and(|arg| arg == "test") => return true,
-                "vitest" if args.is_empty() || args.first().is_some_and(|arg| {
-                    matches!(arg.as_str(), "run" | "watch" | "dev") || arg.starts_with('-') && !matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h")
-                }) => return true,
+                "vitest" if !args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h"))
+                    && !args.first().is_some_and(|arg| matches!(arg.as_str(), "list" | "init")) => return true,
                 "vite" if args.first().is_some_and(|arg| arg == "build") => return true,
                 "journey-eval.sh" => return true,
                 "tsc" if !args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h" | "--showConfig")) => return true,
@@ -4091,7 +4090,7 @@ mod workspace_contract_tests {
             "npm exec --yes --package=playwright -- playwright test", "pnpm exec vitest run",
             "yarn test", "bun run test:unit", "pnpm dlx playwright test", "tsc --noEmit", "vite build",
             "node node_modules/@playwright/test/cli.js test", "node scripts/run-verified-tests.mjs playwright --project=journeys",
-            "node scripts/visual-qa.mjs",
+            "node scripts/visual-qa.mjs", "npx vitest src/connection.test.ts",
         ] {
             assert!(worker_suite_command(command, 0), "{command}");
         }

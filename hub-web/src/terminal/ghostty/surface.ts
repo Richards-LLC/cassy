@@ -355,8 +355,6 @@ export function terminalLinkAtColumn(row: GhosttySnapshot["rowData"][number], co
   return terminalLinkAtPosition([row], 0, column);
 }
 
-/** The terminal's own keys, in the words its escape hint uses (cas-d1fa). */
-export const TERMINAL_ESCAPE_HINT = "Tab goes to the terminal. Ctrl+Alt+M leaves it.";
 /** The element, outside the drawing area, that says so (the session header's). */
 export const TERMINAL_ESCAPE_HINT_ID = "terminal-escape-hint";
 

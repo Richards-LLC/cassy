@@ -13,7 +13,7 @@ export interface SessionSelection {
 
 export interface SelectionState {
   readonly current?: SessionSelection;
-  /** Oldest first; the last entry is where "back" leads. */
+  /** Oldest first; the last entry is the selection before `current`. */
   readonly history: readonly SessionSelection[];
 }
 
@@ -47,23 +47,9 @@ export function selectionAfterPairing(machineId: string, repairing: boolean, cur
   return repairing && current?.session !== undefined ? { machineId: current.machineId, session: current.session } : { machineId };
 }
 
-export function previousSelection(state: SelectionState): SessionSelection | undefined {
-  return state.history.at(-1);
-}
-
-export function canGoBack(state: SelectionState): boolean {
-  return state.history.length > 0;
-}
-
-export function goBackSelection(state: SelectionState): SelectionState {
-  const previous = previousSelection(state);
-  if (!previous) return state;
-  return { current: previous, history: state.history.slice(0, -1) };
-}
-
 /**
- * A removed machine must not survive in the back stack: walking back into a
- * credential that no longer exists is a dead end, not navigation.
+ * A removed machine must not survive in the selection or its history: a
+ * credential that no longer exists is a dead end, not a place to return to.
  */
 export function forgetMachine(state: SelectionState, machineId: string): SelectionState {
   return {

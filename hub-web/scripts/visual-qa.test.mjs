@@ -29,31 +29,33 @@ describe("hub-web fixture visual QA", () => {
   });
 
   it("renders every scoped allowlist shape with its production attributes", async () => {
-    const [fixtureSource, allowlistSource] = await Promise.all([
+    const [fixtureSource, conversationSource, allowlistSource] = await Promise.all([
       readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
+      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
       readFile(join(repoRoot, "visual-qa-allowlist.json"), "utf8"),
     ]);
-    const allowlist = JSON.parse(allowlistSource);
-    expect(fixtureSource).toContain('element("div", "machine-drawer")');
-    expect(fixtureSource).toContain('setAttribute("aria-hidden", "true")');
-    expect(fixtureSource).toContain('setAttribute("inert", "")');
+    const selectors = JSON.parse(allowlistSource).entries.map(({ selector }) => selector);
     expect(fixtureSource).toContain('toast.id = "toast"');
     expect(fixtureSource).toContain('toast.setAttribute("aria-hidden", "true")');
-    expect(fixtureSource).toContain('renderTerminalPlaceholder("agile-octopus", "worker", true)');
-    expect(allowlist.entries.map(({ selector }) => selector)).toEqual(expect.arrayContaining([
-      ".terminal-mount",
-      ".session-picker-toggle > .session-picker-name",
-      ".pane.collapsed",
+    // The header, list and footer the entries name come from the production shell builder.
+    expect(conversationSource).toContain("app.innerHTML = conversationShellMarkup({");
+    expect(selectors).toEqual(expect.arrayContaining([
+      ".conversation-preview",
+      ".conversation-identity h1 > b",
+      "#paired-machines-toggle > .machine-badge-state",
     ]));
+    // cas-0546: the Terminal view is gone, and its exceptions with it.
+    for (const gone of [".terminal-mount", ".session-picker-toggle > .session-picker-name", ".pane.collapsed"]) expect(selectors).not.toContain(gone);
   });
 
   it("keeps changed fixtures on the production connection and pairing surfaces", async () => {
-    const [fixtureSource, mainSource, cssSource] = await Promise.all([
+    const [fixtureSource, conversationSource, mainSource, cssSource] = await Promise.all([
       readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
+      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
       readFile(join(repoRoot, "src", "main.ts"), "utf8"),
       readFile(join(repoRoot, "src", "styles.css"), "utf8"),
     ]);
-    expect(fixtureSource).toContain("renderConnectionSurfaceInto(card, \"bright-otter\"");
+    expect(conversationSource).toContain("renderConnectionSurfaceInto(placeholder, 'one', snapshot");
     expect(mainSource).toContain("renderConnectionSurfaceInto(placeholder, session, snapshot");
     expect(fixtureSource).toContain("K7MW-4H2Q");
     expect(fixtureSource).toContain("function appendOpenPairingDialog(view: PairingFixture): void");
@@ -63,6 +65,26 @@ describe("hub-web fixture visual QA", () => {
     expect(cssSource).toContain("font-size: clamp(44px, 10cqw, 76px);");
   });
 
+  it("draws the conversation header's Interrupt and Raw output with the production builders (cas-0546)", async () => {
+    const [fixtureSource, conversationSource, mainSource] = await Promise.all([
+      readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
+      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
+      readFile(join(repoRoot, "src", "main.ts"), "utf8"),
+    ]);
+    for (const name of ["conversation-interrupt-unavailable", "conversation-raw-output"]) expect(FIXTURE_NAMES).toContain(name);
+    // No fixture draws the removed Terminal view.
+    for (const name of ["fleet-populated", "session-canvas", "transcript", "attention-12", "operator-thread"]) {
+      expect(FIXTURE_NAMES).not.toContain(name);
+      expect(fixtureSource).not.toContain(`"${name}"`);
+    }
+    // Unavailable actions say why through the same helper main.ts uses.
+    expect(mainSource).toContain('applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt")');
+    expect(conversationSource).toContain("applyActionAvailability(app.querySelector<HTMLButtonElement>('#conversation-interrupt')");
+    // The drawer is the production markup in both.
+    expect(mainSource).toContain("dialog.innerHTML = rawOutputDrawerMarkup();");
+    expect(conversationSource).toContain("dialog.innerHTML = rawOutputDrawerMarkup();");
+  });
+
   it("builds the composer and pairing dialog from the production markup builders (D11)", async () => {
     const [fixtureSource, conversationSource, mainSource] = await Promise.all([
       readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
@@ -70,7 +92,7 @@ describe("hub-web fixture visual QA", () => {
       readFile(join(repoRoot, "src", "main.ts"), "utf8"),
     ]);
     // The app and the fixtures call the same builders.
-    expect(mainSource).toContain("${composerMarkup(supervisor, operatorThreadMarkup(thread))}");
+    expect(mainSource).toContain("composer: build(composerMarkup(supervisor)),");
     expect(mainSource).toContain("return renderPairDialogMarkup({");
     expect(mainSource).toContain("applyMicState(mic, {");
     expect(conversationSource).toContain("slot.innerHTML = composerMarkup(supervisor);");

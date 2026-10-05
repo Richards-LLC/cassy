@@ -86,14 +86,9 @@ elevation:
   overlay: "--shadow-overlay 0 24px 80px rgba(18,20,26,0.40)"
 geometry:
   rail: "--machine-rail-width 48px"
-  drawer: "--machine-drawer-width 280px"
-  context: "--context-panel-width 320px"
   conversation-rail: "--conversation-rail-width 374px"
-  header: "--session-header-height 44px"
-  pane-header: "--pane-header-height 32px"
   button: "--button-height 40px"
   dialog: "--dialog-width 520px"
-  fleet-container: "--fleet-board-max-width 1120px"
   phone-rail-target: "--rail-item-min 44px"
 breakpoints:
   phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"

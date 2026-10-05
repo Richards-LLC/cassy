@@ -1,12 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  canGoBack,
   clearStoredSelection,
   forgetMachine,
-  goBackSelection,
   loadStoredSelection,
   pairedSessionToOpen,
-  previousSelection,
   restorableSession,
   saveStoredSelection,
   selectionAfterPairing,
@@ -32,30 +29,17 @@ function memoryStorage(seed: Record<string, string> = {}): SelectionStorage & { 
 }
 
 describe("session selection history", () => {
-  it("records the previous selection so back returns to it", () => {
+  it("records the previous selection, across machines as well as sessions", () => {
     let state: SelectionState = { history: [] };
     state = selectSelection(state, { machineId: "m1", session: "alpha" });
-    expect(canGoBack(state)).toBe(false);
-    state = selectSelection(state, { machineId: "m1", session: "beta" });
-    expect(canGoBack(state)).toBe(true);
-    expect(previousSelection(state)).toEqual({ machineId: "m1", session: "alpha" });
-    state = goBackSelection(state);
-    expect(state.current).toEqual({ machineId: "m1", session: "alpha" });
-    expect(canGoBack(state)).toBe(false);
-  });
-
-  it("walks back across machines, not only sessions", () => {
-    let state: SelectionState = { history: [] };
-    state = selectSelection(state, { machineId: "m1", session: "alpha" });
+    expect(state.history).toEqual([]);
     state = selectSelection(state, { machineId: "m2" });
     state = selectSelection(state, { machineId: "m2", session: "gamma" });
-    state = goBackSelection(state);
-    expect(state.current).toEqual({ machineId: "m2" });
-    state = goBackSelection(state);
-    expect(state.current).toEqual({ machineId: "m1", session: "alpha" });
+    expect(state.current).toEqual({ machineId: "m2", session: "gamma" });
+    expect(state.history).toEqual([{ machineId: "m1", session: "alpha" }, { machineId: "m2" }]);
   });
 
-  it("ignores a re-selection of the current session so back never becomes a no-op step", () => {
+  it("ignores a re-selection of the current session so history never records a no-op step", () => {
     let state: SelectionState = { history: [] };
     state = selectSelection(state, { machineId: "m1", session: "alpha" });
     state = selectSelection(state, { machineId: "m1", session: "beta" });
@@ -75,11 +59,6 @@ describe("session selection history", () => {
     expect(state.history[0]?.session).toBe("s5");
     expect(state.history.at(-1)?.session).toBe("s24");
     expect(state.current?.session).toBe("s25");
-  });
-
-  it("returns the same state when there is nothing to go back to", () => {
-    const state: SelectionState = { current: { machineId: "m1" }, history: [] };
-    expect(goBackSelection(state)).toBe(state);
   });
 
   it("drops a removed machine from the current selection and from the history", () => {

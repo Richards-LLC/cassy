@@ -116,27 +116,17 @@ None of these has a house counterpart; they are the console's own measurements a
 | # | Property | Becomes | Why |
 | --- | --- | --- | --- |
 | 52 | `--machine-rail-width` 48px | **keep** | rail column |
-| 53 | `--machine-drawer-width` 280px | **keep** | drawer sheet |
-| 54 | `--context-panel-width` 320px | **keep** | context column |
-| 55 | `--session-header-height` 44px | **keep** | header row |
-| 56 | `--pane-secondary-min-width` 280px | **keep** | worker pane floor |
-| 57 | `--pane-header-height` 32px | **keep** | pane eyebrow row |
-| 58 | `--worker-collapsed-width` 240px | **keep** | collapsed worker bar |
+| 58 | `--worker-collapsed-width` 240px | **keep** | collapsed context rail track |
 | 59 | `--toolbar-height` 72px | **keep** | phone toolbar |
 | 60 | `--button-height` 40px | **keep** | full-size control |
 | 61 | `--button-compact-height` 28px | **keep** | pane-chrome control |
 | 62 | `--dialog-width` 520px | **keep** | pairing dialog |
 | 63 | `--terminal-state-width` 360px | **keep** | the connection state card; its content changes form (brief), its width does not |
 | 64 | `--pair-detail-label-width` 140px | **keep** | ledger term column in `.pair-details` |
-| 65 | `--mobile-drawer-max-height` 520px | **keep** | phone sheet |
 | 66 | `--mobile-pane-min-width` 260px | **keep** | phone pane floor |
 | 67 | `--mobile-attention-label-width` 200px | **keep** | landscape label column |
 | 68 | `--fleet-card-min-width` 260px | **retired** with the fleet grid in Unit 3 (Unit 7 amendment: no interim consumer ever existed; 0 uses) | the session card grid is replaced by the hero figure and the ledger (brief: *Deliberately omitted*) |
-| 69 | `--fleet-board-max-width` 1120px | `layout.container` | 1120px | the house container; already equal |
-| 70 | `--mobile-header-chip-width` 72px | **keep** | phone header chips |
-| 71 | `--mobile-context-pill-width` 152px | **keep** | phone bar pill (D7) |
 | 72 | `--rail-item-min` 44px | **keep** | phone touch floor (D7) |
-| 73 | `--landscape-attention-rail-width` 80px | **keep** | landscape phone column |
 | 74 | `--browser-notice-height` 32px | **keep** | unsupported-browser line |
 | 75 | `--attention-payload-max-height` 180px | **keep**; the rule that uses it already declares `overflow: auto` | satisfies `container.text-box-height` (a fixed height with a scroll strategy on the same rule) |
 
@@ -145,7 +135,6 @@ None of these has a house counterpart; they are the console's own measurements a
 | # | Property | Becomes | Value | Why |
 | --- | --- | --- | --- | --- |
 | 76 | `--attention-motion-duration` 150ms | `motion.reveal` | 200ms, easing `motion.easing` | a new event revealing in the timeline is a reveal |
-| 77 | `--chrome-motion-duration` 120ms | `motion.chrome` | 120ms | hover, focus, toggle |
 | 78 | `--connection-spin-duration` 800ms | **retired** by Unit 5 together with the spinner and its keyframes (Unit 7 amendment: 0 uses; the connecting card is the serif outcome over the attempt timeline) | — | the house forbids looping animation and the connecting card states its outcome instead |
 | 79 | `--connection-log-max-height` 60dvh | **keep**; its rule declares `overflow: auto` | 60dvh | the connection log ledger scrolls inside the dialog |
 

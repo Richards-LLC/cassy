@@ -1,4 +1,4 @@
-import { activate, phoneLayout, showConversationList } from "./responsive-goals";
+import { activate, phoneLayout, phonePairLink, showConversationList } from "./responsive-goals";
 import { test, expect, expectWholeFocusRing, journeyPart } from "./journey";
 import { ATLAS, PELICAN, STUDIO } from "./world";
 import { SCOPES } from "./hub-double";
@@ -9,6 +9,7 @@ const TOKEN = "q3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRaQ";
 const EARLIER_TOKEN = "Zq3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRa";
 
 test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey }) => {
+  if (await phoneLayout(page)) { await phonePairLink(page, journey, TOKEN, EARLIER_TOKEN); return; }
   const hub = await journey.hub({ machines: [ATLAS, STUDIO] });
   const dialog = page.locator("#pair-dialog");
 

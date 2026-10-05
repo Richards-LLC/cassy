@@ -66,6 +66,29 @@ impl CasService {
         // against exactly the tip under review (cas-c3b8 contract v1).
         let bundle = crate::qa_pass::validate_round_bundle(std::path::Path::new(ledger_path), &claimed)
             .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
+        if verdict == QaVerdict::Approved {
+            let store = self.inner.open_task_store()?;
+            let delivery = store.get(task_id).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            if crate::qa_evidence::journeys::affects_hub(&delivery.deliverables.files_changed)
+                || crate::qa_evidence::journeys::recorded_selection(&delivery.notes, &claimed.bound_head).is_some()
+            {
+                let repo = crate::mcp::tools::core::task::lifecycle::close_ops::resolve_close_gate_repo_root(&cas_root)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+                let config = crate::config::Config::load(&cas_root)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+                let roots = crate::config::resolved_factory_artifact_paths(&cas_root, config.factory().artifacts_root.as_deref());
+                let manifest = bundle.canonicalize().map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+                let artifacts = roots.task_dirs(task_id).into_iter()
+                    .find(|dir| dir.canonicalize().is_ok_and(|root| manifest.starts_with(root)))
+                    .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "QA journey evidence escapes the owning task artifacts"))?;
+                let ctx = crate::qa_evidence::EvidenceContext {
+                    task_id, task_artifacts_dir: &artifacts, repo: &repo,
+                    delivered_head: &claimed.bound_head, notes: &delivery.notes, deployed_origins: &[],
+                };
+                crate::qa_evidence::journeys::check_round_journeys(&ctx, &manifest, &delivery.notes, &delivery.deliverables.files_changed)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {}. Next: {}", e.problem, e.command)))?;
+            }
+        }
         let pass = cas_store::resolve_qa_pass(
             &cas_root,
             task_id,

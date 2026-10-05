@@ -130,6 +130,10 @@ A QA reviewer may reuse the implementer's affected receipt for the same tip
 and spend the round on independent cells and real-pixel checks. Documentation
 or ledger edits do not require a browser rerun: rebind only after Git proves
 the evaluated product and journey inputs unchanged; retain execution provenance.
+Set optional `executed_head_sha` in both the receipt and the QA bundle when
+rebinding; `head_sha` remains the final reviewed tip. Gates prove ancestor
+history, documentation-only changes and unchanged hub-web, selector, runner,
+bundler, catalog and build inputs. A catalog edit is not exempt documentation.
 At epic assembly, cite `journey-receipt: <absolute receipt path>` in an epic
 note. The assembly gate requires `scope: "full"`, the exact assembled tip and
 passing results for every catalog journey.

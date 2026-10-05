@@ -1866,3 +1866,266 @@ fn cas_1ca0_close_refuses_a_hand_picked_journey_subset() {
     assert!(error.contains("HUB-J7"), "{error}");
     assert!(error.contains("scripts/journey-eval.sh"), "{error}");
 }
+
+fn write_journey_receipt(
+    fx: &Fixture,
+    ids: &[&str],
+    scope: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> PathBuf {
+    let path = fx.task_dir.join("journey-receipt.json");
+    let mut value = serde_json::json!({
+        "schema": 1, "producer": "journey-eval", "kind": "local", "scope": scope,
+        "base_sha": fx.head, "head_sha": fx.head, "selection_ids": ids,
+        "tool_version": "playwright 1.63.0", "suite_exit": 0,
+        "results": ids.iter().map(|id| serde_json::json!({
+            "id": id, "status": "PASS", "passed": 2, "failed": 0, "skipped": 0,
+        })).collect::<Vec<_>>()
+    });
+    edit(&mut value);
+    std::fs::write(&path, value.to_string()).unwrap();
+    path
+}
+
+fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
+    EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes,
+        deployed_origins: &[],
+    }
+}
+
+#[test]
+fn cas_1ca0_close_accepts_complete_affected_receipt_and_ci_receipt() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |_| {});
+    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let reasons = vec![journeys::selection_reason(
+        &fx.head,
+        &["HUB-J1".into(), "HUB-J7".into()],
+    )];
+    let pass = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap();
+    assert!(
+        pass.notes
+            .iter()
+            .any(|n| n.contains("JOURNEY_SELECTION:") && n.contains("HUB-J7"))
+    );
+    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
+        v["kind"] = serde_json::json!("ci");
+        v["ci_run_url"] = serde_json::json!("https://github.com/org/repo/actions/runs/42");
+    });
+    run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap();
+}
+
+#[test]
+fn cas_1ca0_missing_selected_failed_skipped_and_stale_receipts_refuse() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &["HUB-J1"], "affected", |_| {});
+    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let reasons = vec![journeys::selection_reason(
+        &fx.head,
+        &["HUB-J1".into(), "HUB-J7".into()],
+    )];
+    let error = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap_err();
+    assert!(error.contains("missing selected IDs [HUB-J7]"), "{error}");
+    assert!(error.contains("scripts/journey-eval.sh"), "{error}");
+    for key in ["failed", "skipped"] {
+        write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
+            v["results"][1][key] = serde_json::json!(1)
+        });
+        let error = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap_err();
+        assert!(error.contains("nonpassing IDs [HUB-J7]"), "{error}");
+    }
+    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
+        v["head_sha"] = serde_json::json!("0".repeat(40))
+    });
+    assert!(
+        run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[])
+            .unwrap_err()
+            .contains("exact delivered tip")
+    );
+}
+
+#[test]
+fn cas_1ca0_receipt_provenance_and_task_namespace_are_required() {
+    let fx = Fixture::new();
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let ids = vec!["HUB-J7".into()];
+    for key in ["suite_exit", "schema"] {
+        let path = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
+            v[key] = serde_json::json!(99)
+        });
+        assert!(journeys::validate_journey_receipt(&ctx, &path, &fx.head, &ids, false).is_err());
+    }
+    let path = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
+        v["tool_version"] = serde_json::json!("")
+    });
+    assert!(journeys::validate_journey_receipt(&ctx, &path, &fx.head, &ids, false).is_err());
+    let outside = fx.repo.join("foreign-receipt.json");
+    std::fs::copy(path, &outside).unwrap();
+    assert!(
+        journeys::validate_journey_receipt(&ctx, &outside, &fx.head, &ids, false)
+            .unwrap_err()
+            .problem
+            .contains("escapes")
+    );
+}
+
+#[test]
+fn cas_1ca0_independent_qa_reuses_exact_tip_implementer_receipt() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &["HUB-J7"], "affected", |_| {});
+    let manifest = fx.write_bundle(|v| {
+        v["producer"] = serde_json::json!("independent-qa");
+        v["journey_receipt"] = serde_json::json!(receipt);
+    });
+    let recorded = format!(
+        "JOURNEY_SELECTION: head={} base={} ids=HUB-J7",
+        fx.head, fx.head
+    );
+    let ctx = journey_context(&fx, &recorded);
+    let reused = journeys::check_round_journeys(&ctx, &manifest, &recorded, &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(reused, receipt.canonicalize().unwrap());
+    write_journey_receipt(&fx, &["HUB-J1"], "affected", |_| {});
+    assert!(
+        journeys::check_round_journeys(&ctx, &manifest, &recorded, &[])
+            .unwrap_err()
+            .problem
+            .contains("HUB-J7")
+    );
+    assert!(
+        journeys::check_round_journeys(&ctx, &manifest, "", &["hub-web/src/main.ts".into()])
+            .unwrap_err()
+            .problem
+            .contains("no affected-journey selection")
+    );
+}
+
+#[test]
+fn cas_1ca0_epic_requires_full_catalog_receipt_and_selector_errors_refuse() {
+    let mut fx = Fixture::new();
+    assert!(journeys::select_journeys(&fx.repo, &fx.head, &fx.head, None).is_err());
+    std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
+    // Real Python call validates reviewed revision/base env; this fixture
+    // selector stands in for the source-graph owner's separate implementation.
+    std::fs::write(
+        fx.repo.join("scripts/journeys-for-diff.py"),
+        r#"
+import json, os
+assert len(os.environ['CAS_JOURNEYS_HEAD']) == 40
+assert len(os.environ['CAS_JOURNEYS_BASE']) == 40
+print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J7'}]}))
+"#,
+    )
+    .unwrap();
+    git_ok(&fx.repo, &["add", "scripts/journeys-for-diff.py"]);
+    git_ok(&fx.repo, &["commit", "-q", "-m", "fixture selector"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    let path = write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |_| {});
+    let notes = format!("journey-receipt: {}", path.display());
+    let ctx = journey_context(&fx, &notes);
+    let error = journeys::check_epic_journeys(&ctx).unwrap_err();
+    assert!(error.problem.contains("full-suite"), "{error:?}");
+    assert!(error.command.contains("no journey filter"), "{error:?}");
+    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "full", |_| {});
+    journeys::check_epic_journeys(&ctx).unwrap();
+    write_journey_receipt(&fx, &["HUB-J1"], "full", |_| {});
+    assert!(
+        journeys::check_epic_journeys(&ctx)
+            .unwrap_err()
+            .problem
+            .contains("HUB-J7")
+    );
+    std::fs::write(
+        fx.repo.join("scripts/journeys-for-diff.py"),
+        "raise SystemExit(2)\n",
+    )
+    .unwrap();
+    assert!(
+        journeys::check_epic_journeys(&ctx)
+            .unwrap_err()
+            .problem
+            .contains("selection failed")
+    );
+}
+
+#[test]
+fn cas_1ca0_empty_impact_does_not_require_browser_run() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &[], "affected", |_| {});
+    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let selection =
+        journeys::check_close_journeys(&ctx, &[journeys::selection_reason(&fx.head, &[])])
+            .unwrap()
+            .unwrap();
+    assert!(selection.contains("no affected journeys"));
+}
+
+#[test]
+fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_refuse() {
+    let mut fx = Fixture::new();
+    let executed = fx.head.clone();
+    std::fs::create_dir_all(fx.repo.join("docs")).unwrap();
+    fx.head = commit(&fx.repo, "docs/QA.md", 0);
+    assert!(journeys::doc_only_rebind(&fx.repo, &executed, &fx.head));
+    let receipt = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
+        v["base_sha"] = serde_json::json!(executed);
+        v["executed_head_sha"] = serde_json::json!(executed);
+    });
+    fx.write_bundle(|v| {
+        v["journey_receipt"] = serde_json::json!(receipt);
+        v["executed_head_sha"] = serde_json::json!(executed);
+        v["created_at"] =
+            serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339());
+    });
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "PASS",
+        chrono::Utc::now() - chrono::Duration::seconds(90),
+        "http://localhost:31000",
+    );
+    for key in [
+        "trace.zip",
+        "trace-actions.txt",
+        "receipt.webm",
+        "final.aria.yml",
+        "final.aria.json",
+        "M01.png",
+    ] {
+        set_mtime_secs_ago(&fx.bundle_dir().join(key), 90);
+    }
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    run_close_gate(
+        &ctx,
+        EvidenceTier::Bundle,
+        &[journeys::selection_reason(&executed, &["HUB-J7".into()])],
+        &[],
+    )
+    .unwrap();
+    std::fs::create_dir_all(fx.repo.join("docs/qa")).unwrap();
+    let catalog_change = commit(&fx.repo, "docs/qa/journeys.md", 0);
+    assert!(!journeys::doc_only_rebind(
+        &fx.repo,
+        &fx.head,
+        &catalog_change
+    ));
+    let source_change = commit(&fx.repo, "changed.ts", 0);
+    assert!(!journeys::doc_only_rebind(
+        &fx.repo,
+        &executed,
+        &source_change
+    ));
+}

@@ -85,7 +85,8 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
       ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }],
       ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }],
     ] as const) {
-      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
+      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+      await page.emulateMedia(media);
       expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
       await expect(question.locator(".chip.sent")).toHaveText("Send for review");
       await page.screenshot({ path: join(RECEIPTS, "HUB-J7", `a11y-${name}.png`) });
@@ -116,7 +117,7 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
     await page.setViewportSize({ width: 390, height: 440 });
     await page.getByRole("textbox", { name: "Your message" }).focus();
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeInViewport();
-    expect(await page.locator(".pinned-ask").evaluate(el => el.getBoundingClientRect().height)).toBeLessThanOrEqual(48);
+    expect(await page.locator(".pinned-bar").evaluate(el => el.getBoundingClientRect().height)).toBeLessThanOrEqual(48);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
   await journey.stage("An empty session shows no borrowed workers", async () => {

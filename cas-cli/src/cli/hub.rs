@@ -2235,7 +2235,14 @@ fn render_audit_status(report: &crate::hub::AuditWriterReport) -> String {
 
 /// `--json` severity of the installed-service finding (cas-621ec).
 fn service_status(finding: Option<&str>) -> &'static str {
-    if finding.is_some() { "error" } else { "ok" }
+    match finding {
+        Some(
+            super::hub_service::MANAGER_TIMEOUT_WARNING
+            | super::hub_service::MANAGER_UNAVAILABLE_WARNING,
+        ) => "unknown",
+        Some(_) => "error",
+        None => "ok",
+    }
 }
 
 fn render_transport_status(report: &HubTransportReport) -> String {

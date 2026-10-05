@@ -511,7 +511,7 @@ export class HubConnectionSupervisor {
     if (error instanceof AuthenticationError) return { code: `auth_${error.kind.replaceAll("-", "_")}` as CauseEvidence["code"], layer: "auth", retryable: false, requestId: error.requestId };
     if (error instanceof TransientAuthError) return { code: "proof_refused", layer: "auth", retryable: true };
     if (error instanceof DOMException && error.name === "TimeoutError") return { code: "request_timeout", layer: "http", retryable: true };
-    if (error instanceof HubRequestError) return { code: "http_refused", layer: "http", retryable: true, status: error.status, requestId: error.requestId };
+    if (error instanceof HubRequestError) return { code: error.code === "health_probe" && error.status === 503 ? "health_http_unavailable" : "http_refused", layer: "http", retryable: true, status: error.status, requestId: error.requestId };
     if (isNetworkFailure(error)) return { code: "network_or_browser_policy_unknown", layer: "browser", retryable: true, permission: "unknown" };
     if (error instanceof UnsupportedBrowserError) return { code: "unsupported_browser", layer: "browser", retryable: false };
     return { code: "stream_closed", layer: "events", retryable: true };
@@ -519,7 +519,7 @@ export class HubConnectionSupervisor {
 
   private async probeHealth(signal: AbortSignal): Promise<void> {
     const response = await fetch(new URL("/v1/health", this.machine.baseUrl), { signal, cache: "no-store", credentials: "omit" });
-    if (!response.ok) throw new HubRequestError(`daemon health failed (${response.status})`, response.status);
+    if (!response.ok) throw new HubRequestError(`daemon health failed (${response.status})`, response.status, "health_probe");
   }
 
   /**

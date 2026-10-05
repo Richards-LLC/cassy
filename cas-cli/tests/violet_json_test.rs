@@ -15,6 +15,7 @@ fn violet_command(root: &Path) -> Command {
         if key.to_string_lossy().starts_with("CAS_")
             || key.to_string_lossy().starts_with("VIOLET_")
             || key.to_string_lossy().starts_with("SLACK_")
+            || key.to_string_lossy().starts_with("MECHA_")
         {
             command.env_remove(key);
         }
@@ -110,7 +111,12 @@ async fn violet_rejected_probe_keeps_json_clean_and_human_diagnostics() {
 
     let hub = MockServer::start().await;
     Mock::given(any())
-        .respond_with(ResponseTemplate::new(401))
+        // rmcp recognizes a 401 auth challenge via WWW-Authenticate.
+        .respond_with(
+            ResponseTemplate::new(401)
+                .insert_header("WWW-Authenticate", "Bearer realm=\"fixture\"")
+                .set_body_json(serde_json::json!({"error": "unauthorized"})),
+        )
         .mount(&hub)
         .await;
     for json in [true, false] {

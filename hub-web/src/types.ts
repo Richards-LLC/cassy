@@ -78,6 +78,8 @@ export interface ArtifactRef {
 
 /** Supervisor turn routed to this paired Commander device. */
 export interface OperatorReply {
+  /** Local application receipt, never shared operator-read state. */
+  device_persisted?: boolean;
   notification_id: number;
   reply_to: number | null;
   message: string;

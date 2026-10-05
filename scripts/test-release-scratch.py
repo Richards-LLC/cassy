@@ -38,7 +38,10 @@ class ScratchTests(unittest.TestCase):
         # entries still point at real /proc handles of this test and its children.
         self.proc = self.root / 'proc'
         self.proc.mkdir()
-        (self.proc / str(os.getpid())).symlink_to(Path('/proc') / str(os.getpid()), target_is_directory=True)
+        if Path('/proc').is_dir():
+            (self.proc / str(os.getpid())).symlink_to(Path('/proc') / str(os.getpid()), target_is_directory=True)
+        else:
+            self.proc.rmdir()  # Exercise the macOS ps/lsof path on macOS.
         patch = mock.patch.object(scratch, 'PROC_ROOT', self.proc)
         patch.start()
         self.addCleanup(patch.stop)
@@ -57,7 +60,8 @@ class ScratchTests(unittest.TestCase):
 
     def spawn(self, command, **kwargs):
         process = subprocess.Popen(command, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **kwargs)
-        (self.proc / str(process.pid)).symlink_to(Path('/proc') / str(process.pid), target_is_directory=True)
+        if self.proc.is_dir():
+            (self.proc / str(process.pid)).symlink_to(Path('/proc') / str(process.pid), target_is_directory=True)
         def reap():
             if process.poll() is None:
                 process.kill()
@@ -167,35 +171,144 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         self.assertTrue(escape.exists())
         self.assertFalse(old.exists())
 
+    def idle_owner(self, path):
+        path.mkdir(mode=0o700, exist_ok=True)
+        owner = scratch.owner_record(path, path / scratch.LOCK)
+        owner.update(pid=0, start='idle')
+        (path / scratch.OWNER).write_text(json.dumps(owner))
+
     def test_cache_size_and_age_bounds_evict_before_and_after_use(self):
         target = self.parent / 'assembly-target'
-        target.mkdir()
-        (target / 'output').write_bytes(b'x' * 2048)
         env = dict(self.env, CAS_ASSEMBLY_TARGET_MAX_GIB='0.000001')
+        # Created under the lease protocol, not silently adopted legacy output.
         with scratch.BoundedCache(target, env, self.repo):
-            self.assertFalse(target.exists())
-            target.mkdir()
             (target / 'output').write_bytes(b'x' * 2048)
         self.assertFalse(target.exists())
-        target.mkdir()
-        (target / 'output').write_text('old')
-        self.old(target)
         with scratch.BoundedCache(target, self.env, self.repo):
-            self.assertFalse(target.exists())
+            (target / 'output').write_text('old')
+        self.old(target / '.cas-last-used')
+        with scratch.BoundedCache(target, self.env, self.repo) as directory:
+            self.assertFalse((directory / 'output').exists())
 
     def test_cache_preserves_open_output_and_registered_checkout(self):
         target = self.parent / 'assembly-target'
-        target.mkdir()
-        (target / 'output').write_bytes(b'x' * 2048)
+        with scratch.BoundedCache(target, self.env, self.repo):
+            (target / 'output').write_bytes(b'x' * 2048)
         env = dict(self.env, CAS_ASSEMBLY_TARGET_MAX_GIB='0.000001')
-        with (target / 'output').open('rb'), self.assertRaisesRegex(ValueError, 'live users'):
-            with scratch.BoundedCache(target, env, self.repo):
-                pass
+        with (target / 'output').open('rb'):
+            report = scratch.cache_report(self.repo, target, clean=True, env=env)
+            self.assertIn('live users', report['reason'])
+            self.assertTrue((target / 'output').exists())
         self.git('worktree', 'add', '-q', '-b', 'fixture/cache', str(target / 'registered'))
         with self.assertRaisesRegex(ValueError, 'registered worktree'):
             with scratch.BoundedCache(target, env, self.repo):
                 pass
         self.assertTrue((target / 'registered/source').exists())
+
+    def test_legacy_cache_requires_explicit_adoption_and_refuses_held_lease(self):
+        target = self.parent / 'assembly-target'
+        target.mkdir()
+        (target / 'output').write_bytes(b'x' * 2048)
+        env = dict(self.env, CAS_ASSEMBLY_TARGET_MAX_GIB='0.000001')
+        report = scratch.cache_report(self.repo, target, clean=True, env=env)
+        self.assertIn('legacy cache retained', report['reason'])
+        self.assertEqual(report['retained_bytes'], 2048)
+        self.assertFalse((target / scratch.OWNER).exists())
+        with scratch.BoundedCache(target, self.env, self.repo):
+            report = scratch.cache_report(self.repo, target, clean=True, adopt=True, env=env)
+            self.assertIn('protected', report['reason'])
+            self.assertTrue(target.exists())
+        report = scratch.cache_report(self.repo, target, clean=True, adopt=True, env=env)
+        self.assertTrue(report['adopted'])
+        self.assertEqual(report['reclaimed_bytes'], 2048)
+        self.assertFalse(target.exists())
+
+    def test_registered_remap_keeps_base_but_reclaims_only_known_siblings(self):
+        base = self.parent / 'base.retained'
+        self.idle_owner(base)
+        self.git('worktree', 'add', '-q', '-b', 'fixture/remap', str(base / 'workspace-remap'))
+        for name in scratch.REGENERABLE:
+            if name == 'suite.tar.zst':
+                (base / name).write_bytes(b'x' * 2048)
+            else:
+                (base / name).mkdir()
+                (base / name / 'output').write_bytes(b'x' * 2048)
+        (base / 'unknown-evidence').write_text('keep')
+        self.old(base)
+        protected_before = scratch.worktrees(self.repo)
+        report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertTrue(base.exists())
+        self.assertEqual(protected_before, scratch.worktrees(self.repo))
+        self.assertTrue((base / 'workspace-remap/source').exists())
+        self.assertTrue((base / 'unknown-evidence').exists())
+        self.assertEqual(report['reclaimed_bytes'], 5 * 2048)
+        self.assertGreater(report['retained_bytes'], 0)
+        self.assertTrue(report['entries'][0]['retained_base'])
+        self.assertFalse(any((base / name).exists() for name in scratch.REGENERABLE))
+
+    def test_start_time_mismatch_is_dead_but_matching_owner_is_live(self):
+        old = self.parent / 'base.reused-pid'
+        self.idle_owner(old)
+        owner = json.loads((old / scratch.OWNER).read_text())
+        owner.update(pid=os.getpid(), start='different start')
+        (old / scratch.OWNER).write_text(json.dumps(owner))
+        self.old(old)
+        self.assertFalse(scratch.owner_live(owner))
+        scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertFalse(old.exists())
+        with scratch.OwnedDirectory('base.', self.parent) as live:
+            self.old(live)
+            self.assertTrue(scratch.owner_live(scratch.read_owner(live)))
+            scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+            self.assertTrue(live.exists())
+
+    def test_opaque_process_blocks_unknown_but_not_dead_lease_managed_scratch(self):
+        managed, unknown = self.parent / 'base.managed', self.parent / 'base.unknown'
+        self.idle_owner(managed)
+        unknown.mkdir()
+        (unknown / 'output').write_text('preserve')
+        self.old(managed)
+        self.old(unknown)
+        if not self.proc.is_dir():
+            self.skipTest('Linux permission fixture; macOS opaque lsof fixture is separate')
+        original = os.readlink
+        def opaque(path, *args, **kwargs):
+            if Path(path) == self.proc / str(os.getpid()) / 'cwd':
+                raise PermissionError('controlled non-dumpable process')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(scratch.os, 'readlink', side_effect=opaque):
+            report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertFalse(managed.exists(), report)
+        self.assertTrue(unknown.exists(), report)
+        self.assertGreater(report['reclaimed_bytes'], 0)
+        self.assertGreater(report['retained_bytes'], 0)
+
+    def test_registration_refuses_populated_unknown_and_symlink_paths(self):
+        with scratch.OwnedDirectory('cas-release-gate.', self.parent) as owner:
+            unsafe = self.parent / 'base.not-fresh'
+            unsafe.mkdir(mode=0o700)
+            (unsafe / 'output').write_text('keep')
+            link = self.parent / 'base.link'
+            link.symlink_to(unsafe, target_is_directory=True)
+            with mock.patch.dict(os.environ, self.env):
+                for path in (unsafe, link, self.repo):
+                    with self.assertRaises(ValueError):
+                        scratch.register(path, owner)
+            self.assertFalse((owner / 'paths').exists())
+            self.assertTrue((unsafe / 'output').exists())
+
+    def test_macos_lsof_exempts_only_own_exact_lease_fd(self):
+        path = self.parent / 'base.mac'
+        path.mkdir()
+        lock = path / scratch.LOCK
+        with lock.open('a+') as stream, mock.patch.object(scratch, 'PROC_ROOT', self.root / 'absent-proc'):
+            fields = f'p{os.getpid()}\0f{stream.fileno()}w\0n{lock}\0'.encode()
+            with mock.patch.object(scratch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, fields, b'')):
+                self.assertFalse(scratch.process_uses(path, stream.fileno()))
+                self.assertTrue(scratch.process_uses(path))
+            with mock.patch.object(scratch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'', b'opaque process')):
+                self.assertTrue(scratch.process_uses(path))
+                self.assertFalse(scratch.process_uses(path, lease_managed=True))
 
     def test_parent_waits_beyond_nested_five_second_teardown(self):
         ready = self.root / 'slow-ready'
@@ -218,6 +331,8 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         self.assertFalse(directory.exists())
 
     def test_opaque_process_evidence_fails_closed(self):
+        if not self.proc.is_dir():
+            self.skipTest('Linux proc permission fixture')
         original = os.readlink
         def unreadable(path, *args, **kwargs):
             if Path(path) == self.proc / str(os.getpid()) / 'cwd':

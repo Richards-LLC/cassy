@@ -240,9 +240,9 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(hub.requests).toHaveLength(requests);
   });
-  it("keeps network-quality estimates from bypassing four failed heartbeats (cas-eefe)", async () => {
+  it.each([undefined, "wifi"])("keeps network-quality estimates from bypassing four failed heartbeats (type=%s, cas-eefe)", async type => {
     const hub = transport();
-    const hints = Object.assign(new EventTarget(), { rtt: 50, downlink: 10, effectiveType: "4g" });
+    const hints = Object.assign(new EventTarget(), { type, rtt: 50, downlink: 10, effectiveType: "4g" });
     vi.stubGlobal("navigator", { connection: hints });
     vi.stubGlobal("document", Object.assign(new EventTarget(), { visibilityState: "visible" }));
     const connection = supervisor(await storedMachine("quality-estimate"));
@@ -268,6 +268,25 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.snapshot().phase).toBe("live");
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+  });
+
+  it("still probes a measured network transport change immediately (cas-eefe)", async () => {
+    const hub = transport();
+    const hints = Object.assign(new EventTarget(), { type: "wifi" });
+    vi.stubGlobal("navigator", { connection: hints });
+    vi.stubGlobal("document", Object.assign(new EventTarget(), { visibilityState: "visible" }));
+    const connection = supervisor(await storedMachine("transport-change"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(request => request.path === "/v1/machine").length;
+    hub.block(true);
+    hints.type = "cellular";
+    hints.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before + 1);
+    expect(connection.snapshot().missedHeartbeats).toBe(4);
   });
 
   it("bounds an unanswered event catalog refresh to the probe deadline (cas-b85a)", async () => {

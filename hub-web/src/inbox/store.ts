@@ -123,6 +123,8 @@ export interface QueuedCommand {
   hubId: string;
   projectId: string;
   sessionId: string;
+  /** Readable session name, local only (sealed inside the ciphertext). */
+  sessionName: string;
   /** The exact request body, sealed once; every retry sends these bytes. */
   request: Record<string, unknown> | null;
   /** Plaintext shown locally until the history event replays. */

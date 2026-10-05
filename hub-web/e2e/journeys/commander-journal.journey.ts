@@ -48,7 +48,7 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     expect(new Set(sends.map((row) => row.client_ref)).size).toBe(2);
     await Promise.all([page.reload(), second.reload()]);
     await choose(page); await choose(second);
-    await expect(page.getByRole("log")).toContainText("Not confirmed");
+    await expect(page.getByRole("log")).toContainText("2 messages not confirmed");
     await expect.poll(() => [...hub.sends, ...other.sends].length).toBe(2);
     expect(errors).toEqual([]);
   });

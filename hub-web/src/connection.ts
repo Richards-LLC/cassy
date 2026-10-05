@@ -1,5 +1,6 @@
 import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
+import { CoalescedRefresh } from "./catalog-refresh";
 import { dpopHeaders } from "./dpop";
 import { localNetworkAccessHelp } from "./local-network-access";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
@@ -207,6 +208,19 @@ export class HubConnectionSupervisor {
   private desired = false;
   private attempt = 0;
   private eventAbort?: AbortController;
+  private catalogRequest?: Promise<HubSession[]>;
+  /** SSE and multiplexed events share this lane; event delivery never waits. */
+  private readonly eventCatalog = new CoalescedRefresh(async () => {
+    if (!this.desired || this.lifecycle.phase !== "live") return;
+    const stream = this.eventAbort;
+    try {
+      await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+    } catch (error) {
+      // Preserve the existing event-stream recovery path and its deadline.
+      // A late failure from an old stream must not abort its replacement.
+      if (stream === this.eventAbort && !stream?.signal.aborted) stream?.abort(error);
+    }
+  }, () => {});
   private retryTimer?: number;
   private heartbeatTimer?: number;
   private missedHeartbeats = 0;
@@ -534,9 +548,13 @@ export class HubConnectionSupervisor {
   }
 
   async refreshSessions(signal: AbortSignal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)): Promise<HubSession[]> {
-    const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealWorkers(), revealDormant()), undefined, signal);
-    this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
-    return response.sessions;
+    // Heartbeat, manual refresh and event refresh share an active GET too.
+    this.catalogRequest ??= this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealWorkers(), revealDormant()), undefined, signal)
+      .then(response => {
+        this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
+        return response.sessions;
+      }).finally(() => { this.catalogRequest = undefined; });
+    return this.catalogRequest;
   }
 
   private async refreshMachineInfo(signal?: AbortSignal): Promise<void> {
@@ -723,7 +741,7 @@ export class HubConnectionSupervisor {
           if (data) {
             const event = JSON.parse(data) as Record<string, unknown>;
             this.deliverMachineEvent(event);
-            await this.refreshSessions(anySignal([signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+            void this.eventCatalog.request();
           }
           boundary = buffer.indexOf("\n\n");
         }
@@ -1494,7 +1512,7 @@ export class HubConnectionSupervisor {
     }
     if (envelope.channel === "events" && envelope.event) {
       this.deliverMachineEvent(envelope.event as Record<string, unknown>);
-      await this.refreshSessions(anySignal([this.eventAbort?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+      void this.eventCatalog.request();
       return;
     }
     const session = typeof envelope.channel === "string" && envelope.channel.startsWith("pty:")

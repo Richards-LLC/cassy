@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Host admission tests using Python children and fake JS runner; no browsers/npm."""
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+BASELINE = '--baseline' in sys.argv
+if BASELINE:
+    sys.argv.remove('--baseline')
+
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+host = load('host_memory', ROOT / 'scripts/host_memory.py')
+sys.modules['host_memory'] = host
+worker = load('worker_memory', ROOT / 'scripts/worker-memory.py')
+GIB = 1024**3
+HIGH = {'total_bytes': 64*GIB, 'available_bytes': 60*GIB, 'reserve_bytes': 16*GIB, 'budget_bytes': 44*GIB, 'source': 'fixture'}
+
+
+class AdmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.pool = self.root / 'pool'
+        self.events = []
+        self.env = dict(os.environ)
+        self.env.pop(host.LEASE_ENV, None)
+
+    def admit(self, role, **kwargs):
+        return host.admission(role, self.env, lambda _: HIGH, directory=self.pool,
+                              wait_secs=.5, poll_secs=.02, report=self.events.append, **kwargs)
+
+    def test_frontend_runner_waits_for_proof_and_reports_wait(self):
+        # Execute the actual frontend entry point with one fake native runner.
+        # Relocate only the lease directory to avoid touching a production proof.
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py']:
+            shutil.copy(ROOT / 'scripts' / name, scripts / name)
+        (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
+            "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))
+        runner = self.root / 'hub/scripts/run-verified-tests.mjs'
+        runner.parent.mkdir(parents=True)
+        body = subprocess.check_output(['git', 'show', 'aa6418b37:hub-web/scripts/run-verified-tests.mjs'], cwd=ROOT, text=True) if BASELINE else (ROOT / 'hub-web/scripts/run-verified-tests.mjs').read_text()
+        runner.write_text(body)
+        marker = self.root / 'started'
+        fake = self.root / 'hub/node_modules/vitest/vitest.mjs'
+        fake.parent.mkdir(parents=True)
+        fake.write_text("import {writeFileSync} from 'node:fs'; writeFileSync(" + json.dumps(str(marker)) + ", 'started'); const file=process.argv.find(a=>a.startsWith('--outputFile=')).slice(13); writeFileSync(file, JSON.stringify({numPassedTests:1}));")
+        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3')
+        with self.admit('proof'):
+            child = subprocess.Popen(['node', str(runner), 'vitest'], cwd=self.root/'hub', env=env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                time.sleep(.25)
+                self.assertFalse(marker.exists(), 'worker native suite started while proof held reserve')
+                self.assertIsNone(child.poll())
+            except BaseException:
+                child.kill()
+                child.communicate(timeout=3)
+                raise
+        stdout, stderr = child.communicate(timeout=5)
+        self.assertEqual(child.returncode, 0, stdout + stderr)
+        self.assertIn('waiting for host memory (proof running)', stdout)
+        self.assertIn('verified-web-tests: PASS (1 vitest tests passed)', stdout)
+        self.assertTrue(marker.exists())
+
+    def test_worker_wait_has_deadline_without_starting_command(self):
+        with self.admit('proof'):
+            result = []
+            def waiter():
+                try:
+                    with self.admit('worker'):
+                        result.append('started')
+                except ValueError as exc:
+                    result.append(str(exc))
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.assertRegex(result[0], 'deadline expired.*command was not started')
+        self.assertNotIn('started', result)
+        self.assertTrue(any(e['reason'] == 'proof running' for e in self.events))
+
+    def test_low_budget_waits_then_admits_after_fresh_sample(self):
+        snapshots = iter([dict(HIGH, budget_bytes=3*GIB), HIGH])
+        with host.admission('worker', self.env, lambda _: next(snapshots), directory=self.pool,
+                            wait_secs=.5, poll_secs=.01, report=self.events.append):
+            pass
+        self.assertEqual([e['reason'] for e in self.events],
+                         ['worker suite estimate + headroom exceeds fresh memory budget', 'admitted'])
+
+    def test_proof_priority_blocks_a_second_worker(self):
+        order = []
+        with self.admit('worker'):
+            def proof_waiter():
+                with self.admit('proof'):
+                    order.append('proof')
+                    time.sleep(.08)
+            proof_thread = threading.Thread(target=proof_waiter)
+            proof_thread.start()
+            deadline = time.monotonic() + 1
+            while not self.events or not any(e['role'] == 'proof' for e in self.events):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            def worker_waiter():
+                with self.admit('worker'):
+                    order.append('worker')
+            worker_thread = threading.Thread(target=worker_waiter)
+            worker_thread.start()
+            time.sleep(.05)
+        for thread in (proof_thread, worker_thread):
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(order, ['proof', 'worker'])
+
+    def test_stale_or_unrelated_inherited_admission_does_not_skip(self):
+        with self.admit('proof') as (env, _):
+            self.assertTrue(host.inherited(env, self.pool))
+            self.assertFalse(host.inherited(dict(env, **{host.LEASE_ENV: 'garbage'}), self.pool))
+            unrelated = dict(env)
+            with mock.patch.object(host.os, 'getpid', return_value=123456), mock.patch.object(host, 'parent_pid', return_value=1):
+                self.assertFalse(host.inherited(unrelated, self.pool))
+        self.assertFalse(host.inherited(env, self.pool))
+
+    def test_symlink_and_permissive_lease_files_fail_closed(self):
+        target = self.root/'target'
+        target.mkdir(mode=0o700)
+        self.pool.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'unsafe.*directory'):
+            with self.admit('worker'): pass
+        self.pool.unlink()
+        host.private_directory(self.pool)
+        lock = self.pool/'budget.lock'
+        lock.write_text('')
+        lock.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, 'unsafe.*file'):
+            with self.admit('worker'): pass
+
+    def test_wait_is_visible_in_plain_language(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            host.default_report({'role':'worker', 'reason':'proof running', 'elapsed_s':2})
+        self.assertIn('waiting for host memory (proof running), 2 s', output.getvalue())
+
+    def test_direct_runner_limits_are_authoritative(self):
+        self.assertEqual(worker.constrained(['npx','playwright','test','--workers','20']), ['npx','playwright','test','--workers=1'])
+        self.assertEqual(worker.constrained(['node','/pkg/vitest/vitest.mjs','run','--maxWorkers=50']), ['node','/pkg/vitest/vitest.mjs','run','--maxWorkers=2'])
+
+    def test_signal_teardown_releases_worker_lease_and_reaps_owned_child(self):
+        pidfile = self.root / 'child-pid'
+        program = "import os,pathlib,time;pathlib.Path(" + repr(str(pidfile)) + ").write_text(str(os.getpid()));time.sleep(30)"
+        launcher = "import sys;sys.path.insert(0," + repr(str(ROOT/'scripts')) + ");import importlib.util,pathlib;spec=importlib.util.spec_from_file_location('worker'," + repr(str(ROOT/'scripts/worker-memory.py')) + ");m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);m.proof.memory_budget=lambda env:" + repr(HIGH) + ";sys.exit(m.run([sys.executable,'-c'," + repr(program) + "],directory=pathlib.Path(" + repr(str(self.pool)) + ")))"
+        child = subprocess.Popen([sys.executable, '-c', launcher], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 2
+            while not pidfile.exists():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            child.terminate()
+            child.communicate(timeout=3)
+            self.assertNotEqual(child.returncode, 0)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pidfile.read_text()), 0)
+            with self.admit('worker'): pass
+        finally:
+            if child.poll() is None: child.kill()
+            child.communicate(timeout=3)
+
+    def test_memory_pressure_aborts_only_owned_child_group(self):
+        snapshots = iter([HIGH, dict(HIGH, budget_bytes=GIB)])
+        with mock.patch.object(worker.proof, 'memory_budget', side_effect=lambda _: next(snapshots)), \
+             mock.patch.object(worker.proof, 'positive_knob', return_value=None), \
+             self.assertRaisesRegex(ValueError, 'memory headroom'):
+            worker.run([sys.executable, '-c', 'import time;time.sleep(30)'], env=self.env, directory=self.pool)
+        with self.admit('worker'): pass  # aborted command did not strand the lease
+
+
+if __name__ == '__main__':
+    unittest.main()

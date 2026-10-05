@@ -59,6 +59,7 @@ new_fixture() {
     cp "$gate" "$repo/scripts/release-gate.sh"
     cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
     cp "$script_dir/assembly-memory.py" "$repo/scripts/assembly-memory.py"
+    cp "$script_dir/host_memory.py" "$repo/scripts/host_memory.py"
     # The producer and its guard share deterministic physical-memory fixtures.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_MEMORY_GUARD_FIXTURE'
 from pathlib import Path

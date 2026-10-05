@@ -26,10 +26,12 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
     // Own the reporters/output so caller arguments cannot silently select a
     // console-only run or reuse a report from a previous command.
     if (args.some(arg => /^--(?:reporter|outputFile)/.test(arg))) throw new Error('runner owns reporter/outputFile options');
+    args = args.filter((arg, index) => !/^--(?:maxWorkers|workers)(?:=|$)/.test(arg) && !/^--(?:maxWorkers|workers)$/.test(args[index - 1] ?? ''));
+    args.push(runner === 'vitest' ? '--maxWorkers=2' : '--workers=1');
     const nativeArgs = runner === 'vitest'
       ? ['run', ...args, '--reporter=default', '--reporter=json', `--outputFile=${report}`]
       : ['test', ...args, '--reporter=list,json'];
-    const result = spawn(process.execPath, [resolve(cwd, `node_modules/${runner === 'vitest' ? 'vitest/vitest.mjs' : '@playwright/test/cli.js'}`), ...nativeArgs], {
+    const result = spawn('python3', [fileURLToPath(new URL('../../scripts/worker-memory.py', import.meta.url)), '--', process.execPath, resolve(cwd, `node_modules/${runner === 'vitest' ? 'vitest/vitest.mjs' : '@playwright/test/cli.js'}`), ...nativeArgs], {
       cwd, stdio: 'inherit', env: { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: report },
     });
     if (result.error) throw result.error;

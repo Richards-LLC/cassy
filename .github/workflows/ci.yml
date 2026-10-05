@@ -766,6 +766,8 @@ jobs:
           npm ci
           npm run typecheck
           npm test
+          # cas-4ce5: the failure upload below really matches files in the hidden .results dir.
+          bash ../scripts/test-ci-journey-evidence-upload.sh
           npm run build
           if sudo -n true 2>/dev/null; then
             npm exec --yes --package=playwright -- playwright install --with-deps chromium

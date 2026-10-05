@@ -13,7 +13,14 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-GLOB_VERSION="0.5.0"   # the @actions/glob line actions/upload-artifact@v4 depends on
+# @actions/glob is a locked devDependency of hub-web (the line actions/
+# upload-artifact@v4 depends on), installed by the web step's normal npm ci.
+# Nothing is fetched here; without that install the test fails, never skips.
+glob_module="hub-web/node_modules/@actions/glob/package.json"
+if [[ ! -f "$glob_module" ]]; then
+  echo "test-ci-journey-evidence-upload: $glob_module is missing; run npm ci in hub-web first" >&2
+  exit 1
+fi
 
 step_json="$(python3 - <<'PY'
 import json, yaml
@@ -31,13 +38,13 @@ PY
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/tree/hub-web/e2e/.results/reconnect.journey.ts-HUB-J11-journeys" "$work/glob"
+mkdir -p "$work/tree/hub-web/e2e/.results/reconnect.journey.ts-HUB-J11-journeys"
 printf 'PK' > "$work/tree/hub-web/e2e/.results/reconnect.journey.ts-HUB-J11-journeys/trace.zip"
 printf '# Instructions\n' > "$work/tree/hub-web/e2e/.results/reconnect.journey.ts-HUB-J11-journeys/error-context.md"
 
-(cd "$work/glob" && npm init -y >/dev/null && npm install --no-audit --no-fund --silent "@actions/glob@${GLOB_VERSION}" >/dev/null)
-
-cat > "$work/glob/probe.mjs" <<'JS'
+probe="hub-web/e2e/.ci-upload-probe.mjs"   # inside hub-web so the import resolves its node_modules
+trap 'rm -rf "$work" "$repo_root/$probe"' EXIT
+cat > "$probe" <<'JS'
 import { create } from "@actions/glob";
 const [pattern, includeHidden] = [process.argv[2], process.argv[3] === "true"];
 const files = async (exclude) => (await (await create(pattern, { excludeHiddenFiles: exclude })).glob());
@@ -48,7 +55,7 @@ JS
 
 pattern="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["path"])' "$step_json")"
 include_hidden="$(python3 -c 'import json,sys; print(str(json.loads(sys.argv[1])["includeHidden"]).lower())' "$step_json")"
-result="$(cd "$work/tree" && NODE_PATH="$work/glob/node_modules" node "$work/glob/probe.mjs" "$pattern" "$include_hidden" | tail -n 1)"   # @actions/core prints ::debug:: lines first
+result="$(cd "$work/tree" && node "$repo_root/$probe" "$pattern" "$include_hidden" | tail -n 1)"   # @actions/core prints ::debug:: lines first
 
 python3 - "$result" <<'PY'
 import json, sys

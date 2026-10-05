@@ -754,15 +754,16 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // nothing about the lease and leave it alone.
       if (refusal(detail).action === "take-control") controlTakenAfterRefusal.delete(key);
       const onBubble = conversationHistory(key).reject(clientRef, detail);
-      if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
+      const trackedDelivery = messageDelivery?.session === key && messageDelivery.clientRef === clientRef;
+      if (trackedDelivery) {
         messageDelivery = undefined;
         document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
-        if (selectedMachineId === machine.id && selectedSession === session) {
-          // The refused bubble carries the reason and the next step; the
-          // composer only points at it, so the reason is said once (cas-4d92).
-          // Without a bubble to point at, the composer gives the whole sentence.
-          showComposerStatus(onBubble ? REFUSED_SEE_ABOVE : refusalSentence(detail), "error");
-        }
+      }
+      if (selectedMachineId === machine.id && selectedSession === session && (onBubble || trackedDelivery)) {
+        // The journal owns send state; this refusal need not have a legacy
+        // messageDelivery tracker. A refused message never promises a retry.
+        // The bubble names the reason once; the composer points at it (cas-4d92).
+        showComposerStatus(onBubble ? REFUSED_SEE_ABOVE : refusalSentence(detail), "error");
       }
       updateConversationViews(); renderConversationList();
     },
@@ -810,7 +811,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           if (reply.session === undefined || reply.session === session) applyOperatorNotice(machine, session, reply);
           continue;
         }
-        history.hydrateReply(reply);
+        // History has reached this device, but the asynchronous journal commit
+        // has not proved storage yet. Render its forwarded receipt immediately,
+        // as for live replies, so committing it does not insert a new line above
+        // the reader's position after Load earlier (HUB-J4).
+        history.hydrateReply(reply.session === undefined || reply.session === session ? { ...reply, device_persisted: false } : reply);
       }
       updateConversationViews();
       renderConversationList();
@@ -2869,9 +2874,14 @@ function persistPendingSends(): Promise<void> {
     if (pendingThreadScopes.has(key) && pendingThreadScopes.get(key) !== scopeKey(deliveryScope(machine, session))) continue;
     const after = history.pendingSends().map((send) => send.state === "held" ? { ...send, heldAt: heldSince.get(send.id) ?? send.at } : send);
     journalWrites = journalWrites.then(async () => {
+      // Revocation can occur while this write waits behind another transaction.
+      // The privacy fence is checked when it executes, not only when scheduled.
+      if (conversationPersistenceBlocked.has(machine.id)) return;
       const before = persistedSends.get(key) ?? [];
       if (JSON.stringify(before) === JSON.stringify(after)) return;
       const result = await sendJournal.reconcile(deliveryScope(machine, session), before, after, credentialFence(machine));
+      // A revoked scope is deliberately refused, not a browser storage error.
+      if (conversationPersistenceBlocked.has(machine.id)) return;
       if (result === "kept") persistedSends.set(key, after);
       else if (selectedMachineId === machine.id && selectedSession === session) showComposerStatus(result === "too-long"
         ? "This message is too long to keep in browser storage. Edit it before sending."

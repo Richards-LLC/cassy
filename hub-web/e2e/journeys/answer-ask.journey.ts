@@ -134,11 +134,12 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await pinned.getByRole("button", { name: "Fix in-train" }).click();
     expect(await sent).toMatchObject({ text: "Fix in-train", in_reply_to: ask });
     await expect(pinned).toBeHidden();
-    // The question stays in the thread with the chosen answer and no open choices.
+    // The question stays in the thread with the chosen answer and no open
+    // choices, and keeps its device receipt (DESIGN.md reply receipt facts).
     await expect(page.getByRole("log").getByRole("group", { name: `Question from ${PELICAN}` }).filter({ hasText: "clippy warning" })).toMatchAriaSnapshot(`
       - group "Question from ${PELICAN}":
         - paragraph: /clippy warning/
-        - text: Fix in-train
+        - text: Fix in-train Stored on this device
     `);
     await expect(page.getByRole("button", { name: "Ship with allowlist" })).toHaveCount(0);
     // Handled, the question quiets to the supervisor's colour and keeps the

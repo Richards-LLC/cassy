@@ -249,6 +249,17 @@ may release only their own lease; `force=true` does not grant that authority.
 Releasing an InProgress task returns it to Open and clears its assignee.
 AwaitingMerge retains its delivery state, including when no active lease remains.
 
+### Branch-only target correction
+
+`task action=update target_branch=<branch>` preserves the task's repository
+binding or defaults a legacy targetless task to the current project repository.
+The corrected branch is validated, so a deleted old epic branch can be repaired.
+The same default applies to supervisor `proof_scope_fix=true` corrections.
+An unchanged correction leaves the proof cycle intact and reports the last
+recorded close rejection for that task, including pre-close hook failures.
+Retry `task action=close` to refresh the current gate before correcting scope
+again; historical diagnostics do not replace a fresh close attempt.
+
 ### Server-list MCP contract
 
 `factory action=server_list` reports verified running servers by default.

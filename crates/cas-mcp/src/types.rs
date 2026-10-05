@@ -614,7 +614,7 @@ pub struct TaskRequest {
     pub target_repo: Option<String>,
 
     /// Expected integration branch in the target repository.
-    #[schemars(description = "Expected integration branch in target_repo (create/update).")]
+    #[schemars(description = "Expected integration branch (create/update). When target_repo is omitted, update preserves an existing repository binding or defaults a targetless task to the current project repository.")]
     #[serde(default)]
     pub target_branch: Option<String>,
 

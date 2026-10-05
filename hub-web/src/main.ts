@@ -4571,14 +4571,6 @@ function bindEvents(): void {
       toast(error instanceof Error ? error.message : "Pairing failed");
     });
   };
-  const inventory = document.querySelector<HTMLButtonElement>("#installation-inventory");
-  if (inventory && selected) inventory.onclick = () => {
-    const connection = connections.get(selected.id);
-    if (connection) void openInstallationInventory(document, selected, connection, async () => {
-      await installationAccess.forgetRevoked(selected.id, selected.baseUrl, selected.deviceId);
-      await forgetPairedMachine(selected.id);
-    });
-  };
   bindSpeechComposer();
   if (document.querySelector<HTMLButtonElement>("#message-send")) document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };
 }

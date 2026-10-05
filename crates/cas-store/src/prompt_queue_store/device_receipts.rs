@@ -1,7 +1,8 @@
 //! Authenticated application persistence is distinct from transport and read.
 use super::*;
 
-pub const OPERATOR_REPLY_RECEIPTS_SCHEMA: &str = r#"
+pub const OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS: &[&str] = &[
+    r#"
 CREATE TABLE IF NOT EXISTS operator_reply_device_receipts (
     prompt_id INTEGER NOT NULL REFERENCES prompt_queue(id) ON DELETE CASCADE,
     factory_session TEXT NOT NULL,
@@ -9,9 +10,11 @@ CREATE TABLE IF NOT EXISTS operator_reply_device_receipts (
     persisted_at TEXT NOT NULL,
     PRIMARY KEY (prompt_id, factory_session, device_id)
 );
-CREATE INDEX IF NOT EXISTS idx_operator_reply_receipt_device
+"#,
+    r#"CREATE INDEX IF NOT EXISTS idx_operator_reply_receipt_device
     ON operator_reply_device_receipts(factory_session, device_id, prompt_id);
-"#;
+"#,
+];
 
 impl SqlitePromptQueueStore {
     pub(super) fn persist_operator_reply_receipt(

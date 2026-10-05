@@ -14,7 +14,7 @@ use crate::recording_store::capture_message_event;
 use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::NotificationPriority;
 mod device_receipts;
-pub use device_receipts::OPERATOR_REPLY_RECEIPTS_SCHEMA;
+pub use device_receipts::OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS;
 use crate::{Result, StoreError};
 
 mod operator_delivery;
@@ -3054,7 +3054,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(PROMPT_QUEUE_SCHEMA)?;
-            conn.execute_batch(OPERATOR_REPLY_RECEIPTS_SCHEMA)?;
+            for sql in OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS {
+                conn.execute(sql, [])?;
+            }
             let first_lifecycle_migration =
                 !crate::shared_db::column_exists(&conn, "prompt_queue", "highest_stage");
 

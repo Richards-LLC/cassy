@@ -249,8 +249,7 @@ pub use surfaced_artifact_store::{
 pub use prompt_queue_store::{
     OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OperatorDeliveryClaim, OperatorDeliveryEvent,
     OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorRelayReceipt,
-    OperatorTurn, OperatorTurnMetadata,
-    OPERATOR_REPLY_RECEIPTS_SCHEMA,
+    OperatorTurn, OperatorTurnMetadata, OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS,
     ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
     MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
     PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptRetentionSweep, RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, PromptQueueStore, PromptRetryDisposition,

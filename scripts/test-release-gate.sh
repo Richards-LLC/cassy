@@ -81,9 +81,31 @@ test-ci-tiers:
 EOF
     cat >"$repo/scripts/ci-script-fixture.py" <<'EOF'
 import os
+import json
+import subprocess
+import tomllib
 import unittest
 
 class ScriptTier(unittest.TestCase):
+    def test_nested_gate_receipts(self):
+        if os.environ.get("GATE_FIXTURE_NESTED_GATE_TEST") != "1":
+            return
+        # A deliberately failing nested row is an expected self-test result.
+        # It must not overwrite the outer row's timing or receipt destinations.
+        with open("cas-cli/Cargo.toml", "rb") as manifest:
+            version = tomllib.load(manifest)["package"]["version"]
+        result = subprocess.run(["bash", "scripts/release-gate.sh", version,
+                                 "--only", "hub-web-tests"],
+                                env=dict(os.environ, NPM="/usr/bin/false"),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL hub-web-tests", result.stdout)
+        with open(os.environ["GATE_FIXTURE_NESTED_ENV_FILE"], "w") as stream:
+            json.dump({key: value for key, value in os.environ.items()
+                       if key.startswith("CAS_RELEASE_GATE_") or key in
+                       ("CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR",
+                        "VERIFIED_TEST_COUNT_FILE", "VERIFIED_TEST_LOG")}, stream)
+
     def test_seeded_ci_script_failure(self):
         for key in ("CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
                     "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT"):
@@ -406,6 +428,41 @@ if grep -qF 'PASS ci-script-tests' <<<"$output"; then
     ok 'CI script row runs real make with every factory identity key scrubbed'
 else
     bad "CI script identity scrub failed: $output"
+fi
+# Reproduce the assembly failure: a passing script tier contains an expected
+# failed nested web-gate row. The outer receipt must contain only its own row,
+# and all parent output/synchronization controls must be absent in the child.
+printf '%s\n' '{"name":"nested-web-fixture","private":true}' >"$repo/hub-web/package.json"
+nested_outer_logs="$tmp/nested-outer-rows"
+nested_child_env="$tmp/nested-child-env.json"
+output="$(CAS_RELEASE_GATE_LOG_DIR="$nested_outer_logs" \
+    CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$tmp/outer-archive-size" \
+    CAS_RELEASE_GATE_CACHE_DIR="$tmp/outer-cache" \
+    CAS_RELEASE_GATE_SWEEP_CACHE_DIR="$tmp/outer-sweep-cache" \
+    CAS_RELEASE_GATE_SWEEP_RECEIPT="$tmp/outer-sweep.json" \
+    CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR="$tmp/outer-sync" \
+    CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY='{}' \
+    CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS=16 CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB=16 \
+    CAS_RELEASE_ARTIFACTS_ROOT="$tmp/outer-artifacts" \
+    CAS_RELEASE_RECEIPTS_RUN_DIR="$tmp/outer-receipts" \
+    VERIFIED_TEST_COUNT_FILE="$tmp/outer-count" VERIFIED_TEST_LOG="$tmp/outer-test.log" \
+    GATE_FIXTURE_NESTED_GATE_TEST=1 GATE_FIXTURE_NESTED_ENV_FILE="$nested_child_env" \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only ci-script-tests 2>&1 || true)"
+if grep -qF 'PASS ci-script-tests' <<<"$output" \
+    && python3 - "$nested_outer_logs/timing.tsv" "$nested_child_env" <<'PY_NESTED_RECEIPTS'
+import csv
+import json
+import sys
+with open(sys.argv[1]) as stream:
+    rows = list(csv.DictReader(stream, delimiter="\t"))
+assert len(rows) == 1 and rows[0]["row"] == "ci-script-tests" and rows[0]["status"] == "0", rows
+with open(sys.argv[2]) as stream:
+    assert json.load(stream) == {}, "nested tests inherited parent receipt controls"
+PY_NESTED_RECEIPTS
+then
+    ok 'nested gate self-tests cannot overwrite outer timing, receipts, caches or assembly controls'
+else
+    bad "nested gate receipt isolation failed: $output"
 fi
 for make_mode in -n -i -t; do
     : >"$tmp/cargo.log"

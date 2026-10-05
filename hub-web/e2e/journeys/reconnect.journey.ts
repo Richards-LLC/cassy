@@ -1,7 +1,16 @@
 import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN } from "./world";
 
+// cas-4ce5: recovery is driven by the app's next scheduled attach, which is at
+// most MACHINE_RETRY_CEILING_MS (10 s) away however long the outage lasted.
+// Wait for that attach to reach the double (bounded by the retry contract plus
+// a loaded runner's handshake), then for the screen to follow it.
+const RETRY_CONTRACT_MS = 10_000;
+const RECOVERY_TIMEOUT_MS = RETRY_CONTRACT_MS + 20_000;
+
 test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page, journey }) => {
+  // Three outages, each bounded by RECOVERY_TIMEOUT_MS on a loaded runner (cas-4ce5).
+  test.setTimeout(150_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const composer = page.getByRole("textbox", { name: "Your message" });
 
@@ -146,7 +155,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   });
 
   await journey.stage("It reconnects on its own", async () => {
-    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect(header).toHaveText(" · Live");
     // The header speaks again for the return to Live.
@@ -228,12 +237,13 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     }
     expect(await page.evaluate(() => (window as unknown as { __covered: string[] }).__covered), "a toast covered the banner").toEqual([]);
     hub.release(PELICAN);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await page.emulateMedia({ colorScheme: null });
     // cas-1f13: the reconnect re-hydrates the thread from history, and every
     // turn keeps its place: the day line still heads the thread and the held
     // message stays above the ones sent after it (cas-eb4b).
-    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect.poll(threadOrder, { message: "thread order after the reconnect" }).toEqual(beforeOutage);
     await expect.poll(turnOrder, { message: "turns in the order they were said, after the reconnect" }).toEqual(SAID);
   });
@@ -328,6 +338,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     }
     await page.setViewportSize({ width: 1280, height: 720 });
     hub.release(PELICAN);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect.poll(async () => (await read()).rail, { timeout: 15_000 }).toBe("All clear");
     const after = await read();

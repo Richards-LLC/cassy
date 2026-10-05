@@ -19,7 +19,7 @@ pub(crate) fn render(cas_root: &Path, clean: bool) -> String {
             let raw = String::from_utf8_lossy(&output.stdout);
             match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(value) => format!(
-                    "\nRelease scratch: reclaimable={} bytes, reclaimed={} bytes, retained={} bytes\nRELEASE_SCRATCH_STATUS_JSON={}\n",
+                    "\nRelease scratch: {} bytes reclaimable\nReclaimed: {} bytes; retained: {} bytes\nRELEASE_SCRATCH_STATUS_JSON={}\n",
                     value["reclaimable_bytes"],
                     value["reclaimed_bytes"],
                     value["retained_bytes"],

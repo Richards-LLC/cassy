@@ -5974,6 +5974,51 @@ impl CasCore {
             .map(|claimed| claimed.timestamp())
     }
 
+    /// cas-00eb (cas-f1f4 regression): a recorded anchor may only move along
+    /// this task's own lineage. Commit messages alone cannot tell (cas-ba4a
+    /// catches only messages that name another task), so two structural
+    /// stops apply:
+    /// - the measured branch must be this task's per-task branch
+    ///   (`factory/<assignee>-<task>`). A plain `factory/<assignee>` is a
+    ///   mutable lane where the worker stacks the next task on this one;
+    /// - no other open task's anchor may sit between the recorded anchor and
+    ///   the tip, because that commit is another delivery's boundary.
+    pub(crate) fn tip_is_own_task_lineage(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        measured_branch: Option<&str>,
+        recorded: &str,
+        tip: Option<&str>,
+    ) -> bool {
+        let (Some(branch), Some(tip), Some(assignee)) =
+            (measured_branch, tip, task.assignee.as_deref())
+        else {
+            return false;
+        };
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        if branch != crate::factory_isolation::worker_task_branch(assignee, &task.id) {
+            return false;
+        }
+        let Ok(others) = task_store.list(None) else {
+            return false;
+        };
+        !others.iter().any(|other| {
+            other.id != task.id
+                && other.status != TaskStatus::Closed
+                && other
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref()
+                    .is_some_and(|anchor| {
+                        !commit_ids_match(anchor, recorded)
+                            && git_commit_is_ancestor(repo_path, recorded, anchor)
+                            && git_commit_is_ancestor(repo_path, anchor, tip)
+                    })
+        })
+    }
+
     /// cas-00eb: the fresh-park counterpart of
     /// [`Self::advance_awaiting_merge_anchor`]. cas-6e3a recorded `b65630c82`
     /// mid-cycle, then pushed two more commits; the park kept `b656`, so its
@@ -5989,12 +6034,23 @@ impl CasCore {
         task: &Task,
         repo_path: &std::path::Path,
         parent_branch: &str,
+        measured_branch: Option<&str>,
         measured_tip: Option<&str>,
     ) -> Task {
         let mut parking = task.clone();
         let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
             return parking;
         };
+        if !self.tip_is_own_task_lineage(
+            task_store,
+            task,
+            repo_path,
+            measured_branch,
+            recorded,
+            measured_tip,
+        ) {
+            return parking;
+        }
         let Some(tip) = measured_tip
             .and_then(|tip| resolve_branch_sha(repo_path, &format!("{tip}^{{commit}}")))
         else {
@@ -7534,11 +7590,15 @@ impl CasCore {
                         // task's own commits only, the tip is the delivery:
                         // advance first, so the park, its QA round and its
                         // merge request all name the tip.
+                        let measured_branch = task.assignee.as_deref().map(|assignee| {
+                            close_measured_factory_branch(&close_project_root, &task, assignee)
+                        });
                         let parking = self.advance_commit_time_anchor_before_park(
                             task_store.as_ref(),
                             &task,
                             &close_project_root,
                             &resolved_parent_branch,
+                            measured_branch.as_deref(),
                             anchor.as_deref(),
                         );
                         // cas-4b3f: snapshot the factory branch's current

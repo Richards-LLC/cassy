@@ -563,6 +563,14 @@ impl CasCore {
             tip.as_deref(),
         ) && !recorded.eq_ignore_ascii_case(tip)
             && let Ok(store) = self.open_task_store()
+            && self.tip_is_own_task_lineage(
+                store.as_ref(),
+                task,
+                &repo_root,
+                Some(&branch),
+                &recorded,
+                Some(tip),
+            )
         {
             self.advance_awaiting_merge_anchor(
                 store.as_ref(),
@@ -1935,6 +1943,9 @@ mod stale_anchor_rebind_tests_cas_00eb {
     use cas_types::{Agent, AgentRole, QaPassState, TaskRisk, TaskStatus};
     use std::process::Command;
 
+    /// The task's own per-task branch (`factory/<assignee>-<task>`).
+    const WORKER_TASK_BRANCH: &str = "factory/worker-cas-ui02";
+
     fn git(repo: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .args(args)
@@ -1964,7 +1975,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
     }
 
     /// A user-facing commit A (the recorded anchor), then a test fix and a
-    /// docs commit, all claiming the task, on `factory/worker`.
+    /// docs commit, all claiming the task, on its per-task branch.
     fn fixture(env: &mut TestEnvGuard, status: TaskStatus) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
@@ -1997,7 +2008,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         std::fs::write(repo.join("README.md"), "seed\n").unwrap();
         git(repo, &["add", "README.md"]);
         git(repo, &["commit", "-q", "-m", "seed"]);
-        git(repo, &["checkout", "-q", "-b", "factory/worker"]);
+        git(repo, &["checkout", "-q", "-b", WORKER_TASK_BRANCH]);
         std::fs::create_dir_all(repo.join("web")).unwrap();
         std::fs::write(repo.join("web/roster.css"), ".roster{gap:8px}\n").unwrap();
         git(repo, &["add", "web/roster.css"]);
@@ -2047,7 +2058,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         task.demo_statement = "Open the roster and see every worker".into();
         task.status = status;
         task.deliverables.factory_branch_anchor = Some(anchor.clone());
-        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.parked_branch = Some(WORKER_TASK_BRANCH.into());
         tasks.add(&task).unwrap();
         Fixture {
             dir,
@@ -2071,6 +2082,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
             &f.task,
             repo,
             "main",
+            Some(WORKER_TASK_BRANCH),
             Some(&f.tip),
         );
         assert_eq!(
@@ -2104,7 +2116,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture(&mut env, TaskStatus::InProgress);
         let repo = f.dir.path();
-        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
         std::fs::write(repo.join("other.txt"), "x\n").unwrap();
         git(repo, &["add", "other.txt"]);
         git(
@@ -2119,7 +2131,60 @@ mod stale_anchor_rebind_tests_cas_00eb {
             &f.task,
             repo,
             "main",
+            Some(WORKER_TASK_BRANCH),
             Some(&foreign_tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.anchor.as_str())
+        );
+    }
+
+    /// cas-f1f4 shape: on the worker's plain `factory/<assignee>` lane the
+    /// commits after the anchor may be the next task stacked on this one,
+    /// even when their messages name no other task. The anchor stays.
+    #[test]
+    fn park_keeps_the_anchor_on_a_shared_worker_lane() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        git(repo, &["branch", "factory/worker", &f.tip]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &f.task,
+            repo,
+            "main",
+            Some("factory/worker"),
+            Some(&f.tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.anchor.as_str())
+        );
+    }
+
+    /// Another open task's anchor between ours and the tip is that task's
+    /// delivery boundary: the anchor never walks over it.
+    #[test]
+    fn park_keeps_the_anchor_when_another_task_is_anchored_in_between() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        let middle = git(repo, &["rev-parse", &format!("{}~1", f.tip)]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let mut other = Task::new("cas-ui03".into(), "Stacked task".into());
+        other.assignee = Some("worker".into());
+        other.status = TaskStatus::AwaitingMerge;
+        other.deliverables.factory_branch_anchor = Some(middle);
+        tasks.add(&other).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &f.task,
+            repo,
+            "main",
+            Some(WORKER_TASK_BRANCH),
+            Some(&f.tip),
         );
         assert_eq!(
             parking.deliverables.factory_branch_anchor.as_deref(),
@@ -2142,7 +2207,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
             &NewQaPass {
                 task_id: &f.task.id,
                 implementer_agent_id: "worker",
-                branch: "factory/worker",
+                branch: WORKER_TASK_BRANCH,
                 bound_head: &f.anchor,
                 deadline_at: now + chrono::Duration::minutes(30),
                 max_rounds: 3,

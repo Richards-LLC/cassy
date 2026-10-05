@@ -184,7 +184,7 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
     const top = bounds.top + parseFloat(clipStyle.borderTopWidth);
     const bottom = bounds.bottom - parseFloat(clipStyle.borderBottomWidth);
     const across = box.left - extent >= left - 0.5 && box.right + extent <= right + 0.5;
-    // A control that fills a clipping heading (the Terminal view title) loses
+    // A control that fills a clipping heading (a clipped title) loses
     // its ring top and bottom as well (cas-cf10 QA F01).
     const down = !vertical || (box.top - extent >= top - 0.5 && box.bottom + extent <= bottom + 0.5);
     return { outline: style.outlineStyle, fits: across && down };

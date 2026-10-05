@@ -3,8 +3,11 @@ import { fleetControlGate } from '../src/fleet-permissions';
 import type { Scope } from '../src/types';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
-import { ConversationView, terminalOfferReason } from '../src/conversation-view';
-import { applyKeyboardViewport, applyTerminalOffer, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
+import { ConversationView } from '../src/conversation-view';
+import { applyActionAvailability, applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, ensureConversationStage, fitConversationHost, keyboardViewportHeight, rawOutputDrawerMarkup } from '../src/conversation-shell';
+import { CONVERSATION_OPENING, fatalConnectionRecovery, lostConnectionBanner, pairingControlsReason, renderConnectionSurfaceInto } from '../src/connection-state-view';
+import { TranscriptView, type TranscriptSource } from '../src/transcript-view';
+import type { GhosttyCell, GhosttyColor, GhosttyRow } from '../src/terminal/ghostty/core';
 import { applyDraftNote, applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
 import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
@@ -108,7 +111,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       ? { id: 'bench-1', label: 'Bench', host: 'Bench · Linux', projectDir: '/projects/cas-hub-static', project: 'cas-hub-static' }
     // cas-1451 / cas-6b75: an empty session on a machine with a long name, as
     // HUB-J9's rack: the card keeps the machine whole ahead of the codename,
-    // and its Terminal view is a full target on a phone.
+    // and the header's Raw output and Interrupt stay full targets on a phone.
     : state === 'conversation-empty-long-machine'
       ? { id: 'bench-1', label: 'Build Server Rack Seven · Windows', host: 'Build Server Rack Seven · Windows', projectDir: '/projects/infra', project: 'infra' }
       : state === 'conversation-sessions' || state === 'conversation-earlier'
@@ -341,12 +344,20 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
   const sessionFixture = state === 'conversation-sessions';
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture || state === 'conversation-empty-long-machine' ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
-  app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture || state === 'conversation-empty-long-machine' ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }) } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
+  const paneSlot = app.querySelector<HTMLElement>('#conversation-pane-slot')!;
+  if (state === 'connection-failed-retry' || state === 'connection-fatal-browser') renderConnectionStage(paneSlot, view, state);
+  else paneSlot.append(view.element);
+  view.update();
   // The earlier session the operator opened to read (cas-55a4).
   if (sessionFixture) { const open = view.element.querySelector<HTMLDetailsElement>('details.earlier-session'); if (open) open.open = true; }
-  // cas-6b75: the pairing is gone, so the header's Terminal view says why it can't open.
-  if (needsPairing) applyTerminalOffer(document, terminalOfferReason('Needs pairing', 'Atlas · Linux'));
+  // cas-0546: the header's Raw output and Interrupt, available or saying why not, as main.ts syncConversationActions leaves them.
+  const reasons = fixtureActionReasons(state, machine.host);
+  applyActionAvailability(app.querySelector<HTMLButtonElement>('#conversation-raw-output'), app.querySelector<HTMLElement>('#conversation-raw-output-reason'), reasons.rawOutput);
+  applyActionAvailability(app.querySelector<HTMLButtonElement>('#conversation-interrupt'), app.querySelector<HTMLElement>('#conversation-interrupt-reason'), reasons.interrupt);
+  // The host line is fitted to the header's room exactly as main.ts does after every render and resize.
+  fitConversationHost(document);
+  window.addEventListener('resize', () => fitConversationHost(document), { passive: true });
   // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
   const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
   // Dictation writes interim words into the field while the mic listens.
@@ -374,6 +385,107 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // status and no attention events, so those sections stay absent, and a
   // thread with neither folds the rail to its 48px track.
   syncContextRail(app, { history, progress: false, attention: 0 });
+  if (state === 'conversation-raw-output') openRawOutputFixture(machine.project);
+}
+
+/**
+ * Why each header action can't run in a fixture state, in main.ts's words
+ * (interruptUnavailableReason / rawOutputUnavailableReason); undefined is available.
+ */
+function fixtureActionReasons(state: string, host: string): { rawOutput?: string; interrupt?: string } {
+  // cas-b452 / cas-6b75: the pairing is gone, so neither action can reach the machine.
+  if (state === 'conversation-needs-pairing') return { rawOutput: pairingControlsReason(host), interrupt: pairingControlsReason(host) };
+  // A first connection that failed: nothing has attached yet.
+  if (state === 'connection-failed-retry') return { rawOutput: 'Raw output appears once the conversation is connected.', interrupt: 'Interrupt works once the conversation is connected.' };
+  if (state === 'connection-fatal-browser') {
+    const reason = `${fatalConnectionRecovery(FATAL_BROWSER_REASON)} Interrupt and raw output wait until then.`;
+    return { rawOutput: reason, interrupt: reason };
+  }
+  // A pairing without pane-interrupt: Raw output reads, Interrupt says how to get the permission.
+  if (state === 'conversation-interrupt-unavailable') return { interrupt: `This browser was paired without permission to interrupt. Run cas hub pair --origin ${window.location.origin} on ${host}, open the new pairing link here, and approve control access.` };
+  return {};
+}
+
+const FATAL_BROWSER_REASON = 'This browser is missing AbortSignal.timeout, which Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer.';
+
+/**
+ * The open conversation's grid as main.ts renderConnectionSurface leaves it:
+ * a first connection that failed shows the connection card in place of the
+ * thread; a lost connection keeps the thread under the disconnected banner.
+ */
+function renderConnectionStage(paneSlot: HTMLElement, view: ConversationView, state: 'connection-failed-retry' | 'connection-fatal-browser'): void {
+  const grid = document.createElement('section');
+  grid.id = 'pane-grid';
+  grid.className = 'pane-grid';
+  grid.dataset.sessionKey = 'atlas-linux:one';
+  paneSlot.append(grid);
+  if (state === 'connection-failed-retry') {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'empty';
+    grid.append(placeholder);
+    const snapshot = { phase: 'failed' as const, stage: 'dialing' as const, since: Date.now() - 16_000, attempt: 3, reason: 'The machine did not answer its hub address.', retryInMs: 8_000, missedHeartbeats: 0, degraded: false };
+    renderConnectionSurfaceInto(placeholder, 'one', snapshot, { retry: () => {}, diagnose: () => {} }, Date.now(), { openingTitle: CONVERSATION_OPENING, quietOpening: true });
+    return;
+  }
+  ensureConversationStage(grid).slot.append(view.element);
+  const banner = document.createElement('div');
+  banner.className = 'terminal-disconnected-banner';
+  banner.setAttribute('role', 'status');
+  banner.dataset.scope = 'machine';
+  const words = document.createElement('span');
+  words.className = 'banner-text';
+  words.textContent = lostConnectionBanner('Atlas · Linux', true, FATAL_BROWSER_REASON);
+  banner.append(words);
+  grid.prepend(banner);
+  grid.classList.add('terminal-disconnected');
+}
+
+function transcriptRow(text: string, wrapsToNext = false, isWrapContinuation = false): GhosttyRow {
+  const foreground: GhosttyColor = { r: 232, g: 235, b: 242 };
+  const background: GhosttyColor = { r: 12, g: 14, b: 19 };
+  const cell = (character: string): GhosttyCell => ({ text: character, wide: 0, foreground, background, bold: false, italic: false, invisible: false, strikethrough: false, overline: false, underline: false, selected: false });
+  return { cells: [...text].map(cell), text, wrapsToNext, isWrapContinuation };
+}
+
+/**
+ * The Raw output drawer open over the conversation (cas-0546), built as
+ * main.ts rawOutputDialog/openRawOutput build it, over a supervisor screen
+ * with markdown-looking lines, a wrapped run and a wide diagram row.
+ */
+function openRawOutputFixture(project: string): void {
+  const dialog = document.createElement('dialog');
+  dialog.id = 'raw-output';
+  dialog.className = 'raw-output-drawer';
+  dialog.setAttribute('aria-labelledby', 'raw-output-title');
+  dialog.setAttribute('aria-describedby', 'raw-output-subject');
+  dialog.innerHTML = rawOutputDrawerMarkup();
+  document.body.append(dialog);
+  dialog.querySelector<HTMLButtonElement>('.raw-output-close')!.onclick = () => dialog.close();
+  dialog.querySelector<HTMLElement>('#raw-output-subject')!.textContent = `What the ${project} supervisor's terminal shows, as text. Read-only.`;
+  const source: TranscriptSource = {
+    rows: () => [
+      transcriptRow('# Build result'),
+      transcriptRow('const answer = 42;'),
+      transcriptRow('⎿ Tool: exec_command'),
+      transcriptRow('<unknown-block>unfamiliar output</unknown-block>'),
+      transcriptRow(`┌${'─'.repeat(100)}┐`),
+      transcriptRow('$ cas factory status'),
+      transcriptRow('  › supervisor is coordinating six workers', true),
+      transcriptRow('    across the Commander design pass', false, true),
+      transcriptRow(''),
+      transcriptRow('  › visual QA receipt is ready to review'),
+    ],
+    theme: () => ({ foreground: { r: 232, g: 235, b: 242 }, background: { r: 12, g: 14, b: 19 } }),
+    hasScrollbackAbove: () => true,
+    scrollRows: () => {},
+    scrollToBottom: () => {},
+  };
+  const view = new TranscriptView(document, source);
+  view.element.setAttribute('aria-label', 'Raw output');
+  dialog.querySelector<HTMLElement>('.raw-output-body')!.append(view.element);
+  dialog.showModal();
+  document.querySelector<HTMLButtonElement>('#conversation-raw-output')?.setAttribute('aria-expanded', 'true');
+  view.update();
 }
 
 /**

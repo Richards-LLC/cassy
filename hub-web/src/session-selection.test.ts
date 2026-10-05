@@ -1,21 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  backLabel,
-  canGoBack,
   clearStoredSelection,
   forgetMachine,
-  goBackSelection,
   loadStoredSelection,
   pairedSessionToOpen,
-  previousSelection,
   restorableSession,
   saveStoredSelection,
   selectionAfterPairing,
   selectSelection,
-  sessionPickerEntries,
-  sessionPickerHeadline,
-  sessionPickerRowMeta,
-  workerCountLabel,
   SELECTION_HISTORY_LIMIT,
   type SelectionState,
   type SelectionStorage,
@@ -37,30 +29,17 @@ function memoryStorage(seed: Record<string, string> = {}): SelectionStorage & { 
 }
 
 describe("session selection history", () => {
-  it("records the previous selection so back returns to it", () => {
+  it("records the previous selection, across machines as well as sessions", () => {
     let state: SelectionState = { history: [] };
     state = selectSelection(state, { machineId: "m1", session: "alpha" });
-    expect(canGoBack(state)).toBe(false);
-    state = selectSelection(state, { machineId: "m1", session: "beta" });
-    expect(canGoBack(state)).toBe(true);
-    expect(previousSelection(state)).toEqual({ machineId: "m1", session: "alpha" });
-    state = goBackSelection(state);
-    expect(state.current).toEqual({ machineId: "m1", session: "alpha" });
-    expect(canGoBack(state)).toBe(false);
-  });
-
-  it("walks back across machines, not only sessions", () => {
-    let state: SelectionState = { history: [] };
-    state = selectSelection(state, { machineId: "m1", session: "alpha" });
+    expect(state.history).toEqual([]);
     state = selectSelection(state, { machineId: "m2" });
     state = selectSelection(state, { machineId: "m2", session: "gamma" });
-    state = goBackSelection(state);
-    expect(state.current).toEqual({ machineId: "m2" });
-    state = goBackSelection(state);
-    expect(state.current).toEqual({ machineId: "m1", session: "alpha" });
+    expect(state.current).toEqual({ machineId: "m2", session: "gamma" });
+    expect(state.history).toEqual([{ machineId: "m1", session: "alpha" }, { machineId: "m2" }]);
   });
 
-  it("ignores a re-selection of the current session so back never becomes a no-op step", () => {
+  it("ignores a re-selection of the current session so history never records a no-op step", () => {
     let state: SelectionState = { history: [] };
     state = selectSelection(state, { machineId: "m1", session: "alpha" });
     state = selectSelection(state, { machineId: "m1", session: "beta" });
@@ -80,19 +59,6 @@ describe("session selection history", () => {
     expect(state.history[0]?.session).toBe("s5");
     expect(state.history.at(-1)?.session).toBe("s24");
     expect(state.current?.session).toBe("s25");
-  });
-
-  it("returns the same state when there is nothing to go back to", () => {
-    const state: SelectionState = { current: { machineId: "m1" }, history: [] };
-    expect(goBackSelection(state)).toBe(state);
-  });
-
-  it("names where back leads, falling back to the machine when no session was open", () => {
-    const label = (id: string) => (id === "m1" ? "soundwave-linux" : undefined);
-    expect(backLabel({ machineId: "m1", session: "cas-src-young-raven-93" }, label)).toBe("Back to cas-src-young-raven-93");
-    expect(backLabel({ machineId: "m1" }, label)).toBe("Back to soundwave-linux");
-    expect(backLabel({ machineId: "m9" }, label)).toBe("Back to the previous machine");
-    expect(backLabel(undefined, label)).toBe("Back");
   });
 
   it("drops a removed machine from the current selection and from the history", () => {
@@ -172,128 +138,5 @@ describe("last session restore", () => {
     ])).toBe("first-live");
     expect(pairedSessionToOpen([hubSession("old", { liveness: "missing_endpoint" })])).toBeUndefined();
     expect(pairedSessionToOpen([])).toBeUndefined();
-  });
-});
-
-describe("session picker entries", () => {
-  const machines = [{ id: "m1", label: "soundwave-linux" }, { id: "m2", label: "studio-mac" }];
-  const sessions = new Map<string, HubSession[]>([
-    ["m1", [
-      hubSession("cas-src-young-raven-93", { supervisor: "fast-kestrel-6", workers: ["a", "b", "c", "d", "e"] }),
-      hubSession("gabber-studio-witty-panda-98", { supervisor: "witty-panda-98", workers: [], liveness: "stale_metadata" }),
-    ]],
-    ["m2", [hubSession("studio-idle-otter-2", { supervisor: "", workers: ["z"], liveness: "missing_endpoint" })]],
-  ]);
-
-  it("lists every session the hub exposes, with the selected machine first", () => {
-    const entries = sessionPickerEntries({ machines, sessions, selection: { machineId: "m2" } });
-    expect(entries.map((entry) => entry.session)).toEqual([
-      "studio-idle-otter-2",
-      "cas-src-young-raven-93",
-      "gabber-studio-witty-panda-98",
-    ]);
-  });
-
-  it("carries the supervisor, worker count, and hub status for each session", () => {
-    const entries = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1", session: "cas-src-young-raven-93" } });
-    expect(entries[0]).toMatchObject({
-      machineId: "m1",
-      machineLabel: "soundwave-linux",
-      session: "cas-src-young-raven-93",
-      role: "supervisor",
-      supervisor: "fast-kestrel-6",
-      workerCount: 5,
-      status: "live",
-      current: true,
-    });
-    expect(entries[1]).toMatchObject({ status: "stale metadata", current: false });
-    expect(entries[2]).toMatchObject({ role: "session", supervisor: undefined, status: "missing endpoint" });
-  });
-
-  it("prefers the daemon session summary for the title and phase when one exists", () => {
-    const summaries = new Map([
-      ["m1:cas-src-young-raven-93", { title: "Commander session picker", phase: "editing" as const }],
-    ]);
-    const entries = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1" }, summaries });
-    expect(entries[0]).toMatchObject({ title: "Commander session picker", phase: "editing" });
-    expect(entries[1].title).toBeUndefined();
-    expect(entries[1].phase).toBeUndefined();
-  });
-
-  it("returns nothing when the hub has listed no sessions yet", () => {
-    expect(sessionPickerEntries({ machines, sessions: new Map(), selection: { machineId: "m1" } })).toEqual([]);
-  });
-
-  it("hides dormant sessions unless the recovery view is explicit", () => {
-    const dormant = hubSession("orphaned-supervisor", { dormant: true, supervisor: "witty-panda-98", workers: [] });
-    const withDormant = new Map(sessions);
-    withDormant.set("m1", [...(withDormant.get("m1") ?? []), dormant]);
-    expect(sessionPickerEntries({ machines, sessions: withDormant, selection: { machineId: "m1" } }).map((entry) => entry.session)).not.toContain("orphaned-supervisor");
-    expect(sessionPickerEntries({ machines, sessions: withDormant, includeDormant: true, selection: { machineId: "m1" } }).map((entry) => entry.session)).toContain("orphaned-supervisor");
-    expect(sessionPickerEntries({ machines, sessions: withDormant, includeDormant: true, selection: { machineId: "m1" } }).find((entry) => entry.session === "orphaned-supervisor")?.status).toBe("dormant");
-  });
-
-  it("is what the picker line says between the role and the hub status", () => {
-    const [entry] = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1", session: "cas-src-young-raven-93" } });
-    expect(sessionPickerRowMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");
-  });
-
-  it("leads with the project when the hub reports one (cas-56e6)", () => {
-    const withProject = new Map([["m1", [{ ...sessions.get("m1")![0]!, project_dir: "/home/op/projects/cas-src/" }]]]);
-    const [entry] = sessionPickerEntries({ machines, sessions: withProject, selection: { machineId: "m1" } });
-    expect(entry!.project).toBe("cas-src");
-    expect(sessionPickerHeadline(entry!)).toBe("cas-src");
-    expect(sessionPickerRowMeta(entry!)).toMatch(/^supervisor /);
-  });
-
-  it("picker rows lead with the project and keep the codename secondary (3.30.0 F2)", () => {
-    const withProject = new Map([["m1", [{ ...sessions.get("m1")![0]!, project_dir: "/home/op/projects/cas-src/" }]]]);
-    const [entry] = sessionPickerEntries({ machines, sessions: withProject, selection: { machineId: "m1" } });
-    expect(sessionPickerHeadline(entry!)).toBe("cas-src");
-    expect(sessionPickerRowMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");
-    // No supervisor: the session name is the codename on the second line.
-    const bare = { ...entry!, role: "session" as const, supervisor: undefined };
-    expect(sessionPickerRowMeta(bare)).toBe(`session ${entry!.session} · 5 workers · live`);
-  });
-
-  it("picker rows without a project lead with the session name and do not repeat it", () => {
-    const [entry] = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1" } });
-    expect(entry!.project).toBeUndefined();
-    expect(sessionPickerHeadline(entry!)).toBe(entry!.session);
-    expect(sessionPickerRowMeta({ ...entry!, role: "session", supervisor: undefined })).toBe("session · 5 workers · live");
-  });
-
-  it("names a no-project supervisor once, in the headline, when it shares the session's name (cas-3055)", () => {
-    const lone = hubSession("lone-heron-5", { supervisor: "lone-heron-5", workers: ["odd-newt-3"] });
-    const [entry] = sessionPickerEntries({ machines, sessions: new Map([["m1", [lone]]]), selection: { machineId: "m1" } });
-    expect(sessionPickerHeadline(entry!)).toBe("lone-heron-5");
-    expect(sessionPickerRowMeta(entry!)).toBe("supervisor · 1 worker · live");
-    expect(`${sessionPickerHeadline(entry!)} ${sessionPickerRowMeta(entry!)}`.match(/lone-heron-5/g)).toHaveLength(1);
-    // A supervisor with a different name than its session is new information, so it stays.
-    const renamed = hubSession("cas-src-young-raven-93", { supervisor: "fast-kestrel-6", workers: [] });
-    const [other] = sessionPickerEntries({ machines, sessions: new Map([["m1", [renamed]]]), selection: { machineId: "m1" } });
-    expect(sessionPickerRowMeta(other!)).toBe("supervisor fast-kestrel-6 · no workers · live");
-    // With a project, the codename stays secondary on the second line.
-    const [projectLed] = sessionPickerEntries({ machines, sessions: new Map([["m1", [{ ...lone, project_dir: "/p/orion" }]]]), selection: { machineId: "m1" } });
-    expect(sessionPickerHeadline(projectLed!)).toBe("orion");
-    expect(sessionPickerRowMeta(projectLed!)).toBe("supervisor lone-heron-5 · 1 worker · live");
-  });
-
-  it("says a worker-less session has none instead of omitting the fact", () => {
-    const entries = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1" } });
-    const idle = entries.find((entry) => entry.session === "gabber-studio-witty-panda-98")!;
-    expect(sessionPickerRowMeta(idle)).toBe("supervisor witty-panda-98 · no workers · stale metadata");
-  });
-
-});
-
-describe("worker count label", () => {
-  // The hub used to report an empty roster for a session running five workers,
-  // so the picker hid the number rather than state a wrong one. The roster is
-  // now the live registry, so zero means zero and is said out loud.
-  it("counts in words a human reads, including a real zero", () => {
-    expect(workerCountLabel(0)).toBe("no workers");
-    expect(workerCountLabel(1)).toBe("1 worker");
-    expect(workerCountLabel(5)).toBe("5 workers");
   });
 });

@@ -28,6 +28,8 @@ export interface ConnectionSnapshot {
 /** A machine never live in this visit whose attempts have failed; retries continue. */
 export const CANT_REACH_RETRYING = "Can't reach · retrying";
 export const NEEDS_PAIRING = "Needs pairing";
+/** A machine connection failure that will not retry by itself. */
+export const UNREACHABLE = "Unreachable";
 /**
  * cas-a6f0 (journey F8/F9): heartbeats are going unanswered on a machine that
  * still reads live. Every surface uses this one word for it (header, row,
@@ -47,7 +49,7 @@ export function machineConnectionLabel(state: MachineConnectionLabelState | unde
   const retrying = state.phase === "backoff" || (state.phase === "failed" && state.fatal !== true && !state.authFailure);
   if (retrying && !everConnected) return CANT_REACH_RETRYING;
   if (state.phase === "backoff") return "Reconnecting";
-  if (state.phase === "failed") return state.authFailure ? NEEDS_PAIRING : "Unreachable";
+  if (state.phase === "failed") return state.authFailure ? NEEDS_PAIRING : UNREACHABLE;
   return "Connecting";
 }
 
@@ -73,30 +75,6 @@ export const STAGE_TIMEOUT_MS: Readonly<Record<Exclude<ConnectionStage, "idle" |
 export const HEARTBEAT_INTERVAL_MS = 5_000;
 export const DEGRADED_AFTER_MISSED_HEARTBEATS = 2;
 export const RECONNECT_AFTER_MISSED_HEARTBEATS = 4;
-
-/**
- * The Terminal view header's connection chip (dot class and words) while the
- * session is up, read from the machine's own connection, the same state the
- * machine rail shows (cas-bf07 QA F01):
- * - no latency sample yet, or one missed heartbeat: a neutral dot and
- *   "Checking…", never a green dot beside "Status unavailable" (journey F17,
- *   QA F02);
- * - degraded (heartbeats keep failing): the amber dot and "Unsteady", as the
- *   rail, whatever the terminal attach says (cas-a6f0);
- * - a sample: `attachState` (normally live) and the latency;
- * - not live: the machine's phase and `notLiveLabel`.
- */
-export function headerConnectionChip(
-  machine: ConnectionSnapshot | undefined,
-  attachState: string,
-  notLiveLabel: string,
-): { readonly state: string; readonly text: string } {
-  if (!machine) return { state: "checking", text: "Checking…" };
-  if (machine.phase !== "live") return { state: machine.phase, text: notLiveLabel };
-  if (machine.degraded) return { state: "degraded", text: UNSTEADY };
-  if (machine.latencyMs === undefined) return { state: "checking", text: "Checking…" };
-  return { state: attachState, text: `${machine.latencyMs}ms` };
-}
 
 /**
  * The longest the machine connection waits between reconnect attempts. The

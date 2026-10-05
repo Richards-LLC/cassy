@@ -23,19 +23,10 @@ import {
 } from "./connection-state";
 import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
-import { sessionsPath, workersRevealed } from "./worker-visibility";
+import { sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 
 export type ConnectionState = ConnectionSnapshot;
-
-/** Off by default (cas-6261): worker panes are requested only when the operator asked. */
-function revealWorkers(): boolean {
-  let storage: Storage | undefined;
-  let search = "";
-  try { storage = globalThis.localStorage; } catch { storage = undefined; }
-  try { search = globalThis.location?.search ?? ""; } catch { search = ""; }
-  return workersRevealed(search, storage);
-}
 
 function revealDormant(): boolean {
   let storage: Storage | undefined;
@@ -96,7 +87,6 @@ export interface HubCallbacks {
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
   onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
   onFlowControlReset?(session: string): void;
-  onScrollbackPage?(session: string, page: Record<string, any>): void;
   onSocketError(session: string, detail: string): void;
 }
 
@@ -549,7 +539,7 @@ export class HubConnectionSupervisor {
 
   async refreshSessions(signal: AbortSignal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)): Promise<HubSession[]> {
     // Heartbeat, manual refresh and event refresh share an active GET too.
-    this.catalogRequest ??= this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealWorkers(), revealDormant()), undefined, signal)
+    this.catalogRequest ??= this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal)
       .then(response => {
         this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
         return response.sessions;
@@ -993,7 +983,6 @@ export class HubConnectionSupervisor {
     const endpoint = new URL(`/v1/sessions/${encodeURIComponent(session)}/attach`, this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
-    if (revealWorkers()) endpoint.searchParams.set("workers", "1");
     const socket = new WebSocket(endpoint);
     this.transitionAttach(session, "dialing", "dialing");
     socket.binaryType = "arraybuffer";
@@ -1191,7 +1180,8 @@ export class HubConnectionSupervisor {
     if (this.machineSubscriptions.has(session)) return;
     this.machineSubscriptions.add(session);
     this.transitionAttach(session, "attaching", "attaching");
-    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true, workers: revealWorkers() }));
+    // Supervisors only (cas-6261): worker panes are never streamed to Commander.
+    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true, workers: false }));
     const timeouts = this.attachTimeouts.get(session) ?? {};
     if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
     timeouts.ready = window.setTimeout(() => {
@@ -1443,17 +1433,6 @@ export class HubConnectionSupervisor {
     return true;
   }
 
-  requestScrollback(session: string, paneId: string, generation: number, startRow: number, count = 200): boolean {
-    return this.send(session, {
-      ScrollbackRequest: {
-        pane_id: paneId,
-        generation,
-        start_row: startRow,
-        count: Math.min(200, Math.max(1, count)),
-      },
-    });
-  }
-
   /** Request a private, device-scoped page of durable Commander turns. */
   requestConversationHistory(session: string, before?: number, limit = 50): boolean {
     return this.send(session, {
@@ -1611,8 +1590,6 @@ export class HubConnectionSupervisor {
     } else if (message.PaneSize) {
       const size = message.PaneSize;
       this.callbacks.onPaneSize?.(session, size.pane_id, size.cols, size.rows, String(size.authority));
-    } else if (message.ScrollbackPage) {
-      this.callbacks.onScrollbackPage?.(session, message.ScrollbackPage);
     } else if (message.StateUpdate) {
       this.sessionPanes.set(session, message.StateUpdate.state.panes);
       this.callbacks.onSessionState(session, message.StateUpdate.state);

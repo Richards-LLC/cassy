@@ -22,14 +22,6 @@ export const ROOT_FONT_PX = 16;
 
 export const LANDSCAPE_PHONE_MEDIA_QUERY = `(max-height: ${PHONE_MAX_SHORT_AXIS_REM}rem) and (pointer: coarse)`;
 export const PHONE_MEDIA_QUERY = `(max-width: ${PHONE_MAX_WIDTH_REM}rem), ${LANDSCAPE_PHONE_MEDIA_QUERY}`;
-/**
- * Deliberately width-only, and deliberately not the phone rule. This one asks
- * how many columns fit across the mount — the question behind the 80-column PTY
- * floor and the transcript default — and a phone in landscape genuinely has the
- * width for a wider grid. Phone chrome is a short-axis question; the column
- * floor is not.
- */
-export const COMPACT_MEDIA_QUERY = `(max-width: ${PHONE_MAX_WIDTH_REM}rem)`;
 
 export interface ViewportEnvironment {
   readonly width: number;

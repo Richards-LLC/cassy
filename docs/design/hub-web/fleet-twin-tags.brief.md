@@ -1,5 +1,7 @@
 # Fleet twin tags
 
+> **Retired (cas-0546, 2026-10-05).** The Terminal view this document designs (fleet board, session ledger, machine rail, pane grid, fleet-wide Attention feed, take-control, side composer) was removed; Conversations is Commander's only surface (see `hub-web/DESIGN.md`). Kept as a historical design record.
+
 Reader: An operator comparing two sessions with the same codename on different machines.
 
 Decision: Open the intended session without guessing from a prematurely shortened tag.

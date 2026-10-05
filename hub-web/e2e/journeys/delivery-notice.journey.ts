@@ -212,7 +212,10 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(rail).not.toHaveAttribute("aria-modal", "true");
     await expect(rail).toHaveAttribute("aria-label", "Conversation context");
     await expect(page.locator("#conversation-attention")).toHaveAttribute("aria-expanded", "false");
-    await expect(page.locator("[inert]")).toHaveCount(0);
+    // Nothing the operator can see is left inert. The supervisor pane's host
+    // is inert by design: it is hidden plumbing, never on screen (cas-0546).
+    await expect(page.locator("[inert]:not(.pane-host)")).toHaveCount(0);
+    await expect(page.locator(".pane-host")).toBeHidden();
     await expect(attentionItems).toHaveCount(1);
   });
 

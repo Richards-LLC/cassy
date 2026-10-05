@@ -1,4 +1,4 @@
-import type { HubSession, SessionPhase } from "./types";
+import type { HubSession } from "./types";
 
 /**
  * One machine runs several Cassy sessions, so "where am I" is a pair, not a
@@ -13,7 +13,7 @@ export interface SessionSelection {
 
 export interface SelectionState {
   readonly current?: SessionSelection;
-  /** Oldest first; the last entry is where "back" leads. */
+  /** Oldest first; the last entry is the selection before `current`. */
   readonly history: readonly SessionSelection[];
 }
 
@@ -47,38 +47,15 @@ export function selectionAfterPairing(machineId: string, repairing: boolean, cur
   return repairing && current?.session !== undefined ? { machineId: current.machineId, session: current.session } : { machineId };
 }
 
-export function previousSelection(state: SelectionState): SessionSelection | undefined {
-  return state.history.at(-1);
-}
-
-export function canGoBack(state: SelectionState): boolean {
-  return state.history.length > 0;
-}
-
-export function goBackSelection(state: SelectionState): SelectionState {
-  const previous = previousSelection(state);
-  if (!previous) return state;
-  return { current: previous, history: state.history.slice(0, -1) };
-}
-
 /**
- * A removed machine must not survive in the back stack: walking back into a
- * credential that no longer exists is a dead end, not navigation.
+ * A removed machine must not survive in the selection or its history: a
+ * credential that no longer exists is a dead end, not a place to return to.
  */
 export function forgetMachine(state: SelectionState, machineId: string): SelectionState {
   return {
     current: state.current?.machineId === machineId ? undefined : state.current,
     history: state.history.filter((entry) => entry.machineId !== machineId),
   };
-}
-
-export function backLabel(
-  previous: SessionSelection | undefined,
-  machineLabel: (machineId: string) => string | undefined,
-): string {
-  if (!previous) return "Back";
-  if (previous.session) return `Back to ${previous.session}`;
-  return `Back to ${machineLabel(previous.machineId) ?? "the previous machine"}`;
 }
 
 export function loadStoredSelection(storage: SelectionStorage | undefined): SessionSelection | undefined {
@@ -139,86 +116,4 @@ export function restorableSession(
  */
 export function pairedSessionToOpen(sessions: readonly HubSession[]): string | undefined {
   return sessions.find((session) => session.liveness === "live" && !session.dormant && !session.unreachable)?.name;
-}
-
-export interface SessionPickerEntry {
-  readonly machineId: string;
-  readonly machineLabel: string;
-  readonly session: string;
-  /** Project folder name, when the hub reports one. */
-  readonly project?: string;
-  readonly role: "supervisor" | "session";
-  readonly supervisor?: string;
-  readonly workerCount: number;
-  readonly status: string;
-  readonly title?: string;
-  readonly phase?: SessionPhase;
-  readonly current: boolean;
-}
-
-export interface SessionPickerInput {
-  readonly machines: readonly { readonly id: string; readonly label: string }[];
-  readonly sessions: ReadonlyMap<string, readonly HubSession[]>;
-  readonly includeDormant?: boolean;
-  readonly selection?: SessionSelection;
-  readonly summaries?: ReadonlyMap<string, { readonly title: string; readonly phase: SessionPhase }>;
-}
-
-/**
- * Say the roster size in words. The hub once reported an empty roster for a
- * session running five workers, so the picker suppressed the number rather than
- * state a wrong one; the roster is now the live agent registry, so a zero is a
- * fact worth printing.
- */
-export function workerCountLabel(count: number): string {
-  if (count === 0) return "no workers";
-  return `${count} ${count === 1 ? "worker" : "workers"}`;
-}
-
-/**
- * What a session picker row leads with: the project, as the conversation list
- * and the palette do, or the session name when the hub names no project
- * (3.30.0 journey F2).
- */
-export function sessionPickerHeadline(entry: Pick<SessionPickerEntry, "project" | "session">): string {
-  return entry.project ?? entry.session;
-}
-
-/**
- * The picker row's second line under a project headline: the generated
- * codename is secondary, with the role, roster and status after it. The
- * machine is the group heading above the row. With no project the session
- * name is already the headline, so the line does not repeat it: a supervisor
- * that shares the session's name is named once, in the headline (cas-3055).
- */
-export function sessionPickerRowMeta(entry: SessionPickerEntry): string {
-  const codename = entry.project
-    ? entry.supervisor ?? entry.session
-    : entry.supervisor && entry.supervisor !== entry.session ? entry.supervisor : undefined;
-  const role = codename ? `${entry.role} ${codename}` : entry.role;
-  return [role, workerCountLabel(entry.workerCount), entry.status].join(" · ");
-}
-
-export function sessionPickerEntries(input: SessionPickerInput): SessionPickerEntry[] {
-  const selectedMachineId = input.selection?.machineId;
-  const ordered = [...input.machines].sort((a, b) =>
-    Number(b.id === selectedMachineId) - Number(a.id === selectedMachineId));
-  return ordered.flatMap((machine) => (input.sessions.get(machine.id) ?? [])
-    .filter((session) => input.includeDormant === true || session.dormant !== true)
-    .map((session) => {
-      const summary = input.summaries?.get(`${machine.id}:${session.name}`);
-      return {
-        machineId: machine.id,
-        machineLabel: machine.label,
-        session: session.name,
-        project: session.project_dir?.trim().split(/[\\/]+/).filter(Boolean).at(-1) || undefined,
-        role: session.supervisor ? "supervisor" as const : "session" as const,
-        supervisor: session.supervisor || undefined,
-        workerCount: session.workers.length,
-        status: session.dormant ? "dormant" : session.liveness.replaceAll("_", " "),
-        title: summary?.title,
-        phase: summary?.phase,
-        current: machine.id === selectedMachineId && session.name === input.selection?.session,
-      };
-    }));
 }

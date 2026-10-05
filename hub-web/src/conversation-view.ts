@@ -23,9 +23,9 @@ import {
 } from "./thread-model";
 
 /**
- * Pebble thread (cas-d167). The default conversation shows only operator
- * turns and supervisor→operator turns; the live pane never appears here — the
- * terminal stays the explicit alternate view.
+ * Pebble thread (cas-d167). The conversation shows only operator turns and
+ * supervisor→operator turns; the live pane never appears here — its raw text
+ * is the header's read-only Raw output drawer (cas-0546).
  */
 
 /** What a kind-specific renderer receives. */
@@ -156,13 +156,11 @@ export interface ConversationViewOptions {
    * thread shows it, so a live session never reads as idle or as a copy.
    */
   activity?: () => { at?: number; label?: string; terminal?: boolean } | undefined;
-  /** The empty thread offers the session's Terminal view (cas-55a4). */
-  openTerminal?: () => void;
   /**
    * The conversation header's connection label ("Live", "Degraded",
    * "Reconnecting", "Needs pairing", …). The empty thread reads it, so it
-   * never promises new messages or offers Terminal view over a connection
-   * that cannot carry them (cas-010f). Unset reads as live.
+   * never promises new messages over a connection that cannot carry them
+   * (cas-010f). Unset reads as live.
    */
   connection?: () => string | undefined;
   /** Requests the next older durable page when history has more turns. */
@@ -260,32 +258,13 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   bubble.focus({ preventScroll: true });
 }
 
-/** The header's connection label, as the empty thread and Terminal view's offer read it. */
+/** The header's connection label, as the empty thread reads it. */
 function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "reconnecting" | "unreachable" {
   return label === undefined || label === "Live" ? "live"
     : label === "Degraded" ? "degraded"
       : label === NEEDS_PAIRING ? "pairing"
         : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
           : "unreachable";
-}
-
-/**
- * Why the conversation header's Terminal view can't open now, or nothing
- * when it can (cas-6b75, journey F03). The empty card stops offering
- * Terminal view once the connection is lost; the header says the same
- * instead of offering a terminal it cannot reach. A first connection
- * ("Connecting", "Idle") is on its way, not lost, so it is still offered.
- */
-export function terminalOfferReason(connection: string | undefined, machine: string | undefined): string | undefined {
-  if (connection === "Connecting" || connection === "Idle") return undefined;
-  const where = machine || "this machine";
-  const subjectMachine = machine || "This machine";
-  switch (connectionKind(connection)) {
-    case "pairing": return `${subjectMachine} needs pairing again before Terminal view can open.`;
-    case "reconnecting": return `Reconnecting to ${where} — Terminal view opens once it's back.`;
-    case "unreachable": return `${subjectMachine} can't be reached — Terminal view opens once it's back.`;
-    default: return undefined;
-  }
 }
 
 /**
@@ -296,10 +275,9 @@ export function terminalOfferReason(connection: string | undefined, machine: str
  *   says why instead of claiming there is nothing;
  * - `empty`: the page resolved with no turns of this session's own.
  * Plain words only: no product codename, and the generated session codename
- * stays in the card's meta line. Terminal view is offered only while the
- * connection can carry it.
+ * stays in the card's meta line.
  */
-export function emptyThreadCopy(input: { project?: string; machine?: string; connection?: string; resolved: boolean }): { state: "loading" | "waiting" | "empty"; said: string; terminal: boolean } {
+export function emptyThreadCopy(input: { project?: string; machine?: string; connection?: string; resolved: boolean }): { state: "loading" | "waiting" | "empty"; said: string } {
   const subject = input.project ? `the ${input.project} supervisor` : "this supervisor";
   const where = input.machine || "this machine";
   const subjectMachine = input.machine || "This machine";
@@ -307,22 +285,22 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
   const kind = connectionKind(label);
   const none = `No messages from ${subject} in this session yet`;
   if (!input.resolved) {
-    if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "", terminal: false };
-    if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.`, terminal: false };
-    if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.`, terminal: false };
-    return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.`, terminal: false };
+    if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "" };
+    if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.` };
+    if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.` };
+    return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.` };
   }
-  if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.`, terminal: true };
-  if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.`, terminal: true };
-  if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.`, terminal: false };
-  if (kind === "reconnecting") return { state: "empty", said: `${none}. Reconnecting to ${where} — anything new will show here once it's back.`, terminal: false };
-  return { state: "empty", said: `${none}. ${subjectMachine} can't be reached — anything new will show here once it's back.`, terminal: false };
+  if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.` };
+  if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.` };
+  if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.` };
+  if (kind === "reconnecting") return { state: "empty", said: `${none}. Reconnecting to ${where} — anything new will show here once it's back.` };
+  return { state: "empty", said: `${none}. ${subjectMachine} can't be reached — anything new will show here once it's back.` };
 }
 
 /**
  * The empty thread's activity line (cas-010f): plain words, no queue jargon.
- * Terminal output is the same time Terminal view's pane header shows;
- * otherwise the session's own last activity.
+ * The supervisor's terminal output when that is newest; otherwise the
+ * session's own last activity.
  */
 export function emptyCardActivityText(activity: { at?: number; terminal?: boolean }, now: number): string {
   if (activity.at === undefined) return "";
@@ -503,8 +481,6 @@ export class ConversationView {
     const { supervisor } = this.options;
     this.element = document.createElement("div");
     this.element.className = "conversation-reading thread";
-    // Kept in place when a terminal surface mounts beneath it (cas-04ee).
-    this.element.dataset.mountOverlay = "";
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
@@ -1078,8 +1054,7 @@ export class ConversationView {
     const echo = this.options.echo?.()?.trim() || "";
     const activity = this.options.activity?.();
     const activityText = activity ? emptyCardActivityText(activity, Date.now()) : "";
-    const terminal = copy.terminal && this.options.openTerminal !== undefined;
-    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, terminal, copy.said]);
+    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, copy.said]);
     if (this.empty.dataset.signature === signature) return;
     this.empty.dataset.signature = signature;
     const document = this.element.ownerDocument;
@@ -1107,18 +1082,10 @@ export class ConversationView {
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
     said.textContent = copy.said;
     const children: HTMLElement[] = [mono, name, where, said];
-    if (activityText || terminal) {
-      // One quiet line: when the session last did anything, then the way into
-      // Terminal view, named as the header names it (cas-010f).
+    if (activityText) {
+      // One quiet line: when the session last did anything (cas-010f).
       const foot = document.createElement("p"); foot.className = "empty-foot";
-      if (activityText) { const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live); }
-      if (terminal) {
-        if (activityText) { const dot = document.createElement("span"); dot.className = "empty-foot-sep"; dot.setAttribute("aria-hidden", "true"); dot.textContent = "·"; foot.append(dot); }
-        const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
-        open.textContent = "Terminal view";
-        open.onclick = () => this.options.openTerminal?.();
-        foot.append(open);
-      }
+      const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live);
       children.push(foot);
     }
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }

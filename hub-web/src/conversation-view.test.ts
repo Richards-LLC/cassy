@@ -91,7 +91,6 @@ describe("ConversationView (Pebble thread)", () => {
     const opened = Date.now() - 600;
     const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading, openingSince: () => opened });
     document.body.replaceChildren(view.element);
-    expect(view.element.dataset.mountOverlay).toBe("");
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     expect(empty.hidden).toBe(false);

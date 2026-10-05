@@ -127,13 +127,3 @@ export function planSupervisorSend(context: SupervisorSendContext): SupervisorSe
     notice: `Taking control of ${context.session} to deliver this message…`,
   };
 }
-
-/**
- * A render replaces app.innerHTML, so the terminal restore and the composer
- * restore both fire afterwards. The composer must win: a terminal that steals
- * focus back swallows the rest of the sentence being typed.
- */
-export function composerFocusWinner(state: { composerWasFocused: boolean; terminalWasFocused: boolean }): "composer" | "terminal" | "none" {
-  if (state.composerWasFocused) return "composer";
-  return state.terminalWasFocused ? "terminal" : "none";
-}

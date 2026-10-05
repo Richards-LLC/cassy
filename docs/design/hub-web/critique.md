@@ -1,5 +1,7 @@
 # Commander design pass — final critique gate (Unit 7)
 
+> **Retired (cas-0546, 2026-10-05).** The Terminal view this document designs (fleet board, session ledger, machine rail, pane grid, fleet-wide Attention feed, take-control, side composer) was removed; Conversations is Commander's only surface (see `hub-web/DESIGN.md`). Kept as a historical design record.
+
 **Verdict: the epic proceeds to release prep.** The assembled Commander on the integrated epic
 tip `698dbaba` scores 4 / 5 / 4 / 4 / 4 against the cas-ui-craft rubric (floor: distinctiveness,
 fit, hierarchy ≥ 4; no 0), and the strict visual-QA row is green on every fixture in both schemes

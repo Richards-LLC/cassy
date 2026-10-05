@@ -67,6 +67,19 @@ export function railWaiting(history: ConversationHistory | undefined): OperatorR
   return history.waiting().filter((reply) => reply.notification_id !== pinned);
 }
 
+/**
+ * How many things wait on the operator in a conversation (cas-0546): the
+ * supervisor's own open asks and blockers, nothing else. Attention events — a
+ * task awaiting merge, a lost daemon, a stopped worker, a notice — are shown
+ * in the conversation's Attention section, never counted as "waiting on
+ * you": they are progress and machine state, not questions for the operator.
+ * The list row's waiting mark, the palette's "needs you" and the compose
+ * button's pick all read this.
+ */
+export function waitingOnOperator(history: ConversationHistory | undefined): number {
+  return history?.waiting().length ?? 0;
+}
+
 /** Which sections have something unique to show. */
 export function contextSections(input: ContextRailInput): ContextSection[] {
   const sections: ContextSection[] = [];

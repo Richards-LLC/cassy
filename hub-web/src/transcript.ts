@@ -11,8 +11,6 @@ import { GHOSTTY_CELL_WIDE, type GhosttyCell, type GhosttyColor, type GhosttyRow
  * for the seam decision.
  */
 
-export type TranscriptViewMode = "transcript" | "terminal";
-
 export interface TranscriptSegment {
   readonly text: string;
   readonly foreground: GhosttyColor;
@@ -50,15 +48,6 @@ const GUTTER_MARKERS = new Set([
 
 /** A hanging indent wide enough to swallow a phone line is worse than none. */
 const MAX_INDENT = 10;
-
-const COMPACT_BREAKPOINT_PX = 53 * 16;
-const STORAGE_PREFIX = "cas-commander:transcript-view:";
-const VIEW_SCHEMA_VERSION = 1;
-
-export interface TranscriptViewStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
 
 function sameColor(left: GhosttyColor, right: GhosttyColor): boolean {
   return left.r === right.r && left.g === right.g && left.b === right.b;
@@ -205,29 +194,4 @@ export function shouldFollowTail(viewport: TranscriptViewport): boolean {
  */
 export function shouldPageScrollback(state: { scrollTop: number; hasScrollbackAbove: boolean }): boolean {
   return state.hasScrollbackAbove && state.scrollTop <= TAIL_TOLERANCE_PX;
-}
-
-/** Transcript below the compact breakpoint, the true grid above it. */
-export function defaultTranscriptView(viewportWidth: number): TranscriptViewMode {
-  return viewportWidth <= COMPACT_BREAKPOINT_PX ? "transcript" : "terminal";
-}
-
-export function loadTranscriptView(storage: TranscriptViewStorage, sessionKey: string): TranscriptViewMode | undefined {
-  try {
-    const stored = storage.getItem(`${STORAGE_PREFIX}${sessionKey}`);
-    if (!stored) return undefined;
-    const parsed = JSON.parse(stored) as { version?: number; view?: string };
-    if (parsed.version !== VIEW_SCHEMA_VERSION) return undefined;
-    return parsed.view === "transcript" || parsed.view === "terminal" ? parsed.view : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-export function saveTranscriptView(storage: TranscriptViewStorage, sessionKey: string, view: TranscriptViewMode): void {
-  try {
-    storage.setItem(`${STORAGE_PREFIX}${sessionKey}`, JSON.stringify({ version: VIEW_SCHEMA_VERSION, view }));
-  } catch {
-    // A private or full browser store must not prevent reading the pane.
-  }
 }

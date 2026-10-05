@@ -19,7 +19,6 @@ import {
   unsteadyBanner,
   sessionOutageControlsReason,
   sessionReconnectingBanner,
-  outageControlsNotice,
   outageControlsReason,
   outageRefusal,
   shouldRetainDisconnectedFrame,
@@ -296,24 +295,24 @@ describe("one outage, one vocabulary (journey F9)", () => {
     // cas-d15c: one session's link, the machine still connected.
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", false)).toBe("Reconnecting to cas-src… Atlas · Linux is still connected.");
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", true)).toBe("Lost the link to cas-src. Not retrying. Atlas · Linux is still connected.");
-    expect(sessionOutageControlsReason("cas-src")).toBe("Reconnecting to cas-src. Control and interrupts return when it's back.");
+    expect(sessionOutageControlsReason("cas-src")).toBe("Reconnecting to cas-src. Interrupt and raw output return when it's back.");
     // A refused pairing does not claim to be reconnecting.
     expect(pairingLostBanner("Atlas · Linux")).toBe("Atlas · Linux needs pairing again.");
     // cas-a6f0: still live, heartbeats unanswered: unsteady, not lost.
     expect(unsteadyBanner("Atlas · Linux")).toBe("Connection to Atlas · Linux unsteady — checking…");
     expect(pairingRefusal("Atlas · Linux")).toBe("Not sent: Atlas · Linux needs pairing again.");
     // cas-7b31: a refused pairing promises no reconnect and no returning control.
-    expect(pairingControlsReason("Atlas · Linux")).toBe("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    expect(pairingControlsReason("Atlas · Linux")).toBe("Atlas · Linux needs pairing again. Re-pair it to interrupt the supervisor or read its raw output.");
     expect(pairingControlsReason("Atlas · Linux")).not.toMatch(/return|reconnect/i);
     expect(outageRefusal("Atlas · Linux")).toBe("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
-    expect(outageControlsReason("Atlas · Linux")).toBe("Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.");
+    expect(outageControlsReason("Atlas · Linux")).toBe("Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.");
     for (const line of [outageRefusal("Atlas · Linux"), outageControlsReason("Atlas · Linux")]) {
       expect(line.toLowerCase()).toContain("lost connection to atlas · linux");
       expect(line).not.toMatch(/hub connection|session is live/);
     }
   });
 
-  it("says the outage once in Terminal view: the line under the header only says what it means for the controls (journey F42)", () => {
+  it("says why the conversation's Interrupt and Raw output wait, in the banner's words (cas-0546)", () => {
     const banners = {
       machine: lostConnectionBanner("Atlas · Linux", false),
       session: sessionReconnectingBanner("cas-src", "Atlas · Linux", false),
@@ -325,15 +324,12 @@ describe("one outage, one vocabulary (journey F9)", () => {
       pairing: pairingControlsReason("Atlas · Linux"),
     } as const;
     for (const kind of ["machine", "session", "pairing"] as const) {
-      const notice = outageControlsNotice(kind);
-      // The line beside the banner restates neither the machine nor the loss.
-      expect(notice).not.toMatch(/Atlas|cas-src|lost connection|needs pairing|reconnecting to/i);
-      expect(banners[kind]).not.toContain(notice);
-      // The control's own description is the banner's words plus the line's.
-      expect(reasons[kind].endsWith(notice)).toBe(true);
+      // Each names the conversation's own actions, never the Terminal view's control.
+      expect(reasons[kind]).toMatch(/interrupt/i);
+      expect(reasons[kind]).toMatch(/raw output/i);
+      expect(reasons[kind]).not.toMatch(/take control|terminal/i);
+      // It opens with what the banner says was lost.
+      expect(reasons[kind].startsWith(banners[kind].split(/[.…]/)[0]!)).toBe(true);
     }
-    expect(outageControlsNotice("machine")).toBe("Control and interrupts return when it reconnects.");
-    expect(outageControlsNotice("session")).toBe("Control and interrupts return when it's back.");
-    expect(outageControlsNotice("pairing")).toBe("Re-pair it to take control and interrupt.");
   });
 });

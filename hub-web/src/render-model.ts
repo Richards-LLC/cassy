@@ -25,21 +25,8 @@ export interface ShellSignatureParts {
   /** `machine/session` pairs, which drive the palette's jump commands. */
   readonly sessionKeys: readonly string[];
   readonly catalogLoaded: boolean;
-  readonly drawerOpen: boolean;
-  readonly attentionCollapsed: boolean;
-  readonly contextTab: string;
-  readonly fleetEmpty: boolean;
   readonly supervisor: string | undefined;
-  readonly backLabel: string | undefined;
   readonly compatibility: string | undefined;
-  /**
-   * Lease identity, not lease timestamps. bindEvents captures the lease in its
-   * handlers, so a change of controller has to rebuild rather than leave a
-   * stale closure behind a live button.
-   */
-  readonly leaseHeldByMe: boolean;
-  readonly leaseController: string | undefined;
-  readonly controlDisabled: boolean;
   readonly commandPaletteOpen: boolean;
   /**
    * The pairing dialog's *step*: which flow is showing, which request it
@@ -53,13 +40,6 @@ export interface ShellSignatureParts {
 }
 
 /**
- * The session picker's open state is not here (cas-00ad): opening rebuilt the
- * whole shell, and closing left a stale "picker open" signature that the next
- * hub push turned into a rebuild. Each rebuild replaced the session title that
- * held keyboard focus, so under load an Enter pressed on it was lost. The
- * picker's list is a live region and its toggle's aria-expanded is set in
- * place, so neither needs a rebuild.
- *
  * Deliberately excludes everything a heartbeat changes. If a value belongs
  * here, a five-second frame rebuilds the page; if it belongs in the live
  * regions, it does not. That trade is the whole design.
@@ -71,16 +51,8 @@ export function shellSignature(parts: ShellSignatureParts): string {
     parts.machineIds.join(","),
     parts.sessionKeys.join(","),
     parts.catalogLoaded ? "loaded" : "loading",
-    parts.drawerOpen ? "drawer" : "",
-    parts.attentionCollapsed ? "collapsed" : "expanded",
-    parts.contextTab,
-    parts.fleetEmpty ? "empty" : "",
     parts.supervisor ?? "",
-    parts.backLabel ?? "",
     parts.compatibility ?? "",
-    parts.leaseHeldByMe ? "control" : "observe",
-    parts.leaseController ?? "",
-    parts.controlDisabled ? "disabled" : "",
     parts.commandPaletteOpen ? "palette" : "",
     parts.pairingView,
   // A control character no field can contain: without a separator, moving a

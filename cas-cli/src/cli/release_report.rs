@@ -135,6 +135,7 @@ struct ReleaseMetadata {
 
 #[derive(Debug, Clone, Default)]
 struct ReleaseEvidence {
+    interventions: Option<u64>,
     tag_published_at: Option<String>,
     tag_to_published_seconds: Option<i64>,
     publication_budget_seconds: Option<i64>,
@@ -145,6 +146,10 @@ struct ReleaseEvidence {
 
 impl ReleaseEvidence {
     fn record_latency(&mut self, values: &HashMap<String, String>) {
+        self.interventions = values
+            .get("INTERVENTIONS")
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse().ok());
         self.tag_to_published_seconds = values
             .get("PUBLISH_LATENCY_SECONDS")
             .and_then(|value| value.parse::<i64>().ok())
@@ -1251,8 +1256,16 @@ fn assemble_markdown(
         "| Green to published | {latency} | gate.green.epoch to the published receipt, when available |\n"
     ));
     output.push_str(&format!(
-        "| Tag to published | {} | First tag workflow to publication; measured budget result |\n\n",
+        "| Tag to published | {} | First tag workflow to publication; measured budget result |\n",
         sources.release_evidence.publication_timing()
+    ));
+    output.push_str(&format!(
+        "| Manual interventions | {} | Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS |\n\n",
+        sources
+            .release_evidence
+            .interventions
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "unavailable".to_string())
     ));
     output.push_str("## What you can do now\n\n");
     output.push_str(&was_now_sections(sources, true));
@@ -2236,6 +2249,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn publication_receipt_interventions_preserve_unknown_and_real_counts() {
+        let mut evidence = ReleaseEvidence::default();
+        for (value, expected) in [
+            ("8", Some(8)),
+            ("0", Some(0)),
+            ("-1", None),
+            ("", None),
+            ("unknown", None),
+        ] {
+            evidence.record_latency(&parse_key_values(&format!("INTERVENTIONS={value}\n")));
+            assert_eq!(evidence.interventions, expected);
+        }
+        evidence.record_latency(&HashMap::new());
+        assert_eq!(evidence.interventions, None);
+    }
+
+    #[test]
     fn publication_receipt_overrun_remains_visible_in_report_timing() {
         let mut evidence = ReleaseEvidence::default();
         evidence.record_latency(&parse_key_values(
@@ -2360,10 +2390,14 @@ Dev reply
             retrieved_at: "2026-09-09T00:00:00Z".to_string(),
         };
         sources.release_evidence.record_latency(&parse_key_values(
-            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
+            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\nINTERVENTIONS=8\n",
         ));
         let report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(report.contains("| Tag to published | 15m 8s — over budget (10m 0s budget) |"));
+        assert!(report.contains("| Manual interventions | 8 |"));
+        sources.release_evidence.record_latency(&HashMap::new());
+        let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
+        assert!(unavailable.contains("| Manual interventions | unavailable |"));
         let user = was_now_sections(&sources, true);
         let dev = was_now_sections(&sources, false);
         assert!(user.contains("Readable report"));

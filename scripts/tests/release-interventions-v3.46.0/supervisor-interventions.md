@@ -1,0 +1,5 @@
+- 2026-10-05T16:36:37Z assemble: old release-integrate.py on main rejects journey-evaluation docs in docs-only rebase; manual git rebase --onto integration tip (known 3.42.0 gap, fixed on v35)
+- 2026-10-05T17:11:13Z pipeline: merge-queue run 37344271910 failed HUB-J13 launch-session phone tap hang (60s) in CI; local 6/6 pass at release tip; resumed to re-enqueue
+- 2026-10-05T17:25:48Z pipeline: queue run 37346586377 failed HUB-J11 reconnect banner not hidden within 15s after release (attempt 4) on runner with ffmpeg download timeout; re-enqueued; local load check running
+- 2026-10-05T17:54:59Z publish: release.sh failed (cargo-zigbuild 0.23.x rejects .cargo/config.toml build.jobs="default"); hotfix PR #1132 (cb7146a74, jobs=-1) landed as e60c0395e; landed-main.sha updated a661df58e -> e60c0395e (prior kept as landed-main.sha.pre-hotfix); resumed publish
+- 2026-10-05T17:55:41Z publish: deleted local-only annotated tag v3.46.0 (peeled a661df58e, never pushed; remote had no v3.46.0) left by the failed first publish; resumed

@@ -89,6 +89,40 @@ out="$(CAS_RELEASE_TRAIN_RUN_DIR="$run_dir" FAKE_PUBLISHED_AT=2026-08-20T12:04:1
 expect_field "$out" INTERVENTIONS 3 'resume interventions count each blocker once'
 expect_field "$out" BLOCKERS gate,pipeline 'receipt preserves distinct blocker stages'
 
+# Real v3.46.0 shape: 15 internal rows, three resumed stages, five hand fixes.
+fixture="$script_dir/tests/release-interventions-v3.46.0"
+cp "$fixture/interventions.txt" "$run_dir/interventions.log"
+cp "$fixture/blockers.txt" "$run_dir/blockers.log"
+cp "$fixture/supervisor-interventions.md" "$run_dir/supervisor-interventions.md"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_dir")"
+expect_field "$out" INTERVENTIONS 8 'v3.46 internal resumes and five hand fixes are counted'
+expect_field "$out" BLOCKERS assemble,pipeline,publish 'v3.46 blocker stages remain distinct'
+# A kind-only substitution on resumed rows must not change the count.
+awk '/resume=true/ {sub("kind=internal", "kind=manual")} {print}' \
+    "$fixture/interventions.txt" >"$run_dir/interventions.log"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_dir")"
+expect_field "$out" INTERVENTIONS 8 'resumed stage count is independent of caller kind'
+rm "$run_dir/supervisor-interventions.md"
+printf 'subcommand=--cut kind=internal resume=true blockers=assemble\n' >"$run_dir/interventions.log"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_dir")"
+expect_field "$out" INTERVENTIONS 1 'unresumed blocker stages do not inflate a recorded rescue'
+rm "$run_dir/interventions.log"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_dir")"
+expect_field "$out" INTERVENTIONS 3 'blockers alone cannot report a clean release'
+printf 'unrecognized legacy blocker\n' >"$run_dir/blockers.log"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_dir")"
+expect_field "$out" INTERVENTIONS 1 'noncanonical nonempty blocker evidence cannot report zero'
+rm "$run_dir/blockers.log"
+printf '# Hand fixes\n\n- first fix\n  continuation\n- second fix\n' >"$run_dir/supervisor-interventions.md"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_dir")"
+expect_field "$out" INTERVENTIONS 2 'hand fixes without invocation log count entries, not lines'
+
+rm "$run_dir/supervisor-interventions.md"
+printf 'subcommand=--cut stage=preflight kind=internal resume=false blockers=none\nsubcommand=--status stage=status kind=internal resume=false blockers=none\n' >"$run_dir/interventions.log"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_dir")"
+expect_field "$out" INTERVENTIONS 0 'ordinary internal dispatch and status reads remain zero'
+expect_field "$out" BLOCKERS none 'ordinary internal calls do not invent blockers'
+
 # 2. A slow published release must record the overrun and continue.
 set +e
 slow_out="$(FAKE_PUBLISHED_AT=2026-08-20T12:21:00Z "$receipt" v3.4.0 2>&1)"

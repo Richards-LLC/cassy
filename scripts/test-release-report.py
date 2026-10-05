@@ -29,6 +29,14 @@ class ReleaseRendererTests(unittest.TestCase):
         self.assertIn("15m 8s — over budget (10m 0s budget)", output)
         self.assertIn("Tag to published", output)
 
+    def test_intervention_count_and_unknown_survive_html_rendering(self):
+        for value in ("8", "0", "unavailable"):
+            source = EXEMPLAR.replace("| Green to published |",
+                f"| Manual interventions | {value} | Distinct rescued stages plus recorded hand fixes |\n| Green to published |")
+            output = renderer.render(source, project_root=ROOT)
+            self.assertIn(f'<span class="stat-value">{value}</span><span class="stat-label">Manual interventions</span>', output)
+            self.assertIn("Manual interventions", output)
+
     def test_different_project_and_partial_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

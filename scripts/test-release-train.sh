@@ -460,6 +460,19 @@ else
     bad "--status omitted intervention metrics: $metrics_status"
 fi
 
+# The same historical evidence must produce the same count in --status.
+metrics_fixture="$script_dir/tests/release-interventions-v3.46.0"
+cp "$metrics_fixture/interventions.txt" "$dir_metrics/interventions.log"
+cp "$metrics_fixture/blockers.txt" "$dir_metrics/blockers.log"
+cp "$metrics_fixture/supervisor-interventions.md" "$dir_metrics/supervisor-interventions.md"
+metrics_status="$($train 9.99.3 "$wt_metrics" --status 2>&1 || true)"
+if [[ "$metrics_status" == *'INTERVENTIONS=8'* ]] \
+    && [[ "$metrics_status" == *'BLOCKERS=assemble,pipeline,publish'* ]]; then
+    ok '--status counts the v3.46 internal resumes and supervisor notes'
+else
+    bad "--status understated historical rescues: $metrics_status"
+fi
+
 # --check-lane binds the branch name and exact tip to the Scoped Validation JOB
 # inside the real CI workflow's push run. Missing evidence and API errors refuse.
 wt_lane="$(new_worktree lane-ci)"

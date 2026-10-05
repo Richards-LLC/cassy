@@ -129,6 +129,7 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
   const hub = await journey.hub({ machines: [ATLAS] });
   await journey.open();
   await pair(page, "8".repeat(43));
+  hub.expireInstallation([...hub.installations.keys()][0]!);
   const url = page.url();
   await page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open("cas-commander-v1", 2); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });

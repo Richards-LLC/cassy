@@ -2192,6 +2192,33 @@ mod stale_anchor_rebind_tests_cas_00eb {
         );
     }
 
+    /// cas-24d8: a checkout holding only `origin/<epic>` (no local epic
+    /// branch) classifies the delivery against origin. A missing local ref
+    /// must not make the eligibility diff fail and degrade to the demo alone.
+    #[test]
+    fn only_an_origin_epic_ref_is_resolved_cas_24d8() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-q", "-m", "seed"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", "refs/remotes/origin/epic/v35", &base]);
+        std::fs::write(repo.join("roster.css"), ".roster{}\n").unwrap();
+        git(repo, &["add", "roster.css"]);
+        git(repo, &["commit", "-q", "-m", "feat(cas-ui02): roster"]);
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let target = freshest_target_ref(repo, "epic/v35");
+        assert_eq!(target, "origin/epic/v35");
+        let changed =
+            changed_paths_for_delivery(repo, &target, &head).expect("diff against origin");
+        assert!(
+            changed.iter().any(|path| path == "roster.css"),
+            "{changed:?}"
+        );
+    }
+
     /// AC2: qa_request on a parked task whose pending pass is bound to the
     /// stale anchor retires that pass and opens one at the tip, with the
     /// rebind on record.

@@ -832,7 +832,137 @@ pub(super) fn surviving_line_content(
     line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], true)
 }
 
+/// cas-24d8: one close asked for the same ownership walk about 78 times
+/// (deliveries × paths × callers), each a full `delivery..target` history
+/// walk. The answer depends only on immutable Git objects once every ref is
+/// resolved to a commit, so it is memoized by those commits. Errors are not
+/// cached: a measurement-budget expiry is not a property of the history.
+type WalkKey = (
+    std::path::PathBuf,
+    String,
+    String,
+    String,
+    String,
+    Vec<String>,
+    bool,
+    Vec<String>,
+    bool,
+);
+
+static WALKS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<WalkKey, Option<super::DeliveryContentPresence>>>,
+> = std::sync::OnceLock::new();
+
+/// Bound on memoized walks; the cache is cleared when it fills.
+const WALK_CACHE_LIMIT: usize = 4096;
+
 fn line_content_presence_impl(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+    resolutions: &[String],
+    novel_only: bool,
+    cycle: &[String],
+    allow_partial: bool,
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    let commit =
+        |reference: &str| super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"));
+    let key = match (commit(parent), commit(delivery), commit(target)) {
+        (Some(parent), Some(delivery), Some(target)) => Some((
+            repo.to_path_buf(),
+            parent,
+            delivery,
+            target,
+            path.to_string(),
+            resolutions.to_vec(),
+            novel_only,
+            cycle.to_vec(),
+            allow_partial,
+        )),
+        _ => None,
+    };
+    let walks = WALKS.get_or_init(Default::default);
+    if let Some(key) = key.as_ref()
+        && let Ok(cache) = walks.lock()
+        && let Some(answer) = cache.get(key)
+    {
+        return Ok(answer.clone());
+    }
+    let answer = line_content_presence_uncached(
+        repo,
+        parent,
+        delivery,
+        target,
+        path,
+        resolutions,
+        novel_only,
+        cycle,
+        allow_partial,
+    )?;
+    if let Some(key) = key
+        && let Ok(mut cache) = walks.lock()
+    {
+        if cache.len() >= WALK_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, answer.clone());
+    }
+    Ok(answer)
+}
+
+/// cas-24d8: the blob each commit holds at `path`, from one batched
+/// `cat-file`; `None` for a commit where the path is absent. An edge whose two
+/// ends hold the same blob has no hunks, and `advance` maps every owner
+/// through an empty change set unchanged, so the walk can skip such an edge
+/// (and the commit message read it would have needed) without spawning Git.
+/// Any failure returns `None` and the walk measures every edge as before.
+fn path_blobs(
+    repo: &Path,
+    commits: &[&str],
+    path: &str,
+) -> Option<std::collections::HashMap<String, Option<String>>> {
+    use std::io::{Seek, Write};
+    super::epic_measurement::check().ok()?;
+    if path.contains('\n') {
+        return None;
+    }
+    let mut input = tempfile::tempfile().ok()?;
+    for commit in commits {
+        writeln!(input, "{commit}:{path}").ok()?;
+    }
+    input.rewind().ok()?;
+    let output = Command::new("git")
+        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+        .current_dir(repo)
+        .measurement_output_with_stdin(std::process::Stdio::from(input))
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8(output.stdout).ok()?;
+    let lines: Vec<_> = listing.lines().collect();
+    if lines.len() != commits.len() {
+        return None;
+    }
+    Some(
+        commits
+            .iter()
+            .zip(lines)
+            .map(|(commit, line)| {
+                let blob = (!line.ends_with(" missing"))
+                    .then(|| line.split_once(' '))
+                    .flatten()
+                    .filter(|(_, kind)| *kind == "blob")
+                    .map(|(id, _)| id.to_string());
+                (commit.to_string(), blob)
+            })
+            .collect(),
+    )
+}
+
+fn line_content_presence_uncached(
     repo: &Path,
     parent: &str,
     delivery: &str,
@@ -970,11 +1100,27 @@ fn line_content_presence_impl(
     )?;
     let mut states = std::collections::HashMap::new();
     states.insert(delivery.to_string(), owners);
+    let mut walked = vec![delivery];
+    for record in history.lines() {
+        for commit in record.split_whitespace() {
+            if !walked.contains(&commit) {
+                walked.push(commit);
+            }
+        }
+    }
+    let blobs = path_blobs(repo, &walked, path);
+    let unchanged = |prior: &str, commit: &str| {
+        blobs.as_ref().is_some_and(|blobs| {
+            matches!((blobs.get(prior), blobs.get(commit)), (Some(left), Some(right)) if left == right)
+        })
+    };
     for record in history.lines() {
         let fields: Vec<_> = record.split_whitespace().collect();
         let commit = fields[0];
         let ordinary = fields.len() == 2;
-        let reverted = is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
+        // A revert label only matters for an edge that changes the path.
+        let reverted = !fields.iter().skip(1).all(|prior| unchanged(prior, commit))
+            && is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
         let mut union_changes = None;
         let mut union_base = None;
         let mut union_checked = false;
@@ -1001,6 +1147,15 @@ fn line_content_presence_impl(
             let Some(previous) = states.get(*prior) else {
                 continue;
             };
+            if unchanged(prior, commit) {
+                // No hunks on this edge: ownership passes through unchanged.
+                for (index, owner) in previous.iter().enumerate() {
+                    if merged[index].is_none() {
+                        merged[index] = owner.clone();
+                    }
+                }
+                continue;
+            }
             let changes = if ordinary {
                 ordinary_hunks(repo, prior, commit, path)?
             } else {

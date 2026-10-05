@@ -3056,4 +3056,52 @@ mod tests {
             Some(false)
         );
     }
+
+    /// cas-24d8: the ownership walk skips edges that leave the path's blob
+    /// unchanged (a long run of unrelated commits, a side merge that never
+    /// touches the file) without losing the edge that does change it.
+    #[test]
+    fn unrelated_history_is_skipped_but_a_later_deletion_is_still_caught_cas_24d8() {
+        let dir = fixture();
+        let repo = dir.path();
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let delivery = commit(
+            repo,
+            "copy.txt",
+            "old\ndelivered();\n",
+            "cas-taskb: delivery",
+        );
+        for index in 0..40 {
+            commit(
+                repo,
+                "other.txt",
+                &format!("{index}\n"),
+                &format!("unrelated {index}"),
+            );
+        }
+        git(repo, &["checkout", "-qb", "side"]);
+        commit(repo, "side.txt", "side\n", "side work");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(repo, &base, &delivery, "main", "copy.txt")
+                .unwrap(),
+            Some(DeliveryContentPresence::Present {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+        commit(repo, "copy.txt", "old\n", "drop the delivered line");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(repo, &base, &delivery, "main", "copy.txt")
+                .unwrap(),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
 }

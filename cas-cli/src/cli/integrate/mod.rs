@@ -130,15 +130,23 @@ impl From<PlatformAction> for IntegrationAction {
     }
 }
 
-/// CLI dispatch. Each platform handler is currently a stub that returns an
-/// error pointing at its owning task — see module docs.
+/// CLI dispatch. Violet owns its JSON report; other successful outcomes use
+/// the shared human renderer.
 pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
     let outcome = match cmd {
         IntegrateCommands::Vercel { action } => vercel::execute((*action).into())?,
         IntegrateCommands::Neon { action } => neon::execute((*action).into())?,
         IntegrateCommands::Github { action } => github::execute(action.clone())?,
         #[cfg(feature = "mcp-proxy")]
-        IntegrateCommands::Violet(args) => violet::execute(args, _cli.json)?,
+        IntegrateCommands::Violet(args) => {
+            let outcome = violet::execute(args, _cli.json)?;
+            if _cli.json {
+                // Violet already emitted its structured report. Appending
+                // the human outcome would invalidate the JSON stream.
+                return Ok(());
+            }
+            outcome
+        }
     };
     render_outcome(&outcome);
     Ok(())

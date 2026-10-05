@@ -2453,8 +2453,10 @@ pub fn execute(args: &VioletArgs, json: bool) -> Result<IntegrationOutcome> {
     // Refuse loudly on a rejected credential so a scripted setup fails here
     // rather than at the first release post.
     if matches!(report.probe, ProbeOutcome::Unauthorized) {
-        for line in &outcome.summary {
-            println!("  {line}");
+        if !json {
+            for line in &outcome.summary {
+                println!("  {line}");
+            }
         }
         anyhow::bail!(
             "Violet refused this machine's credential (HTTP 401). Nothing was verified; the \

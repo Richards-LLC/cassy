@@ -927,14 +927,15 @@ esac
     assert!(!home.path().join("mock-serve").exists());
 }
 
-fn start_hub(home: &Path, path: &OsStr, tailscale: bool) -> Value {
+// false omits the explicit flag and exercises the default host policy (Serve ON).
+fn start_hub(home: &Path, path: &OsStr, explicit_tailscale_flag: bool) -> Value {
     assert!(
         !home.join(".cas").exists(),
         "process proof must start with an actually absent CAS home"
     );
     let mut command = cas_command(home, path);
     command.args(["--json", "hub", "start", "--port", "0"]);
-    if tailscale {
+    if explicit_tailscale_flag {
         command.arg("--tailscale-serve");
     }
     let output = command.output().expect("start clean-home hub process");
@@ -1209,7 +1210,7 @@ fn clean_home_process_start_health_status_stop_needs_no_init() {
     let startup_log = fs::read_to_string(home.path().join(".cas/hub/hub.log"))
         .expect("hub startup must create a diagnostic log before optional probes");
     assert!(
-        startup_log.contains("cas hub serve starting (tailscale_serve=false"),
+        startup_log.contains("cas hub serve starting (tailscale_serve=true"),
         "startup log: {startup_log}"
     );
     #[cfg(unix)]

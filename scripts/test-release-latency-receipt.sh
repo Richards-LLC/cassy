@@ -89,8 +89,8 @@ out="$(CAS_RELEASE_TRAIN_RUN_DIR="$run_dir" FAKE_PUBLISHED_AT=2026-08-20T12:04:1
 expect_field "$out" INTERVENTIONS 3 'resume interventions count each blocker once'
 expect_field "$out" BLOCKERS gate,pipeline 'receipt preserves distinct blocker stages'
 
-# Real v3.46.0 shape: 15 internal rows, three resumed stages, five hand fixes.
-fixture="$script_dir/tests/release-interventions-v3.46.0"
+# Real rescued-release shape (captured from a production run): 15 internal rows, three resumed stages, five hand fixes.
+fixture="$script_dir/tests/release-interventions-rescued"
 cp "$fixture/interventions.txt" "$run_dir/interventions.log"
 cp "$fixture/blockers.txt" "$run_dir/blockers.log"
 cp "$fixture/supervisor-interventions.md" "$run_dir/supervisor-interventions.md"

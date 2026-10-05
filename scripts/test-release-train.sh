@@ -480,7 +480,7 @@ else
 fi
 
 # The same historical evidence must produce the same count in --status.
-metrics_fixture="$script_dir/tests/release-interventions-v3.46.0"
+metrics_fixture="$script_dir/tests/release-interventions-rescued"
 cp "$metrics_fixture/interventions.txt" "$dir_metrics/interventions.log"
 cp "$metrics_fixture/blockers.txt" "$dir_metrics/blockers.log"
 cp "$metrics_fixture/supervisor-interventions.md" "$dir_metrics/supervisor-interventions.md"

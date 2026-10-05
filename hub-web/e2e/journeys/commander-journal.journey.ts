@@ -2,6 +2,7 @@ import { test, expect, journeyPart } from "./journey";
 import { HubDouble } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
 import { journalRows } from "./commander-journal-storage";
+import { journeyNow } from "./clock";
 import type { Page } from "@playwright/test";
 
 async function choose(page: Page) {
@@ -15,7 +16,7 @@ async function send(page: Page, text: string) {
 test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, async ({ page, context, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
   const second = await context.newPage();
-  await second.clock.install({ time: await page.evaluate(() => Date.now()) });
+  await second.clock.install({ time: journeyNow() });
   const other = new HubDouble(second, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
   const errors: string[] = [];
   second.on("pageerror", (error) => errors.push(error.message));

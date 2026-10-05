@@ -58,6 +58,10 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
           const note = element.querySelector<HTMLElement>(".fleet-ops-note")!;
           return Math.round(note.clientWidth - parseFloat(getComputedStyle(note).paddingRight) - content);
         }), "the failure note spans the row").toBe(0);
+        // cas-d2df: the note names its row in the row header's mono face.
+        await expect(row.locator(".fleet-ops-note .fleet-ops-note-subject")).toHaveText("swift-lark-3");
+        expect(await row.evaluate((element) => getComputedStyle(element.querySelector(".fleet-ops-note-subject")!).fontFamily
+          === getComputedStyle(element.querySelector(".status-line .status-identifier")!).fontFamily), "same face as the row header").toBe(true);
         if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
         await expect(row.locator(".status-chip")).toHaveText("active");
       });

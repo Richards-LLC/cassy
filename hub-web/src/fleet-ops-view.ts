@@ -118,8 +118,22 @@ function noteLine(document: Document, context: FleetOpsViewContext, rowKey: stri
   line.className = `fleet-ops-note fleet-ops-note--${note.tone}`;
   line.tabIndex = -1;
   line.dataset.fleetFocus = `${rowKey}:note`;
-  line.textContent = note.text;
+  appendWithSubject(document, line, note.text, rowKey.slice(rowKey.indexOf(":") + 1));
   return line;
+}
+
+/**
+ * The note's text, with the row's own identifier (worker name or task id) set
+ * in the row header's mono face (cas-d2df), so "Could not stop swift-lark-3: …"
+ * visibly names the row it sits in. The text content is unchanged.
+ */
+function appendWithSubject(document: Document, line: HTMLElement, text: string, subject: string): void {
+  const at = subject ? text.indexOf(subject) : -1;
+  if (at < 0) { line.textContent = text; return; }
+  const name = document.createElement("span");
+  name.className = "fleet-ops-note-subject";
+  name.textContent = subject;
+  line.append(text.slice(0, at), name, text.slice(at + subject.length));
 }
 
 /** The inline destructive confirmation (End session's pattern): the question, Cancel first, then the danger button. */

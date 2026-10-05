@@ -1890,6 +1890,8 @@ main {
 .fleet-ops-confirm-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .fleet-ops-progress, .fleet-ops-note, .fleet-ops-asked { margin: 0; color: var(--text-mid); }
 .fleet-ops-note--error, .fleet-ops-note--stale { color: var(--state-warn); }
+/* cas-d2df: the row's own identifier inside its note, in the header's mono face; it wraps as one unit and breaks inside only when longer than the line. */
+.fleet-ops-note-subject { display: inline-block; max-width: 100%; font-family: var(--font-mono); overflow-wrap: anywhere; }
 .fleet-ops-header { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-2); }
 .fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }

@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn five_repairs_keep_one_device_and_refuse_previous_generations() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let mut prior: Option<DeviceCredential> = None;
@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn cancelled_committed_repair_restores_exact_prior_and_fences_late_abort() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let (first, old) = prepare(&store, &key, None, now);
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn substituted_body_refused_and_same_label_different_keys_remain_distinct() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let a = SigningKey::random(&mut OsRng);
         let b = SigningKey::random(&mut OsRng);
         let now = Utc::now();
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn abort_before_prepare_is_idempotent_and_refuses_delayed_prepare() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let request = exchange(&store, &key, None, now);
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn expired_prepare_cannot_commit_but_outage_recovery_can_still_abort() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let (first, old) = prepare(&store, &key, None, now);
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn superseded_commit_is_pruned_without_falsely_confirming_late_rollback() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let (first, old) = prepare(&store, &key, None, now);
@@ -794,8 +794,8 @@ mod tests {
     #[test]
     fn simultaneous_initial_prepares_cannot_enroll_two_rows_for_the_same_key() {
         let root = tempfile::tempdir().unwrap();
-        let a = AuthStore::open(root.path(), "test-hub").unwrap();
-        let b = AuthStore::open(root.path(), "test-hub").unwrap();
+        let a = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
+        let b = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let first = exchange(&a, &key, None, now);
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn rekey_requires_old_key_and_origin_body_changes_refuse() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let old_key = SigningKey::random(&mut OsRng);
         let new_key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn revoked_and_refreshed_candidates_fence_abort_and_cross_device_revoke_needs_admin() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let other_key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn refresh_wins_against_prepared_repair_and_abort_preserves_refresh() {
         let root = tempfile::tempdir().unwrap();
-        let store = AuthStore::open(root.path(), "test-hub").unwrap();
+        let store = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let (first, old) = prepare(&store, &key, None, now);

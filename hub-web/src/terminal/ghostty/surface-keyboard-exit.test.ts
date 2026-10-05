@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // cas-d1fa (WCAG 2.1.2): the keyboard can always leave the terminal input.
 import { describe, expect, it } from "vitest";
-import { GhosttyTerminalSurface, TERMINAL_ESCAPE_HINT, TERMINAL_ESCAPE_HINT_ID, isTerminalFocusTab, isTerminalLeaveShortcut } from "./surface";
+import { GhosttyTerminalSurface, TERMINAL_ESCAPE_HINT_ID, isTerminalFocusTab, isTerminalLeaveShortcut } from "./surface";
 
 const key = (init: Partial<KeyboardEvent> & { altGraph?: boolean }) => ({
   ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, key: "", code: "",
@@ -44,6 +44,5 @@ describe("the terminal input says how to leave (cas-d1fa)", () => {
     surface.controlMode = false;
     surface.updateEscapeHint();
     expect(input.hasAttribute("aria-describedby")).toBe(false);
-    expect(TERMINAL_ESCAPE_HINT).toBe("Tab goes to the terminal. Ctrl+Alt+M leaves it.");
   });
 });

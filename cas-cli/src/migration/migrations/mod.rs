@@ -238,6 +238,9 @@ mod m259_rules_add_operator_authority;
 mod m260_entries_rules_add_origin_project;
 mod m261_tasks_add_door;
 mod m262_tasks_normalize_proof_targets;
+mod m263_operator_delivery_outbox;
+mod m264_operator_reply_device_receipts;
+mod m265_operator_cloud_outbox;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -513,6 +516,9 @@ pub const MIGRATIONS: &[Migration] = &[
     m260_entries_rules_add_origin_project::MIGRATION,
     m261_tasks_add_door::MIGRATION,
     m262_tasks_normalize_proof_targets::MIGRATION,
+    m263_operator_delivery_outbox::MIGRATION,
+    m264_operator_reply_device_receipts::MIGRATION,
+    m265_operator_cloud_outbox::MIGRATION,
 ];
 
 #[cfg(test)]

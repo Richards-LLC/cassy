@@ -91,7 +91,6 @@ describe("ConversationView (Pebble thread)", () => {
     const opened = Date.now() - 600;
     const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading, openingSince: () => opened });
     document.body.replaceChildren(view.element);
-    expect(view.element.dataset.mountOverlay).toBe("");
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     expect(empty.hidden).toBe(false);
@@ -262,7 +261,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(table.querySelector(".pass")?.textContent).toBe("pass"); expect(table.querySelector(".flake")?.textContent).toBe("1 flake");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
   });
-  it("renders the same markdown body for hydrated replies and pinned asks", () => {
+  it("renders markdown bodies in the thread and a plain-text waiting bookmark", () => {
     const unregister = registerTurnRenderer("ask", (_reply, context) => {
       const object = context.document.createElement("div"); object.className = "obj"; object.append(...context.body()); return object;
     });
@@ -273,8 +272,10 @@ describe("ConversationView (Pebble thread)", () => {
       const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element, view.pinned); view.update();
       expect(view.element.querySelector('.turn.sup strong')?.textContent).toBe("Hydrated");
       expect(view.element.querySelector('.turn.sup .markdown-list li')?.textContent).toBe("history");
-      expect(view.pinned.querySelector('strong')?.textContent).toBe("Pinned");
-      expect(view.pinned.querySelector('.markdown-list li')?.textContent).toBe("choose");
+      expect(view.element.querySelector('.obj strong')?.textContent).toBe("Pinned");
+      expect(view.element.querySelector('.obj .markdown-list li')?.textContent).toBe("choose");
+      expect(view.pinned.querySelector(".pinned-bar-text")?.textContent).toBe("Pinned");
+      expect(view.pinned.querySelector(".obj")).toBeNull();
     } finally { unregister(); }
   });
   it("shows sending and refused states on the operator pebble with an edit affordance", () => {

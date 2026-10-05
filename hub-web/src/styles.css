@@ -49,14 +49,10 @@ button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--bg-h
 button:disabled,
 button[aria-disabled="true"] { opacity: .42; cursor: not-allowed; }
 
-.machine-row,
-.nav-item,
 .status-row,
 .attention-item,
 .palette-command { transition: background-color 100ms ease; }
 
-.machine-row:hover,
-.nav-item:hover,
 .status-row:hover,
 .attention-item:hover,
 .palette-command:hover { background: var(--bg-hover); }
@@ -70,15 +66,6 @@ textarea:focus-visible {
 
 code,
 pre { font-family: var(--font-mono); }
-
-.shell {
-  display: grid;
-  grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--context-panel-width);
-  gap: var(--space-2);
-  height: 100dvh;
-  overflow: hidden;
-  background: var(--bg-root);
-}
 
 /* An engine that cannot run this build says so in one line above the shell,
    instead of leaving the operator with a terminal that never connects. */
@@ -95,176 +82,7 @@ pre { font-family: var(--font-mono); }
   text-align: center;
 }
 
-.shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }
-
-.shell.attention-collapsed {
-  grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--machine-rail-width);
-}
-
-/* An unpaired, all-clear Commander has one job: start pairing.  Removing the
-   empty rails lets the canvas own that state instead of surrounding it with
-   duplicate CTAs, a monitor glyph, and an all-clear panel. */
-.shell.fleet-empty {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.shell.fleet-empty .machine-navigation,
-.shell.fleet-empty .context-panel {
-  display: none;
-}
-
-.shell.fleet-empty .session-header {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-/* An open desktop drawer owns a grid track instead of floating above panes. */
-.shell.drawer-open {
-  grid-template-columns: calc(var(--machine-rail-width) + var(--machine-drawer-width)) minmax(0, 1fr) var(--context-panel-width);
-}
-
-.shell.drawer-open.attention-collapsed {
-  grid-template-columns: calc(var(--machine-rail-width) + var(--machine-drawer-width)) minmax(0, 1fr) var(--machine-rail-width);
-}
-
-.machine-navigation {
-  position: relative;
-  z-index: 5;
-  min-width: 0;
-  overflow: visible;
-  background: var(--bg-panel);
-}
-
-/* == Unit 3: machine rail and drawer == */
-.machine-rail {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
-  width: var(--machine-rail-width);
-  height: 100%;
-  padding: var(--space-1);
-  background: var(--bg-panel);
-}
-
-.rail-control,
-.machine-icon {
-  display: grid;
-  place-items: center;
-  flex: 0 0 var(--button-height);
-  width: var(--button-height);
-  min-height: var(--button-height);
-  padding: 0;
-  background: var(--color-transparent);
-}
-
-.commander-mark {
-  color: var(--text-hi);
-}
-
-.commander-mark-label { display: none; }
-
-.commander-mark-icon {
-  width: var(--space-6);
-  height: var(--space-6);
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.75;
-}
-
-.machine-rail nav {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: var(--space-2);
-  width: var(--button-height);
-  margin: 0;
-  overflow-y: auto;
-}
-
-/* Machines are tiles and the two controls are glyphs, so the rail reads as
-   "these are the things, and this is what you can do" instead of one column
-   of identical squares. */
-.machine-icon {
-  position: relative;
-  color: var(--text-mid);
-  background: var(--bg-raised);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  font-weight: var(--weight-medium);
-}
-
-.machine-icon:hover:not(:disabled) { color: var(--text-hi); }
-
-.machine-icon.active {
-  color: var(--text-hi);
-  background: var(--bg-active);
-}
-
-/* The active fill alone is 1.3:1 against the rail (WCAG 1.4.11), so the
-   selected machine also carries an accent edge bar that is >= 3:1 in both
-   schemes. A bar, not an outline: the outline is the focus ring. */
-.machine-icon.active::before {
-  content: "";
-  position: absolute;
-  top: var(--space-2);
-  bottom: var(--space-2);
-  left: 2px;
-  width: 3px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-}
-
-.rail-control:hover:not(:disabled) { background: var(--bg-raised); }
-
-.machine-state,
-.connection-dot,
-.pane-status-dot {
-  display: inline-block;
-  width: var(--space-2);
-  height: var(--space-2);
-  border-radius: var(--radius-pill);
-  background: var(--state-idle);
-}
-
-.machine-icon .machine-state {
-  position: absolute;
-  right: var(--space-1);
-  bottom: var(--space-1);
-}
-
-/* The desktop rail is 48px of initials; the machine's full name belongs to the
-   phone rail and the drawer, where there is room to read it. */
-.machine-icon .machine-name { display: none; }
-
-/* These classes are the lifecycle phases the supervisor actually emits
-   (idle, resolving, dialing, auth, attaching, live, backoff, failed, degraded).
-   Health has to be legible from the dot alone on both surfaces. */
-.machine-state.live,
-.live .connection-dot,
-.pane-status-dot.live { background: var(--state-ok); }
-
-.machine-state.resolving,
-.machine-state.dialing,
-.machine-state.auth,
-.machine-state.attaching,
-.resolving .connection-dot,
-.dialing .connection-dot,
-.auth .connection-dot,
-.attaching .connection-dot { background: var(--state-ok); }
-
-.machine-state.degraded,
-.machine-state.backoff,
-.degraded .connection-dot,
-.backoff .connection-dot { background: var(--state-warn); }
-
-.machine-state.failed,
-.failed .connection-dot,
-.pane-status-dot.exited { background: var(--state-crit); }
-
+/* The pairing dialog's machine summary (dl.pair-machine). */
 .pair-machine {
   margin-top: auto;
   color: var(--text-mid);
@@ -273,117 +91,8 @@ pre { font-family: var(--font-mono); }
 
 .pair-machine:hover:not(:disabled) { color: var(--text-hi); }
 
-.pair-machine-label { display: none; }
-
-.machine-drawer {
-  position: absolute;
-  z-index: 1;
-  inset: 0 auto 0 var(--machine-rail-width);
-  display: flex;
-  flex-direction: column;
-  width: var(--machine-drawer-width);
-  padding: var(--space-3);
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(calc(-1 * var(--space-2)));
-  background: var(--bg-panel);
-  transition: opacity var(--chrome-motion-duration) ease, transform var(--chrome-motion-duration) ease;
-}
-
-.machine-navigation.drawer-open .machine-drawer {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateX(0);
-}
-
-.drawer-header {
-  display: flex;
-  min-height: var(--space-8);
-  align-items: center;
-  justify-content: space-between;
-  color: var(--text-hi);
-}
-
-.drawer-header button {
-  width: var(--space-8);
-  min-height: var(--space-8);
-  padding: 0;
-  background: var(--color-transparent);
-}
-
-.machine-drawer nav {
-  display: grid;
-  flex: 1;
-  align-content: start;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-  overflow: auto;
-}
-
-.machine-group { display: grid; gap: var(--space-1); }
-
-.machine-row {
-  display: grid;
-  /* The status column grows to fit a short state and wraps a long one, so
-     "Reconnecting" is never cut to "Reconnect…" (journey F9). */
-  grid-template-columns: var(--space-2) minmax(12ch, 1fr) fit-content(16ch);
-  min-height: var(--button-height);
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  color: var(--text-hi);
-  background: var(--color-transparent);
-  border-radius: 0;
-  border-bottom: var(--line-width) solid var(--line-subtle);
-  text-align: left;
-}
-
-.machine-row strong {
-  overflow: hidden;
-  font-family: var(--font-ui);
-  font-size: var(--fs-meta);
-  font-weight: var(--weight-medium);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.machine-row small {
-  min-width: 0;
-  color: var(--text-mid);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  text-align: right;
-  overflow-wrap: break-word;
-}
-
-.session-tree {
-  display: grid;
-  gap: var(--space-1);
-  padding-left: var(--space-3);
-}
-
-.drawer-empty {
-  margin: var(--space-1) var(--space-2);
-  color: var(--text-mid);
-  font-size: var(--fs-meta);
-}
-
-/* The one destructive action in the drawer sits away from the session list it
-   would otherwise share a thumb-width with. */
-.remove-machine {
-  width: 100%;
-  min-height: var(--space-8);
-  flex: none;
-  margin-top: var(--space-4);
-  color: var(--state-crit);
-  font-size: var(--fs-xs);
-}
-
-/* == End Unit 3: machine rail and drawer == */
 /* The main-action button. :where() keeps the old specificity, and scopes it to
-   controls: the primary terminal pane also carries .primary (pane-layout), and
-   the hover rule's brightness(1.08) used to wash the whole thread under the
+   controls, and the hover rule's brightness(1.08) used to wash the whole thread under the
    pointer from cream to white (journey F11). */
 :where(button, a).primary {
   width: 100%;
@@ -395,29 +104,6 @@ pre { font-family: var(--font-mono); }
 /* The main action keeps its fill under the pointer and brightens; the generic
    button hover (--bg-hover) would make it the weakest control on screen. */
 :where(button, a).primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }
-
-.nav-item {
-  display: grid;
-  gap: var(--space-1);
-  padding: var(--space-2);
-  background: var(--color-transparent);
-  text-align: left;
-}
-
-.nav-item.active { background: var(--bg-active); }
-.nav-item:hover:not(:disabled) { background: var(--bg-hover); }
-
-.nav-item small {
-  color: var(--text-mid);
-  font-size: var(--fs-xs);
-  line-height: var(--line-terminal);
-}
-
-.session-eyebrow {
-  grid-column: 1 / -1;
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-}
 
 .session-summary-title {
   min-width: 0;
@@ -443,81 +129,6 @@ pre { font-family: var(--font-mono); }
 
 .session-summary-description.stale { color: var(--text-mid); }
 
-/* == Unit 3: fleet verdict, state plot and evidence ledger == */
-.fleet-board {
-  align-self: start;
-  justify-self: center;
-  display: grid;
-  width: min(100%, var(--fleet-board-max-width));
-  min-width: 0;
-  gap: var(--space-6);
-  padding: var(--space-6) var(--space-4) var(--space-12);
-  color: var(--text-hi);
-}
-.fleet-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: var(--space-6); align-items: start; }
-/* Journey F2: side by side, a board narrower than this leaves the figure too
-   little room for its state words; the verdict then sits above it instead. */
-.fleet-board { container: fleet-board / inline-size; }
-@container fleet-board (max-width: 60rem) {
-  .fleet-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
-  .fleet-verdict { max-width: none; }
-}
-.fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
-.fleet-eyebrow { margin: 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.33 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
-.fleet-board-summary { margin: 0; color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
-.fleet-verdict { flex-basis: 100%; margin: var(--space-2) 0 0; max-width: 22ch; font: var(--weight-regular) var(--fs-verdict)/1.1 var(--font-display); letter-spacing: -.015em; text-wrap: pretty; }
-.fleet-figure { min-width: 0; margin: 0; container: fleet-figure / inline-size; }
-.fleet-plot-scroll { max-height: calc(8 * var(--button-compact-height) + var(--space-12)); overflow: auto; }
-.fleet-plot { width: 100%; border-collapse: collapse; table-layout: fixed; font: var(--fs-xs)/1.16 var(--font-mono); }
-.fleet-plot th { padding: var(--space-1); font-weight: var(--weight-regular); white-space: nowrap; text-align: center; }
-.fleet-plot thead th { padding: var(--space-1) 0; height: var(--space-12); color: var(--text-mid); vertical-align: bottom; }
-.fleet-plot th:first-child { width: 25%; text-align: left; }
-.fleet-plot th:nth-child(3) { width: calc(10ch + var(--space-6)); }
-.fleet-plot th:last-child { width: 19%; }
-.fleet-plot tbody th, .fleet-track-cell { height: var(--button-compact-height); padding: 0; vertical-align: middle; }
-.fleet-plot tbody th { color: var(--text-mid); }
-.fleet-plot-name { display: block; padding: 0 var(--space-1); line-height: var(--button-compact-height); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* cas-598e QA F01: rows sharing a project carry a codename tag that never truncates; the project gives way first. */
-.fleet-plot-name.tagged { display: flex; align-items: baseline; gap: var(--space-1); }
-/* The project keeps at least a letter and its ellipsis beside any tag (cas-ae5e). */
-.fleet-plot-project { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
-.fleet-plot-tag { flex: none; }
-.fleet-plot-tag::before { content: "· "; }
-.fleet-track-cell { position: relative; text-align: center; }
-.fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--line-width); background: var(--line-subtle); }
-.fleet-plot-mark { position: relative; display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: middle; white-space: nowrap; }
-.track-working .fleet-plot-mark { display: flex; padding: 0 var(--space-1); }
-.fleet-plot.has-working th:nth-child(3), .fleet-plot.has-working .track-working { background: var(--bg-active); color: var(--text-hi); }
-.fleet-dot { position: relative; display: inline-block; width: var(--space-2); height: var(--space-2); background: var(--text-mid); border-radius: var(--radius-pill); vertical-align: middle; }
-.needs-you .fleet-dot { background: var(--state-crit); outline: var(--rule-verdict) solid var(--color-verdict); outline-offset: var(--line-width); }
-.unreachable .fleet-dot { background: var(--state-warn); }
-.fleet-dot-phase { color: var(--text-hi); font: var(--fs-meta)/1.38 var(--font-mono); white-space: nowrap; }
-.fleet-track-key, .fleet-track-legend { display: none; }
-/* Narrow figures use a numbered key so state words never split across rows. */
-@container fleet-figure (max-width: 34rem) {
-  .fleet-plot th:first-child { width: 36%; }
-  .fleet-plot th:last-child { width: auto; }
-  .fleet-plot thead th:not(:first-child) .fleet-track-label { display: none; }
-  .fleet-track-key { display: inline; }
-  .fleet-track-legend { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); margin-top: var(--space-2); color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
-  .fleet-track-legend > span { white-space: nowrap; }
-}
-.fleet-figure-caption { margin-top: var(--space-3); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); }
-.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; cursor: default; }
-.fleet-provenance:empty { display: none; }
-.fleet-evidence { display: grid; gap: var(--space-4); }
-.fleet-machine { display: grid; gap: var(--space-2); min-width: 0; }
-.fleet-machine-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: var(--space-6); color: var(--text-hi); font-size: var(--fs-meta); }
-.fleet-machine-phase { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
-.fleet-ledger { display: grid; }
-.fleet-session { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: var(--space-1) var(--space-3); min-height: var(--button-height); padding: var(--space-3) 0; border-top: var(--line-width) solid var(--line-subtle); border-radius: 0; color: var(--text-hi); background: var(--color-transparent); text-align: left; }
-.fleet-session.needs-you { border-top-color: var(--color-verdict); }
-.fleet-session .session-name { grid-column: 1; color: var(--text-hi); font: var(--fs-md)/1.47 var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
-.fleet-session .phase-chip { grid-column: 2; grid-row: 1; border-radius: var(--radius-card); }
-.fleet-session .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-base); font-weight: var(--weight-regular); white-space: normal; overflow: visible; overflow-wrap: anywhere; }
-.fleet-session .session-meta { grid-column: 1 / -1; color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; }
-.fleet-empty-sessions { margin: 0; padding: var(--space-3) 0; color: var(--text-mid); font-size: var(--fs-base); }
 /* == End Unit 3: fleet == */
 
 .phase-chip {
@@ -538,10 +149,6 @@ pre { font-family: var(--font-mono); }
 .phase-blocked { color: var(--state-warn); background: var(--tint-warn); }
 .phase-idle { color: var(--text-mid); }
 
-.session-name,
-.session-meta,
-.toolbar-session-title,
-.pane-title,
 .attention-group-label,
 .attention-ticket,
 .status-identifier,
@@ -572,534 +179,30 @@ main {
   background: var(--bg-root);
 }
 
-/* == Unit 3: header == */
-/* The actions (palette, control, Interrupt) never clip: they never shrink.
-   The title keeps its width first; the machine chip yields first (ellipsised),
-   and a header too narrow for the chips drops them in priority order (the
-   container rules below). At 900–1024px the header used to run 871px of
-   content in 640 and cut the actions off (cas-3400 QA F01). A phone header
-   keeps its grid (the 53rem block). */
-.session-header {
-  display: flex;
-  container: session-header / inline-size;
-  flex: 0 0 var(--session-header-height);
-  height: var(--session-header-height);
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
-  background: var(--bg-panel);
-}
-
-.session-header h1 {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--text-hi);
-  font-family: var(--font-ui);
-  font-size: var(--fs-lg);
-  font-weight: var(--weight-medium);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.session-header h1.toolbar-session-title { font-family: var(--font-mono); }
-
-/* Lease mode and terminal latency describe an open session. On the fleet
-   board they described nothing and were clipped to "Status una" on a phone. */
-.session-header:not(:has(.toolbar-session-title)) .machine-chip,
-.session-header:not(:has(.toolbar-session-title)) .mode-badge,
-.session-header:not(:has(.toolbar-session-title)) .connection-summary { display: none; }
-
-/* Where you are, and the way back out of it, sit together at the start of the
-   header: the same two controls on a desktop and under a thumb. */
-.session-identity {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.session-back-label { font-size: var(--fs-meta); }
-
-/* cas-ac390 QA F01/F02: "Back" yields when the Terminal-view column has no
-   room for it (a 900px window with the drawer open, a phone): the glyph stays
-   and the accessible name is still "Back to …". Scoped to the back control;
-   the column is only the measuring container. */
-.shell > main { container: shell-main / inline-size; }
-@container shell-main (max-width: 36rem) {
-  .session-back-label { display: none; }
-  .session-back { padding: 0; }
-}
-
-.session-back {
-  flex: 0 0 auto;
-  display: inline-flex;
-  min-width: var(--space-8);
-  min-height: var(--space-8);
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  /* Journey F2: the glyph alone read as unlabelled; "Back" is on screen. */
-  padding: 0 var(--space-3) 0 var(--space-2);
-  color: var(--text-mid);
-  background: var(--bg-raised);
-  border: none;
-  border-radius: var(--radius-pill);
-  font-size: var(--fs-lg);
-  line-height: 1;
-}
-
-.session-picker-toggle {
-  display: inline-flex;
-  max-width: 100%;
-  min-width: 0;
-  min-height: var(--space-8);
-  align-items: center;
-  gap: var(--space-1);
-  padding: 0 var(--space-1);
-  color: inherit;
-  background: var(--color-transparent);
-  border: none;
-  border-radius: var(--radius-card);
-  font: inherit;
-}
-
-/* The h1 clips at the toggle's own edges (overflow: hidden keeps the long-title
-   ellipsis), so an outset ring was cut off on every side. Draw it inside the
-   toggle's box instead, where the clip cannot reach it (cas-cf10 QA F01). */
-.session-picker-toggle:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
-
-/* The caret is the only sign that the session name is a control, so the name
-   yields width to it rather than pushing it out of the clipped header. */
-.session-picker-name {
-  /* It keeps its width while the codename has any to give (a proportional
-     shrink took a fraction of a pixel from it too, enough to show "cas-s…"
-     beside a truncated codename, cas-3400), and is capped short of the caret
-     when the project name alone is too long. The cap reserves exactly the
-     gap and the caret's fixed box: a larger reserve cut "Fleet overview" to
-     "Fleet overvi…" with 200px of header to spare, because the toggle sizes
-     to its content and the percentage is taken from that (journey F24). */
-  flex: 0 0 auto;
-  max-width: calc(100% - var(--space-1) - var(--space-3));
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The codename follows the project, secondary: quieter, and the first to
-   yield width so the project and the caret stay readable (3.30.0 F2). */
-.session-picker-codename {
-  flex: 0 100 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-mid);
-  font-size: var(--fs-xs);
-  font-weight: var(--weight-regular);
-  text-overflow: ellipsis;
-}
-
-/* A fixed box (the name's cap above reserves exactly this and the gap). */
-.session-picker-caret {
-  flex: 0 0 var(--space-3);
-  text-align: center;
-  color: var(--text-mid);
-  font-family: var(--font-ui);
-  font-size: var(--fs-xs);
-}
-
-.picker-machine {
-  margin: var(--space-2) 0 0;
-  color: var(--text-mid);
-  font-size: var(--fs-xs);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-}
-
-.session-picker-entry {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-1) var(--space-2);
-}
-
-.session-picker-entry .session-name { grid-column: 1; font-size: var(--fs-base); }
-/* The details wrap rather than clip: on a phone the one-line ellipsis hid the
-   status of a long row, the open session's included (cas-56e6). */
-.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-xs); white-space: normal; overflow: visible; overflow-wrap: anywhere; }
-.session-picker-entry :is(.session-name, .session-summary-title) { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
-.session-picker-entry .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-meta); }
-.session-picker-entry .phase-chip { grid-column: 1; justify-self: start; }
-.session-picker-entry[aria-current="true"] { background: var(--bg-active); }
-/* The global button:hover (0,3,1) would swap the open session's tint for the
-   plain hover surface, leaving only the small "Open" label to mark it. Hover
-   and press keep the tint and answer the pointer with the Pebble lift, as a
-   hovered chip does: a deeper tint would take the small meta line below
-   4.5:1 (cas-a756 QA). */
-.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) { background: var(--bg-active); box-shadow: var(--lift); }
-/* The lift's blur falls mostly outside the row, where the scrolling list clips
-   it; underline the name too, the same pointer cue forced colours use. */
-.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }
-
-.session-picker-current {
-  grid-column: 2;
-  grid-row: 1;
-  color: var(--color-action);
-  font-size: var(--fs-xs);
-  letter-spacing: var(--tracking-label);
-}
-
-.machine-chip,
-.mode-badge,
-.connection-summary {
-  display: inline-flex;
-  width: max-content;
-  min-height: var(--space-6);
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-mid);
-  background: var(--bg-raised);
-  border-radius: var(--radius-card);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-}
-
-/* Desktop header priorities: the title, then the actions, then the mode, the
-   connection and last the machine name, which ellipsises first (the full name
-   is in the chip's title attribute). */
-/* The title is the first to give way (cas-3400 QA round 3): no floor beyond
-   the Back glyph, which stays; the project name ellipsises. */
-.session-header > .session-identity { flex: 0 1 auto; min-width: 0; }
-.session-header > .machine-chip { flex: 0 1000 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; }
-.session-header > .mode-badge, .session-header > .connection-summary { flex: 0 0 auto; }
-.session-header > .actions { flex: 0 0 auto; }
-
-/* Header actions carry an icon for the narrowest header, hidden until then. */
-.session-header .action-icon { display: none; width: 16px; height: 16px; flex: 0 0 auto; }
-.session-header .actions button:has(.action-icon) { display: inline-flex; align-items: center; justify-content: center; }
-
-/* The header's own column decides, not the viewport: a desktop window with the
-   machine drawer open leaves the Terminal header 185–360px (cas-3400 QA rounds
-   2–3). Below 360px the palette, control and Interrupt buttons show their
-   icons; their accessible names stay "Open command palette (Ctrl K)",
-   "Release control"/"Take control" and "Interrupt selected pane". No control
-   is hidden: the title gives way instead (the 220px rule below). */
-@container session-header (max-width: 360px) {
-  .session-header .actions .action-label { display: none; }
-  .session-header .actions .action-icon { display: block; }
-  .session-header .actions button:has(.action-icon) { min-width: var(--space-8); padding: 0 var(--space-2); }
-}
-/* Narrower still (the drawer open in an 849px window): every control stays
-   (Back as its ‹ glyph, cas-ac390; the palette, control and Interrupt as
-   icons), and the title steps down a size and gives way instead (cas-3400 QA
-   round 3). */
-@container session-header (max-width: 220px) {
-  .session-header h1 { font-size: var(--fs-meta); }
-  /* The codename goes first: a sliver of it read as a stray bar beside the
-     project name. The full name is still the heading's accessible name. */
-  .session-header .session-picker-codename { display: none; }
-}
-
-/* The latency words ellipsise inside the chip rather than being cut, and the
-   dot keeps its size. */
-.connection-summary [data-machine-latency] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.connection-summary .connection-dot { flex: 0 0 auto; }
-
-@media (min-width: 53.0625rem) {
-  /* A block box, so the long hostname ends in an ellipsis rather than a cut
-     glyph (an inline-flex chip cannot ellipsise its text). */
-  .session-header > .machine-chip { display: block; }
-  @container session-header (max-width: 820px) { .session-header > .machine-chip { display: none; } }
-  @container session-header (max-width: 720px) { .session-header > .connection-summary { display: none; } }
-  @container session-header (max-width: 560px) { .session-header > .mode-badge { display: none; } }
-}
-
-.mode-badge {
-  color: var(--text-mid);
-  background: var(--color-transparent);
-  border: var(--line-width) solid var(--text-mid);
-  letter-spacing: var(--tracking-label);
-}
-
-.mode-badge.control {
-  color: var(--state-ok);
-  background: color-mix(in srgb, var(--state-ok) 12%, transparent);
-  border-color: color-mix(in srgb, var(--state-ok) 32%, transparent);
-}
-
-.mode-badge.observer { color: var(--text-mid); }
-/* No control to claim while the session is reconnecting (cas-edcd, cas-4a93). */
-.mode-badge[hidden] { display: none; }
-
-.session-header .actions {
-  /* In the phone grid: the last track, whichever chips are shown. */
-  grid-column: -2;
-  display: flex;
-  min-width: 0;
-  justify-content: flex-end;
-  gap: var(--space-1);
-  margin-left: auto;
-}
-
-.control-action { display: inline-flex; }
-
-/* Journey F9: a greyed header control says why on screen. Touch has no
-   tooltip, so title and aria text alone left the reason unreachable. The line
-   continues the header's panel, in the warning ink the composer's reason uses. */
-.session-controls-reason {
-  flex: 0 0 auto;
-  margin: 0;
-  padding: 0 var(--space-3) var(--space-1);
-  color: var(--state-warn);
-  background: var(--bg-panel);
-  font-size: var(--fs-meta);
-  text-wrap: pretty;
-}
-
-.session-controls-reason[hidden] { display: none; }
-/* cas-71af (6929 QA F01): a click on a control this line explains calls
-   attention to the line (a brief warm wash) instead of repeating it in a toast. */
-.session-controls-reason.called { animation: controls-reason-called 1.2s ease-out; }
-@keyframes controls-reason-called { from { background: color-mix(in srgb, var(--state-warn) 22%, var(--bg-panel)); } to { background: var(--bg-panel); } }
-@media (prefers-reduced-motion: reduce) {
-  .session-controls-reason.called { animation: none; background: color-mix(in srgb, var(--state-warn) 14%, var(--bg-panel)); }
-}
-
-.session-header .actions button {
-  min-height: var(--space-8);
-  padding: 0 var(--space-2);
-  font-size: var(--fs-meta);
-  white-space: nowrap;
-}
-
+/* A destructive action's ink (fleet operations). */
 .danger { color: var(--state-crit); }
 
-/* == End Unit 3: header == */
-/* == Unit 4: Session panes == */
+/* == Conversation stage == */
+/* #pane-grid holds an open conversation: its connection card, its thread and
+   (hidden) its pane host. The disconnected banner is positioned inside it. */
 .pane-grid {
   position: relative;
-  flex: 1;
-  display: grid;
-  gap: var(--space-2);
+  display: block;
+  height: 100%;
   min-height: 0;
-  padding: var(--space-2);
-  overflow: auto;
+  overflow: hidden;
   background: var(--bg-root);
 }
 
-.pane-grid.pane-layout {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr);
-  overflow: hidden;
-}
+/* cas-0546: the hidden per-session pane host renders nothing — no box, no
+   paint, no focus or pointer — and the thread is never inside it. */
+.pane-host, .pane-host[hidden] { display: none !important; }
 
-.pane-grid.pane-layout.single-pane { grid-template-rows: minmax(0, 1fr); }
-.primary-pane-slot,
-.secondary-pane-strip { min-height: 0; min-width: 0; }
-.primary-pane-slot { display: flex; }
-.primary-pane-slot .pane { flex: 1; }
-
-.secondary-pane-strip {
-  display: flex;
-  min-height: var(--space-8);
-  align-items: stretch;
-  gap: var(--space-2);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) var(--color-transparent);
-}
-
-.secondary-pane-strip .pane { flex: 1 0 var(--pane-secondary-min-width); }
-
-.pane {
-  position: relative;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  color: var(--text-hi);
-  background: var(--bg-panel);
-  border: var(--line-width) solid var(--line-subtle);
-  border-radius: var(--radius-pane);
-}
-
-.pane.selected { border-color: var(--line-strong); }
-.pane:focus-within { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
-.pane.selected .pane-title { color: var(--text-hi); }
-
-.pane > header {
-  flex: 0 0 var(--pane-header-height);
-  min-height: var(--pane-header-height);
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-mid);
-  background: var(--bg-raised);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-}
-
-.pane-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  cursor: pointer;
-}
-
-.pane[data-pane-role="supervisor"] .pane-header { cursor: default; }
-.pane-title {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-mid);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pane-role {
-  color: var(--text-mid);
-  font-size: var(--fs-xs);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-}
-
-.pane-last-activity {
-  /* cas-2072: the activity line takes only the room the name, role and
-     controls leave, so it never trims the name (twin codenames differ in
-     their tail digits). It shows whole or not at all: words that do not fit
-     wrap past the zero-width first item onto a clipped second line instead
-     of trimming to a stub. */
-  display: flex;
-  flex: 1 1 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  min-width: 0;
-  height: 1lh;
-  overflow: hidden;
-  color: var(--text-mid);
-  white-space: nowrap;
-}
-/* The first line's full height, so words that wrap past it fall below the clip. */
-.pane-last-activity::before { content: ""; height: 100%; }
-
-.pane-layout-controls {
-  display: flex;
-  flex: none;
-  gap: var(--space-1);
-}
-
-/* Pane controls sit inside the title bar, so they recede until they are wanted
-   rather than competing with the pane name for attention. */
-.pane-layout-controls button {
-  min-height: var(--button-compact-height);
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-mid);
-  background: var(--color-transparent);
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-}
-
-/* cas-d1fa: while this browser is in control the terminal keeps Tab; its
-   header says how the keyboard leaves it, outside the drawing area. */
-.pane-layout-controls .pane-leave[hidden] { display: none; }
-.pane-layout-controls .pane-leave kbd { margin-left: var(--space-1); padding: 0 var(--space-1); color: var(--text-mid); font: inherit; font-size: var(--fs-xs); white-space: nowrap; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
-/* cas-7d25: the key is always on screen, so a sighted keyboard user learns
-   it without hovering. Where the pane header is compact (a 1280 window with
-   the drawer open, a phone), the word gives way to a glyph and the control
-   reads "⇥ Ctrl+Alt+M"; its name stays "Leave terminal". */
-.pane-header { container: pane-header / inline-size; }
-@container pane-header (max-width: 960px) {
-  .pane-layout-controls .pane-leave .pane-leave-word { display: none; }
-  .pane-layout-controls .pane-leave::before { content: "⇥"; font-size: var(--fs-md); }
-  .pane-layout-controls .pane-leave kbd { margin-left: var(--space-1); }
-}
-/* cas-2072: a short header (a 1280 window with the drawer open) keeps the
-   pane's whole name and Leave's key by turning the other controls into the
-   glyphs a phone uses; each keeps its name and its tooltip. Kept at the
-   specificity of the desktop rules so the phone block still governs a phone. */
-@container pane-header (max-width: 720px) {
-  .pane-layout-controls button { display: grid; place-items: center; min-width: var(--space-8); padding: 0; font-size: 0; }
-  .pane-layout-controls .pane-leave:not([hidden]) { display: inline-flex; align-items: center; padding: 0 var(--space-1); }
-  .pane-layout-controls .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
-  .pane-layout-controls .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
-  .pane-layout-controls .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
-  .pane-layout-controls .make-primary::after { content: "★"; font-size: var(--fs-meta); }
-  .pane-layout-controls .move-earlier::after { content: "←"; font-size: var(--fs-md); }
-  .pane-layout-controls .move-later::after { content: "→"; font-size: var(--fs-md); }
-}
-.pane-layout-controls button:hover:not(:disabled),
-.pane-layout-controls button:focus-visible { color: var(--text-hi); background: var(--bg-hover); }
-
-.secondary-pane-strip .pane .pane-layout-controls {
-  position: absolute;
-  z-index: 2;
-  top: calc(var(--pane-header-height) + var(--space-1));
-  right: var(--space-1);
-  display: none;
-  padding: var(--space-1);
-  background: var(--bg-raised);
-  border-radius: var(--radius-card);
-}
-
-.secondary-pane-strip .pane:hover:not(.collapsed) .pane-layout-controls,
-.secondary-pane-strip .pane.selected:not(.collapsed) .pane-layout-controls { display: flex; }
-
-.secondary-pane-strip .pane.collapsed {
-  flex-basis: var(--worker-collapsed-width);
-  height: var(--space-8);
-  min-height: var(--space-8);
-  align-self: flex-start;
-}
-.secondary-pane-strip .pane.collapsed > header { flex: 1; min-height: 0; padding-block: 0; }
-.secondary-pane-strip .pane.collapsed .terminal-mount { display: none; }
-
-/* Supervisors only by default (cas-6261): one quiet line stands where the
-   worker strip would be, with the single control that reveals workers. */
-.pane-grid.pane-layout.workers-hidden { grid-template-rows: minmax(0, 1fr) auto; }
-.pane-grid.pane-layout.workers-hidden .secondary-pane-strip { min-height: 0; align-items: center; }
-.hidden-workers {
-  display: flex;
-  flex: 1 0 100%;
-  min-height: var(--space-8);
-  margin: 0;
-  padding: 0 var(--space-2);
-  align-items: center;
-  gap: var(--space-3);
-  color: var(--text-mid);
-  font-size: var(--fs-xs);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.hidden-workers-reveal {
-  min-height: var(--button-compact-height);
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-hi);
-  background: var(--bg-raised);
-  border: var(--line-width) solid var(--line-subtle);
-  border-radius: var(--radius-pane);
-  font-size: var(--fs-xs);
-  letter-spacing: normal;
-  text-transform: none;
-}
-.hidden-workers-reveal:hover,
-.hidden-workers-reveal:focus-visible { background: var(--bg-hover); border-color: var(--line-strong); }
-
-.terminal-mount {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  background: var(--bg-terminal);
-}
-
-/* == Unit 4: Transcript reading column == */
-/* The reading view of a pane: the emulator's logical lines reflowed at UI text
-   size. It covers the grid rather than replacing it, so "Show terminal" is a
-   class toggle and never a remount. */
+/* == Raw output transcript == */
+/* The supervisor pane's emulator lines reflowed at UI text size, read-only,
+   in the Raw output drawer (cas-0546). */
 .transcript {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
+  position: relative;
   overflow: auto;
   overscroll-behavior: contain;
   padding: var(--space-2);
@@ -1163,59 +266,6 @@ main {
 
 .transcript-jump[hidden] { display: none; }
 
-.terminal-mount.transcript-active .t3-ghostty-canvas { visibility: hidden; }
-
-.terminal-search {
-  position: absolute;
-  z-index: 4;
-  top: calc(var(--pane-header-height) + var(--space-2));
-  right: var(--space-2);
-  display: grid;
-  grid-template-columns: minmax(120px, 220px) auto var(--button-compact-height);
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  color: var(--text-mid);
-  background: var(--bg-raised);
-  border-radius: var(--radius-card);
-  font-size: var(--fs-xs);
-}
-
-.terminal-search input {
-  min-width: 0;
-  height: var(--button-compact-height);
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-hi);
-  background: var(--bg-terminal);
-  border: var(--line-width) solid var(--line-subtle);
-  border-radius: var(--radius-card);
-}
-
-.terminal-search button { width: var(--button-compact-height); min-height: var(--button-compact-height); padding: 0; }
-
-.t3-ghostty-canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-  cursor: text;
-}
-
-.t3-ghostty-canvas.link { cursor: pointer; }
-
-.t3-ghostty-input {
-  position: absolute;
-  left: var(--space-1);
-  top: var(--space-1);
-  width: var(--line-width);
-  height: var(--line-width);
-  opacity: 0;
-  padding: 0;
-  border: 0;
-  resize: none;
-  pointer-events: none;
-}
-
-.t3-ghostty-scrollbar { display: none; }
 .empty { place-self: center; color: var(--text-mid); }
 
 /* == Unit 3: empty state == */
@@ -1243,7 +293,6 @@ main {
 .empty-hint { max-width: var(--terminal-state-width); color: var(--text-mid); }
 .empty-pane-slot .primary { width: auto; padding: 0 var(--space-4); }
 
-/* == End Unit 3: empty state == */
 /* == Unit 5: connection-state surfaces == */
 /* Connecting, failed and retry share one centred verdict surface. The
    lifecycle detail is an annotated timeline, not a spinner or a counter. */
@@ -1354,6 +403,10 @@ main {
 
 /* == Unit 4: Session disconnection outcome == */
 .terminal-disconnected-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
   position: absolute;
   z-index: 4;
   top: var(--space-2);
@@ -1368,6 +421,8 @@ main {
   font-size: var(--fs-meta);
   border-left: var(--rule-verdict) solid var(--state-warn);
 }
+.terminal-disconnected-banner .banner-text { flex: 1 1 12rem; }
+.terminal-disconnected-banner .banner-diagnose { flex: none; min-height: 44px; }
 
 /* cas-d15c: the pairing-lost banner carries Re-pair beside its sentence,
    since a phone hides the rail that otherwise offers it. */
@@ -1378,100 +433,6 @@ main {
 @media (max-width: 53rem), (pointer: coarse) {
   .terminal-disconnected-banner .banner-repair { min-height: 44px; }
 }
-
-/* Dims the terminal only. The conversation reading view lives inside the
-   same mount; fading it put its text at 2.2-3.3:1 during an outage (cas-3446).
-   The banner and the header already mark the session as not live. */
-.terminal-disconnected .terminal-mount:not(.conversation-active) { opacity: .4; }
-.context-panel {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: var(--machine-rail-width) minmax(0, 1fr);
-  overflow: hidden;
-  background: var(--bg-panel);
-}
-
-.context-panel.collapsed { grid-template-columns: var(--machine-rail-width); }
-.context-panel.collapsed .context-body { display: none; }
-
-.attention-rail {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1);
-  background: var(--bg-raised);
-}
-
-.mobile-message-toggle { display: none; }
-
-.attention-rail-counts {
-  display: grid;
-  place-items: center;
-  width: var(--button-height);
-  min-height: var(--button-height);
-  padding: var(--space-1);
-  background: var(--color-transparent);
-}
-
-/* An open panel already states its counts in the heading; the rail must not
-   print the same numbers a second time. */
-.context-panel:not(.collapsed) .attention-rail-counts { display: none; }
-
-.attention-rail .attention-counts--compact {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.attention-rail .attention-count { min-width: var(--space-6); padding: var(--space-1); }
-
-.context-body {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.context-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  flex: 0 0 var(--button-height);
-  padding: 0 var(--space-2);
-  background: var(--bg-panel);
-}
-
-.context-tabs button {
-  min-height: var(--button-height);
-  padding: 0 var(--space-2);
-  overflow: hidden;
-  color: var(--text-mid);
-  background: var(--color-transparent);
-  border-bottom: var(--line-width) solid var(--color-transparent);
-  border-radius: 0;
-  font-size: var(--fs-meta);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.context-tabs button[aria-selected="true"] {
-  color: var(--text-hi);
-  border-bottom-color: var(--line-strong);
-}
-
-/* The desktop rail carries its own collapse control; the phone panel closes
-   from its tab row instead of spending a 48px row on one chevron. */
-.context-panel-close { display: none; }
-
-.context-tab {
-  min-height: 0;
-  flex: 1;
-  padding: var(--space-2) var(--space-3) var(--space-3);
-  overflow: auto;
-}
-
-.context-tab[hidden] { display: none; }
-.status-context { display: flex; flex-direction: column; gap: var(--space-4); }
 
 /* == Unit 4: Attention timeline == */
 .attention-panel-header {
@@ -1492,45 +453,6 @@ main {
   font-weight: var(--weight-semibold);
 }
 
-.attention-counts {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--tracking-label);
-}
-
-.attention-count {
-  min-width: var(--space-6);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-pill);
-  text-align: center;
-}
-
-/* One badge, one surface. Tinting only critical and warning gave the rail two
-   badge treatments and left the info figure floating on the bar with none. */
-.attention-count { background: var(--bg-active); }
-.attention-count--critical { color: var(--state-crit); }
-.attention-count--warning { color: var(--state-warn); }
-.attention-count--info { color: var(--text-mid); }
-.attention-count--clear { color: var(--text-mid); }
-
-/* The rail's single labelled figure. Desktop keeps the per-severity column. */
-.attention-summary { display: none; }
-
-.attention-summary-label {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  font-weight: var(--weight-medium);
-  white-space: nowrap;
-}
-
-.attention-summary--critical .attention-summary-label { color: var(--state-crit); }
-.attention-summary--warning .attention-summary-label { color: var(--state-warn); }
-.attention-summary--info .attention-summary-label { color: var(--text-hi); }
-.attention-summary--clear .attention-summary-label { color: var(--text-mid); }
 .attention-dot--info { background: var(--text-mid); }
 .attention-dot--clear { background: var(--state-idle); }
 
@@ -1839,7 +761,7 @@ main {
 @media (prefers-reduced-motion: reduce) {
   .attention-item--new-critical,
   .attention-item--reclassified { animation: none; }
-  .machine-drawer { transition-property: opacity; }
+
   button { transition: none; }
   #toast { transform: none; transition-property: opacity; }
 }
@@ -1874,7 +796,11 @@ main {
 .status-agent > .fleet-ops { justify-items: stretch; }
 .status-agent > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
 .status-agent .status-line { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
-.status-agent > .fleet-ops > .fleet-ops-note { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+/* cas-d2df: the first line is at least as tall as the trigger's corner (its
+   top inset + height, less the row's top padding and grid gap), so the note,
+   menu and confirmation always start below the ⋯ button and use the row's
+   full width instead of reserving the button's width on every line. */
+.status-agent > .status-line { min-height: calc(var(--space-2) + var(--rail-item-min) - var(--space-3) - var(--space-1)); }
 .fleet-ops button:not(.primary), .fleet-ops-header button:not(.primary) { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
 .fleet-ops .fleet-ops-trigger { min-width: var(--rail-item-min); padding: 0; font-size: var(--fs-md); }
 .fleet-ops button[aria-disabled="true"], .fleet-ops-header button[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
@@ -1890,6 +816,9 @@ main {
 .fleet-ops-confirm-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .fleet-ops-progress, .fleet-ops-note, .fleet-ops-asked { margin: 0; color: var(--text-mid); }
 .fleet-ops-note--error, .fleet-ops-note--stale { color: var(--state-warn); }
+/* cas-d2df: the row's own identifier inside its note, in the header's mono face; a short one stays whole (fleet-ops-view.ts SUBJECT_WHOLE_MAX). */
+.fleet-ops-note-subject { font-family: var(--font-mono); }
+.fleet-ops-note-subject--whole { white-space: nowrap; }
 .fleet-ops-header { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-2); }
 .fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
@@ -1978,38 +907,10 @@ main {
   font-size: var(--fs-meta);
 }
 
-.status-context:has(.status-stale) #status-view { opacity: .62; }
-
-.drawer-pair { margin-top: var(--space-3); }
-
 .session-summary-status {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: var(--space-2);
-}
-
-.talk-supervisor {
-  display: flex;
-  flex: none;
-  width: auto;
-  min-height: 44px;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  margin: 0 var(--space-2) var(--space-2);
-}
-
-/* The composer is on screen, so the one-tap way to it is a second copy of the
-   same control. It returns the moment the panel or the tab changes. */
-.shell:has(.context-panel:not(.collapsed) [data-context-content="status"]:not([hidden])) .talk-supervisor { display: none; }
-/* The return control leads <main> in the DOM (first in the Tab order) and is
-   drawn at the foot of the workspace, where it has always been (cas-7eaf). */
-main > #conversation-return { order: 1; }
-
-.talk-supervisor small {
-  color: var(--text-mid);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
 }
 
 /* == Unit 4: Supervisor composer == */
@@ -2023,29 +924,10 @@ main > #conversation-return { order: 1; }
 
 .message h2 { margin: 0; font-size: var(--fs-md); }
 
-.operator-thread {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  background: var(--bg-raised);
-  border: var(--line-width) solid var(--line-strong);
-  border-radius: var(--radius-card);
-}
-
-.operator-thread-label {
-  color: var(--text-mid);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-
-.operator-attachment,
 .conversation-attachment {
   margin-top: var(--space-2);
 }
 
-.operator-attachment a,
 .conversation-attachment a {
   display: inline-flex;
   align-items: center;
@@ -2056,24 +938,6 @@ main > #conversation-return { order: 1; }
   color: inherit;
   text-decoration: underline;
 }
-
-.operator-reply {
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-panel);
-  border-left: calc(var(--line-width) * 3) solid var(--state-ok);
-  border-radius: var(--radius-card);
-}
-
-.operator-reply header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-2);
-  color: var(--text-mid);
-  font-size: var(--fs-xs);
-}
-
-.operator-reply header strong { color: var(--text-hi); }
-.operator-reply p { margin: var(--space-1) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .message textarea {
   width: 100%;
@@ -2151,7 +1015,6 @@ main > #conversation-return { order: 1; }
   #message-mic.listening { animation: none; }
 }
 
-.composer-status,
 .message-status,
 .message-delivery {
   margin: 0;
@@ -2176,12 +1039,6 @@ main > #conversation-return { order: 1; }
   text-wrap: pretty;
 }
 
-.control-disabled-reason {
-  margin: 0;
-  color: var(--state-warn);
-  font-size: var(--fs-meta);
-}
-
 .sr-only {
   position: absolute;
   width: var(--line-width);
@@ -2193,9 +1050,13 @@ main > #conversation-return { order: 1; }
 }
 
 /* == Unit 5: connection evidence ledger == */
-.connection-log {
+.connection-log, .connection-log[open] {
   width: min(var(--dialog-width), calc(100vw - var(--space-6)));
+  max-height: calc(100dvh - var(--space-6));
+  overflow: auto;
 }
+.connection-log-summary { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.connection-log-export { justify-self: start; min-height: 44px; }
 
 .connection-log section {
   display: grid;
@@ -2223,10 +1084,11 @@ main > #conversation-return { order: 1; }
 }
 
 .connection-log header button {
-  width: var(--space-8);
-  min-height: var(--space-8);
+  width: 44px;
+  min-height: 44px;
   padding: 0;
 }
+.connection-log header form { display: block; container-type: normal; overflow: visible; flex: 0 0 auto; padding: 0; margin: 0; }
 
 .connection-log pre {
   max-height: var(--connection-log-max-height);
@@ -2241,6 +1103,7 @@ main > #conversation-return { order: 1; }
   font-size: var(--fs-meta);
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* == Unit 5: pairing dialog == */
@@ -2303,8 +1166,7 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
-/* A long unbroken filter query wraps inside the dialog instead of running out of it (cas-a8db QA F01). */
-#session-picker-no-match { overflow-wrap: anywhere; }
+
 /* Journey F20: the Appearance row in effect carries a check and "Current". */
 .palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
 .palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2346,25 +1208,11 @@ dialog::backdrop { background: var(--overlay-backdrop); }
   /* Hover is a pointer cue, so it must not look like a frame (the focus ring)
      or a fill (the open session): underline the command's name instead. */
   .palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }
-  /* The focus ring is Highlight, so the open session cannot also be a
-     Highlight frame: it is filled instead, and its own ring flips to
-     HighlightText so focus still shows on the fill. Both are drawn at full
-     strength (a system colour can carry alpha). */
-  /* Each opaque restatement follows the plain system colour: engines without
-     relative colour (Chrome/Edge < 119, Firefox < 128, below the hub's floor
-     of 110/115) drop the second declaration and keep Highlight instead of
-     falling back to the author surface (cas-78c81 QA round 1, F1). */
   /* Forced colors would repaint an author ring in the system Highlight,
      which can carry alpha; opting the focused row out (with every colour
      restated as a system colour) keeps the ring at full strength. */
-  .palette-commands .palette-command:not(.session-picker-entry[aria-current="true"]):focus-visible { forced-color-adjust: none; color: CanvasText; background: Canvas; border-color: ButtonBorder; outline-color: Highlight; outline-color: color(from Highlight srgb r g b / 1); }
-  .palette-commands .palette-command:not(.session-picker-entry[aria-current="true"]):focus-visible * { color: CanvasText; background: transparent; }
-  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1); border-color: Highlight; border-color: color(from Highlight srgb r g b / 1); }
-  /* forced-color-adjust: none lets author surfaces through, so the global
-     button:hover background would replace the fill under HighlightText. */
-  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: Highlight; background: color(from Highlight srgb r g b / 1); }
-  .session-picker-entry[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
-  .palette-commands .session-picker-entry[aria-current="true"]:focus-visible { outline-color: HighlightText; }
+  .palette-commands .palette-command:focus-visible { forced-color-adjust: none; color: CanvasText; background: Canvas; border-color: ButtonBorder; outline-color: Highlight; outline-color: color(from Highlight srgb r g b / 1); }
+  .palette-commands .palette-command:focus-visible * { color: CanvasText; background: transparent; }
 }
 /* == End Unit 3: command palette == */
 
@@ -2690,6 +1538,9 @@ dialog form > *,
 /* Behind the disclosure the terms read as sentences, not eyebrows (cas-b2e4 F02). */
 .pair-technical .pair-details dt { text-transform: none; letter-spacing: normal; font-size: var(--fs-meta); }
 .pair-technical fieldset { margin: 0; }
+/* cas-5e53 F08: hub:admin consent sits in plain view beside the name fields. */
+.pair-admin-consent { margin: 0; grid-template-columns: 1fr; }
+.pair-admin-consent legend { font-weight: var(--weight-semibold); }
 
 .pair-alternative {
   color: var(--text-mid);
@@ -2733,196 +1584,14 @@ dialog form > *,
 
 #toast.visible { opacity: 1; transform: none; }
 
-/* == Unit 3: drawer visibility follows its explicit open control == */
-
+/* == Phone layout == */
 /* The phone rule, kept identical to PHONE_MEDIA_QUERY in viewport.ts. A
    width-only breakpoint is a narrow-window test, not a phone test: a rotated
    Pixel 7 is 915px wide, cleared 53rem, and got the three-column desktop
    console on a 412px-tall screen (report defect D5). The pointer clause keeps a
    desktop with a short window out of here. */
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  /* Every drawer/attention combination must be listed: the desktop
-     .shell.drawer-open.attention-collapsed rule is more specific than a bare
-     .shell here, and a media query adds no specificity of its own. Losing that
-     match rebuilt the phone as a three-column desktop grid the moment the
-     drawer opened, squeezing the terminal into a 14px column. */
-  .shell,
-  .shell.attention-collapsed,
-  .shell.drawer-open,
-  .shell.drawer-open.attention-collapsed,
-  .shell.drawer-open.attention-expanded {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
-    gap: 0;
-  }
-
-  /* The expanded context panel receives a row, so it never covers a terminal. */
-  .shell.attention-expanded,
-  .shell.drawer-open.attention-expanded {
-    grid-template-rows: minmax(0, 1fr) minmax(0, min(45dvh, var(--mobile-drawer-max-height))) calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
-  }
-
-  .shell.fleet-empty,
-  .shell.fleet-empty.attention-collapsed,
-  .shell.fleet-empty.attention-expanded {
-    grid-template-rows: minmax(0, 1fr);
-  }
-
-  .shell main { grid-column: 1; grid-row: 1; }
-  .machine-navigation { grid-column: 1; grid-row: 2; }
-  .shell.attention-expanded .machine-navigation { grid-row: 3; }
-
-  .machine-rail {
-    flex-direction: row;
-    width: 100%;
-    height: calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
-    box-sizing: border-box;
-    padding-bottom: env(safe-area-inset-bottom);
-    padding-right: calc(var(--mobile-context-pill-width) + var(--space-1));
-  }
-
-  .machine-rail nav {
-    flex-direction: row;
-    align-items: center;
-    gap: var(--space-2);
-    width: auto;
-    height: 100%;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  /* D7: one container treatment for the whole bar. Machines, every machine
-     chip, Pair, the attention summary and the envelope share this height,
-     padding, radius and surface, and none of them borrows --line-strong —
-     that token is the focused-pane border, and Pair is not a pane. */
-  .machine-rail .commander-mark,
-  .machine-rail .machine-icon,
-  .machine-rail .pair-machine,
-  .context-panel.collapsed .attention-rail-counts,
-  .context-panel.collapsed .mobile-message-toggle {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-2);
-    width: auto;
-    min-width: var(--rail-item-min);
-    min-height: var(--rail-item-min);
-    padding: 0 var(--space-2);
-    color: var(--text-hi);
-    background: var(--bg-raised);
-    border: 0;
-    border-radius: var(--radius-card);
-    font-size: var(--fs-meta);
-    font-weight: var(--weight-medium);
-  }
-
-  .machine-rail .pair-machine { margin: 0 var(--space-2) 0 auto; }
-  .machine-rail .pair-machine-label { display: inline; }
-  .machine-rail .commander-mark-label { display: inline; }
-  .machine-rail .machine-icon.active { background: var(--bg-active); }
-  .machine-rail .machine-icon .machine-initials { display: none; }
-
-  .machine-rail .machine-icon .machine-name {
-    display: inline;
-    max-width: 9ch;
-    overflow: hidden;
-    color: var(--text-mid);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .machine-rail .machine-icon.active .machine-name { color: var(--text-hi); }
-
-  /* Inline, so the chip's corner radius cannot slice the status dot (fig a1). */
-  .machine-rail .machine-icon .machine-state { position: static; }
-
-  /* Portrait keeps the bar to four labelled controls. Machines live in the
-     drawer this bar opens: chips for them here truncated "Attic Linux" to
-     "Atti" beside a scrollbar the moment a second machine was paired, and
-     the header already names the one that is open. */
-  .machine-rail nav { display: none; }
-  .machine-rail .commander-mark,
-  .machine-rail .pair-machine { flex: 1 1 0; }
-
-  .machine-drawer {
-    position: fixed;
-    inset: auto var(--space-2) calc(var(--machine-rail-width) + var(--space-2) + env(safe-area-inset-bottom)) var(--space-2);
-    width: auto;
-    height: min(58dvh, var(--mobile-drawer-max-height));
-    border-radius: var(--radius-pane);
-    opacity: 0;
-    transform: translateY(var(--space-3));
-  }
-
-  .machine-navigation.drawer-open .machine-drawer {
-    opacity: 1;
-    pointer-events: auto;
-    transform: translateY(0);
-  }
-
-  .session-header {
-    display: grid;
-    grid-template-columns: minmax(var(--mobile-header-chip-width), 1fr) auto auto minmax(0, auto);
-    gap: var(--space-1);
-    padding-inline: var(--space-2);
-  }
-
-  .session-header h1 { font-size: var(--fs-md); }
-
-  /* Switching session and stepping back are the two phone gestures this header
-     exists for, so they get the widest targets in it. */
-  .session-back { min-width: var(--button-height); }
-  .session-picker-toggle { padding-right: var(--space-2); }
-
-  .machine-chip { display: none; }
-
-  .mode-badge,
-  .connection-summary {
-    max-width: var(--mobile-header-chip-width);
-    min-height: var(--space-6);
-    padding: var(--space-1);
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .mode-badge { max-width: none; flex-shrink: 0; }
-
-  .session-header .actions { gap: var(--line-width); }
-
-  /* A 44px header leaves 36px for its controls; 32px was the smallest target
-     on the phone and the two the thumb uses most. */
-  .session-header .actions button,
-  .session-back,
-  .session-picker-toggle {
-    min-height: calc(var(--space-8) + var(--space-1));
-  }
-
-  .session-header .actions button {
-    padding: 0 var(--space-2);
-    font-size: var(--fs-xs);
-  }
-
-  .drawer-header button {
-    width: var(--button-height);
-    min-height: var(--button-height);
-  }
-
-  .remove-machine { min-height: var(--button-height); }
-
   .terminal-state { width: calc(100% - var(--space-4)); }
-  /* == Unit 3: phone fleet figure == */
-  .fleet-board { padding: var(--space-3) var(--space-1) var(--space-6); gap: var(--space-4); }
-  .fleet-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
-  .fleet-verdict { max-width: none; }
-  /* == End Unit 3: phone fleet == */
-
-  .talk-supervisor {
-    min-height: 48px;
-    margin: 0 var(--space-2) var(--space-2);
-  }
 
   /* A fixed label column leaves a phone barely 100px for a URL or a scope list,
      so the term stacks above its value instead of shredding it. */
@@ -2931,103 +1600,6 @@ dialog form > *,
     gap: var(--space-1);
   }
   .command-palette { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--toolbar-height)); margin-block: var(--space-2) auto; }
-  .terminal-search { right: var(--space-1); left: var(--space-1); grid-template-columns: minmax(0, 1fr) auto var(--button-compact-height); }
-
-  .context-panel,
-  .context-panel.collapsed {
-    position: fixed;
-    z-index: 6;
-    right: 0;
-    bottom: env(safe-area-inset-bottom);
-    display: grid;
-    width: var(--mobile-context-pill-width);
-    height: var(--machine-rail-width);
-    /* The collapsed pill floats over the rail. It must not paint a second
-       surface there — the seam in fig a1 is --bg-raised over --bg-panel — and
-       it must not spill its contents left across Pair (fig b1a). */
-    background: var(--color-transparent);
-    overflow: hidden;
-  }
-
-  /* Both collapsed cells stay on one row inside the pill: the attention summary
-     opens the panel, so the chevron would only duplicate a target the thumb
-     needs. Each cell carries the shared rail-item surface, so the pill reads as
-     two more controls on one bar rather than a panel laid over it. */
-  .context-panel.collapsed .attention-rail {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--space-1);
-    width: var(--mobile-context-pill-width);
-    height: var(--machine-rail-width);
-    padding: 0 var(--space-1);
-    background: var(--color-transparent);
-  }
-
-  .context-panel.collapsed .attention-rail .rail-control { display: none; }
-
-  /* One labelled figure on the phone; the per-severity column stays on desktop. */
-  .context-panel.collapsed .attention-summary {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-  }
-
-  .context-panel.collapsed .attention-counts--compact { display: none; }
-
-  .mobile-message-toggle {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0 var(--space-2);
-    color: var(--text-hi);
-    background: var(--bg-raised);
-    border-radius: var(--radius-card);
-    font-size: var(--fs-md);
-  }
-
-  .context-panel:not(.collapsed) {
-    position: static;
-    /* cas-bad9: expanded, the panel is a row of its own and needs no layer.
-       The pill's z-index 6 (above) made it a stacking context over the
-       machine navigation (5), so the open drawer slid under it and every
-       machine row below the first was covered. The landscape sheet sets its
-       own layer below. */
-    z-index: auto;
-    grid-column: 1;
-    grid-row: 2;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr);
-    width: auto;
-    height: 100%;
-    background: var(--bg-panel);
-  }
-
-  /* Open, the panel's rail is gone: the tabs row closes it, and the envelope
-     is the Workers & Tasks tab it would have opened. A 48px row holding one
-     chevron and one glyph above a 40px tab row was two rows of chrome for
-     one decision. */
-  .context-panel:not(.collapsed) .attention-rail { display: none; }
-
-  .context-tabs {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) var(--rail-item-min);
-    flex-basis: var(--machine-rail-width);
-    align-items: center;
-    padding-right: var(--space-1);
-  }
-
-  .context-panel-close {
-    display: grid;
-    place-items: center;
-    min-width: var(--rail-item-min);
-    min-height: var(--rail-item-min);
-    padding: 0;
-    color: var(--text-mid);
-    border-bottom: 0;
-    border-radius: var(--radius-card);
-    font-size: var(--fs-lg);
-  }
 
   /* Toasts span the top of a narrow screen, under the status bar. */
   #toast { left: var(--space-3); right: var(--space-3); top: calc(var(--space-3) + env(safe-area-inset-top)); max-width: none; }
@@ -3035,7 +1607,7 @@ dialog form > *,
      (56 px: 44 px targets + 6 px padding) so the back link, project and host
      stay readable (cas-002e). */
   body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
-  .context-body { min-height: 0; }
+
   /* == Unit 4: Phone attention and composer == */
   .attention-group-label { max-width: 100%; }
 
@@ -3046,283 +1618,30 @@ dialog form > *,
   #message-mic { grid-column: auto; }
 
   #message-keyboard { display: block; }
-
-
-  /* == Unit 4: Phone panes form a stacked ruled worker list == */
-  main .pane-grid.pane-layout { grid-template-rows: minmax(0, 1fr) auto; }
-  .pane-grid.pane-layout.workers-hidden .secondary-pane-strip { max-height: none; }
-  .hidden-workers { justify-content: space-between; padding-bottom: env(safe-area-inset-bottom); }
-  .hidden-workers-reveal { min-height: 44px; padding-inline: var(--space-3); }
-
-  .pane-grid.pane-layout .secondary-pane-strip {
-    flex-direction: column;
-    max-height: 40dvh;
-    gap: 0;
-    overflow-x: hidden;
-    overflow-y: auto;
-  }
-
-  .pane-grid.pane-layout .secondary-pane-strip .pane,
-  .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed {
-    flex: 0 0 auto;
-    width: 100%;
-    min-width: 0;
-    height: var(--space-8);
-    min-height: var(--space-8);
-    border-radius: 0;
-    border-bottom: var(--line-width) solid var(--line-subtle);
-  }
-
-  .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed .pane-header {
-    min-height: 0;
-    flex-basis: auto;
-    padding-block: 0;
-  }
-
-  /* Phone pane controls are icon-only, so every one of them needs a glyph and a
-     target the thumb can actually hit inside the 32px pane header. */
-  .pane-grid.pane-layout .pane-layout-controls button {
-    display: grid;
-    place-items: center;
-    min-width: var(--space-8);
-    min-height: var(--space-8);
-    padding: 0;
-    font-size: 0;
-  }
-  /* cas-7d25: Leave keeps its key beside the glyph on one line. */
-  .pane-grid.pane-layout .pane-layout-controls .pane-leave:not([hidden]) {
-    display: inline-flex;
-    align-items: center;
-    padding: 0 var(--space-1);
-    white-space: nowrap;
-  }
-
-  /* A compact viewport holds the PTY at 80 columns, so the true grid is wider
-     than the mount and pans instead of being redrawn at half its width. */
-  .terminal-mount { overflow-x: auto; }
-  .terminal-mount.transcript-active { overflow-x: hidden; }
-
-  /* A phone reorders by tapping a worker row to open it as primary; the three
-     reorder glyphs only ate the header the pane name needs. */
-  .pane-grid.pane-layout .pane-layout-controls .make-primary,
-  .pane-grid.pane-layout .pane-layout-controls .move-earlier,
-  .pane-grid.pane-layout .pane-layout-controls .move-later { display: none; }
-
-  .pane-grid.pane-layout .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
-  .pane-grid.pane-layout .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
-  .pane-grid.pane-layout .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
-  .pane-grid.pane-layout .make-primary::after { content: "★"; font-size: var(--fs-meta); }
-  .pane-grid.pane-layout .move-earlier::after { content: "←"; font-size: var(--fs-md); }
-  .pane-grid.pane-layout .move-later::after { content: "→"; font-size: var(--fs-md); }
-  .pane-role { display: none; }
 }
-/* A phone on its side. The portrait stack spends the scarce axis on chrome: a
-   48px bottom rail plus an attention row leaves a 412px-tall screen with less
-   than half its height for the terminal. Landscape puts the chrome on the long
-   edges instead — machines left, attention right, both 48px — and gives the
-   terminal every remaining pixel of height. Panels open over it, never beside
-   it. This block follows the compact block deliberately: the two share
-   selectors at equal specificity, so order is what resolves them. */
+/* A phone on its side. This block follows the compact block deliberately: the
+   two share selectors at equal specificity, so order is what resolves them. */
 @media (max-height: 30rem) and (pointer: coarse) {
-  .shell,
-  .shell.attention-collapsed,
-  .shell.attention-expanded,
-  .shell.drawer-open,
-  .shell.drawer-open.attention-collapsed,
-  .shell.drawer-open.attention-expanded {
-    grid-template-columns: calc(var(--machine-rail-width) + env(safe-area-inset-left)) minmax(0, 1fr) calc(var(--landscape-attention-rail-width) + env(safe-area-inset-right));
-    grid-template-rows: minmax(0, 1fr);
-    gap: 0;
-  }
-
-  .shell.fleet-empty,
-  .shell.fleet-empty.attention-collapsed,
-  .shell.fleet-empty.attention-expanded {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr);
-  }
-
-  .shell main { grid-column: 2; grid-row: 1; }
-
-  /* An unpaired Commander hides both rails, so its canvas owns the only column.
-     Leaving main in column 2 conjured an implicit second track and split a
-     915px screen into 467px of nothing and 448px of content. */
-  .shell.fleet-empty main,
-  .shell.fleet-empty.attention-collapsed main,
-  .shell.fleet-empty.attention-expanded main { grid-column: 1; }
-
-  .machine-navigation,
-  .shell.attention-expanded .machine-navigation {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  /* The rail is a column again, but it keeps the phone's 44px targets and drops
-     the labels: horizontal room is what landscape has, height is not. */
-  .machine-rail {
-    flex-direction: column;
-    width: 100%;
-    height: 100%;
-    padding: var(--space-1);
-    padding-left: calc(var(--space-1) + env(safe-area-inset-left));
-    padding-right: var(--space-1);
-    padding-bottom: var(--space-1);
-  }
-
-  /* Landscape has the height for machine tiles again, as initials. */
-  .machine-rail nav {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    width: 100%;
-    height: auto;
-    overflow-x: hidden;
-    overflow-y: auto;
-  }
-
-  .machine-rail .commander-mark,
-  .machine-rail .machine-icon,
-  .machine-rail .pair-machine {
-    width: 100%;
-    padding: 0;
-  }
-
-  .machine-rail .pair-machine { margin: 0; }
-  .machine-rail .commander-mark-label,
-  .machine-rail .pair-machine-label,
-  .machine-rail .machine-icon .machine-name { display: none; }
-  .machine-rail .machine-icon .machine-initials { display: inline; }
-
-  /* Drawers open from the edge they belong to. A bottom sheet here would cover
-     the terminal it was opened to navigate. */
-  .machine-drawer {
-    inset: var(--space-2) auto var(--space-2) calc(var(--machine-rail-width) + var(--space-1) + env(safe-area-inset-left));
-    width: min(var(--machine-drawer-width), 60vw);
-    height: auto;
-    transform: translateX(calc(-1 * var(--space-3)));
-  }
-
-  .machine-navigation.drawer-open .machine-drawer { transform: translateX(0); }
-
-  /* The collapsed context panel is the right edge, mirroring the machine rail,
-     so the attention count and the composer keep a fixed home in both
-     orientations instead of floating over the terminal's corner. */
-  .context-panel.collapsed {
-    position: static;
-    grid-column: 3;
-    grid-row: 1;
-    /* The panel's own 48px rail track would leave the labelled count in a
-       column narrower than the label. Here the rail is the whole panel. */
-    grid-template-columns: minmax(0, 1fr);
-    width: 100%;
-    height: 100%;
-    padding-right: env(safe-area-inset-right);
-    background: var(--bg-panel);
-    overflow: visible;
-  }
-
-  .context-panel.collapsed .attention-rail {
-    flex-direction: column;
-    justify-content: flex-start;
-    gap: var(--space-1);
-    width: 100%;
-    height: 100%;
-    padding: var(--space-1);
-  }
-
-  /* One labelled figure, kept labelled: the phone rail's whole point (D8) is
-     that a bare coloured number tells an operator nothing. */
-  .context-panel.collapsed .attention-rail-counts,
-  .context-panel.collapsed .mobile-message-toggle {
-    width: 100%;
-    min-height: var(--rail-item-min);
-    padding: 0 var(--space-1);
-    overflow: hidden;
-  }
-
-  .context-panel.collapsed .attention-summary-label {
-    overflow: hidden;
-    font-size: var(--fs-xs);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* Expanded, it is a sheet over the terminal. Taking a row instead would leave
-     a 412px screen with a terminal the height of two lines. */
-  .context-panel:not(.collapsed) {
-    position: fixed;
-    z-index: 6;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: auto;
-    grid-column: auto;
-    grid-row: auto;
-    grid-template-rows: minmax(0, 1fr);
-    width: min(var(--context-panel-width), 60vw);
-    height: 100dvh;
-    padding-right: env(safe-area-inset-right);
-    background: var(--bg-panel);
-  }
-
-  /* The header has 819px, not 1400: the chord trigger has no phone equivalent
-     and its width belongs to the two controls a thumb actually uses. Without
-     this the actions overflowed under the attention rail and Interrupt was
-     sliced in half. */
-  /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
-  .session-header .actions { gap: var(--space-1); }
-  .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
-
-  /* Nothing is stacked above a bottom rail here, so the composer stops
-     reserving room for one. */
+  /* Nothing is stacked below the composer here, so it stops reserving the
+     safe-area room the portrait layout keeps. */
   .message { padding-bottom: 0; }
-
-  /* A worker strip that keeps 40dvh of a 412px screen leaves the supervisor
-     terminal shorter than the strip below it. */
-  .pane-grid.pane-layout .secondary-pane-strip { max-height: 30dvh; }
-  .session-header { padding-inline: var(--space-1); }
 }
 
-@media (max-width: 500px) {
-  .session-header { grid-template-columns: minmax(48px, 1fr) auto auto; }
-  .session-header h1 { font-size: var(--fs-meta); }
-  /* Full words or no chip: OBS / Ctrl / Int made a first-time Pixel pass read
-     like a debug toolbar. The detailed status remains in the machine drawer. */
-  .machine-chip, .mode-badge, .connection-summary { display: none; }
-  /* The ⌘K chord has no phone equivalent; its width belongs to the two controls
-     a thumb actually uses, which stay wide enough to hit. */
-  /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
-  .session-header .actions { gap: var(--space-1); }
-  .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
-}
-
-/* == Unit 3: single labelled rail figure == */
-.attention-rail-counts .attention-summary { display: grid; justify-items: center; gap: var(--space-1); }
-.attention-rail-counts { height: auto; }
-.attention-rail-counts .attention-summary-label { white-space: normal; overflow-wrap: anywhere; text-align: center; }
-/* == End Unit 3: single labelled rail figure == */
-
-/* == Unit 3: print every text region; terminal canvases become labelled wells == */
+/* == Unit 3: print every text region == */
 @media print {
   html, body, #app { height: auto; overflow: visible; }
-  .shell, .shell.drawer-open, .shell.attention-collapsed, .shell.attention-expanded { display: block; height: auto; overflow: visible; }
-  .shell main, .pane-grid, .pane, .pane-body, .context-body, .context-tab, .transcript, .transcript-line, .attention-detail, .connection-log, .connection-log pre, .pair-details, .fleet-board, .fleet-plot-scroll { height: auto; max-height: none; overflow: visible; }
-  .context-panel, .context-panel.collapsed { position: static; display: block; width: auto; height: auto; max-height: none; overflow: visible; }
-  .context-panel.collapsed .context-body { display: block; }
+
+  .pane-grid, .transcript, .transcript-line, .attention-detail, .connection-log, .connection-log pre, .pair-details { height: auto; max-height: none; overflow: visible; }
+
   .transcript-line, .connection-log pre, .attention-payload pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .machine-navigation, .attention-rail { position: static; width: auto; height: auto; overflow: visible; }
-  .machine-rail { flex-direction: row; width: auto; height: auto; }
+
   #toast.visible { position: static; transform: none; }
-  .terminal-mount { min-height: var(--space-12); height: auto; overflow: visible; border: var(--line-width) solid var(--text-mid); }
-  .terminal-mount::before { content: "Terminal output — interactive canvas; open Transcript to print text."; display: block; padding: var(--space-3); color: var(--text-hi); background: var(--bg-terminal); font: var(--fs-meta)/1.38 var(--font-mono); }
-  .terminal-mount canvas, .terminal-mount textarea { display: none; }
+
   dialog[open] { position: static; max-height: none; overflow: visible; }
 }
 /* == End Unit 3: print == */
 
-/* Cassy Cloud: project-first conversations; terminal rendering is an alternate. */
+/* Cassy Cloud: project-first conversations. */
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
@@ -3444,9 +1763,20 @@ dialog form > *,
 /* Journey F17: where the list is on screen beside the thread, "‹ Conversations"
    is a step that goes nowhere; the phone layout below shows it again. */
 #conversation-back { display: none; }
-#conversation-terminal { margin-inline-start: auto; }
+
 .conversation-topline .cloud-brand { display: none; }
 .conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
+/* cas-0546: the conversation's own actions — Raw output and Interrupt —
+   on the row above the identity. Unavailable, they stay focusable and in
+   full ink (the global aria-disabled fade would put them below AA), marked
+   by a dashed edge; their reason is their description. */
+.conversation-header-actions { display: inline-flex; align-items: center; gap: var(--space-2); margin-inline-start: auto; }
+.conversation-topline .conversation-action { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); white-space: nowrap; }
+.conversation-topline .conversation-action:hover:not([aria-disabled="true"]) { background: var(--bg-hover); }
+.conversation-topline .conversation-action:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.conversation-action .action-icon { width: 16px; height: 16px; flex: none; }
+.conversation-topline .conversation-interrupt { border-color: currentColor; color: var(--state-crit); }
+.conversation-topline .conversation-action[aria-disabled="true"] { opacity: 1; border-style: dashed; border-color: var(--line-strong); color: var(--ink-mid); cursor: not-allowed; }
 .conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
 .conversation-identity .conversation-avatar { flex: none; }
 .conversation-identity .id { min-width: 0; }
@@ -3459,7 +1789,7 @@ dialog form > *,
 .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* cas-766c: the machine name says where a conversation runs, so it holds its
    place and the generated codename yields: the machine's OS word goes first
-   (.os-dropped); then the codename shrinks (its shrink weight dwarfs the
+   (fitMachineLine marks it .sr-only, so it is still heard); then the codename shrinks (its shrink weight dwarfs the
    machine's) down to 8ch while a long machine name keeps 16ch
    (.machine-long); then the codename steps aside (.codename-squeezed) and
    the machine ellipsises alone. The title keeps the whole line
@@ -3471,19 +1801,14 @@ dialog form > *,
 .conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
 /* cas-8526: what steps aside is hidden from sight only (the .sr-only
    technique), never display:none, so the line is heard whole at any width. */
-.conversation-identity .host-where.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
-.conversation-pane-slot .primary-pane-slot { height: 100%; }
-.conversation-pane-slot .secondary-pane-strip, .conversation-pane-slot .pane-header { display: none; }
-.conversation-pane-slot .pane { display: block; height: 100%; border: 0; border-radius: 0; background: var(--bg-root); color: var(--text-hi); }
-.conversation-pane-slot .terminal-mount { height: 100%; padding: 0; background: var(--bg-root); color: var(--text-hi); overflow: hidden; }
-/* Keep the terminal mounted and its grid intact, but exclude its hidden
-   descendants from the reading surface's scroll geometry (cas-ff3d). */
-.conversation-active > :not(.conversation-reading) { display: none; }
+.conversation-pane-slot .pane-grid { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
+/* The thread's own slot beside the hidden pane host (cas-0546). */
+.conversation-mount { min-height: 0; min-width: 0; }
+.conversation-pane-slot .conversation-thread-slot { height: 100%; min-height: 0; }
 
 /* ---- Pebble thread (cas-d167) --------------------------------------------
  * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:
@@ -3543,6 +1868,7 @@ dialog form > *,
 .thread .bub.receipt .receipt-text { min-width: 0; }
 .thread .tick { width: 15px; height: 15px; margin-top: 4px; color: var(--state-ok); flex: none; display: block; }
 .thread .conversation-delivery { display: block; margin-top: 6px; font-size: 12px; opacity: 0.85; }
+.thread .reply-storage-receipt { display: block; margin-top: 6px; color: var(--ink); font-size: 12px; }
 /* P8 (cas-b1ee): a refused send looks refused, not delivered. No fill, a
  * dashed critical outline (--crit-bg on --canvas ≥5.9:1 both schemes), body
  * in --ink, a 13px semibold "Not sent" lead with a warning glyph, and Edit /
@@ -3826,7 +2152,6 @@ button.chip:disabled { cursor: default; }
 .thread .empty .proj2.machine-long > .proj2-machine { min-width: 16ch; }
 .thread .empty .proj2-sep { flex: none; white-space: pre; }
 .thread .empty .proj2-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
-.thread .empty .proj2.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .thread .empty .proj2.codename-squeezed > .proj2-machine { min-width: 0; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
@@ -3896,9 +2221,9 @@ button.chip:disabled { cursor: default; }
 /* line-height 1.4 keeps the glyphs' own box inside the clipping box, so a
    name that fits is never counted as clipped (cas-1334 QA F1). */
 .conversation-composer .send-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
-.conversation-composer .control-disabled-reason { display: none; }
-.conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
-.conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
+
+.conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
+.conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
 /* Auto-placed across the composer: the status row when that is empty,
    otherwise its own row beneath, never on top of a status (cas-adfc). */
 .conversation-composer .message-draft-note { grid-column: 1 / -1; }
@@ -3921,7 +2246,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .context-attachment .context-text { grid-area: name; min-width: 0; overflow-wrap: anywhere; }
 .conversation-context .context-meta { grid-area: meta; color: var(--ink-mid); font-size: 12px; }
 .conversation-context .context-meta:empty { display: none; }
-.conversation-context .context-tab { padding: 0; }
+
 /* cas-5c22: the badge and the sheet's Close belong to the phone. */
 #conversation-attention, .conversation-context .context-sheet-close { display: none; }
 .conversation-context .workers { display: none; }
@@ -3973,22 +2298,31 @@ button.chip:disabled { cursor: default; }
   .conversation-shell.thread-open .conversation-main { display: flex; height: 100%; }
   /* One-row phone thread header (cas-1776): a 40px "‹" back target, the
      identity (36px avatar, codename ellipsised beside its badge, host line
-     beneath) and a text-only "Terminal". The lockup stays on the list screen
-     only (DESIGN.md §Brand). The topline dissolves into the heading grid so
-     its two buttons flank the identity on the same row. */
+     beneath) and the conversation's actions (Raw output as its icon,
+     Interrupt with its word). The lockup stays on the list screen only
+     (DESIGN.md §Brand). The topline dissolves into the heading grid so its
+     buttons flank the identity on the same row. */
   .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-1); padding: 6px var(--space-2) 6px var(--space-1); }
   .conversation-topline { display: contents; }
   .conversation-topline .cloud-brand { display: none; }
   #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
   #conversation-back .back-glyph { font: var(--weight-regular) 30px/1 var(--font-ui); }
-  #conversation-back .back-label, #conversation-terminal .terminal-suffix { display: none; } /* aria-label keeps the full name */
+  #conversation-back .back-label { display: none; } /* aria-label keeps the full name */
   .conversation-identity { grid-column: 2; grid-row: 1; gap: 10px; }
   .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
-  #conversation-terminal { grid-column: 3; grid-row: 1; min-height: 44px; padding: 0 var(--space-2); background: var(--color-transparent); color: var(--ink-mid); font-size: var(--fs-xs); }
+  /* The actions always take the last column, whichever others show. */
+  .conversation-header-actions { grid-column: -2 / -1; grid-row: 1; gap: 4px; margin: 0; }
+  .conversation-topline .conversation-action { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 10px; font-size: var(--fs-xs); }
+  #conversation-raw-output { padding: 0; }
+  #conversation-raw-output .action-label { display: none; } /* aria-label keeps the name */
+  /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
+  #conversation-interrupt { padding: 0 var(--space-2); }
+  #conversation-interrupt .action-icon { display: none; }
+
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */
   .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-terminal { grid-column: 4; }
+
   #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
   #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
@@ -3996,7 +2330,7 @@ button.chip:disabled { cursor: default; }
   .conversation-shell.thread-open.attention-sheet-open > .conversation-context { display: block; position: fixed; inset: 0; z-index: 20; padding: var(--space-4) var(--space-4) max(var(--space-6), env(safe-area-inset-bottom)); border: 0; background: var(--bg-root); overflow-y: auto; }
   .attention-sheet-open > .conversation-context .context-section:not([data-section="attention"]) { display: none; }
   .attention-sheet-open > .conversation-context .context-sheet-close { display: flex; align-items: center; justify-content: center; margin: 0 0 var(--space-2) auto; width: 44px; height: 44px; padding: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-regular) 26px/1 var(--font-ui); }
-  #conversation-back:hover:not(:disabled), #conversation-terminal:hover:not(:disabled) { background: var(--bg-hover); }
+  #conversation-back:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-identity h1 { flex-wrap: nowrap; }
   .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
   .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
@@ -4022,13 +2356,11 @@ button.chip:disabled { cursor: default; }
   /* 4px of the 19px inset is the tint edge (P9). */
   .obj.t-a .obj-body { padding-left: 15px; }
 }
-/* Below 500px the meta line is a touch smaller and Terminal a touch narrower,
-   so a generated codename ("patient-pelican-9") fits beside its machine more
+/* Below 500px the meta line is a touch smaller, so a generated codename ("patient-pelican-9") fits beside its machine more
    often. The OS word goes at any width once the line is short of room
    (cas-766c, fitMachineLine). After the phone block so it wins the cascade. */
 @media (max-width: 500px) {
   .conversation-identity .conversation-host { font-size: 11.5px; }
-  #conversation-terminal { padding: 0 6px; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }
@@ -4047,8 +2379,6 @@ button.chip:disabled { cursor: default; }
 /* cas-a474: an agent row the operator can act on names its worker; the ⋯ menu
    would otherwise be the only place the name appears. */
 .conversation-context .status-agent .status-line > .status-identifier:first-child { display: inline; }
-
-#conversation-return { flex: none; white-space: nowrap; }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -4088,8 +2418,7 @@ button.chip:disabled { cursor: default; }
 .fleet-permission-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
 /* cas-d382 QA F01: Copy command is one line, beside or under the command, never wrapped. */
 .fleet-permission-command .fleet-permission-copy { flex: none; white-space: nowrap; }
-.commander-mark .cloud-brand > span { display: none; }
-.commander-mark .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
+
 #pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }
 .conversation-sidebar > footer { flex-shrink: 0; padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
 @media (max-height: 30rem) {
@@ -4315,19 +2644,13 @@ button.chip:disabled { cursor: default; }
 .thread .earlier-turn b { font-weight: var(--weight-semibold); color: var(--ink); }
 .thread .earlier-turn time { color: var(--ink-soft); font: var(--weight-regular) 11px/1.3 var(--font-mono); }
 .thread .earlier-turn p { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-/* cas-010f: activity and the way into Terminal view share one quiet line;
-   Terminal view is a link-weight control named as the header names it. */
+/* cas-010f: the session's last activity, one quiet line under the card. */
 .thread .empty .empty-foot { margin: 0; color: var(--ink-mid); font: var(--weight-regular) 12px/1.4 var(--font-ui); overflow-wrap: anywhere; }
 .thread .empty .empty-activity { font-family: var(--font-mono); }
-.thread .empty .empty-foot-sep { margin: 0 0.5em; }
-.thread .empty .empty-terminal { display: inline-flex; align-items: center; min-height: 24px; padding: 0 2px; border: 0; background: none; color: var(--ink-mid); font: inherit; text-decoration: underline; text-decoration-color: var(--line-subtle); text-underline-offset: 3px; cursor: pointer; }
-.thread .empty .empty-terminal:hover { color: var(--ink); text-decoration-color: currentColor; }
-.thread .empty .empty-terminal:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
-/* cas-6b75: on a phone or any coarse pointer, Terminal view is a full
-   44 px target; the line centres the activity text on it. */
+
+/* On a phone or any coarse pointer the line centres under the card. */
 @media (max-width: 53rem), (pointer: coarse) {
   .thread .empty .empty-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; }
-  .thread .empty .empty-terminal { min-height: 44px; min-width: 44px; padding: 0 var(--space-2); }
 }
 @media (max-width: 720px) {
   .thread .earlier-sessions { margin: 10px 14px 0; }
@@ -4459,10 +2782,117 @@ button.chip:disabled { cursor: default; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-heading { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
   #conversation-fleet { grid-column: 3; grid-row: 1; }
-  #conversation-terminal { grid-column: 4; }
+
   .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto auto; }
   .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-fleet { grid-column: 4; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-terminal { grid-column: 5; }
+
   .fleet-ops-picker { display: grid; gap: var(--space-3); }
   .fleet-ops-picker [role="menuitem"][hidden], .fleet-ops-no-match[hidden], #fleet-phone-undo[hidden] { display: none; }
 }
+
+/* == Raw output drawer (cas-0546) ==
+   The supervisor's terminal, as read-only text: a side sheet on a desktop, a
+   bottom sheet on a phone. The chrome follows the scheme; the output keeps
+   the terminal's own dark well, where its colours were chosen to read. */
+.raw-output-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(640px, 100vw); max-width: none; height: 100dvh; max-height: none; box-sizing: border-box; flex-direction: column; padding: 0; border: 0; border-left: var(--line-width) solid var(--line-strong); border-radius: 0; background: var(--sheet-bg); color: var(--ink); box-shadow: var(--lift-strong); }
+.raw-output-drawer:not([open]) { display: none; }
+.raw-output-drawer[open] { display: flex; }
+.raw-output-drawer::backdrop { background: var(--overlay-backdrop); }
+.raw-output-header { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4) var(--space-4) var(--space-3); border-bottom: var(--line-width) solid var(--line-subtle); }
+.raw-output-heading { flex: 1; min-width: 0; }
+.raw-output-drawer h2 { margin: 0; color: var(--ink); font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); }
+.raw-output-drawer .raw-output-subject { margin: 4px 0 0; color: var(--ink-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.raw-output-close { display: flex; align-items: center; justify-content: center; flex: none; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-regular) 26px/1 var(--font-ui); }
+.raw-output-body { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--bg-terminal); font: var(--fs-terminal)/var(--line-terminal) var(--font-mono); }
+.raw-output-body .transcript { flex: 1; min-height: 0; overflow: auto; }
+.raw-output-body .transcript:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+.raw-output-drawer .raw-output-empty { margin: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--text-mid); font: var(--weight-regular) var(--fs-meta)/1.4 var(--font-ui); }
+.raw-output-drawer .raw-output-empty[hidden] { display: none; }
+@media (max-width: 53rem) {
+  .raw-output-drawer { inset: auto 0 0 0; width: 100vw; height: min(85dvh, var(--keyboard-viewport-height, 100dvh)); border-left: 0; border-top: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane) var(--radius-pane) 0 0; padding-bottom: env(safe-area-inset-bottom); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .raw-output-drawer[open] { animation: raw-output-in 160ms ease-out; }
+}
+@media (prefers-reduced-motion: no-preference) and (max-width: 53rem) {
+  .raw-output-drawer[open] { animation-name: raw-output-up; }
+}
+/* Opacity only: the sheet is pinned to the viewport edge, so a slide would carry it past that edge. */
+@keyframes raw-output-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes raw-output-up { from { opacity: 0; } to { opacity: 1; } }
+@media (forced-colors: active) {
+  .raw-output-drawer { border-color: CanvasText; }
+  .conversation-topline .conversation-action { border-color: ButtonText; }
+  .conversation-topline .conversation-action:focus-visible { outline-color: Highlight; }
+}
+.installation-inventory-body { display: grid; min-height: 0; overflow-y: auto; gap: var(--space-4); padding: var(--space-3); }
+.installation-inventory-list { display: grid; gap: 1.25rem; }
+.installation-inventory-row { display: grid; gap: .75rem; border-top: var(--line-width) solid var(--line-subtle); padding-top: 1rem; }
+.installation-inventory-row h3 { margin: 0; font-size: var(--fs-md); }
+.installation-inventory-row code, .installation-inventory-row dd { overflow-wrap: anywhere; }
+.installation-inventory-row button { justify-self: start; }
+/* Conversation progress is prose in a narrow rail, including unbroken IDs. */
+#status-view, .status-row { min-width: 0; max-width: 100%; }
+.status-row { box-sizing: border-box; overflow-wrap: anywhere; }
+.status-line .status-identifier { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.status-chip { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-family: var(--font-ui); letter-spacing: normal; text-transform: none; }
+.conversation-context .status-activity .status-identifier { display: inline; }
+
+/* == cas-9b7d: Operator inbox dialog == */
+#operator-inbox-dialog[open] { width: min(40rem, calc(100vw - var(--space-6))); }
+.operator-inbox-body { display: flex; flex-direction: column; gap: var(--space-3); min-height: 0; overflow: auto; }
+.operator-inbox-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.operator-inbox-heading h2 { font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
+.operator-inbox-lead { color: inherit; }
+.operator-inbox-warning, .operator-inbox-status { color: var(--text-mid); border-left: 3px solid currentColor; padding-left: var(--space-2); }
+.operator-inbox-signin, .operator-inbox-approval, .operator-inbox-ready, .operator-inbox-thread-view { display: flex; flex-direction: column; gap: var(--space-3); }
+.operator-inbox-code { align-self: flex-start; }
+.operator-inbox-threads, .operator-inbox-turns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.operator-inbox-thread { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-3); text-align: left; }
+.operator-inbox-thread .operator-inbox-preview { grid-column: 1; color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operator-inbox-thread time { grid-column: 2; grid-row: 1; color: var(--text-mid); }
+/* QA F01 (round 1): the thread speaks Commander's conversation language.
+ * Bodies are bubbles in the thread's own inks (supervisor left on --sup-bg,
+ * you right on --you-bubble-bg); author and age stay metadata in --ink-mid;
+ * the reply's machine state is a semibold state line with a mark, not a
+ * caption. `dialog p` is muted globally, so the bubbles restate their ink. */
+.operator-inbox { color: var(--ink); }
+.operator-inbox-thread strong { color: var(--ink); font-weight: var(--weight-semibold); }
+.operator-inbox-turns { gap: 16px; padding-block: var(--space-2); }
+.operator-inbox-turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 85%; min-width: 0; }
+.operator-inbox-message, .operator-inbox-command { align-self: flex-end; align-items: flex-end; }
+.operator-inbox-author { padding: 0 6px; font: var(--weight-medium) 12px/1.3 var(--font-ui); color: var(--ink-mid); }
+.operator-inbox-turn time { padding: 2px 6px 0; font-size: 12px; color: var(--ink-mid); }
+.operator-inbox-bubble { max-width: 100%; min-width: 0; margin: 0; padding: 12px 19px; overflow-wrap: anywhere; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift-sup); font-size: var(--fs-base); line-height: 1.45; }
+dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit; }
+.operator-inbox-reply .operator-inbox-bubble { color: var(--sup-fg); }
+.operator-inbox-message .operator-inbox-bubble, .operator-inbox-command .operator-inbox-bubble { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; white-space: pre-wrap; }
+.operator-inbox-bubble p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.operator-inbox-bubble p + p { margin-top: 8px; }
+.operator-inbox-bubble .markdown-heading { font-weight: var(--weight-semibold); }
+.operator-inbox-bubble .markdown-list { margin: 8px 0 0; padding-inline-start: 1.35em; }
+.operator-inbox-bubble .markdown-list:first-child { margin-top: 0; }
+.operator-inbox-bubble .markdown-inline-code { padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, currentColor 11%, transparent); font: var(--weight-medium) 0.9em/1.35 var(--font-mono); }
+.operator-inbox-bubble .markdown-code { max-width: 100%; margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--sheet-bg); color: var(--ink); font: var(--weight-regular) 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.operator-inbox-bubble .markdown-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.operator-inbox-command-state { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 0; font: var(--weight-semibold) 13px/1.3 var(--font-ui); color: var(--ink); }
+.operator-inbox-command-state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; border: 2px solid currentColor; }
+.operator-inbox-command-state:is([data-state="pending_machine"], [data-state="reserved"], [data-state="sealing"], [data-state="submitting"]) { color: var(--warn-text); }
+.operator-inbox-command-state[data-state="accepted"] { color: var(--state-ok); }
+.operator-inbox-command-state[data-state="accepted"]::before { background: currentColor; }
+.operator-inbox-command-state:is([data-state="rejected_by_machine"], [data-state="refused"], [data-state="expired"]) { color: var(--crit-bg); }
+.operator-inbox-command-state[data-state="cancelled"] { color: var(--ink-mid); font-weight: var(--weight-medium); }
+.operator-inbox-back { align-self: flex-start; min-height: 32px; padding: 0 12px; border-radius: var(--radius-pill); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+.operator-inbox-thread-view h3 { margin: 0; font: var(--weight-semibold) var(--fs-md)/1.25 var(--font-ui); color: var(--ink); }
+/* QA F03: a withheld envelope is named once, quietly, above the list. */
+.operator-inbox-withheld { color: var(--ink-mid); font-size: var(--fs-xs); }
+@media (forced-colors: active) {
+  .operator-inbox-bubble { border: 1px solid CanvasText; }
+  .operator-inbox-command-state::before { forced-color-adjust: none; border-color: CanvasText; }
+}
+.operator-inbox-composer { display: flex; flex-direction: column; gap: var(--space-2); }
+.operator-inbox-composer textarea { width: 100%; font: inherit; }
+.operator-inbox-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--text-mid); font-size: var(--fs-xs); }
+.conversation-welcome-inbox { margin-top: var(--space-3); }
+.link-button { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+#inbox-toggle { white-space: nowrap; }

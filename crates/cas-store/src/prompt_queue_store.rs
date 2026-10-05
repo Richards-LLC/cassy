@@ -13,7 +13,23 @@ use std::sync::{Arc, Mutex};
 use crate::recording_store::capture_message_event;
 use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::NotificationPriority;
+mod device_receipts;
+pub use device_receipts::OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS;
 use crate::{Result, StoreError};
+
+mod operator_cloud;
+pub use operator_cloud::{
+    AdmissionOutcome, OperatorCommandAdmission,
+    OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
+    OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
+    session_routing_id,
+};
+mod operator_delivery;
+pub use operator_delivery::{
+    OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OperatorDeliveryClaim, OperatorDeliveryEvent,
+    OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorRelayReceipt,
+    OperatorTurn, OperatorTurnMetadata,
+};
 
 /// Retry policy for daemon-owned prompt delivery.
 ///
@@ -1632,6 +1648,10 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue>;
 
+    /// Record a complete operator turn and its immutable local outbox event in
+    /// one transaction. Display labels never establish a cloud audience.
+    fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome>;
+
     /// Queue one Commander message with its hub-authenticated operator stamp
     /// (cas-e8df). The origin is derived from the stamp — `PairedDevice` when
     /// verified, `Unattributed` otherwise — never from `source` or the
@@ -2220,6 +2240,9 @@ pub trait PromptQueueStore: Send + Sync {
     /// Authoritative full transport handoff (all intended recipients Ok).
     /// Atomically sets `transport_delivered_at` + stage Delivered + `processed_at`.
     fn mark_transport_delivered(&self, prompt_id: i64) -> Result<()>;
+
+    /// One authenticated device committed the reply locally. Never marks read.
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
 
     /// Broadcast outcome for `all_workers` (attempted/succeeded/failed counts).
     ///
@@ -3064,6 +3087,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(PROMPT_QUEUE_SCHEMA)?;
+            for sql in OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS {
+                conn.execute(sql, [])?;
+            }
             let first_lifecycle_migration =
                 !crate::shared_db::column_exists(&conn, "prompt_queue", "highest_stage");
 
@@ -3188,6 +3214,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
             conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
             conn.execute_batch(PROMPT_QUEUE_SESSION_HISTORY_INDEX)?;
+            for statement in OPERATOR_DELIVERY_SCHEMA_STATEMENTS {
+                conn.execute_batch(statement)?;
+            }
+            for statement in OPERATOR_CLOUD_SCHEMA_STATEMENTS {
+                conn.execute_batch(statement)?;
+            }
             Ok(())
         })
     }
@@ -3406,6 +3438,17 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(enqueued)
     }
 
+    fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome> {
+        if !turn.target.trim().eq_ignore_ascii_case("operator") && turn.metadata.operator.is_none()
+        {
+            return Err(StoreError::Other(
+                "operator recording requires an operator recipient or authenticated operator stamp"
+                    .into(),
+            ));
+        }
+        self.record_complete_operator_turn(turn)
+    }
+
     fn enqueue_operator_message(
         &self,
         source: &str,
@@ -3418,38 +3461,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         attribution: Option<&serde_json::Value>,
         operator: &OperatorStamp,
     ) -> Result<EnqueueOutcome> {
-        let origin = operator.origin();
-        let outcome = self.enqueue_attributed_urgent_with_outcome(
+        self.record_operator_turn(&OperatorTurn {
             source,
             target,
             prompt,
             factory_session,
-            summary,
-            priority,
-            urgent,
-            attribution,
-            Some(&origin),
-        )?;
-        let EnqueueOutcome::Created(id) = outcome else {
-            return Ok(outcome);
-        };
-        let scopes = serde_json::to_string(&operator.scopes)?;
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            conn.execute(
-                "UPDATE prompt_queue SET operator_label = ?, operator_device_id = ?, operator_device_label = ?, operator_scopes = ?, operator_verified = ? WHERE id = ?",
-                params![
-                    operator.operator,
-                    operator.device_id,
-                    operator.device_label,
-                    scopes,
-                    i64::from(operator.verified),
-                    id
-                ],
-            )?;
-            Ok(())
-        })?;
-        Ok(outcome)
+            metadata: OperatorTurnMetadata {
+                summary,
+                priority,
+                urgent,
+                attribution,
+                operator: Some(operator),
+                ..Default::default()
+            },
+        })
     }
 
     fn enqueue_attributed_urgent_with_outcome(
@@ -3465,6 +3490,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
         require_operator_session(target, factory_session)?;
+        if target.trim().eq_ignore_ascii_case("operator") {
+            return self.record_operator_turn(&OperatorTurn {
+                source,
+                target,
+                prompt,
+                factory_session,
+                metadata: OperatorTurnMetadata {
+                    summary,
+                    priority,
+                    urgent,
+                    attribution,
+                    origin,
+                    ..Default::default()
+                },
+            });
+        }
         let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
@@ -3541,6 +3582,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
         require_operator_session(target, factory_session)?;
+        if target.trim().eq_ignore_ascii_case("operator") {
+            return self
+                .record_operator_turn(&OperatorTurn {
+                    source,
+                    target,
+                    prompt,
+                    factory_session,
+                    metadata: OperatorTurnMetadata {
+                        summary,
+                        priority,
+                        origin,
+                        dedupe_key: Some(dedupe_key),
+                        ..Default::default()
+                    },
+                })
+                .map(|outcome| match outcome {
+                    EnqueueOutcome::Created(id) => EnqueueIdempotentResult::Created(id),
+                    EnqueueOutcome::SuppressedDuplicate(id) => {
+                        EnqueueIdempotentResult::AlreadyExists(id)
+                    }
+                });
+        }
+
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
@@ -5304,37 +5368,58 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         device_id: &str,
         kind: &str,
     ) -> Result<Option<i64>> {
-        crate::shared_db::with_write_retry(|| {
+        require_operator_session("operator", Some(factory_session))?;
+        let event_id = operator_delivery::new_event_identity();
+        let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let changed = conn.execute(
-                "INSERT OR IGNORE INTO prompt_queue
-                   (source, target, prompt, created_at, factory_session, summary,
-                    priority, urgent, dedupe_key, origin_kind, recipient_device_id, kind)
-                 SELECT 'supervisor', 'operator', ?1, ?2, ?3, ?4, 2, 0, ?5,
-                        'daemon', ?6, ?7
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM prompt_queue
-                   WHERE factory_session = ?3 AND lower(target) = 'operator'
-                     AND source = 'supervisor' AND dedupe_key IS NULL
-                     AND created_at >= ?8 AND created_at <= ?9
-                     AND CASE WHEN json_valid(prompt)
-                       THEN json_extract(prompt, '$.message') = json_extract(?1, '$.message')
-                       ELSE 0 END
-                 )",
+            let tx = ImmediateTx::new(&conn)?;
+            let explicit: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM prompt_queue
+                    WHERE factory_session = ?1 AND lower(target) = 'operator'
+                      AND source = 'supervisor' AND dedupe_key IS NULL
+                      AND created_at >= ?2 AND created_at <= ?3
+                      AND CASE WHEN json_valid(prompt)
+                          THEN json_extract(prompt, '$.message') = json_extract(?4, '$.message')
+                          ELSE 0 END)",
                 params![
-                    payload,
-                    Utc::now().to_rfc3339(),
                     factory_session,
-                    summary,
-                    turn_key,
-                    device_id,
-                    kind,
                     started_at.to_rfc3339(),
                     completed_at.to_rfc3339(),
+                    payload
                 ],
+                |row| row.get(0),
             )?;
-            Ok((changed > 0).then(|| conn.last_insert_rowid()))
-        })
+            if explicit {
+                return Ok(None);
+            }
+            let outcome = Self::insert_complete_operator_turn(
+                &tx,
+                &OperatorTurn {
+                    source: "supervisor",
+                    target: "operator",
+                    prompt: payload,
+                    factory_session: Some(factory_session),
+                    metadata: OperatorTurnMetadata {
+                        summary: Some(summary),
+                        origin: Some(&QueueOrigin::Daemon),
+                        recipient_device_id: Some(device_id),
+                        kind: Some(kind),
+                        dedupe_key: Some(turn_key),
+                        ..Default::default()
+                    },
+                },
+                &event_id,
+            )?;
+            tx.commit()?;
+            Ok(match outcome {
+                EnqueueOutcome::Created(id) => Some(id),
+                EnqueueOutcome::SuppressedDuplicate(_) => None,
+            })
+        })?;
+        if outcome.is_some() {
+            self.signal_inbox("operator");
+        }
+        Ok(outcome)
     }
 
     fn latest_verified_operator_message(
@@ -5456,6 +5541,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 },
             )
         })
+    }
+
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
+        self.persist_operator_reply_receipt(prompt_id, factory_session, device_id)
     }
 
     fn mark_broadcast_outcome(
@@ -6040,10 +6129,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let pruned = tx.execute(
                 "DELETE FROM prompt_queue
                  WHERE processed_at IS NOT NULL AND processed_at < ?
-                   AND dedupe_key IS NULL",
+                   AND dedupe_key IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM operator_delivery_outbox o
+                       WHERE o.prompt_id = prompt_queue.id AND o.retained_at IS NULL)",
                 params![cutoff],
             )?;
-            for table in ["prompt_queue_recipient_seen", "prompt_queue_recipient_transport"] {
+            for table in [
+                "prompt_queue_recipient_seen",
+                "prompt_queue_recipient_transport",
+            ] {
                 tx.execute(
                     &format!(
                         "DELETE FROM {table}
@@ -6066,6 +6160,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // Explicit clear is a local purge, unlike automatic retention.
+            tx.execute("DELETE FROM operator_delivery_outbox", [])?;
             let rows = tx.execute("DELETE FROM prompt_queue", [])?;
             tx.execute("DELETE FROM prompt_queue_recipient_seen", [])?;
             tx.commit()?;
@@ -6086,7 +6182,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "DELETE FROM prompt_queue
                  WHERE processed_at IS NOT NULL
                    AND processed_at < ?
-                   AND (dedupe_key IS NULL OR dedupe_key NOT LIKE 'ci-red-run:%')",
+                   AND (dedupe_key IS NULL OR dedupe_key NOT LIKE 'ci-red-run:%')
+                   AND NOT EXISTS (SELECT 1 FROM operator_delivery_outbox o
+                       WHERE o.prompt_id = prompt_queue.id AND o.retained_at IS NULL)",
                 params![cutoff],
             )?;
             tx.execute(

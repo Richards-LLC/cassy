@@ -2,9 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "./terminal/ghostty/core";
 import { GHOSTTY_CELL_WIDE } from "./terminal/ghostty/core";
 import {
-  defaultTranscriptView,
-  loadTranscriptView,
-  saveTranscriptView,
   shouldFollowTail,
   shouldPageScrollback,
   transcriptLineKey,
@@ -205,56 +202,5 @@ describe("transcript scrollback paging", () => {
 
   it("does not page while the reader is still inside the current screen", () => {
     expect(shouldPageScrollback({ scrollTop: 120, hasScrollbackAbove: true })).toBe(false);
-  });
-});
-
-describe("transcript default view", () => {
-  it("defaults a phone-width viewport to the transcript", () => {
-    expect(defaultTranscriptView(412)).toBe("transcript");
-  });
-
-  it("defaults a desktop viewport to the terminal", () => {
-    expect(defaultTranscriptView(1440)).toBe("terminal");
-  });
-
-  it("treats the compact breakpoint itself as compact", () => {
-    expect(defaultTranscriptView(53 * 16)).toBe("transcript");
-    expect(defaultTranscriptView(53 * 16 + 1)).toBe("terminal");
-  });
-});
-
-describe("transcript view preference", () => {
-  function memoryStorage() {
-    const entries = new Map<string, string>();
-    return {
-      entries,
-      getItem: (key: string) => entries.get(key) ?? null,
-      setItem: (key: string, value: string) => { entries.set(key, value); },
-    };
-  }
-
-  it("remembers the choice for the session that made it", () => {
-    const storage = memoryStorage();
-    saveTranscriptView(storage, "machine:session", "terminal");
-
-    expect(loadTranscriptView(storage, "machine:session")).toBe("terminal");
-    expect(loadTranscriptView(storage, "machine:other")).toBeUndefined();
-  });
-
-  it("ignores a corrupted or foreign stored value", () => {
-    const storage = memoryStorage();
-    storage.entries.set("cas-commander:transcript-view:machine:session", "{not json");
-
-    expect(loadTranscriptView(storage, "machine:session")).toBeUndefined();
-  });
-
-  it("survives a storage that throws on write", () => {
-    const throwing = {
-      getItem: () => { throw new Error("denied"); },
-      setItem: () => { throw new Error("denied"); },
-    };
-
-    expect(() => saveTranscriptView(throwing, "machine:session", "transcript")).not.toThrow();
-    expect(loadTranscriptView(throwing, "machine:session")).toBeUndefined();
   });
 });

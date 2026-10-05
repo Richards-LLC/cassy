@@ -1,6 +1,6 @@
 import { test, expect, journeyPart } from "./journey";
 import type { Route } from "@playwright/test";
-import { SCOPES, type FleetWorld } from "./hub-double";
+import { SCOPES, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 // cas-a474 (fleet-operations brief S5): the desktop rail runs the fleet. The
@@ -23,11 +23,21 @@ const fleet = (): FleetWorld => ({
   spawnNames: ["amber-heron-11", "copper-fox-2"],
 });
 
+// The catalog is the roster; fleet status supplies each worker's details.
+// Clone the shared worlds so later spawn/stop operations can update the roster
+// without leaking one journey's workers into another machine or test.
+const fleetMachine = (machine: Machine): Machine => ({
+  ...machine,
+  sessions: machine.sessions.map(session => ({
+    ...session, workers: fleet().agents.map(agent => agent.name),
+  })),
+});
+
 for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`fleet failure copy ${width} ${colorScheme} cas_a348`, () => {
     test.use({ viewport: { width, height: 844 }, colorScheme });
     test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348`, journeyPart, async ({ page, journey }) => {
-      await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+      await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
       const row = page.locator("#status-view .status-agent", { hasText: "swift-lark-3" });
       const panel = () => width === 390 ? page.locator("dialog.fleet-action-sheet") : row;
       const result = page.locator("#fleet-ops-announcer");
@@ -50,8 +60,20 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
           const range = document.createRange(); range.selectNodeContents(element.querySelector(".fleet-ops-note")!);
           return Array.from(range.getClientRects()).every((rect) => rect.bottom <= trigger.top || rect.top >= trigger.bottom || rect.right <= trigger.left);
         }), "the action button does not cover error text").toBe(true);
+        // cas-d2df: the note's text uses the row's full content width, not a
+        // column narrowed by the trigger's width on every line.
+        expect(await row.evaluate((element) => {
+          const style = getComputedStyle(element);
+          const content = element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+          const note = element.querySelector<HTMLElement>(".fleet-ops-note")!;
+          return Math.round(note.clientWidth - parseFloat(getComputedStyle(note).paddingRight) - content);
+        }), "the failure note spans the row").toBe(0);
+        // cas-d2df: the note names its row in the row header's mono face.
+        await expect(row.locator(".fleet-ops-note .fleet-ops-note-subject")).toHaveText("swift-lark-3");
+        expect(await row.evaluate((element) => getComputedStyle(element.querySelector(".fleet-ops-note-subject")!).fontFamily
+          === getComputedStyle(element.querySelector(".status-line .status-identifier")!).fontFamily), "same face as the row header").toBe(true);
         if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
-        await expect(row.locator(".status-chip")).toHaveText("active");
+        await expect(row.locator(".status-chip")).toHaveText("Active");
       });
       await journey.stage("A connection failure offers connection recovery without diagnostics", async () => {
         await page.unroute("**/v1/sessions/*/operations");
@@ -60,7 +82,7 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await panel().getByRole("menuitem", { name: "Pause" }).click();
         await expect(result).toHaveText("Could not pause swift-lark-3: the machine could not be reached. Check its connection and try again.");
         await expect(row.locator(".fleet-ops-note")).not.toContainText(/POST|\/v1\/|Failed to fetch|500/);
-        await expect(row.locator(".status-chip")).toHaveText("active");
+        await expect(row.locator(".status-chip")).toHaveText("Active");
       });
       for (const [status, reason, detail] of [
         [403, "scope_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
@@ -74,7 +96,7 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
           const text = `Could not pause swift-lark-3: ${detail}`;
           await expect(result).toHaveText(text);
           await expect(row.locator(".fleet-ops-note")).toHaveText(text);
-          await expect(row.locator(".status-chip")).toHaveText("active");
+          await expect(row.locator(".status-chip")).toHaveText("Active");
           if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
         });
       }
@@ -99,7 +121,7 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await panel().getByRole("menuitem", { name: "Pause" }).click();
         await expect(result).toHaveText("swift-lark-3 paused.");
         await expect(row.locator(".fleet-ops-note")).toHaveCount(0);
-        await expect(row.locator(".status-chip")).toHaveText("held");
+        await expect(row.locator(".status-chip")).toHaveText("Held");
         await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
     });
@@ -110,7 +132,7 @@ for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`phone fleet feedback ${colorScheme} cas_c2e7`, () => {
     test.use({ viewport: { width: 390, height: 844 }, colorScheme });
     test("HUB-J17 phone feedback clears the composer and task rows and can be dismissed", journeyPart, async ({ page, journey }) => {
-      const atlas = { ...ATLAS, sessions: ATLAS.sessions.map((session) => ({ ...session })) };
+      const atlas = fleetMachine(ATLAS);
       const world = fleet();
       const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: world } });
       await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, json: { error: "unavailable" } }));
@@ -158,7 +180,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       });
     });
     test("HUB-J17 phone pickers visibly identify the task and current epic", journeyPart, async ({ page, journey }) => {
-      await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+      await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
       const sheet = page.locator("dialog.fleet-action-sheet");
       await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
         await journey.open();
@@ -188,7 +210,7 @@ for (const colorScheme of ["light", "dark"] as const) {
 
 test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
   const hub = await journey.hub({
-    machines: [ATLAS, STUDIO],
+    machines: [fleetMachine(ATLAS), fleetMachine(STUDIO)],
     paired: ["atlas", "studio"],
     scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"], studio: SCOPES },
     fleet: { [PELICAN]: fleet(), [OTTER]: fleet() },
@@ -216,11 +238,11 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(menu.getByRole("menuitem", { name: "Pause" })).toBeFocused();
     await menu.getByRole("menuitem", { name: "Pause" }).click();
     await expect(announcer).toHaveText("swift-lark-3 paused.");
-    await expect(row("swift-lark-3").locator(".status-chip")).toHaveText("held");
+    await expect(row("swift-lark-3").locator(".status-chip")).toHaveText("Held");
     await expect(rail.locator(".fleet-ops-undo")).toContainText("swift-lark-3 paused.");
     await rail.getByRole("button", { name: "Undo" }).click();
     await expect(announcer).toHaveText("swift-lark-3 resumed.");
-    await expect(row("swift-lark-3").locator(".status-chip")).toHaveText("active");
+    await expect(row("swift-lark-3").locator(".status-chip")).toHaveText("Active");
     expect(sent(PELICAN)).toEqual(["set_worker_hold:200", "set_worker_hold:200"]);
   });
 
@@ -315,7 +337,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
   test.describe(`phone ${viewport.width}×${viewport.height}`, () => {
   test.use({ viewport });
   test(`HUB-J17 phone ${viewport.width}×${viewport.height}: operate each machine from its own conversation`, journeyPart, async ({ page, journey }) => {
-    const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"], studio: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet(), [OTTER]: fleet() } });
+    const hub = await journey.hub({ machines: [fleetMachine(ATLAS), fleetMachine(STUDIO)], paired: ["atlas", "studio"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"], studio: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet(), [OTTER]: fleet() } });
     const rail = page.locator("#status-view");
     const agent = (name: string) => rail.locator(".status-agent", { hasText: name });
     const task = (id: string) => rail.locator(".status-task", { hasText: id });
@@ -394,58 +416,68 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
 }
 
 // M12: retaining async ownership through a real shell replacement must also
-// retain usable navigation. A conversation notice cannot cover Terminal's
-// return button, and a Terminal completion keeps its inline Undo/refusal.
+// retain usable navigation. Every render replaces the shell, and Raw output
+// opens a sheet over the conversation: a pending operation keeps its notice
+// through both, and a completion that lands while Raw output is open keeps its
+// inline Undo or refusal, reachable by keyboard once the sheet closes.
 for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
-  test.describe(`phone Terminal return ${viewport.width}×${viewport.height}`, () => {
+  test.describe(`phone Raw output return ${viewport.width}×${viewport.height}`, () => {
     test.use({ viewport });
     for (const disposition of ["success", "stale"] as const) {
-      test(`HUB-J17 phone Terminal return ${viewport.width}×${viewport.height}: pending and ${disposition} remain usable`, journeyPart, async ({ page, journey }) => {
-        await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+      test(`HUB-J17 phone Raw output return ${viewport.width}×${viewport.height}: pending and ${disposition} remain usable`, journeyPart, async ({ page, journey }) => {
+        const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
         let request: Route | undefined;
         await page.route("**/v1/sessions/*/operations", async (route) => { request = route; });
         const agent = () => page.locator(".status-agent", { hasText: "swift-lark-3" });
-        const terminal = () => page.locator(".conversation-heading").getByRole("button", { name: "Terminal view", exact: true });
-        const returning = () => page.locator("#conversation-return");
+        const raw = () => page.getByRole("button", { name: "Raw output", exact: true });
+        const drawer = () => page.getByRole("dialog", { name: "Raw output" });
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-        await journey.stage("M12 pending notice permits normal Terminal return without losing ownership", async () => {
+        await journey.stage("M12 a pending notice survives a shell rebuild and Raw output", async () => {
           await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
           await agent().getByRole("button", { name: "Actions for swift-lark-3" }).click();
           await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Pause" }).click();
           await expect.poll(() => Boolean(request)).toBe(true);
           await page.getByRole("button", { name: "Close tasks & progress" }).click();
           await expect(page.locator("#fleet-phone-undo")).toContainText("Pausing swift-lark-3…");
-          await terminal().click();
-          await expect(page.locator("#fleet-phone-undo")).toHaveCount(0);
+          // A catalog change re-renders, which replaces the shell.
+          await hub.announceCatalog("atlas");
+          await expect(page.locator("#fleet-phone-undo")).toContainText("Pausing swift-lark-3…");
           await expect(agent().locator(".fleet-ops-progress")).toHaveText("Pausing swift-lark-3…");
-          await expect(returning()).toBeVisible();
-          // The real hit target, not force-clicking through the fixed overlay.
-          expect(await returning().evaluate((button) => {
-            const box = button.getBoundingClientRect();
-            return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
-          })).toBe(true);
-          await returning().click();
+          await raw().click();
+          await expect(drawer()).toBeVisible();
+          await page.keyboard.press("Escape");
+          await expect(drawer()).toBeHidden();
+          await expect(raw()).toBeFocused();
           await expect(page.locator("#fleet-phone-undo")).toContainText("Pausing swift-lark-3…");
         });
-        await journey.stage("M12 Terminal completion preserves inline feedback and keyboard return", async () => {
-          await terminal().click();
+        await journey.stage("M12 a completion under Raw output keeps its feedback and the keyboard return", async () => {
+          await raw().click();
+          await expect(drawer()).toBeVisible();
           const body = request!.request().postDataJSON();
           await request!.fulfill(disposition === "success"
             ? { json: { op_id: body.op_id, outcome: { kind: "set_worker_hold" } } }
             : { status: 409, json: { error: "stale", current: { worker: "swift-lark-3", generation: 3 } } });
           const text = disposition === "success" ? "swift-lark-3 paused." : "swift-lark-3 already restarted.";
           await expect(page.locator("#fleet-ops-announcer")).toHaveText(text);
-          await expect(page.locator("#fleet-phone-undo")).toHaveCount(0);
           await expect(agent().locator(".fleet-ops-progress")).toHaveCount(0);
-          if (disposition === "success") await expect(page.locator("#status-view .fleet-ops-undo")).toContainText(text);
-          else await expect(agent().locator(".fleet-ops-note")).toHaveText(text);
-          await returning().focus();
-          await expect(returning()).toBeFocused();
-          await page.keyboard.press("Enter");
-          await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeVisible();
+          // On a phone the Undo sits above the composer, not in the sheet.
+          if (disposition === "stale") await expect(agent().locator(".fleet-ops-note")).toHaveText(text);
+          await page.keyboard.press("Escape");
+          await expect(drawer()).toBeHidden();
+          await expect(raw()).toBeFocused();
           await expect(page.locator("#fleet-phone-undo")).toContainText(text);
-          if (disposition === "success") await expect(page.locator("#fleet-phone-undo").getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+          if (disposition === "success") {
+            const undo = page.locator("#fleet-phone-undo").getByRole("button", { name: "Undo", exact: true });
+            await expect(undo).toBeVisible();
+            // The real hit target, not force-clicking through a fixed overlay.
+            expect(await undo.evaluate((button) => {
+              const box = button.getBoundingClientRect();
+              return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+            })).toBe(true);
+            await undo.focus();
+            await expect(undo).toBeFocused();
+          }
         });
       });
     }

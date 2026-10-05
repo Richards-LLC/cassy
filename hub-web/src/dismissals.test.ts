@@ -270,35 +270,18 @@ describe("in the thread", () => {
     history.receive(reply(5, "answer", "Yes."), at(9, 0) + 30_000); view.update();
     expect(view.element.querySelector('.bub[data-state="unconfirmed"] .conversation-dismiss')).toBeNull();
   });
-  it("folds the pinned question to a one-line bar while composing, opens it on tap, and lets the operator collapse it", () => {
-    uninstall = installAttentionObjects();
-    const history = new ConversationHistory();
+  it("keeps a compact waiting jump while composing and focuses the free-text reply", () => {
+    uninstall = installAttentionObjects(); const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "sup", respond: vi.fn() });
-    document.body.replaceChildren(view.element, view.pinned);
-    history.reply(reply(10, "ask", "Waves are done.\n\n- **Ask:** open the PR to main and cut a release?"), at(9, 0));
-    view.update();
-    expect(view.pinned.dataset.collapsed).toBe("false");
-    expect(view.pinned.querySelector(".pinned-label")?.textContent).toBe("Waiting on you");
-    expect(view.pinned.querySelectorAll("button.chip")).toHaveLength(2);
+    const composer = document.createElement("textarea"); composer.id = "message-text";
+    document.body.replaceChildren(view.element, view.pinned, composer);
+    history.reply(reply(10, "ask", "Waves are done.\n\n- **Ask:** open the PR to main and cut a release?"), at(9, 0)); view.update();
+    expect(view.pinned.querySelector(".pinned-bar-text")?.textContent).toBe("open the PR to main and cut a release?");
+    expect(view.pinned.querySelector(".obj")).toBeNull();
     view.setComposing(true);
-    expect(view.pinned.dataset.collapsed).toBe("true");
-    expect(view.pinned.querySelectorAll("button.chip")).toHaveLength(0);
-    const expand = view.pinned.querySelector<HTMLButtonElement>(".pinned-expand")!;
-    expect(expand.textContent).toBe("Waiting on you: open the PR to main and cut a release?");
-    expect(expand.getAttribute("aria-expanded")).toBe("false");
-    expand.click();
-    expect(view.pinned.dataset.collapsed).toBe("false");
-    expect(document.activeElement).toBe(view.pinned.querySelector(".pinned-collapse"));
-    // Composing again folds it; the operator's own collapse outlasts composing.
-    view.setComposing(false); view.setComposing(true);
-    expect(view.pinned.dataset.collapsed).toBe("true");
-    view.setComposing(false);
-    expect(view.pinned.dataset.collapsed).toBe("false");
-    view.pinned.querySelector<HTMLButtonElement>(".pinned-collapse")!.click();
-    expect(view.pinned.dataset.collapsed).toBe("true");
-    expect(document.activeElement).toBe(view.pinned.querySelector(".pinned-expand"));
-    view.setComposing(true); view.setComposing(false);
-    expect(view.pinned.dataset.collapsed).toBe("true");
+    view.pinned.querySelector<HTMLButtonElement>(".pinned-expand")!.click();
+    expect(document.activeElement).toBe(composer);
+    view.setComposing(false); expect(view.pinned.querySelector(".obj")).toBeNull();
   });
   it("dismisses the pinned question: it unpins, and the thread copy keeps its choices", () => {
     uninstall = installAttentionObjects();
@@ -307,7 +290,7 @@ describe("in the thread", () => {
     const view = new ConversationView(document, history, { supervisor: "sup", respond: vi.fn(), dismissalsChanged: changed });
     const composer = document.createElement("textarea"); composer.id = "message-text";
     document.body.replaceChildren(view.element, view.pinned, composer);
-    history.reply(reply(10, "ask", "Ship?"), at(9, 0)); view.update();
+    history.reply({ ...reply(10, "ask", "Ship?"), options: ["Ship", "Hold"] }, at(9, 0)); view.update();
     view.pinned.querySelector<HTMLButtonElement>(".pinned-dismiss")!.click();
     expect(view.pinned.hidden).toBe(true);
     expect(changed).toHaveBeenCalledTimes(1);
@@ -322,7 +305,7 @@ describe("in the thread", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "sup", respond: vi.fn() });
     document.body.replaceChildren(view.element, view.pinned);
-    history.reply(reply(10, "ask", "Ship?"), at(9, 0)); view.update();
+    history.reply({ ...reply(10, "ask", "Ship?"), options: ["Ship", "Hold"] }, at(9, 0)); view.update();
     const media = window.matchMedia;
     window.matchMedia = ((query: string) => ({ matches: query.includes("reduce"), media: query })) as typeof window.matchMedia;
     try { swipe(view.pinned, 200); } finally { window.matchMedia = media; }

@@ -21,8 +21,11 @@ mod connector;
 mod death;
 mod discovery;
 mod events;
+mod connection_recovery;
 mod identity;
+pub(crate) mod observation;
 pub mod launch_env;
+pub mod operator_inbox;
 pub mod projects;
 mod runtime;
 mod server;
@@ -36,7 +39,7 @@ pub use auth::{
     read_audit_health,
 };
 pub use auth::{
-    AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
+    AccountEnrollment, InstallationAction, InstallationProof, AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
     PairingExchange, PairingExchangeError, PairingInvitation, PairingPrefill, PublicJwk, Scope,
     WsTicket, required_scope,
 };
@@ -180,6 +183,8 @@ pub fn validate_control_bind(addr: SocketAddr, transport: TransportSecurity) -> 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Public health keeps its two-key readiness contract. Installation capability
+// discovery requires an invitation commitment at /v1/auth/pairing/protocol.
 pub struct HealthResponse {
     pub schema_version: u32,
     pub ready: bool,

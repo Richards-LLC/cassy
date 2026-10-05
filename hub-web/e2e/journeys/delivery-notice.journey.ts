@@ -147,6 +147,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await hub.announceCatalog("atlas");
     expect(await focused(), "focus stays on Copy across a minute").toBe(copy);
     await expect(notice.locator("details")).toHaveAttribute("open", "");
+    await notice.getByRole("button", { name: "Copy", exact: true }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy still copies the displayed Details after refresh").toBe(await notice.locator("pre").textContent());
     // cas-f486: a phone that wakes after ten minutes, with the session list
     // changed meanwhile, rebuilds the whole page. The rebuilt sheet has the
     // same Details open and the same Copy focused, in new elements.
@@ -212,7 +214,10 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(rail).not.toHaveAttribute("aria-modal", "true");
     await expect(rail).toHaveAttribute("aria-label", "Conversation context");
     await expect(page.locator("#conversation-attention")).toHaveAttribute("aria-expanded", "false");
-    await expect(page.locator("[inert]")).toHaveCount(0);
+    // Nothing the operator can see is left inert. The supervisor pane's host
+    // is inert by design: it is hidden plumbing, never on screen (cas-0546).
+    await expect(page.locator("[inert]:not(.pane-host)")).toHaveCount(0);
+    await expect(page.locator(".pane-host")).toBeHidden();
     await expect(attentionItems).toHaveCount(1);
   });
 

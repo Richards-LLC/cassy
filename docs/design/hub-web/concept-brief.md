@@ -1,5 +1,7 @@
 # Brief: Cassy Commander (`hub-web`)
 
+> **Retired (cas-0546, 2026-10-05).** The Terminal view this document designs (fleet board, session ledger, machine rail, pane grid, fleet-wide Attention feed, take-control, side composer) was removed; Conversations is Commander's only surface (see `hub-web/DESIGN.md`). Kept as a historical design record.
+
 Concept brief for the Hub Commander design pass. Every later unit implements this brief; the
 token mapping is in [token-map.md](token-map.md), the visual-QA allowlist reasoning in
 [visual-qa-plan.md](visual-qa-plan.md), and the 3.17.3 baseline renders under

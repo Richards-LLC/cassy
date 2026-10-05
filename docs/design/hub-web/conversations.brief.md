@@ -31,7 +31,7 @@ No synthesized replies, new message transport, worker-first overview, decorative
 ## Verification and budgets
 
 - Exact pane text and operator messages/replies in scoped component/integration tests.
-- Real default Hub build in Playwright: project badges; full-width phone thread; addressed Send; sent/acknowledged/replied distinction; terminal alternate; keyboard/draft preservation.
+- Real default Hub build in Playwright: project badges; full-width phone thread; addressed Send; sent/acknowledged/replied distinction; the Raw output drawer (formerly the Terminal view alternate, retired in cas-0546); keyboard/draft preservation.
 - 390×844, 844×390 and 1280×800, light/dark, plus reduced motion. Review each screenshot and record the verdict/change in `/home/pippenz/.cas/artifacts/cas-11b01/element-review.md`.
 - Run Hub npm test, typecheck and an isolated-output build; supervisor owns committed dist regeneration per DESIGN.md unless explicitly instructed otherwise. Measure bundle delta; retain no new runtime dependency.
 - UI critique and final evidence remain pending until the real default view is wired and inspected.

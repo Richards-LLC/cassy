@@ -1799,6 +1799,10 @@ mod tests {
         // ledger and pre-installing the modern post-ALTER shape would break
         // later ALTERs (e.g. m112 indexes `worktrees.task_id`).
         let must_not_exist = [
+            "operator_delivery_outbox",
+            "operator_feed_binding",
+            "operator_cloud_outbox",
+            "operator_command_admissions",
             "worktrees",
             "code_files",
             "code_symbols",

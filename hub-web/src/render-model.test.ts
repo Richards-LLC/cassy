@@ -7,16 +7,8 @@ const base: ShellSignatureParts = {
   machineIds: ["machine-1"],
   sessionKeys: ["machine-1/cas-src-fast-kestrel-6"],
   catalogLoaded: true,
-  drawerOpen: false,
-  attentionCollapsed: false,
-  contextTab: "status",
-  fleetEmpty: false,
   supervisor: "fast-kestrel-6",
-  backLabel: undefined,
   compatibility: undefined,
-  leaseHeldByMe: true,
-  leaseController: "Daniel",
-  controlDisabled: false,
   commandPaletteOpen: false,
   pairingView: "",
 };
@@ -32,16 +24,8 @@ describe("shell signature", () => {
     ["a machine joining the catalog", { machineIds: ["machine-1", "machine-2"] }],
     ["a session appearing", { sessionKeys: ["machine-1/a", "machine-1/b"] }],
     ["the catalog finishing its load", { catalogLoaded: false }],
-    ["the machines drawer opening", { drawerOpen: true }],
-    ["the attention panel collapsing", { attentionCollapsed: true }],
-    ["the context tab", { contextTab: "attention" }],
-    ["the fleet becoming empty", { fleetEmpty: true }],
     ["the supervisor target", { supervisor: "other-supervisor" }],
-    ["a back target appearing", { backLabel: "Back to machine-1" }],
     ["a compatibility warning", { compatibility: "Hub is version-skewed" }],
-    ["control being taken", { leaseHeldByMe: false }],
-    ["a different controller", { leaseController: "someone-else" }],
-    ["control becoming unavailable", { controlDisabled: true }],
     ["the command palette opening", { commandPaletteOpen: true }],
     ["a pairing invitation arriving", { pairingView: "relay-request|ABCD-1234||Waiting for a machine to claim the code…|" }],
     ["cancellation cleanup becoming outstanding", { pairingView: "|||cleanup-failed" }],
@@ -51,11 +35,12 @@ describe("shell signature", () => {
     });
   }
 
-  it("does not change when the session picker opens or closes (cas-00ad)", () => {
-    // Opening or closing the picker must not rebuild the shell: the rebuild
-    // replaced the focused session title, losing an Enter pressed on it.
+  it("does not change when the lease changes hands (cas-0546)", () => {
+    // Control is taken implicitly by a send or an interrupt, which read the
+    // lease when they run; no control in the shell captures it any more.
     const parts = { ...base } as ShellSignatureParts & Record<string, unknown>;
-    parts.sessionPickerOpen = true;
+    parts.leaseHeldByMe = false;
+    parts.leaseController = "someone-else";
     expect(shellSignature(parts)).toBe(shellSignature(base));
   });
 

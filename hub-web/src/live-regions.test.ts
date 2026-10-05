@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { applyLiveRegions, sessionControlsNotice } from "./live-regions";
+import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 
 /**
  * The shapes render() emits. An invariant in invariants.test.ts pins these
@@ -8,33 +8,19 @@ import { applyLiveRegions, sessionControlsNotice } from "./live-regions";
  * testing markup the app does not ship.
  */
 const SHELL = `
-  <div class="shell">
-    <header class="session-header">
-      <span class="mode-badge observer" data-compact-label="OBS">OBSERVER</span>
-      <span class="connection-summary connecting" title="connecting">
-        <span class="connection-dot"></span>
-        <span data-machine-latency="machine-1">Status unavailable</span>
-      </span>
-      <div class="actions">
-        <span class="control-action" title="Take control">
-          <button id="lease" data-compact-label="Ctrl" aria-label="Take control"><svg class="action-icon" aria-hidden="true"></svg><span class="action-label">Take control</span></button>
-          <span id="control-disabled-reason" class="sr-only" hidden></span>
-        </span>
-        <button id="interrupt" class="danger">Interrupt</button>
-      </div>
-    </header>
-    <p id="session-controls-reason" class="session-controls-reason" role="note" hidden></p>
-    <section class="status-context">
+  <div class="conversation-shell thread-open">
+    <aside class="conversation-context">
       <p class="status-stale" role="status" hidden></p>
       <div id="status-view"></div>
-      <div class="message">
+    </aside>
+    <div id="conversation-composer-slot">
+      <div class="message conversation-composer">
         <textarea id="message-text"></textarea>
-        <p class="control-disabled-reason" role="note" hidden></p>
         <div class="composer-actions"><button id="message-send" class="primary">Send message</button></div>
         <p id="message-status" class="message-status" role="status" hidden></p>
         <p id="message-delivery" class="message-delivery" role="status" hidden></p>
       </div>
-    </section>
+    </div>
   </div>
   <dialog id="pair-dialog" open>
     <form id="pair-form">
@@ -72,11 +58,8 @@ const CREATE_STEP = `
     </section>
   </dialog>`;
 
-const live = {
-  connection: { state: "live", title: "live", latencyText: "41ms" },
-  mode: { badge: "CONTROL", compact: "CTL" },
-  controlAction: { label: "Release control" },
-} as const;
+/** A live, unremarkable session: nothing to say in any region. */
+const live: LiveRegionView = {};
 
 let root: HTMLElement;
 
@@ -85,48 +68,13 @@ beforeEach(() => {
   root = document.body;
 });
 
-describe("the mode badge while the session is down (cas-edcd, cas-4a93)", () => {
-  it("hides the control claim while reconnecting and brings it back when live", () => {
-    const mode = root.querySelector<HTMLElement>(".mode-badge")!;
-    expect(mode).not.toBeNull();
-    applyLiveRegions(root, { ...live, connection: { state: "backoff", title: "Reconnecting", latencyText: "Reconnecting" }, mode: { ...live.mode, hidden: true } });
-    expect(mode.hidden).toBe(true);
-    expect(root.querySelector("[data-machine-latency]")?.textContent).toBe("Reconnecting");
-    applyLiveRegions(root, live);
-    expect(mode.hidden).toBe(false);
-    expect(mode.textContent).toBe("CONTROL");
-  });
-});
-
-describe("the header controls say why they are unavailable, on screen (journey F9)", () => {
-  const outage = "Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.";
-  it("states one outage once, even when it disables both controls", () => {
-    expect(sessionControlsNotice(outage, outage)).toBe(outage);
-    expect(sessionControlsNotice(undefined, "Take control to enable terminal input, messages, and interrupts."))
-      .toBe("Take control to enable terminal input, messages, and interrupts.");
-    expect(sessionControlsNotice("A.", "B.")).toBe("A. B.");
-    expect(sessionControlsNotice(undefined, undefined)).toBeUndefined();
-    expect(sessionControlsNotice(" ", undefined)).toBeUndefined();
-  });
-  it("shows the reason in the visible line during an outage and hides it when live", () => {
-    const line = root.querySelector<HTMLElement>("#session-controls-reason")!;
-    applyLiveRegions(root, { ...live, controlAction: { label: "Release control", disabledReason: outage }, interruptReason: outage, controlsNotice: outage });
-    expect(line.hidden).toBe(false);
-    expect(line.textContent).toBe(outage);
-    expect(root.querySelector("#lease")!.getAttribute("aria-disabled")).toBe("true");
-    applyLiveRegions(root, live);
-    expect(line.hidden).toBe(true);
-    expect(line.textContent).toBe("");
-  });
-});
-
 describe("live regions and node identity", () => {
   it("leaves the composer node itself untouched across repeated heartbeats", () => {
     const composer = root.querySelector("#message-text");
     composer!.setAttribute("data-instance", "first");
 
     for (let beat = 0; beat < 6; beat += 1) {
-      applyLiveRegions(root, { ...live, connection: { state: "live", title: "live", latencyText: `${40 + beat}ms` } });
+      applyLiveRegions(root, { ...live, ...(beat % 2 ? { staleNotice: `Not live — reconnecting. Showing the last state received ${beat}m ago.` } : {}) });
     }
 
     expect(root.querySelector("#message-text")).toBe(composer);
@@ -176,10 +124,8 @@ describe("ten seconds of heartbeats, measured the way the defect was", () => {
     for (let beat = 0; beat < 20; beat += 1) {
       composer.value += "a";
       applyLiveRegions(root, {
-        connection: { state: beat % 3 === 0 ? "degraded" : "live", title: "hub", latencyText: `${30 + beat}ms` },
-        mode: { badge: beat % 5 === 0 ? "OBSERVER" : "CONTROL", compact: "CTL" },
-        controlAction: { label: "Release control" },
-        ...(beat % 4 === 0 ? { staleNotice: "Not live — reconnecting." } : {}),
+        ...(beat % 3 === 0 ? { sendReason: "The conversation is reconnecting." } : {}),
+        staleNotice: `Not live — reconnecting. Showing the last state received ${beat}s ago.`,
       });
     }
     observer.takeRecords();
@@ -190,31 +136,11 @@ describe("ten seconds of heartbeats, measured the way the defect was", () => {
     expect(document.activeElement).toBe(composer);
     expect(composer.value).toHaveLength(20);
     // The regions kept moving the whole time — this is not a frozen page.
-    expect(root.querySelector("[data-machine-latency]")!.textContent).toBe("49ms");
+    expect(root.querySelector(".status-stale")!.textContent).toBe("Not live — reconnecting. Showing the last state received 19s ago.");
   });
 });
 
 describe("live region values", () => {
-  it("writes the connection state, title and latency in place", () => {
-    applyLiveRegions(root, live);
-
-    const summary = root.querySelector<HTMLElement>(".connection-summary")!;
-    expect(summary.className).toBe("connection-summary live");
-    expect(summary.title).toBe("live");
-    expect(summary.querySelector("[data-machine-latency]")!.textContent).toBe("41ms");
-    // The dot is a child of the summary and must survive the class rewrite.
-    expect(summary.querySelector(".connection-dot")).not.toBeNull();
-  });
-
-  it("moves the mode badge between observer and control", () => {
-    applyLiveRegions(root, live);
-
-    const mode = root.querySelector<HTMLElement>(".mode-badge")!;
-    expect(mode.className).toBe("mode-badge control");
-    expect(mode.textContent).toBe("CONTROL");
-    expect(mode.dataset.compactLabel).toBe("CTL");
-  });
-
   it("shows and then clears the stale-hub notice", () => {
     applyLiveRegions(root, { ...live, staleNotice: "Not live — reconnecting. Showing the last state received 2m ago." });
     const stale = root.querySelector<HTMLElement>(".status-stale")!;
@@ -247,31 +173,6 @@ describe("live region values", () => {
     expect(send.hasAttribute("data-disabled-reason")).toBe(false);
   });
 
-  it("relabels the control action and mirrors its reason onto the wrapper", () => {
-    applyLiveRegions(root, { ...live, controlAction: { label: "Force takeover", disabledReason: "Daniel controls this session" } });
-
-    const lease = root.querySelector<HTMLButtonElement>("#lease")!;
-    expect(lease.textContent).toBe("Force takeover");
-    expect(lease.getAttribute("aria-label")).toBe("Force takeover");
-    // The relabel writes the words beside the icon, not over it (cas-3400).
-    expect(lease.querySelector(".action-label")!.textContent).toBe("Force takeover");
-    expect(lease.querySelector("svg.action-icon")).not.toBeNull();
-    expect(lease.getAttribute("aria-disabled")).toBe("true");
-    expect(root.querySelector<HTMLElement>(".control-action")!.title).toBe("Daniel controls this session");
-    expect(root.querySelector<HTMLElement>("#control-disabled-reason")!.hidden).toBe(false);
-  });
-
-  it("states why interrupt is unavailable and restores its plain title", () => {
-    applyLiveRegions(root, { ...live, interruptReason: "Interrupt is unavailable for this session." });
-    const interrupt = root.querySelector<HTMLButtonElement>("#interrupt")!;
-    expect(interrupt.title).toBe("Interrupt is unavailable for this session.");
-
-    applyLiveRegions(root, live);
-
-    expect(interrupt.title).toBe("Interrupt selected pane");
-    expect(interrupt.hasAttribute("aria-disabled")).toBe(false);
-  });
-
   it("shows a message result and its error tone, then hides it again", () => {
     applyLiveRegions(root, { ...live, messageStatus: { text: "Message failed to send", error: true } });
     const status = root.querySelector<HTMLElement>("#message-status")!;
@@ -295,7 +196,7 @@ describe("live region values", () => {
   });
 
   it("ignores a shell that does not carry the optional regions", () => {
-    document.body.innerHTML = '<div class="shell"></div>';
+    document.body.innerHTML = '<div class="conversation-shell"></div>';
 
     expect(() => applyLiveRegions(document.body, { ...live, staleNotice: "Not live" })).not.toThrow();
   });

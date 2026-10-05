@@ -16,6 +16,27 @@ class MemoryStorage implements Storage {
 
 const TOKEN = "A".repeat(43);
 
+describe("whole exchange deadline before installation", () => {
+  for (const lane of ["key", "fetch", "body"] as const) {
+    it(`settles a stalled ${lane} without staging any credential`, async () => {
+      vi.useFakeTimers();
+      try {
+        const stage = vi.fn();
+        const never = <T>() => new Promise<T>(() => undefined);
+        const pending = exchange({
+          ...(lane === "key" ? { createKey: () => never<{ privateKey: CryptoKey; publicKey: JsonWebKey }>() } : {}),
+          fetcher: lane === "fetch" ? () => never<Response>() : async () => lane === "body" ? { ok: true, status: 200, json: () => never<unknown>() } as Response : response(200, credential),
+          stagePersisted: stage,
+        });
+        const refused = expect(pending).rejects.toMatchObject({ name: "PairingExchangeError", recoverable: true });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await refused;
+        expect(stage).not.toHaveBeenCalled();
+      } finally { vi.useRealTimers(); }
+    });
+  }
+});
+
 function response(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }

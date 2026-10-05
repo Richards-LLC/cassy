@@ -2,6 +2,9 @@
 //!
 //! Implements H2-PERM-01 through H2-AUDIT-06 from the binding Commander ADR.
 
+mod installation;
+pub use installation::{AccountEnrollment, InstallationAction, InstallationProof};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -34,6 +37,8 @@ const DPOP_REPLAY_MINUTES: i64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PairingExchangeError {
+    #[error("installation generation conflict")]
+    Conflict,
     /// Five exchanges from the same bound controller origin are already inside the one-minute window.
     #[error("pairing exchange throttled")]
     Throttled { retry_after_seconds: u64 },
@@ -114,7 +119,9 @@ impl AuthRefusal {
             Self::StaleProof { skew_secs } if skew_secs < 0 => {
                 Some(format!("proof iat {}s behind the hub clock", -skew_secs))
             }
-            Self::StaleProof { skew_secs } => Some(format!("proof iat {skew_secs}s ahead of the hub clock")),
+            Self::StaleProof { skew_secs } => {
+                Some(format!("proof iat {skew_secs}s ahead of the hub clock"))
+            }
             _ => None,
         }
     }
@@ -282,6 +289,8 @@ impl PublicJwk {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PairingExchange {
+    #[serde(default)]
+    pub installation: Option<InstallationProof>,
     pub token: String,
     pub hub_id: String,
     pub controller_origin: String,
@@ -306,6 +315,7 @@ impl PairingExchange {
         scopes: BTreeSet<Scope>,
     ) -> Self {
         Self {
+            installation: None,
             token,
             hub_id: hub_id.into(),
             controller_origin: origin.into(),
@@ -408,6 +418,8 @@ fn pairing_invitation_url(
 
 #[derive(Clone, Serialize)]
 pub struct DeviceCredential {
+    pub credential_generation: u64,
+    pub account_enrollment: AccountEnrollment,
     pub device_id: String,
     pub credential_id: String,
     pub credential: String,
@@ -460,6 +472,8 @@ impl fmt::Debug for DeviceCredential {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceSession {
+    #[serde(default)]
+    pub credential_generation: u64,
     pub device_id: String,
     pub credential_id: String,
     pub device_label: String,
@@ -477,6 +491,9 @@ pub struct DeviceSession {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DeviceSummary {
+    pub credential_generation: u64,
+    pub key_fingerprint: String,
+    pub account_enrollment: AccountEnrollment,
     pub device_id: String,
     pub credential_id: String,
     pub device_label: String,
@@ -536,6 +553,12 @@ pub struct LeaseSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PersistedState {
+    #[serde(default)]
+    installations: Vec<installation::PendingInstallation>,
+    #[serde(default)]
+    aborted_installations: BTreeMap<String, DateTime<Utc>>,
+    #[serde(default)]
+    generation_highwater: BTreeMap<String, u64>,
     pairings: Vec<PairingRecord>,
     devices: Vec<DeviceSession>,
     tickets: Vec<TicketRecord>,
@@ -655,7 +678,13 @@ pub fn audit_writer_report(root: &Path, now: DateTime<Utc>) -> AuditWriterReport
         None => "no audit rows yet".to_owned(),
     };
     match read_audit_health(root) {
-        Ok(None) => AuditWriterReport { status: "ok", path, last_row_at, failure: None, message: quiet },
+        Ok(None) => AuditWriterReport {
+            status: "ok",
+            path,
+            last_row_at,
+            failure: None,
+            message: quiet,
+        },
         Ok(Some(failure)) => AuditWriterReport {
             status: "failing",
             message: format!(
@@ -861,6 +890,12 @@ impl AuthStore {
         exchange: PairingExchange,
         now: DateTime<Utc>,
     ) -> std::result::Result<DeviceCredential, PairingExchangeError> {
+        if exchange.installation.is_some() {
+            return self.prepare_installation(exchange, now).map_err(|error| {
+                if error.is::<installation::InstallationConflict>() { PairingExchangeError::Conflict }
+                else { match error.downcast::<PairingExchangeError>() { Ok(error) => error, Err(error) => error.into() } }
+            });
+        }
         validate_origin(&exchange.controller_origin)?;
         let token_hash = hash_b64(exchange.token.as_bytes());
         let mut state = self.lock()?;
@@ -916,6 +951,7 @@ impl AuthStore {
         let credential_id = uuid::Uuid::new_v4().to_string();
         let expires_at = now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS);
         state.devices.push(DeviceSession {
+            credential_generation: 0,
             device_id: device_id.clone(),
             credential_id: credential_id.clone(),
             device_label: sanitize_label(&exchange.device_label),
@@ -934,6 +970,8 @@ impl AuthStore {
         drop(state);
         self.audit(None, "allowed", "pairing_exchange", None, None, now)?;
         Ok(DeviceCredential {
+            credential_generation: 0,
+            account_enrollment: AccountEnrollment::Unenrolled,
             device_id,
             credential_id,
             credential,
@@ -1108,13 +1146,26 @@ impl AuthStore {
         });
         let rotated = random_secret();
         let expires_at = now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS);
+        let generation = state
+            .generation_highwater
+            .get(&device.device_id)
+            .copied()
+            .unwrap_or(device.credential_generation)
+            + 1;
+        state
+            .generation_highwater
+            .insert(device.device_id.clone(), generation);
+        state.devices[device_index].credential_generation = generation;
+        state.devices[device_index].credential_id = uuid::Uuid::new_v4().to_string();
         state.devices[device_index].credential_hash = hash_b64(rotated.as_bytes());
         state.devices[device_index].last_used_at = now;
         state.devices[device_index].expires_at = expires_at;
         self.persist(&state)?;
         Ok(DeviceCredential {
+            credential_generation: generation,
+            account_enrollment: AccountEnrollment::Unenrolled,
             device_id: device.device_id,
-            credential_id: device.credential_id,
+            credential_id: state.devices[device_index].credential_id.clone(),
             credential: rotated,
             expires_at,
             scopes: device.scopes,
@@ -1183,6 +1234,9 @@ impl AuthStore {
             .devices
             .iter()
             .map(|device| DeviceSummary {
+                credential_generation: device.credential_generation,
+                key_fingerprint: device.public_key_thumbprint.clone(),
+                account_enrollment: AccountEnrollment::Unenrolled,
                 device_id: device.device_id.clone(),
                 credential_id: device.credential_id.clone(),
                 device_label: device.device_label.clone(),
@@ -1550,9 +1604,9 @@ impl AuthStore {
             reason: refusal.map(AuthRefusal::code),
             detail: detail.or_else(|| refusal.and_then(AuthRefusal::detail)),
         };
-        let written = self
-            .lock()
-            .and_then(|_state_lock| append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record));
+        let written = self.lock().and_then(|_state_lock| {
+            append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record)
+        });
         self.record_audit_outcome(action, now, written.as_ref().err());
         written
     }
@@ -1571,7 +1625,12 @@ impl AuthStore {
     /// clears both. Only transitions touch the disk, so a healthy writer adds
     /// no I/O per row. The health record never refuses the request itself:
     /// the audit error already does that.
-    fn record_audit_outcome(&self, action: &str, now: DateTime<Utc>, error: Option<&anyhow::Error>) {
+    fn record_audit_outcome(
+        &self,
+        action: &str,
+        now: DateTime<Utc>,
+        error: Option<&anyhow::Error>,
+    ) {
         let Ok(mut health) = self.0.audit_health.lock() else {
             return;
         };
@@ -1868,6 +1927,7 @@ mod credential_redaction_tests {
     #[test]
     fn the_pairing_exchange_debug_never_prints_the_pairing_token() {
         let exchange = PairingExchange {
+            installation: None,
             token: "SECRET-tok-9f3a1c".to_string(),
             hub_id: "hub-1".to_string(),
             controller_origin: "https://hub.example".to_string(),
@@ -1905,6 +1965,8 @@ mod credential_redaction_tests {
     #[test]
     fn the_device_credential_debug_never_prints_the_credential() {
         let credential = DeviceCredential {
+            credential_generation: 0,
+            account_enrollment: AccountEnrollment::Unenrolled,
             device_id: "dev-1".to_string(),
             credential_id: "cred-1".to_string(),
             credential: "SECRET-tok-9f3a1c".to_string(),

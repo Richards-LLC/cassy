@@ -1526,6 +1526,9 @@ dialog form > *,
 /* Behind the disclosure the terms read as sentences, not eyebrows (cas-b2e4 F02). */
 .pair-technical .pair-details dt { text-transform: none; letter-spacing: normal; font-size: var(--fs-meta); }
 .pair-technical fieldset { margin: 0; }
+/* cas-5e53 F08: hub:admin consent sits in plain view beside the name fields. */
+.pair-admin-consent { margin: 0; grid-template-columns: 1fr; }
+.pair-admin-consent legend { font-weight: var(--weight-semibold); }
 
 .pair-alternative {
   color: var(--text-mid);
@@ -2809,3 +2812,9 @@ button.chip:disabled { cursor: default; }
   .conversation-topline .conversation-action { border-color: ButtonText; }
   .conversation-topline .conversation-action:focus-visible { outline-color: Highlight; }
 }
+.installation-inventory-body { display: grid; min-height: 0; overflow-y: auto; gap: var(--space-4); padding: var(--space-3); }
+.installation-inventory-list { display: grid; gap: 1.25rem; }
+.installation-inventory-row { display: grid; gap: .75rem; border-top: var(--line-width) solid var(--line-subtle); padding-top: 1rem; }
+.installation-inventory-row h3 { margin: 0; font-size: var(--fs-md); }
+.installation-inventory-row code, .installation-inventory-row dd { overflow-wrap: anywhere; }
+.installation-inventory-row button { justify-self: start; }

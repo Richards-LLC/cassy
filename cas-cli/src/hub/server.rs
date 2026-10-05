@@ -108,9 +108,26 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/commander/symbols.woff2", get(commander_symbols_font))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
+        .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
             "/v1/auth/pairing/exchange",
             post(pairing_exchange::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/pairing/commit",
+            post(installation_commit::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/pairing/abort",
+            post(installation_abort::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/devices",
+            get(installation_inventory::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/devices/{device}/revoke",
+            post(installation_revoke::<R>).options(preflight::<R>),
         )
         .route(
             "/v1/auth/websocket-ticket",
@@ -125,12 +142,20 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             post(grant_own_scopes::<R>).options(preflight::<R>),
         )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
-        .route("/v1/launch/profiles", get(launch_profiles::<R>).options(preflight::<R>))
+        .route(
+            "/v1/launch/profiles",
+            get(launch_profiles::<R>).options(preflight::<R>),
+        )
         .route(
             "/v1/diagnostics",
             get(diagnostics::<R>).options(preflight::<R>),
         )
-        .route("/v1/sessions", get(sessions::<R>).post(launch_session::<R>).options(preflight::<R>))
+        .route(
+            "/v1/sessions",
+            get(sessions::<R>)
+                .post(launch_session::<R>)
+                .options(preflight::<R>),
+        )
         .route("/v1/projects", get(projects::<R>).options(preflight::<R>))
         .route(
             "/v1/projects/browse",
@@ -268,7 +293,10 @@ async fn preflight<R: SessionReadModel>(
     let Some(origin) = origin(&headers) else {
         return unauthorized();
     };
-    if uri.path() == "/v1/auth/pairing/exchange" {
+    if matches!(
+        uri.path(),
+        "/v1/auth/pairing/exchange" | "/v1/auth/pairing/commit" | "/v1/auth/pairing/abort" | "/v1/auth/pairing/protocol"
+    ) {
         return pairing_preflight(&origin, &headers);
     }
     // A health probe contains only readiness data, so the reviewed hosted
@@ -780,15 +808,17 @@ async fn end_session<R: SessionReadModel>(
         )
     {
         return with_cors(
-            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "audit_unavailable",
+                &error.to_string(),
+            ),
             &headers,
         );
     }
     let name = session.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        crate::cli::factory::end_session_by_name(&name)
-    })
-    .await;
+    let outcome =
+        tokio::task::spawn_blocking(move || crate::cli::factory::end_session_by_name(&name)).await;
     if let Some((auth, context)) = audited.as_ref() {
         let (audit_outcome, detail) = match &outcome {
             Ok(Ok(crate::cli::factory::EndSessionOutcome::NotFound)) => ("not_found", None),
@@ -995,7 +1025,11 @@ async fn session_operation<R: SessionReadModel>(
     let op_id = request.op_id.trim().to_string();
     if op_id.is_empty() || op_id.len() > 128 {
         return with_cors(
-            launch_error(StatusCode::BAD_REQUEST, "invalid_op_id", "op_id must be 1-128 characters"),
+            launch_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_op_id",
+                "op_id must be 1-128 characters",
+            ),
             &headers,
         );
     }
@@ -1004,7 +1038,10 @@ async fn session_operation<R: SessionReadModel>(
     replays.retain(|_, replay| replay.at.elapsed() < OPERATION_REPLAY_TTL);
     let key = (context.device_id.clone(), op_id.clone());
     if let Some(replay) = replays.get(&key) {
-        return with_cors((replay.status, Json(replay.body.clone())).into_response(), &headers);
+        return with_cors(
+            (replay.status, Json(replay.body.clone())).into_response(),
+            &headers,
+        );
     }
 
     let sessions = match state.catalog.list().await {
@@ -1023,17 +1060,31 @@ async fn session_operation<R: SessionReadModel>(
     let now = chrono::Utc::now();
     if auth.ensure_active_context(&context, now).is_err() {
         return with_cors(
-            launch_error(StatusCode::UNAUTHORIZED, "revoked", "device credential is no longer active"),
+            launch_error(
+                StatusCode::UNAUTHORIZED,
+                "revoked",
+                "device credential is no longer active",
+            ),
             &headers,
         );
     }
     let action = operation.action();
     let subject = operation.subject();
-    if let Err(error) =
-        auth.audit_operation(&context, "requested", action, scope, &session, Some(subject.clone()), now)
-    {
+    if let Err(error) = auth.audit_operation(
+        &context,
+        "requested",
+        action,
+        scope,
+        &session,
+        Some(subject.clone()),
+        now,
+    ) {
         return with_cors(
-            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "audit_unavailable",
+                &error.to_string(),
+            ),
             &headers,
         );
     }
@@ -1077,9 +1128,15 @@ async fn session_operation<R: SessionReadModel>(
             format!("{subject}; {detail}"),
         ),
     };
-    if let Err(error) =
-        auth.audit_operation(&context, audit_outcome, action, scope, &session, Some(detail), chrono::Utc::now())
-    {
+    if let Err(error) = auth.audit_operation(
+        &context,
+        audit_outcome,
+        action,
+        scope,
+        &session,
+        Some(detail),
+        chrono::Utc::now(),
+    ) {
         tracing::warn!(%error, %session, action, "cas-566b: operation outcome audit row could not be written");
     }
     if status == StatusCode::OK {
@@ -1115,7 +1172,11 @@ async fn run_fleet_operation(
                     "count must be between 1 and 4".to_string(),
                 ));
             }
-            ("spawn_workers", None, WorkerOperation::Spawn { count, task_id })
+            (
+                "spawn_workers",
+                None,
+                WorkerOperation::Spawn { count, task_id },
+            )
         }
         FleetOperation::SetWorkerHold { worker, hold } => (
             "set_worker_hold",
@@ -1141,8 +1202,14 @@ async fn run_fleet_operation(
         }
         // O5 runs the supervisor's async task_update on the hub's runtime.
         FleetOperation::AssignTask { task_id, assignee } => {
-            return run_assign_task(&cas_dir, &task_id, assignee.as_deref(), expected, &attribution)
-                .await;
+            return run_assign_task(
+                &cas_dir,
+                &task_id,
+                assignee.as_deref(),
+                expected,
+                &attribution,
+            )
+            .await;
         }
         other => {
             return tokio::task::spawn_blocking(move || {
@@ -1206,7 +1273,9 @@ fn run_store_operation(
             })?;
             let current = fleet::pinned_epic(session);
             if current != expected.epic_id {
-                return Err(OperationError::Stale(serde_json::json!({"epic_id": current})));
+                return Err(OperationError::Stale(
+                    serde_json::json!({"epic_id": current}),
+                ));
             }
             let request = match (clear, epic_id.as_deref().map(str::trim)) {
                 (true, _) => FocusEpic::Clear,
@@ -1657,7 +1726,12 @@ fn systemd_unit_command(
     command.arg("--").arg(executable)
         .args(["hub", "reap-daemon", "--session", name, "--cwd"])
         .arg(root)
-        .args(["--workers", &workers.to_string(), "--supervisor-cli", cli.backend().name()]);
+        .args([
+            "--workers",
+            &workers.to_string(),
+            "--supervisor-cli",
+            cli.backend().name(),
+        ]);
     apply_launch_environment(&mut command, environment);
     command
 }
@@ -1708,8 +1782,10 @@ fn spawn_factory_daemon(
             }
             Err(error) => return Err(error.into()),
         }
-        let scope = crate::ui::factory::cgroup::create_server_scope(name, "daemon")
-            .ok_or_else(|| anyhow::anyhow!("no separate Cassy cgroup available after systemd-run failed"))?;
+        let scope =
+            crate::ui::factory::cgroup::create_server_scope(name, "daemon").ok_or_else(|| {
+                anyhow::anyhow!("no separate Cassy cgroup available after systemd-run failed")
+            })?;
         if !crate::ui::factory::cgroup::outside_current_scope(&scope) {
             crate::ui::factory::cgroup::remove_scope(&scope);
             anyhow::bail!("separate Cassy cgroup is inside the hub's own scope");
@@ -1831,7 +1907,7 @@ async fn events<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(error) = authorize(
+    let context = match authorize(
         &state,
         HubAction::SessionRead,
         Scope::SessionRead,
@@ -1839,8 +1915,9 @@ async fn events<R: SessionReadModel>(
         "GET",
         "/v1/events",
     ) {
-        return with_cors(unauthorized_for(&error), &headers);
-    }
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
     // Subscribe before snapshotting. A concurrent event can consequently be
     // replayed once and then observed live once; sequence+revision make that a
     // harmless idempotent upsert, while the ordering avoids a lost-event gap.
@@ -1863,7 +1940,22 @@ async fn events<R: SessionReadModel>(
             }
         }
     });
-    let output = replay.chain(live);
+    let auth = state.auth.clone();
+    let mut ticks = tokio::time::interval(Duration::from_millis(250));
+    let termination = async move {
+        loop {
+            ticks.tick().await;
+            if let (Some(auth), Some(context)) = (&auth, &context) {
+                if auth
+                    .ensure_active_context(context, chrono::Utc::now())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    };
+    let output = replay.chain(live).take_until(termination);
     with_cors(
         Sse::new(output)
             .keep_alive(KeepAlive::default())
@@ -2439,11 +2531,132 @@ async fn pairing_exchange<R: SessionReadModel>(
     exchange.source = exchange.controller_origin.clone();
     match auth.exchange_pairing(exchange, chrono::Utc::now()) {
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
+        Err(PairingExchangeError::Conflict) if bound_origin => with_cors((StatusCode::CONFLICT, Json(serde_json::json!({"error":"installation_conflict"}))).into_response(), &headers),
         Err(PairingExchangeError::Throttled {
             retry_after_seconds,
         }) if bound_origin => with_cors(pairing_throttled(retry_after_seconds), &headers),
         Err(_) if bound_origin => with_cors(unauthorized(), &headers),
         Err(_) => unauthorized(),
+    }
+}
+
+#[derive(Deserialize)]
+struct InstallationProtocolRequest { controller_origin: String, pairing_token_hash: String }
+
+async fn installation_protocol<R: SessionReadModel>(
+    State(state): State<HubState<R>>, headers: HeaderMap, Json(request): Json<InstallationProtocolRequest>,
+) -> Response {
+    if origin(&headers).as_deref() != Some(request.controller_origin.as_str()) {
+        return unauthorized();
+    }
+    if state.auth.as_ref().is_none_or(|auth| !auth.installation_protocol_matches(&request.pairing_token_hash, &request.controller_origin, chrono::Utc::now()).unwrap_or(false)) {
+        return unauthorized();
+    }
+    with_cors(Json(serde_json::json!({"installation_protocol":1})).into_response(), &headers)
+}
+
+async fn installation_commit<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(action): Json<super::auth::InstallationAction>,
+) -> Response {
+    installation_transition(state, headers, action, true)
+}
+async fn installation_abort<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(action): Json<super::auth::InstallationAction>,
+) -> Response {
+    installation_transition(state, headers, action, false)
+}
+fn installation_transition<R: SessionReadModel>(
+    state: HubState<R>,
+    headers: HeaderMap,
+    action: super::auth::InstallationAction,
+    commit: bool,
+) -> Response {
+    if origin(&headers).as_deref() != Some(action.controller_origin.as_str()) {
+        return unauthorized();
+    }
+    let Some(auth) = state.auth else {
+        return unauthorized();
+    };
+    match auth.installation_action(action, commit, chrono::Utc::now()) {
+        Ok(()) => with_cors(StatusCode::NO_CONTENT.into_response(), &headers),
+        Err(_) => with_cors(
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error":"installation_conflict"})),
+            )
+                .into_response(),
+            &headers,
+        ),
+    }
+}
+async fn installation_inventory<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    let context = match authorize(
+        &state,
+        HubAction::MachineRead,
+        Scope::MachineRead,
+        &headers,
+        "GET",
+        "/v1/auth/devices",
+    ) {
+        Ok(Some(context)) => context,
+        _ => return with_cors(unauthorized(), &headers),
+    };
+    let Some(auth) = &state.auth else {
+        return unauthorized();
+    };
+    match auth.list_devices() {
+        Ok(devices) => with_cors(
+            Json(
+                devices
+                    .into_iter()
+                    .filter(|d| context.has(Scope::HubAdmin) || d.device_id == context.device_id)
+                    .collect::<Vec<_>>(),
+            )
+            .into_response(),
+            &headers,
+        ),
+        Err(error) => with_cors(internal_error(error), &headers),
+    }
+}
+async fn installation_revoke<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(device): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/auth/devices/{device}/revoke");
+    let context = match authorize(
+        &state,
+        HubAction::Mutation,
+        Scope::MachineRead,
+        &headers,
+        "POST",
+        &uri,
+    ) {
+        Ok(Some(context)) => context,
+        _ => return with_cors(unauthorized(), &headers),
+    };
+    if context.device_id != device && !context.has(Scope::HubAdmin) {
+        return with_cors(unauthorized(), &headers);
+    }
+    let Some(auth) = &state.auth else {
+        return unauthorized();
+    };
+    if auth
+        .ensure_active_context(&context, chrono::Utc::now())
+        .is_err()
+    {
+        return with_cors(unauthorized(), &headers);
+    }
+    match auth.revoke_installation(&context, &device, chrono::Utc::now()) {
+        Ok(_) => with_cors(StatusCode::NO_CONTENT.into_response(), &headers),
+        Err(error) => with_cors(internal_error(error), &headers),
     }
 }
 
@@ -2709,10 +2922,7 @@ pub(super) fn operator_reply_allowed(
 
 /// A live send belongs in every other authenticated viewer's thread. The
 /// sender already has its optimistic bubble and receives MessageQueued.
-fn operator_message_allowed(
-    auth: &Option<(AuthStore, AuthContext)>,
-    bytes: &[u8],
-) -> bool {
+fn operator_message_allowed(auth: &Option<(AuthStore, AuthContext)>, bytes: &[u8]) -> bool {
     let Ok(DaemonMessage::OperatorMessage(message)) =
         serde_json::from_slice::<DaemonMessage>(bytes)
     else {

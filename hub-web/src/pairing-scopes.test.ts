@@ -362,7 +362,7 @@ describe("plain capability summary beside the exact scopes (cas-8051 F7)", () =>
   });
 
   it("names any scope outside those two sets as itself", () => {
-    expect(scopeSummary(["machine-read", "hub-admin"])).toEqual(["See this machine", "Administer the hub"]);
+    expect(scopeSummary(["machine-read", "hub-admin"])).toEqual(["See this machine", "See and revoke this machine's other browser installations"]);
     // cas-d382: the brief's plain words, not "Manage the factory".
     expect(scopeSummary(["factory-manage"])).toEqual(["Stop and restart workers and sessions"]);
     expect(scopeSummary([])).toEqual([]);
@@ -374,8 +374,8 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
   it("reads factory:operate and factory:manage from an invitation, in either spelling", () => {
     expect(parseGrantedScopes("machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage")).toEqual([...PAIRING_SCOPES, "factory-manage"]);
     expect(parseGrantedScopes("machine-read,factory-operate")).toEqual(["machine-read", "factory-operate"]);
-    // hub:admin is still pairing-only and not offered by this build.
-    expect(parseGrantedScopes("machine:read,hub:admin")).toBeUndefined();
+    // cas-5e53 F08: an admin invitation keeps its ceiling instead of falling back to read-only.
+    expect(parseGrantedScopes("machine:read,hub:admin")).toEqual(["machine-read", "hub-admin"]);
     const { invitation } = fragment(`#pair=${TOKEN}&hub=machine-uuid&scopes=machine:read,session:read,pane:read,factory:manage`);
     expect(invitation?.scopes).toEqual(["machine-read", "session-read", "pane-read", "factory-manage"]);
   });
@@ -426,5 +426,19 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
     if (!readOnly.allowed) expect(readOnly.command).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,factory:operate");
     expect(fleetControlGate([...CONTROL, "factory-operate"], "assign-task", ORIGIN).allowed).toBe(true);
     expect(scopeGrantCommand(ORIGIN, ["machine-read", "factory-operate"], "factory-operate")).toBe("cas hub pair --origin https://commander.example --scopes machine:read,factory:operate");
+  });
+});
+
+describe("hub:admin needs explicit consent (cas-5e53 F08)", () => {
+  it("is offered when the invitation grants it, never pre-ticked, with what it allows", () => {
+    const granted = parseGrantedScopes("machine:read,session:read,pane:read,hub:admin")!;
+    const selected = preselectedScopes({ kind: "invitation", token: TOKEN, hubId: "machine-uuid", scopes: granted } as never);
+    expect(selected).toEqual(["machine-read", "session-read", "pane-read"]);
+    const admin = scopeChoices(granted, selected).find((choice) => choice.scope === "hub-admin")!;
+    expect(admin).toEqual({ scope: "hub-admin", label: "hub:admin", granted: true, checked: false, note: "See and revoke this machine's other browser installations" });
+    expect(scopeChoices(granted, [...selected, "hub-admin"]).find((choice) => choice.scope === "hub-admin")!.checked).toBe(true);
+  });
+  it("is not offered by an invitation that does not grant it", () => {
+    expect(scopeChoices(["machine-read"], ["machine-read"]).some((choice) => choice.scope === "hub-admin")).toBe(false);
   });
 });

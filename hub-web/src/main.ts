@@ -1,3 +1,7 @@
+import { openInstallationInventory } from "./installation-inventory";
+import { InstallationAccess, watchInstallations } from "./installation-access";
+import { installationStore } from "./storage";
+
 import { presentFleetSheet } from "./fleet-sheet";
 import { projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
@@ -31,7 +35,7 @@ import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft, type PairingStep } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
 import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
-import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
+import { PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
 import { launchDropped, launchDroppedNotice, preselectedScopes, repairCommand, repairStatus } from "./pairing-scopes";
@@ -93,6 +97,7 @@ bindKeyboardViewport(window);
 // The keyboard coming up or going away resizes the window: the pinned question folds or opens with it (cas-16eed).
 window.addEventListener("resize", () => syncComposing());
 window.visualViewport?.addEventListener("resize", () => syncComposing());
+const installationAccess = new InstallationAccess(installationStore, catalog);
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
@@ -493,11 +498,27 @@ function commitSelection(next: SessionSelection): void {
 }
 
 async function boot(): Promise<void> {
-  const stored = await catalog.recoverPending();
-  for (const machine of stored.machines) machines.set(machine.id, machine);
+  const remotePending = await installationAccess.recover(window.fetch.bind(window));
+  const stored = remotePending ? await catalog.snapshot() : await catalog.recoverPending();
+  const pendingHubs = new Set((await installationStore.list()).filter((r) => r.pending).map((r) => r.id.split("@")[0]));
+  for (const machine of stored.machines) if (!pendingHubs.has(machine.id)) machines.set(machine.id, machine);
+  watchInstallations((hubId) => {
+    // The same hub ID at another URL is a separate trust boundary. Never
+    // expose a staged prior while remote cancellation is still unresolved.
+    void installationStore.list().then(async (records) => {
+      if (records.some((r) => r.pending && r.id.split("@")[0] === hubId)) return;
+      const { machines: stored } = await catalog.snapshot();
+      const current = machines.get(hubId);
+      const accepted = stored.find((m) => m.id === hubId && m.baseUrl === current?.baseUrl);
+      if (accepted && current && (accepted.credentialGeneration ?? 0) >= (current.credentialGeneration ?? 0)) Object.assign(current, accepted);
+    }).catch(() => { /* Durable storage remains authoritative; refusal recovery retries adoption. */ });
+  });
   machineCatalogLoaded = true;
-  if (stored.pendingCleanup > 0) {
-    pairingStatus = "A canceled credential remains blocked while durable local cleanup is pending.";
+  if (stored.pendingCleanup > 0 || remotePending > 0) {
+    pairingCleanupFailed = true;
+    pairingCleanupContext = { cause: "cancel", storeOpen: false, rollbackPending: true };
+    pairingCancellations.begin(undefined);
+    pairingStatus = "Pairing cleanup needs confirmation from the hub. Retry cleanup to restore the previous access.";
   }
   attention = (await attentionStore.list()).toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
   // Reopening on "No session open" throws away the one thing the operator was
@@ -668,7 +689,19 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       pairingStatus = `${detail}. Re-pair in Cassy Cloud; no browser reset is required.`;
       render();
     },
-    onCredentialRefreshed: async (refreshed) => { machines.set(refreshed.id, refreshed); await catalog.put(refreshed); },
+    onCredentialRefreshed: async (refreshed) => {
+      await catalog.put(refreshed);
+      const accepted = (await catalog.snapshot()).machines.find((m) => m.id === refreshed.id);
+      if (accepted) {
+        Object.assign(refreshed, accepted); machines.set(refreshed.id, refreshed);
+        for (const record of await installationStore.list()) {
+          if (!record.pending && record.id === `${accepted.id}@${new URL(accepted.baseUrl).origin}` && accepted.credentialGeneration !== undefined) {
+            record.known = { deviceId: accepted.deviceId, credentialGeneration: accepted.credentialGeneration };
+            await installationStore.put(record);
+          }
+        }
+      }
+    },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (items, freshnessThresholdSecs) => {
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
@@ -1066,19 +1099,28 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   const operation = pairingOperations.begin();
   pairingExchangeInFlight = true;
   exchangeOperationGeneration = operation.generation;
-  pairingStatus = "Creating this browser credential… Cancel stops local installation.";
+  pairingStatus = "Updating this browser installation… Cancel restores its previous access.";
   render();
   let machine: StoredMachine;
   try {
-    machine = await exchangePendingPairing({
+    machine = await installationAccess.pair({
       invitation,
       controllerOrigin: location.origin,
       legacyHubUrl: invitation.hubUrl ? undefined : String(values.get("url")),
       machineLabel: String(values.get("label")),
+      rotateKey: values.get("rotate-key") === "on",
       deviceLabel: String(values.get("device")),
       operatorLabel: String(values.get("operator")),
-      // The relay form has no scope boxes, so its invitation's own scopes stand.
-      requestedScopes: form.querySelector('input[name="scope"]') ? values.getAll("scope") as Scope[] : undefined,
+      // The link form lists every scope box (its hub:admin box is the consent
+      // beside the name fields). The relay form has no scope list, so its
+      // invitation's scopes stand, except hub:admin, which is held only when
+      // its consent box is ticked (cas-5e53 F08).
+      requestedScopes: (() => {
+        const chosen = values.getAll("scope") as Scope[];
+        if (form.querySelector(".pair-scope-list")) return chosen;
+        if (!invitation.scopes) return undefined;
+        return [...invitation.scopes.filter((scope) => scope !== "hub-admin"), ...(chosen.includes("hub-admin") ? ["hub-admin" as Scope] : [])];
+      })(),
       fetcher: window.fetch.bind(window),
       createKey: createDeviceKey,
       installationGeneration: operation.generation,
@@ -1373,7 +1415,8 @@ async function retryPairingCleanup(): Promise<void> {
   const cleared = pendingPairingStore.clear();
   let recovery: { pendingCleanup?: number; failed?: boolean };
   try {
-    recovery = { pendingCleanup: (await catalog.recoverPending()).pendingCleanup };
+    const remotePending = await installationAccess.recover(window.fetch.bind(window));
+    recovery = { pendingCleanup: remotePending || (await catalog.recoverPending()).pendingCleanup };
   } catch {
     recovery = { failed: true };
   }
@@ -1381,6 +1424,16 @@ async function retryPairingCleanup(): Promise<void> {
   const outcome = cleanupRetryOutcome(cleared, recovery);
   pairingStatus = outcome.status;
   if (outcome.done) {
+    // Boot quarantines hubs with uncertain remote rollback. Only confirmed
+    // recovery may repopulate them and restart their connections.
+    const restored = await catalog.snapshot();
+    for (const machine of restored.machines) {
+      if (!machines.has(machine.id)) {
+        machines.set(machine.id, machine);
+        ensureConnection(machine);
+      }
+    }
+    selectedMachineId ??= machines.keys().next().value;
     finishCancelledPairing();
     return;
   }
@@ -4620,6 +4673,14 @@ function renderMachineRegister(): void {
     reorder: !dialog.open,
     copy: (text) => navigator.clipboard.writeText(text),
     allowManagingWorkers: allowManagingWorkers,
+    installations: (id) => {
+      const machine = machines.get(id);
+      const connection = connections.get(id);
+      if (machine && connection) void openInstallationInventory(document, machine, connection, async () => {
+        await installationAccess.forgetRevoked(machine.id, machine.baseUrl, machine.deviceId);
+        await forgetPairedMachine(id);
+      });
+    },
   });
   if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the

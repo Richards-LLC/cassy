@@ -1,5 +1,5 @@
 import type { ConnectionSnapshot } from "./connection-state";
-export type ConnectionCause = "browser_offline" | "network_or_browser_policy_unknown" | "request_timeout" | "auth_expired" | "auth_revoked" | "auth_scope_mismatch" | "auth_needs_pairing" | "proof_refused" | "http_refused" | "socket_closed" | "session_upstream_unavailable" | "event_sequence_gap" | "event_retention_gap" | "event_epoch_changed" | "viewer_lagged" | "stream_closed" | "unsupported_browser";
+export type ConnectionCause = "browser_offline" | "network_or_browser_policy_unknown" | "health_http_unavailable" | "request_timeout" | "auth_expired" | "auth_revoked" | "auth_scope_mismatch" | "auth_needs_pairing" | "proof_refused" | "http_refused" | "socket_closed" | "session_upstream_unavailable" | "event_sequence_gap" | "event_retention_gap" | "event_epoch_changed" | "viewer_lagged" | "stream_closed" | "unsupported_browser";
 export interface CauseEvidence {
   code: ConnectionCause;
   layer: "browser" | "http" | "auth" | "socket" | "session" | "events";
@@ -13,13 +13,14 @@ export interface CauseEvidence {
 export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string }> = {
   browser_offline: { title: "Browser reports offline", action: "Restore this device's network; Commander retries when it returns." },
   network_or_browser_policy_unknown: { title: "Network or browser policy blocked the request", action: "Check Tailscale and browser site permissions. DNS, TLS, CORS and local-network policy are indistinguishable to this page." },
+  health_http_unavailable: { title: "Health probe returned HTTP 503", action: "This browser received an unavailable response. Compare its network route with hub diagnostics; another device's successful health check does not prove this route works." },
   request_timeout: { title: "Request deadline exceeded", action: "Commander retries reads. A timed-out action may have reached the hub; check its result before repeating it." },
   auth_expired: { title: "Hub says access expired", action: "Refresh access or pair this device again." },
   auth_revoked: { title: "Hub says access was revoked", action: "Pair this device again with the machine's approval." },
   auth_scope_mismatch: { title: "Hub refused the required permission", action: "Approve the required scope on the machine." },
   auth_needs_pairing: { title: "Hub refused this credential", action: "Pair this device again." },
   proof_refused: { title: "Hub refused a fresh proof", action: "Commander retries with the hub's clock. Check this device's clock if it persists." },
-  http_refused: { title: "Hub refused the HTTP request", action: "Check the measured HTTP status and hub diagnostics." },
+  http_refused: { title: "HTTP request was refused", action: "Check the measured HTTP status and hub diagnostics." },
   socket_closed: { title: "Terminal socket closed", action: "Commander reconnects the terminal; the HTTP hub may still be healthy." },
   session_upstream_unavailable: { title: "Session's upstream is unavailable", action: "Commander retries this session. Check that its supervisor is running." },
   event_sequence_gap: { title: "Event sequence gap detected", action: "Commander reopens retained events and refreshes the session catalog." },

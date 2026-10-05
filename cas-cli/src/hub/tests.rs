@@ -570,7 +570,7 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         serde_json::from_slice(&to_bytes(health.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(
         health,
-        serde_json::json!({"schema_version": 1, "ready": true, "installation_protocol": 1})
+        serde_json::json!({"schema_version": 1, "ready": true})
     );
 
     let favicon = app

@@ -464,6 +464,10 @@ impl AuthStore {
             }
             state.installations[index].phase = Phase::Aborted;
         }
+        // A successful transition can supersede an expired commit that was
+        // still active during the initial prune. Persist its removal together
+        // with the new credential; refused retries must not carry cleanup.
+        prune_installations(&mut state, now);
         self.persist(&state)?;
         Ok(())
     }
@@ -782,6 +786,24 @@ mod tests {
         let later = now + Duration::minutes(11);
         let (second, current) = prepare(&store, &key, Some(&old), later);
         action(&store, &key, &second, true, later).unwrap();
+        // Check durable cleanup before any refused retry can prune its local
+        // snapshot. The new active receipt keeps the old credential as prior.
+        let reopened = AuthStore::open(root.path().join("hub"), "test-hub").unwrap();
+        {
+            let state = reopened.lock().unwrap();
+            assert_eq!(state.installations.len(), 1);
+            let pending = &state.installations[0];
+            assert_eq!(
+                pending.operation_id,
+                second.installation.as_ref().unwrap().operation_id
+            );
+            assert_eq!(pending.candidate.credential_id, current.credential_id);
+            assert_eq!(
+                pending.prior.as_ref().unwrap().credential_id,
+                old.credential_id
+            );
+            assert_eq!(pending.phase, Phase::Committed);
+        }
         assert!(action(&store, &key, &first, false, later).is_err());
         assert!(action(&store, &key, &first, true, later).is_err());
         assert_eq!(store.lock().unwrap().installations.len(), 1);

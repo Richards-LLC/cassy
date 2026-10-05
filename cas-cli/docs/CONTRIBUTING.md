@@ -490,10 +490,29 @@ the larger of 25% of physical RAM and 8 GiB. Both knobs accept positive integers
 The producer budget uses 8 GiB for the large cas compile/link unit, rounded up
 from soundwave's measured 7,293,348 KiB maximum RSS (serial proof `7e4c6f50`,
 head `abd6817b5`), plus an assumed 256 MiB per dependency job and 2 GiB for
-scripts. Supervisor memory/PSI samples must validate the estimates on each host.
+scripts. A shared host/user linker slot bounds both producers to one link at a
+time, budgeted at 2.1 GiB. Soundwave's 2026-10-05 incremental relink sampler
+(`.cas/perf-98a0/link-rss.log`, 0.5s samples) measured 2,190,228 KiB maximum
+`ld.mold` RSS (2.089 GiB), with `rustc` peaking at 4,775,752 KiB (4.555 GiB).
+The cold-proof 8 GiB producer bound remains because incremental code generation
+does not establish the cold peak. Link admission rechecks memory while holding
+the slot; every invocation records child peak RSS in `link-rss.jsonl`.
+Supervisor memory/PSI samples must validate the estimates on each host.
 Insufficient concurrent capacity selects sequential legs with a fresh memory
-admission before each phase; a phase that cannot preserve the reserve fails
-without starting. Missing memory probes fail admission. Consumers have a fresh
+admission before each phase. `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS`
+(default 600) bounds memory/slot waits and compile pauses;
+`CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS` (default 1 for guards, 2 for phase
+admission) controls resampling. Both accept positive integers. Each refusal and
+later admission is recorded, including on timeout. The compile guard pauses the
+producer process group within 2 GiB of the reserve and resumes once 4 GiB is
+available above it; a deadline or observed reserve breach aborts the producer
+and prevents PASS. It records every sample and pause/resume in
+`compile-memory.jsonl`; the assembly receipt includes both guard and link logs.
+Native linker selection, Cargo target rustflags, explicit environment flags and
+the worker job ceiling are preserved. Immutable helper paths keep clone-path
+changes out of the shared Cargo dependency fingerprint. Configurations using
+`cfg(...)` target rustflags must supply explicit native flags for this guard.
+Missing memory probes fail admission. Consumers have a fresh
 thread ceiling using an assumed 4 GiB base plus 256 MiB per test thread, and
 never overlap a producer. These are admission estimates, not OS memory limits.
 
@@ -653,6 +672,23 @@ live Cargo writer. Old snapshots remain valid for in-flight seeders and should
 only be removed during a maintenance window. Set
 `CAS_FACTORY_DISABLE_TARGET_SEED=1` to skip seeding. Do not replace this with a
 shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
+
+Worker provisioning (including store and Git base resolution) runs in a separate
+process group with a five-minute deadline. Timeout, targeted shutdown and
+`restart_spawn_queue` kill only that generation's provisioner and descendants;
+the daemon keeps processing shutdowns and messages. Reset drops already-dequeued
+spawn actions and reports them; persistent queue rows continue draining. Retirement cleans newly-created checkout/branch metadata and worker-specific
+Git locks best-effort; reused worktrees are preserved. Inspect any reported
+leftovers before retrying.
+
+Before creating or reusing a checkout, `factory.spawn_min_free_gib` checks
+available space on the worker filesystem (default 25 GiB; 0 disables the floor).
+Below the floor, the spawn fails with `spawn_disk_floor` before a checkout or
+branch is created. Set it with `cas config set factory.spawn_min_free_gib 30`.
+The target repository's config applies to cross-repository workers. Existing
+usable targets and `CAS_FACTORY_DISABLE_TARGET_SEED=1` bypass seeding, while
+all spawn paths still apply the disk floor. Seeding normally hardlinks artifacts;
+the floor reserves space for subsequent worker writes and builds.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with

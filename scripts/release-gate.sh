@@ -209,6 +209,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 row_log_dir="${CAS_RELEASE_GATE_LOG_DIR:-$tmp_dir/rows}"
 mkdir -p "$row_log_dir"
 rm -f "$row_log_dir/compile-timing.tsv" "$row_log_dir/memory-admission.json"
+rm -f "$row_log_dir/compile-memory.jsonl" "$row_log_dir/link-rss.jsonl"
 printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
 cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
 # The train owns durable row evidence; unchanged inputs reuse it automatically.
@@ -873,9 +874,14 @@ EOF
 run_assembly_compile() {
     local row="$1" started ended wall user system status=0
     shift
+    local policy="${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}"
+    [[ -n "$policy" ]] || policy='{}'
+    local -a guarded=(python3 "$repo_root/scripts/assembly-memory.py" \
+        --policy "$policy" \
+        --events "$row_log_dir/compile-memory.jsonl" --root "$repo_root" -- "$@")
     started="$(date -u +%FT%TZ)"
     local LC_NUMERIC=C TIMEFORMAT='%R %U %S'
-    if { time "$@" 2>&1; } 2>"$tmp_dir/$row-compile.time"; then
+    if { time "${guarded[@]}" 2>&1; } 2>"$tmp_dir/$row-compile.time"; then
         :
     else
         status=$?
@@ -908,9 +914,11 @@ spec = importlib.util.spec_from_file_location("assembly_proof", sys.argv[1])
 proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)
 execution = {"phases": []}
-with contextlib.redirect_stdout(sys.stderr):
-    threads = proof.admit_phase(json.loads(sys.argv[2]), execution, sys.argv[3] + "-tests")
-Path(sys.argv[4]).write_text(json.dumps(execution["phases"][0]) + "\n")
+try:
+    with contextlib.redirect_stdout(sys.stderr):
+        threads = proof.admit_phase(json.loads(sys.argv[2]), execution, sys.argv[3] + "-tests")
+finally:
+    Path(sys.argv[4]).write_text(json.dumps({"samples": execution["phases"]}) + "\n")
 print(threads)
 PY_ASSEMBLY_MEMORY
 )" || return $?

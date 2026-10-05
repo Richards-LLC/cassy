@@ -9,6 +9,25 @@ use cas::{cli, config, duplicate_check, error, logging, sentry, store};
 
 fn main() -> ExitCode {
     if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-factory-provisioner"))
+    {
+        let mut args = std::env::args_os().skip(2);
+        let (Some(input), Some(output), None) = (args.next(), args.next(), args.next()) else {
+            eprintln!("factory provisioner requires input and output paths");
+            return ExitCode::FAILURE;
+        };
+        return match cas::ui::factory::run_internal_provisioner(
+            std::path::Path::new(&input),
+            std::path::Path::new(&output),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("factory provisioner failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--internal-light-lane-worker"))
     {
         let mut args = std::env::args_os().skip(2);

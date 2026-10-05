@@ -58,6 +58,14 @@ new_fixture() {
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
+    cp "$script_dir/assembly-memory.py" "$repo/scripts/assembly-memory.py"
+    # The producer and its guard share deterministic physical-memory fixtures.
+    python3 - "$repo/scripts/assembly-proof.py" <<'PY_MEMORY_GUARD_FIXTURE'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("def memory_snapshot():", "def memory_snapshot():\n    return {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
+PY_MEMORY_GUARD_FIXTURE
     # Cargo is fake here: bypass only durable-location classification in the
     # copied producer. Production guard behavior has its own Python regressions.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_SCRATCH'
@@ -1667,10 +1675,10 @@ for row in nextest archive-mode; do
     fi
 done
 
-# The fixture has 64 GiB total, 60 available. A 48 GiB reserve admits one
+# The fixture has 64 GiB total, 60 available. A 44 GiB reserve admits one
 # producer, not two: this is real serial dispatch through both shell rows.
 repo="$(new_fixture assembly-serial-memory)"
-CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB=48 run_gate "$repo" '' \
+CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB=44 run_gate "$repo" '' \
     python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/serial-proof.log" 2>&1
 if grep -qF '"mode": "serial"' "$tmp/serial-proof.log" \
     && grep -qF 'insufficient available memory' "$tmp/serial-proof.log" \

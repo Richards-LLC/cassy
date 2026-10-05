@@ -19,6 +19,13 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "hub.tailscale_serve" => Some(
+                self.hub
+                    .as_ref()
+                    .and_then(|hub| hub.tailscale_serve)
+                    .unwrap_or(true)
+                    .to_string(),
+            ),
             "jev.gate.shadow" => Some(self.jev.clone().unwrap_or_default().gate.shadow.to_string()),
             "jev.model" => Some(self.jev.clone().unwrap_or_default().model),
             "jev.key_file" => Some(
@@ -98,6 +105,7 @@ impl Config {
             }
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.spawn_min_free_gib" => Some(factory.spawn_min_free_gib.to_string()),
             "factory.prompt_retention_days" => Some(factory.prompt_retention_days.to_string()),
             "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
                 Some(factory.cargo_build_jobs.clone())

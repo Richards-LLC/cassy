@@ -4,6 +4,7 @@ import copy
 import contextlib
 import io
 import importlib.util
+import itertools
 import json
 from pathlib import Path
 import tempfile
@@ -337,7 +338,7 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid timing.tsv"):
                 proof.run_row(self.root, "ci-script-tests", {}, logs)
 
-    def run_producer(self, failure=None, serial=False, deny_test=False):
+    def run_producer(self, failure=None, serial=False, deny_test=False, recover_test=False):
         self.path.unlink()
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -380,11 +381,13 @@ class ReceiptTests(unittest.TestCase):
                 (logs / "archive-size-bytes").write_text("123")
             return {"status": "PASS", "row": row, "tree": self.tree, "passed": 10}
 
-        memory = {"total_bytes": 64 * proof.GIB, "available_bytes": (26 if serial else 60) * proof.GIB,
+        memory = {"total_bytes": 64 * proof.GIB, "available_bytes": (36 if serial else 60) * proof.GIB,
                   "source": "fixture"}
-        snapshots = [memory, memory, dict(memory, available_bytes=17 * proof.GIB)] if deny_test else None
+        snapshots = itertools.chain([memory, memory], itertools.repeat(dict(memory, available_bytes=17 * proof.GIB))) if deny_test else None
+        if recover_test:
+            snapshots = itertools.chain([memory, memory, dict(memory, available_bytes=17 * proof.GIB)], itertools.repeat(memory))
         with mock.patch.object(proof, "clone_scratch", return_value=Path(scratch.name) / "base"), \
-                mock.patch.object(proof, "inputs", return_value=(self.expected, proof.test_environment(self.root))), \
+                mock.patch.object(proof, "inputs", return_value=(self.expected, dict(proof.test_environment(self.root), CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS="1"))), \
                 mock.patch.object(proof, "memory_snapshot", return_value=memory, side_effect=snapshots), \
                 mock.patch.object(proof, "cpu_count", return_value=32), \
                 mock.patch.object(proof, "run_row", side_effect=run):
@@ -401,6 +404,8 @@ class ReceiptTests(unittest.TestCase):
                 self.assertCountEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
                 self.assertEqual(tests, ["nextest", "archive-mode"])
                 self.assertEqual(record["script_tests"]["status"], "PASS")
+                if recover_test:
+                    self.assertEqual([event["admitted"] for event in record["execution"]["phases"]], [False, True, True])
                 self.assertEqual(record["execution"]["mode"], "serial" if serial else "concurrent")
                 self.assertIsNotNone(proof.matching(self.root, self.expected))
                 proof.prove(self.root)
@@ -423,18 +428,22 @@ class ReceiptTests(unittest.TestCase):
     def test_memory_drop_after_compile_aborts_both_consumers(self):
         self.run_producer(deny_test=True)
 
+    def test_refuse_then_recover_completes_proof_and_publishes_pass(self):
+        self.run_producer(recover_test=True)
+
     def test_memory_and_cpu_caps_on_soundwave_and_prowl(self):
-        for total, available, cores, expected_jobs in ((62, 50, 32, 16), (48, 40, 18, 9), (62, 35, 32, 3)):
+        for total, available, cores, expected_jobs in ((62, 50, 32, 16), (48, 40, 18, 9), (62, 35, 32, 0)):
             with self.subTest(cores=cores), \
                     mock.patch.object(proof, "memory_snapshot", return_value={
                         "total_bytes": total * proof.GIB, "available_bytes": available * proof.GIB,
                         "source": "fixture"}), mock.patch.object(proof, "cpu_count", return_value=cores):
                 plan = proof.execution_plan({})
                 self.assertEqual(plan["compile_jobs"], expected_jobs)
-                estimated = 2 * (expected_jobs * proof.COMPILE_JOB_BYTES + proof.PRODUCER_BYTES) + proof.SCRIPT_BYTES
-                self.assertLessEqual(estimated, plan["budget_bytes"])
+                estimated = 2 * (expected_jobs * proof.COMPILE_JOB_BYTES + proof.PRODUCER_BYTES) + proof.SCRIPT_BYTES + proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
+                if expected_jobs:
+                    self.assertLessEqual(estimated, plan["budget_bytes"])
                 self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS": "99"})["compile_jobs"], expected_jobs)
-                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS": "1"})["compile_jobs"], 1)
+                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS": "1"})["compile_jobs"], min(1, expected_jobs))
                 reserved = proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB": "48"})
                 self.assertEqual(reserved["mode"], "serial")
 
@@ -443,12 +452,26 @@ class ReceiptTests(unittest.TestCase):
                 "total_bytes": 16 * proof.GIB, "available_bytes": 9 * proof.GIB, "source": "fixture"}):
             self.assertEqual(proof.execution_plan({})["reserve_bytes"], 8 * proof.GIB)
             execution = {"phases": []}
-            with self.assertRaisesRegex(ValueError, "cannot fit above memory reserve"):
-                proof.admit_phase({}, execution, "nextest-compile", True)
+            with mock.patch.object(proof.time, "monotonic", side_effect=[0, 1]), \
+                    self.assertRaisesRegex(ValueError, "cannot fit above memory reserve"):
+                proof.admit_phase({"CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS": "1"}, execution, "nextest-compile", True)
             self.assertFalse(execution["phases"][0]["admitted"])
 
+    def test_admission_waits_for_recovery_and_records_both_samples(self):
+        low = {"total_bytes": 64 * proof.GIB, "available_bytes": 15 * proof.GIB, "source": "fixture"}
+        high = dict(low, available_bytes=32 * proof.GIB)
+        execution = {"phases": []}
+        with mock.patch.object(proof, "memory_snapshot", side_effect=[low, high]), \
+                mock.patch.object(proof.time, "sleep") as sleep:
+            count = proof.admit_phase({"CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS": "1"},
+                                      execution, "archive-mode-tests")
+        self.assertGreater(int(count), 0)
+        self.assertEqual([item["admitted"] for item in execution["phases"]], [False, True])
+        sleep.assert_called_once()
+
     def test_invalid_memory_and_job_knobs_fail_closed(self):
-        for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS", "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB"):
+        for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS", "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
+                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS", "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS"):
             for value in ("", "0", "-1", "auto", "1.5"):
                 with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
                     proof.execution_plan({key: value})

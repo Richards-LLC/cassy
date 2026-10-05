@@ -14,6 +14,7 @@ fn cas_command(home: &Path, path: &Path) -> Command {
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
+        .env("TAILSCALE", home.join("missing-tailscale"))
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     command
 }

@@ -3,6 +3,7 @@ use crate::config::meta::registry::ConfigRegistry;
 mod coordination;
 mod daemon;
 mod history;
+mod hub;
 mod hooks_and_code;
 mod issues;
 mod jev;
@@ -32,4 +33,5 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     skill_validation::register_skill_validation(registry);
     skills::register_skills(registry);
     slack::register_slack(registry);
+    hub::register_hub(registry);
 }

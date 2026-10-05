@@ -34,6 +34,7 @@ function transport(multiplex = false) {
   const streams: { signal: AbortSignal; credential: string | null }[] = [];
   let blocked = false;
   let stalledRefresh = false;
+  let catalogRevision: number | undefined;
   let eventController: ReadableStreamDefaultController<Uint8Array> | undefined;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = new URL(String(input)).pathname;
@@ -55,7 +56,7 @@ function transport(multiplex = false) {
         init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
       });
       clock += 17;
-      return Response.json({ sessions: [] });
+      return Response.json({ sessions: catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}` }] });
     }
     if (path === "/v1/events") {
       const signal = init!.signal as AbortSignal;
@@ -73,7 +74,8 @@ function transport(multiplex = false) {
   return {
     requests, streams, block: (value: boolean) => { blocked = value; }, elapse: (ms: number) => { clock += ms; },
     stallRefresh: (value: boolean) => { stalledRefresh = value; },
-    event: () => eventController!.enqueue(new TextEncoder().encode('data: {"kind":"session_added"}\n\n')),
+    catalogRevision: (value: number) => { catalogRevision = value; },
+    event: (event: Record<string, unknown> = { kind: "session_added" }) => eventController!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)),
   };
 }
 
@@ -95,9 +97,9 @@ class TransportSocket {
   send(value: string): void { this.sent.push(value); }
 }
 
-function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = () => {}): HubConnectionSupervisor {
+function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = () => {}, onMachineEvent: HubCallbacks["onMachineEvent"] = () => {}, onSessions: HubCallbacks["onSessions"] = () => {}): HubConnectionSupervisor {
   const connection = new HubConnectionSupervisor(machine, {
-    onState, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {},
+    onState, onSessions, onMachineEvent, onSessionState: () => {},
     onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
   });
   supervisors.push(connection);
@@ -105,6 +107,59 @@ function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = (
 }
 
 describe("Commander live connection lifecycle", () => {
+  it("delivers a stalled catalog's entire burst and joins manual refreshes to its flight (cas-b55b)", async () => {
+    const hub = transport();
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("burst"), () => {}, event => events.push(event));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
+    hub.stallRefresh(true);
+    for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
+    await vi.waitFor(() => expect(events).toHaveLength(100));
+    const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    connection.stop();
+    await Promise.all(manual);
+  });
+  it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {
+    const hub = transport(multiplex);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    let latest: string | undefined;
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("rate-cap"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    let socket: TransportSocket | undefined;
+    if (multiplex) {
+      const attached = connection.attach("session-a");
+      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+      socket = TransportSocket.instances[0]!;
+      socket.open(); socket.receive({ proto: 2 });
+      await attached;
+    }
+    const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
+    for (let i = 1; i <= 100; i++) {
+      hub.catalogRevision(i);
+      const event = { kind: "session_added", sequence: i };
+      // Mix both transports: they must share one refresh lane, not one each.
+      if (socket && i % 2 === 0) socket.receive({ channel: "events", event });
+      else hub.event(event);
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(latest).toBe("catalog-100"));
+    expect(events).toHaveLength(100);
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
+    connection.stop();
+    const stopped = hub.requests.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(hub.requests).toHaveLength(stopped);
+  });
+
   it("clears permission guidance when the same tailnet pairing reconnects (cas-b85a)", async () => {
     const hub = transport();
     const machine = await storedMachine("local-network");
@@ -116,7 +171,7 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     hub.block(true);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("Allow Local network access"));
+    await vi.waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
     expect(connection.snapshot().authFailure).toBeUndefined();
     query.mockResolvedValue({ state: "granted" });
     hub.block(false);
@@ -135,7 +190,7 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     hub.block(true);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("Allow Local network access"));
+    await vi.waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
     hub.block(false);
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));

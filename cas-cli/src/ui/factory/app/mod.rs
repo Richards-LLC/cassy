@@ -1,5 +1,7 @@
 //! Factory application state and orchestration
 
+pub(crate) mod provisioning;
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -121,6 +123,7 @@ pub struct PendingWorkerState {
 }
 
 /// Worktree preparation data (can be sent to background thread)
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct WorktreePrep {
     pub worktree_path: PathBuf,
     pub branch_name: String,
@@ -138,6 +141,7 @@ pub struct WorktreePrep {
 }
 
 /// Data needed to spawn a worker (phase 1 output, can be sent to background thread)
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct WorkerSpawnPrep {
     pub worker_name: String,
     pub worktree_info: Option<WorktreePrep>,
@@ -155,6 +159,7 @@ pub struct WorkerSpawnPrep {
 }
 
 /// Result of background worktree preparation (phase 2 output)
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct WorkerSpawnResult {
     pub worker_name: String,
     pub cwd: PathBuf,
@@ -173,7 +178,7 @@ pub struct WorkerSpawnResult {
     pub(crate) target_seed_warning: Option<String>,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TargetSeedStats {
     pub(crate) snapshot: String,
     pub(crate) source_commit: String,
@@ -181,6 +186,59 @@ pub(crate) struct TargetSeedStats {
     pub(crate) skipped_crates: Vec<String>,
     pub(crate) files: u64,
     pub(crate) bytes: u64,
+}
+
+/// In-memory input to the off-loop provisioner. No Git or store access is
+/// required to capture this snapshot.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct WorkerSpawnContext {
+    pub(crate) worker_name: String,
+    pub(crate) spawn_type: String,
+    isolate: bool,
+    task_id: Option<String>,
+    project_path: PathBuf,
+    cas_dir: PathBuf,
+    worktree_repo_root: Option<PathBuf>,
+    worktree_root: Option<PathBuf>,
+    epic_branch: Option<String>,
+    current_epic_id: Option<String>,
+    factory_session: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct SpawnAdmissionError(String);
+
+fn admit_worker_spawn(worktree_path: &Path, min_free_gib: u32) -> anyhow::Result<()> {
+    if min_free_gib == 0 {
+        return Ok(());
+    }
+    // The target path may not exist yet or may be on a separate mount.
+    let mut filesystem_path = worktree_path;
+    while !filesystem_path.exists() {
+        filesystem_path = filesystem_path.parent().ok_or_else(|| {
+            SpawnAdmissionError(format!(
+                "spawn_disk_floor: no existing ancestor for {}",
+                worktree_path.display()
+            ))
+        })?;
+    }
+    let available = crate::fs_space::fs_space(filesystem_path)
+        .map_err(|error| {
+            SpawnAdmissionError(format!(
+                "spawn_disk_floor: cannot inspect available space at {}: {error}",
+                worktree_path.display()
+            ))
+        })?
+        .available_bytes;
+    let floor = u64::from(min_free_gib) * 1024 * 1024 * 1024;
+    if available < floor {
+        return Err(SpawnAdmissionError(format!(
+            "spawn_disk_floor: {} has {available} available bytes, below factory.spawn_min_free_gib={min_free_gib} ({floor} bytes); free space or lower factory.spawn_min_free_gib before retrying",
+            worktree_path.display()
+        )).into());
+    }
+    Ok(())
 }
 
 const TARGET_SEED_METADATA_FILE: &str = ".cas-build-cache-metadata";
@@ -577,6 +635,11 @@ impl WorkerSpawnPrep {
         if let Some(wt) = self.worktree_info {
             use crate::worktree::GitOperations;
 
+            // Admit every isolated spawn before reuse, checkout or target seeding.
+            let min_free_gib = crate::config::Config::load(&wt.repo_root.join(".cas"))?
+                .factory()
+                .spawn_min_free_gib;
+            admit_worker_spawn(&wt.worktree_path, min_free_gib)?;
             let git = GitOperations::new(wt.repo_root.clone());
 
             // Check if worktree already exists on disk (reuse from previous session)
@@ -759,6 +822,10 @@ impl WorkerSpawnPrep {
             // STEP 1 (cas-5232): Log so this path is distinguishable from the
             // isolated paths in the trace.
             let cwd = std::env::current_dir()?;
+            let min_free_gib = crate::config::Config::load(&cwd.join(".cas"))?
+                .factory()
+                .spawn_min_free_gib;
+            admit_worker_spawn(&cwd, min_free_gib)?;
             tracing::info!(
                 worker = %self.worker_name,
                 cwd = %cwd.display(),
@@ -6106,6 +6173,8 @@ mod pane_geometry_tests;
 #[cfg(test)]
 mod spawn_isolation_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
+    use crate::worktree::WorktreeConfig;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -6468,6 +6537,12 @@ mod spawn_isolation_tests {
         init_repo(&repo);
 
         let cas_dir = repo.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[factory]\nspawn_min_free_gib = 0\n",
+        )
+        .unwrap();
         let snapshot = cas_dir
             .join("build-cache")
             .join("snapshots")
@@ -6625,9 +6700,13 @@ mod spawn_isolation_tests {
             .unwrap();
 
         let cas_dir = repo.join(".cas");
-        let snapshot = cas_dir
-            .join("build-cache/snapshots")
-            .join("target-before");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[factory]\nspawn_min_free_gib = 0\n",
+        )
+        .unwrap();
+        let snapshot = cas_dir.join("build-cache/snapshots").join("target-before");
         let stale_crate_artifact = snapshot.join("debug/deps/libcas_pty-abc.rlib");
         let unaffected_artifact = snapshot.join("debug/deps/libwarm.rlib");
         std::fs::create_dir_all(stale_crate_artifact.parent().unwrap()).unwrap();
@@ -6676,6 +6755,12 @@ mod spawn_isolation_tests {
         init_repo(&repo);
 
         let cas_dir = repo.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[factory]\nspawn_min_free_gib = 0\n",
+        )
+        .unwrap();
         let snapshot = cas_dir.join("build-cache/snapshots/target-unrelated");
         let artifact = snapshot.join("debug/deps/libwarm.rlib");
         std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
@@ -6961,5 +7046,214 @@ mod spawn_isolation_tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_disk_floor_refuses_before_staging_and_spawn_reports_reason() {
+        // A synchronous fixture deadlock must fail before nextest's deadline.
+        // A child process also isolates the process-wide environment mutex:
+        // a timed-out thread would retain that lock and poison other tests.
+        const CHILD: &str = "CAS_2681_FLOOR_TEST_CHILD";
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            let logs = TempDir::new().unwrap();
+            let output = logs.path().join("floor.log");
+            let file = std::fs::File::create(&output).unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "ui::factory::app::spawn_isolation_tests::spawn_disk_floor_refuses_before_staging_and_spawn_reports_reason",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(file.try_clone().unwrap())
+                .stderr(file);
+            let result = super::provisioning::run_command(
+                command,
+                &super::provisioning::ProvisioningCancellation::default(),
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(15),
+            );
+            let output = std::fs::read_to_string(output).unwrap_or_default();
+            assert!(
+                result.is_ok() && output.contains("running 1 test") && output.contains("1 passed"),
+                "bounded disk-floor fixture failed or matched zero tests: {result:?}\n{output}",
+            );
+            return;
+        }
+        let mut env = TestEnvGuard::temp_home();
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = repo.join(".cas");
+        let snapshot = cas_dir.join("build-cache/snapshots/floor-fixture");
+        std::fs::create_dir_all(snapshot.join("debug/deps")).unwrap();
+        std::fs::write(snapshot.join("debug/deps/libwarm.rlib"), b"baseline").unwrap();
+        std::fs::write(
+            snapshot.join(TARGET_SEED_METADATA_FILE),
+            format!(
+                "source_commit={}\ncreated_at_unix=0\n",
+                git_head(&repo).unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::write(cas_dir.join("build-cache/current"), "floor-fixture\n").unwrap();
+        let floor = u32::try_from(
+            crate::fs_space::fs_space(&repo).unwrap().available_bytes / (1 << 30) + 2,
+        )
+        .unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            format!("[factory]\nspawn_min_free_gib = {floor}\n"),
+        )
+        .unwrap();
+        let make_prep = || WorkerSpawnPrep {
+            worker_name: "floor-refused".into(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: cas_dir.join("worktrees/floor-refused"),
+                branch_name: "factory/floor-refused".into(),
+                parent_branch: "main".into(),
+                base_ref: None,
+                repo_root: repo.clone(),
+                cas_dir: cas_dir.clone(),
+            }),
+            warnings: vec![],
+            base_provenance: None,
+        };
+        let git = crate::worktree::GitOperations::new(repo.clone());
+        let path = cas_dir.join("worktrees/floor-refused");
+        let assert_refused = || {
+            let error = make_prep().run().err().expect("low disk must refuse spawn");
+            assert!(error.to_string().contains("spawn_disk_floor"), "{error}");
+        };
+        assert_refused();
+        assert!(!path.exists(), "admission must precede checkout creation");
+        assert!(!git.branch_exists("factory/floor-refused").unwrap());
+        // Seeding disabled still reserves disk for the worker's later builds.
+        // Reuse the guard that already owns the non-reentrant environment mutex.
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        assert_refused();
+        assert!(!path.exists());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        git.create_worktree(&path, "factory/floor-refused", Some("main"))
+            .unwrap();
+        std::fs::create_dir_all(path.join("target/debug")).unwrap();
+        std::fs::write(path.join("target/debug/preserved"), b"prior build").unwrap();
+        assert_refused();
+        assert_eq!(
+            std::fs::read(path.join("target/debug/preserved")).unwrap(),
+            b"prior build"
+        );
+        assert!(path.exists(), "reuse refusal must preserve prior work");
+        assert!(git.branch_exists("factory/floor-refused").unwrap());
+        env.remove("CAS_FACTORY_DISABLE_TARGET_SEED");
+        std::fs::remove_dir_all(path.join("target")).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[factory]\nspawn_min_free_gib = 0\n",
+        )
+        .unwrap();
+        assert!(
+            seed_worker_target_from_baseline(&cas_dir, &path)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read(path.join("target/debug/deps/libwarm.rlib")).unwrap(),
+            b"baseline"
+        );
+    }
+
+    #[test]
+    fn serialized_spawn_snapshot_refreshes_focus_and_preserves_task_epic_precedence() {
+        let _env = TestEnvGuard::temp_home();
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        for branch in ["epic/task", "epic/focus"] {
+            assert!(
+                Command::new("git")
+                    .args(["branch", branch])
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        for (id, branch) in [
+            ("cas-task-epic", "epic/task"),
+            ("cas-focus-epic", "epic/focus"),
+        ] {
+            let mut epic = cas_types::Task::new(id.into(), id.into());
+            epic.task_type = cas_types::TaskType::Epic;
+            epic.branch = Some(branch.into());
+            store.add(&epic).unwrap();
+        }
+        store
+            .add(&cas_types::Task::new("cas-child".into(), "child".into()))
+            .unwrap();
+        store
+            .add_dependency(&cas_types::Dependency {
+                from_id: "cas-child".into(),
+                to_id: "cas-task-epic".into(),
+                dep_type: cas_types::DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .unwrap();
+        let mut app = FactoryApp::for_test_at(cas_dir.clone());
+        app.worktree_manager = Some(
+            WorktreeManager::new(
+                &repo,
+                WorktreeConfig {
+                    enabled: true,
+                    base_path: repo.join(".cas/worktrees").to_string_lossy().into_owned(),
+                    branch_prefix: "factory/".into(),
+                    auto_merge: false,
+                    cleanup_on_close: false,
+                    promote_entries_on_merge: false,
+                },
+            )
+            .unwrap(),
+        );
+        app.factory_session = Some("spawn-focus-fixture".into());
+        app.epic_branch = Some("obsolete-snapshot-focus".into());
+        let task_snapshot = serde_json::to_vec(
+            &app.snapshot_worker_spawn(Some("task-worker"), true, Some("cas-child"))
+                .unwrap(),
+        )
+        .unwrap();
+        let focus_snapshot = serde_json::to_vec(
+            &app.snapshot_worker_spawn(Some("focus-worker"), true, None)
+                .unwrap(),
+        )
+        .unwrap();
+        // Focus changes after capture; resolution must read the named session.
+        let path = crate::ui::factory::session::metadata_path("spawn-focus-fixture");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut metadata = crate::ui::factory::session::create_metadata(
+            "spawn-focus-fixture",
+            12345,
+            "supervisor",
+            &[],
+            None,
+            None,
+            None,
+        );
+        metadata.pinned_epic_id = Some("cas-focus-epic".into());
+        std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let task: WorkerSpawnContext = serde_json::from_slice(&task_snapshot).unwrap();
+        let focus: WorkerSpawnContext = serde_json::from_slice(&focus_snapshot).unwrap();
+        let task = task.resolve().unwrap();
+        let focus = focus.resolve().unwrap();
+        assert_eq!(task.worktree_info.unwrap().parent_branch, "epic/task");
+        assert!(task.base_provenance.unwrap().contains("epic/focus"));
+        assert_eq!(focus.worktree_info.unwrap().parent_branch, "epic/focus");
     }
 }

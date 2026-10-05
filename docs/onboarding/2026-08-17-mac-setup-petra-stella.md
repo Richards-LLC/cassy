@@ -74,11 +74,13 @@ The hub is the machine-local service the web Commander ([hub.petrastella.io](htt
 brew install --cask tailscale   # skip if Tailscale is already on the Mac
 open -a Tailscale               # log in to the tailnet once
 
-cas hub service install                    # loopback-only launchd service, survives reboots
+cas hub service install                    # requests Tailscale Serve, survives reboots
 cas hub service status                      # supervision + hub health in one view
 
-# Tailscale Serve needs the interactive user session for Commander pairing:
-cas hub service uninstall && cas hub start --tailscale-serve
+cas hub status                              # require Tailscale Serve: OK for phone access
+# If publication is unavailable, check the selected CLI's login, then retry:
+tailscale status
+cas hub restart
 ```
 
 ### Pair your browser (once per device)

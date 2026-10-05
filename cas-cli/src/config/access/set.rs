@@ -38,6 +38,13 @@ impl Config {
         };
 
         match key {
+            "hub.tailscale_serve" => {
+                self.hub
+                    .get_or_insert_with(Default::default)
+                    .tailscale_serve = Some(value.parse().map_err(|_| {
+                    MemError::Parse("Invalid boolean for hub.tailscale_serve".into())
+                })?);
+            }
             "jev.gate.shadow" => {
                 self.jev.get_or_insert_with(Default::default).gate.shadow = value.parse()
                     .map_err(|_| MemError::Parse("Invalid boolean for jev.gate.shadow".into()))?;
@@ -71,6 +78,14 @@ impl Config {
                 factory.max_concurrent_builders = value.parse().map_err(|_| {
                     MemError::Parse(format!(
                         "Invalid integer value for factory.max_concurrent_builders: {value}"
+                    ))
+                })?;
+            }
+            "factory.spawn_min_free_gib" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.spawn_min_free_gib = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.spawn_min_free_gib: {value}"
                     ))
                 })?;
             }

@@ -1,4 +1,5 @@
 import { presentFleetSheet } from "./fleet-sheet";
+import { CAUSE_COPY } from "./connection-diagnostics";
 import { cloudBrand, projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
@@ -1756,16 +1757,40 @@ function openConnectionLog(machineId: string): void {
     dialog = document.createElement("dialog");
     dialog.id = "connection-log";
     dialog.className = "connection-log";
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre></section>';
+    dialog.setAttribute("aria-label", "Connection log");
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" role="status"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><pre>Running diagnostics…</pre></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
+  const summary = dialog.querySelector<HTMLElement>(".connection-log-summary")!;
+  const download = dialog.querySelector<HTMLButtonElement>(".connection-log-export")!;
+  download.disabled = true;
+  const update = () => {
+    const connection = connections.get(machineId);
+    const machineState = connection?.snapshot();
+    const state = machineState?.phase !== "live" ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
+    const cause = state?.cause;
+    const retry = state?.nextRetryAt === undefined ? "No retry scheduled." : `Next retry in ${Math.max(0, Math.ceil((state.nextRetryAt - Date.now()) / 1000))}s.`;
+    summary.textContent = `${cause ? `${CAUSE_COPY[cause.code].title} (${cause.layer}). ${CAUSE_COPY[cause.code].action}` : "No active failure measured."} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
+  };
+  update();
+  const timer = window.setInterval(update, 1000);
+  dialog.addEventListener("close", () => window.clearInterval(timer), { once: true });
   output.textContent = "Running diagnostics…";
   dialog.showModal();
   void connections.get(machineId)?.diagnose().then((result) => {
-    output.textContent = JSON.stringify(result, null, 2);
+    const json = JSON.stringify(result, null, 2);
+    output.textContent = json;
+    download.disabled = new TextEncoder().encode(json).byteLength > 65_536;
+    download.onclick = () => {
+      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = "commander-connection-diagnostics.json";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    };
   }).catch((error) => {
-    output.textContent = error instanceof Error ? error.message : "Diagnosis failed";
+    output.textContent = "Diagnostics unavailable. The connection cause above remains available.";
   });
 }
 

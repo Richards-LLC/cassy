@@ -1,5 +1,6 @@
 import type { PairingRelayDelivery, PendingInvitation, PendingRelayRequest } from "./pending-pairing";
 import type { Scope } from "./types";
+import { withRequestDeadline } from "./request-deadline";
 
 // The relay may only request these Cassy Cloud scopes. The machine-side
 // `cas hub authorize` prompt is the consent boundary: it displays the origin
@@ -99,7 +100,10 @@ function relayError(status: number, code: unknown): PairingRelayError {
   return new PairingRelayError(typeof code === "string" ? code : "relay_error", "The pairing service refused the request.");
 }
 
-export async function createPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string, signal?: AbortSignal): Promise<PendingRelayRequest> {
+export function createPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string, signal?: AbortSignal): Promise<PendingRelayRequest> {
+  return withRequestDeadline(bounded => createBoundedPairingRequest(fetcher, relayOrigin, controllerOrigin, requestedScopes, email, bounded), signal);
+}
+async function createBoundedPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[], email?: string, signal?: AbortSignal): Promise<PendingRelayRequest> {
   if (!requestedScopes.length || new Set(requestedScopes).size !== requestedScopes.length || requestedScopes.some((scope) => !DEFAULT_PAIRING_SCOPES.includes(scope))) {
     throw new PairingRelayError("unsupported_scope", "Page-initiated pairing requested an unsupported Cassy Cloud scope.");
   }
@@ -138,7 +142,10 @@ export type PollResult =
   | { kind: "slow-down"; interval: number }
   | { kind: "authorized"; invitation: PendingInvitation };
 
-export async function pollPairingRequest(fetcher: Fetcher, relayOrigin: string, request: PendingRelayRequest, signal?: AbortSignal): Promise<PollResult> {
+export function pollPairingRequest(fetcher: Fetcher, relayOrigin: string, request: PendingRelayRequest, signal?: AbortSignal): Promise<PollResult> {
+  return withRequestDeadline(bounded => pollBoundedPairingRequest(fetcher, relayOrigin, request, bounded), signal);
+}
+async function pollBoundedPairingRequest(fetcher: Fetcher, relayOrigin: string, request: PendingRelayRequest, signal?: AbortSignal): Promise<PollResult> {
   const response = await fetcher(relayEndpoint(relayOrigin, POLL_PATH), {
     method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", signal,
     body: JSON.stringify({ wire_version: 1, pairing_request_id: request.pairingRequestId, poll_secret: request.pollSecret }),
@@ -179,7 +186,10 @@ export async function pollPairingRequest(fetcher: Fetcher, relayOrigin: string, 
   };
 }
 
-export async function acknowledgePairing(fetcher: Fetcher, relayOrigin: string, relay: PairingRelayDelivery, signal?: AbortSignal): Promise<void> {
+export function acknowledgePairing(fetcher: Fetcher, relayOrigin: string, relay: PairingRelayDelivery, signal?: AbortSignal): Promise<void> {
+  return withRequestDeadline(bounded => acknowledgeBoundedPairing(fetcher, relayOrigin, relay, bounded), signal);
+}
+async function acknowledgeBoundedPairing(fetcher: Fetcher, relayOrigin: string, relay: PairingRelayDelivery, signal?: AbortSignal): Promise<void> {
   const response = await fetcher(relayEndpoint(relayOrigin, ACK_PATH), {
     method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", signal,
     body: JSON.stringify({ wire_version: 1, pairing_request_id: relay.pairingRequestId, poll_secret: relay.pollSecret, delivery_id: relay.deliveryId }),

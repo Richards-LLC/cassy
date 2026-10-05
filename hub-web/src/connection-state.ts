@@ -1,3 +1,4 @@
+import type { CauseEvidence } from "./connection-diagnostics";
 export type ConnectionStage = "idle" | "resolving" | "dialing" | "auth" | "attaching" | "live";
 export type ConnectionPhase = ConnectionStage | "failed" | "backoff";
 
@@ -16,6 +17,9 @@ export interface ConnectionSnapshot {
   fatal?: boolean;
   attempt: number;
   reason?: string;
+  cause?: CauseEvidence;
+  nextRetryAt?: number;
+  lastSuccessAt?: number;
   /** Browser permission remediation, independent of the hub's pairing. */
   networkAccessHelp?: string;
   retryInMs?: number;

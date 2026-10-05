@@ -790,7 +790,11 @@ main {
 .status-agent > .fleet-ops { justify-items: stretch; }
 .status-agent > .fleet-ops > .fleet-ops-trigger { position: absolute; top: var(--space-2); right: var(--space-2); }
 .status-agent .status-line { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
-.status-agent > .fleet-ops > .fleet-ops-note { padding-right: calc(var(--rail-item-min) + var(--space-2)); }
+/* cas-d2df: the first line is at least as tall as the trigger's corner (its
+   top inset + height, less the row's top padding and grid gap), so the note,
+   menu and confirmation always start below the ⋯ button and use the row's
+   full width instead of reserving the button's width on every line. */
+.status-agent > .status-line { min-height: calc(var(--space-2) + var(--rail-item-min) - var(--space-3) - var(--space-1)); }
 .fleet-ops button:not(.primary), .fleet-ops-header button:not(.primary) { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
 .fleet-ops .fleet-ops-trigger { min-width: var(--rail-item-min); padding: 0; font-size: var(--fs-md); }
 .fleet-ops button[aria-disabled="true"], .fleet-ops-header button[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
@@ -806,6 +810,9 @@ main {
 .fleet-ops-confirm-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .fleet-ops-progress, .fleet-ops-note, .fleet-ops-asked { margin: 0; color: var(--text-mid); }
 .fleet-ops-note--error, .fleet-ops-note--stale { color: var(--state-warn); }
+/* cas-d2df: the row's own identifier inside its note, in the header's mono face; a short one stays whole (fleet-ops-view.ts SUBJECT_WHOLE_MAX). */
+.fleet-ops-note-subject { font-family: var(--font-mono); }
+.fleet-ops-note-subject--whole { white-space: nowrap; }
 .fleet-ops-header { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-2); }
 .fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }

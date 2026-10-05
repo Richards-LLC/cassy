@@ -346,7 +346,7 @@ fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc
                 assert!(out.system_message.is_none(), "plain read/script: {out:?}");
             }
         }
-        // Rewriting still recursively evaluates the original credential guard.
+        // Admission preserves the unwrapped command's credential decision.
         let mut request = input("npm test; node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'", "worker");
         request.cwd = cwd.into();
         let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
@@ -354,6 +354,38 @@ fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc
         assert!(reason.contains("secrets.json"), "{reason}");
         let value = serde_json::to_value(&out).unwrap();
         assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "deny cannot be rewritten into allow: {out:?}");
+    }
+}
+
+#[test]
+fn worker_suite_rewrite_preserves_original_denials_cas_61dc() {
+    use crate::test_support::TestEnvGuard;
+    for harness in ["claude", "codex"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let _env = TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness), ("CAS_CLONE_PATH", cwd)]);
+        let root = dir.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("scripts/worker-memory.py"), "# never executed\n").unwrap();
+        for forbidden in [
+            "node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'",
+            "printf x > .env",
+            "cargo test",
+        ] {
+            let mut direct = input(forbidden, "worker");
+            direct.cwd = cwd.into();
+            let expected = deny_reason(&handle_pre_tool_use(&direct, Some(&root)).unwrap())
+                .expect("original command must be refused");
+            for command in [format!("npm test; {forbidden}"), format!("{forbidden}; npx vitest run")] {
+                let mut request = input(&command, "worker");
+                request.cwd = cwd.into();
+                let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+                assert_eq!(deny_reason(&out).as_deref(), Some(expected.as_str()), "{harness}: {command}: {out:?}");
+                let value = serde_json::to_value(&out).unwrap();
+                assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "refused command cannot acquire a rewrite: {out:?}");
+            }
+        }
     }
 }
 

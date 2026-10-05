@@ -15,21 +15,52 @@ pub fn handle_pre_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
+    // Admission must compose with the original command's permission decision.
+    // Shell wrapping can hide a write from a parser, so it is never a substitute
+    // for evaluating the unwrapped command through every existing guard.
     let mut output = handle_pre_tool_use_inner(input, cas_root)?;
+    if !worker_suite_rewrite_allowed(&output) {
+        return Ok(output);
+    }
     if crate::harness_policy::is_factory_agent(input)
         && crate::harness_policy::is_worker(input)
         && input.tool_name.as_deref() == Some("Bash")
-        && input.tool_input.as_ref().and_then(|value| value.get("command"))
-            .and_then(|value| value.as_str()).is_some_and(|command| worker_suite_command(command, 0))
-        && worker_suite_helper(&input.cwd).is_none()
+        && let Some(command) = input.tool_input.as_ref().and_then(|value| value.get("command"))
+            .and_then(|value| value.as_str()).filter(|command| worker_suite_command(command, 0))
     {
-        let warning = "Worker browser/JS suite has no scripts/worker-memory.py in this checkout; shared host memory admission is unavailable. Use an admitted checkout for suites sharing the assembly host.";
-        output.system_message = Some(match output.system_message {
-            Some(message) => format!("{message}\n{warning}"),
-            None => warning.to_string(),
-        });
+        if let Some(helper) = worker_suite_helper(&input.cwd) {
+            let rewritten = format!("python3 {} -- bash -c {}",
+                shell_quote_path(&helper), shell_quote_path(Path::new(command)));
+            let mut updated = input.tool_input.clone().unwrap_or_default();
+            updated["command"] = serde_json::Value::String(rewritten);
+            let mut rewritten_input = input.clone();
+            rewritten_input.tool_input = Some(updated.clone());
+            let rewritten_output = handle_pre_tool_use_inner(&rewritten_input, cas_root)?;
+            if !worker_suite_rewrite_allowed(&rewritten_output) {
+                return Ok(rewritten_output);
+            }
+            // Preserve the original allow/context; the helper cannot replace a
+            // deny from either guard pass. Codex needs allow plus updatedInput.
+            output.rewrite_pre_tool_input(updated);
+        } else {
+            let warning = "Worker browser/JS suite has no scripts/worker-memory.py in this checkout; shared host memory admission is unavailable. Use an admitted checkout for suites sharing the assembly host.";
+            output.system_message = Some(match output.system_message {
+                Some(message) => format!("{message}\n{warning}"),
+                None => warning.to_string(),
+            });
+        }
     }
     Ok(output)
+}
+
+fn worker_suite_rewrite_allowed(output: &HookOutput) -> bool {
+    use cas_core::hooks::types::{HookSpecificOutput, PreToolUseHarness};
+    match output.hook_specific_output.as_ref() {
+        Some(HookSpecificOutput::PreToolUse { permission_decision: Some(decision), .. }) => decision == "allow",
+        // The captured Codex schema represents an ordinary allow by no body.
+        None => PreToolUseHarness::current() == PreToolUseHarness::Codex,
+        _ => false,
+    }
 }
 
 fn worker_suite_helper(cwd: &str) -> Option<std::path::PathBuf> {
@@ -148,29 +179,6 @@ fn handle_pre_tool_use_inner(
                      Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused. Full builds and suites remain supervisor-only at epic assembly (cas-4cbb)."
                 ),
             ));
-        }
-    }
-
-    // Browser and JS suites share the assembly host budget (cas-61dc).
-    // Rewrite before broad factory auto-approval; the runner, not this short
-    // hook, reports and bounds waits. Existing guards still inspect the payload.
-    if is_factory_agent && crate::harness_policy::is_worker(input) && tool_name == "Bash" {
-        let command = input.tool_input.as_ref()
-            .and_then(|value| value.get("command")).and_then(|value| value.as_str());
-        if let Some(command) = command.filter(|command| worker_suite_command(command, 0))
-            && let Some(helper) = worker_suite_helper(&input.cwd)
-        {
-            // The repository helper is an opt-in admission surface. Ordinary
-            // projects without it still reach all existing permission guards.
-            let rewritten = format!("python3 {} -- bash -c {}",
-                shell_quote_path(&helper), shell_quote_path(Path::new(command)));
-            let mut updated = input.tool_input.clone().unwrap_or_default();
-            updated["command"] = serde_json::Value::String(rewritten);
-            let mut rewritten_input = input.clone();
-            rewritten_input.tool_input = Some(updated.clone());
-            let mut output = handle_pre_tool_use(&rewritten_input, cas_root)?;
-            output.rewrite_pre_tool_input(updated);
-            return Ok(output);
         }
     }
 

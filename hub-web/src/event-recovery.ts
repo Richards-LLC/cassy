@@ -1,24 +1,4 @@
-/** One catalog request in flight, one trailing request for any burst. */
-export class CoalescedRefresh {
-  private running?: Promise<void>;
-  private pending = false;
-  private nextStart = 0;
-  constructor(private readonly refresh: () => Promise<unknown>, private readonly failed: (error: unknown) => void, private readonly intervalMs = 1000) {}
-  request(): Promise<void> {
-    this.pending = true;
-    if (!this.running) this.running = this.drain().finally(() => { this.running = undefined; });
-    return this.running;
-  }
-  private async drain(): Promise<void> {
-    do {
-      const wait = this.nextStart - Date.now();
-      if (wait > 0) await new Promise<void>(resolve => setTimeout(resolve, wait));
-      this.pending = false;
-      this.nextStart = Date.now() + this.intervalMs;
-      try { await this.refresh(); } catch (error) { this.failed(error); }
-    } while (this.pending);
-  }
-}
+export { CoalescedRefresh } from "./catalog-refresh";
 
 /** Revisions are upserts; replayed events never regress an enriched version.
  * A stream epoch is a hub-process identity, not an account or credential. */

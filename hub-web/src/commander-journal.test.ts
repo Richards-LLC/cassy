@@ -55,6 +55,23 @@ describe("atomic Commander journal", () => {
     expect((await b.read(scope)).sends).toEqual([]);
     expect(await b.dispatch(scope, "a", fence, () => true)).toBe("unconfirmed");
   });
+  it("cancellation and dispatch race atomically: cancelling never reports success after a wire claim", async () => {
+    const { a, b } = journals();
+    await a.reconcile(scope, [], [send("a")], fence);
+    let writes = 0;
+    const [cancelled] = await Promise.all([b.cancel(scope, "a"), a.dispatch(scope, "a", fence, () => { writes++; return true; })]);
+    expect(writes).toBe(cancelled ? 0 : 1);
+    expect(await b.dispatch(scope, "a", fence, () => { writes++; return true; })).toBe("unconfirmed");
+    expect(writes).toBeLessThanOrEqual(1);
+  });
+  it("a foreign tab cannot re-hold a claimed item even after observing its latest revision", async () => {
+    const { a, b } = journals();
+    await a.reconcile(scope, [], [send("a")], fence);
+    await a.dispatch(scope, "a", fence, () => true);
+    const rows = (await b.read(scope)).sends;
+    await b.reconcile(scope, rows, [{ ...rows[0], state: "held" }], fence);
+    expect((await b.read(scope)).sends[0].state).toBe("sending");
+  });
   it("expiry persists as not-sent and cannot dispatch on reload", async () => {
     let now = 1_000;
     const { a, make } = journals(() => now);

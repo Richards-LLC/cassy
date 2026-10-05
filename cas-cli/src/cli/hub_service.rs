@@ -1942,7 +1942,27 @@ exit 0
                 "--port",
                 "4173",
                 "--launched-by",
-                "service"
+                "service",
+                "--no-tailscale-serve"
+            ]
+        );
+    }
+
+    #[test]
+    fn service_arguments_with_default_host_policy_request_tailscale_serve() {
+        let default_policy = crate::config::Config::default()
+            .get("hub.tailscale_serve")
+            .expect("registered host publication key")
+            .parse::<bool>()
+            .expect("boolean host publication policy");
+        // pin: An unset host publication policy must emit the Serve-on form;
+        // explicit off must emit --no-tailscale-serve so the child stays off.
+        assert_eq!(
+            service_args(Path::new("/opt/cas/bin/cas"), default_policy, 443),
+            vec![
+                "/opt/cas/bin/cas", "hub", "serve", "--bind", "127.0.0.1",
+                "--port", "4173", "--launched-by", "service",
+                "--tailscale-serve", "--tailscale-serve-port", "443"
             ]
         );
     }

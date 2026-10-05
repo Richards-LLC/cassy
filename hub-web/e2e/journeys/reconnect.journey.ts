@@ -84,6 +84,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await page.waitForTimeout(1_500);
     expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
     await expect(header).toHaveAttribute("aria-live", "off");
+    await expect(banner.getByRole("status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.getByRole("button", { name: "Connection details" })).toBeVisible();
     // Two machines, one of them down: the footer names it (cas-0739) and its dot is not all-clear (cas-b789).
     expect(seen.footer).toContain("Reconnecting to Atlas");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
@@ -195,7 +197,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     });
     hub.hold(PELICAN);
     hub.drop(PELICAN);
-    await expect(banner).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.locator(".banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // Turning the phone resizes the terminal, which tries to tell the hub: that
     // send fails while the connection is down, which used to raise a toast.
     await page.setViewportSize({ width: 390, height: 760 });

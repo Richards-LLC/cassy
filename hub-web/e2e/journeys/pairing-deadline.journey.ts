@@ -48,7 +48,7 @@ test("HUB-J2 unanswered pairing exchange times out safely and can be retried (ca
   await journey.stage("A browser-held exchange has a finite wait", async () => {
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect.poll(() => Boolean(held)).toBe(true);
-    await expect(dialog).toContainText("Creating this browser credential");
+    await expect(dialog).toContainText("Updating this browser installation");
     // Advance the entire deadline: protocol-idle cannot drain a held fetch
     // before its abort, so this test deliberately drives the browser clock.
     await page.clock.runFor(10_001);

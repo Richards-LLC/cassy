@@ -112,6 +112,35 @@ reconciliation without requiring another filesystem event. Doctor autofix keeps
 its warning while retirements are deferred and supplies `cas index code` to retry;
 it reports the symbol index fixed only after deferred work and errors are clear.
 
+### Worker browser and JS memory admission
+
+Worker npm/npx, browser, Vitest and JS commands run through
+`python3 scripts/worker-memory.py -- <command>`. The worker PreToolUse hook
+routes those commands automatically; the hub-web build, typecheck, visual-QA
+and verified test entry points also acquire admission when run directly.
+
+Admission uses `assembly-proof.py`'s fresh host memory snapshot and reserve
+(default: greater of 8 GiB or 25% of physical RAM). A suite needs an assumed
+2 GiB plus 2 GiB headroom. One suite runs per host/user. Proofs take priority
+and hold a shared host lease around all assembly producers and consumers;
+worker suites wait until those proofs finish. The linker pool remains separate.
+Nested commands reuse admission only while its private claim, live lock and
+process ancestry validate; setting an environment flag does not waive it.
+
+Waits print `waiting for host memory (proof running), N s` and memory samples.
+`CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS` bounds waiting (default 600 s),
+with `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS` resampling (default 1 s).
+Expiry fails before starting the suite. A running worker command is terminated
+with its own process group if fresh budget falls inside the 2 GiB headroom.
+These are admission estimates and sampled protection, not OS memory limits;
+other applications remain outside this cooperative protocol.
+
+Verified frontend tests enforce one Playwright worker and two Vitest workers,
+including caller-supplied worker flags. A proof's own child script tests reuse
+its admitted budget rather than waiting on themselves. Use `TMPDIR` on the
+approved scratch volume for fixture staging. Script-level admission tests need
+no browsers or Cargo: `python3 scripts/test-worker-memory.py`.
+
 ### cas-src close surfaces
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.

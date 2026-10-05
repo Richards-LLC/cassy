@@ -34,6 +34,7 @@ function transport(multiplex = false) {
   const streams: { signal: AbortSignal; credential: string | null }[] = [];
   let blocked = false;
   let stalledRefresh = false;
+  let catalogRevision: number | undefined;
   let eventController: ReadableStreamDefaultController<Uint8Array> | undefined;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = new URL(String(input)).pathname;
@@ -55,7 +56,7 @@ function transport(multiplex = false) {
         init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
       });
       clock += 17;
-      return Response.json({ sessions: [] });
+      return Response.json({ sessions: catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}` }] });
     }
     if (path === "/v1/events") {
       const signal = init!.signal as AbortSignal;
@@ -73,6 +74,7 @@ function transport(multiplex = false) {
   return {
     requests, streams, block: (value: boolean) => { blocked = value; }, elapse: (ms: number) => { clock += ms; },
     stallRefresh: (value: boolean) => { stalledRefresh = value; },
+    catalogRevision: (value: number) => { catalogRevision = value; },
     event: (event: Record<string, unknown> = { kind: "session_added" }) => eventController!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)),
   };
 }
@@ -95,9 +97,9 @@ class TransportSocket {
   send(value: string): void { this.sent.push(value); }
 }
 
-function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = () => {}, onMachineEvent: HubCallbacks["onMachineEvent"] = () => {}): HubConnectionSupervisor {
+function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = () => {}, onMachineEvent: HubCallbacks["onMachineEvent"] = () => {}, onSessions: HubCallbacks["onSessions"] = () => {}): HubConnectionSupervisor {
   const connection = new HubConnectionSupervisor(machine, {
-    onState, onSessions: () => {}, onMachineEvent, onSessionState: () => {},
+    onState, onSessions, onMachineEvent, onSessionState: () => {},
     onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
   });
   supervisors.push(connection);
@@ -105,6 +107,30 @@ function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = (
 }
 
 describe("Commander live connection lifecycle", () => {
+  it("fires100 events in1s with at most2 catalog GETs and fresh final state (cas-2b3a5)", async () => {
+    const hub = transport();
+    let latest: string | undefined;
+    const connection = supervisor(await storedMachine("rate-cap"), () => {}, () => {}, sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
+    for (let i = 1; i <= 100; i++) {
+      hub.catalogRevision(i); hub.event({ kind: "session_added", sequence: i, revision: 0 });
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(latest).toBe("catalog-100"));
+    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
+  });
+  it("distinguishes a measured browser health503 from an opaque fetch failure (cas-2b3a5)", async () => {
+    transport();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable", { status: 503 })));
+    const connection = supervisor(await storedMachine("health-503"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().cause).toMatchObject({ code: "health_http_unavailable", status: 503, layer: "http" }));
+    expect(connection.snapshot().authFailure).toBeUndefined();
+  });
   it("keeps delivering a flood while the catalog stalls, with one catalog flight (cas-2b3a5)", async () => {
     const hub = transport();
     const events: Record<string, unknown>[] = [];

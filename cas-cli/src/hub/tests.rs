@@ -3553,7 +3553,8 @@ async fn cas_d636_the_401_carries_a_machine_readable_reason_and_the_hub_clock() 
     assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(stale.headers()["access-control-allow-origin"], "https://controller.example");
     assert_eq!(stale.headers()["www-authenticate"], "DPoP error=\"invalid_dpop_proof\", error_description=\"stale_proof\"");
-    assert_eq!(stale.headers()["access-control-expose-headers"], "WWW-Authenticate");
+    // This origin is bound: correlate the refusal with its safe request ID.
+    assert_eq!(stale.headers()["access-control-expose-headers"], "WWW-Authenticate, X-Cas-Request-Id");
     let body: serde_json::Value = serde_json::from_slice(&to_bytes(stale.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["reason"], "stale_proof");
     assert_eq!(body["retryable"], true);

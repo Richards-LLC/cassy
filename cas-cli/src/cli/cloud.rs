@@ -2196,6 +2196,66 @@ fn sync_project_knowledge_with_output(
     })
 }
 
+/// The pull watermark(s) `cas cloud status` reports (cas-25c1). A
+/// team-linked checkout pulls in team scope only, so its personal
+/// `last_pull_at` freezes at the last personal pull; reporting that alone
+/// made every later team pull look like it never happened.
+pub(crate) fn status_pull_watermarks(
+    queue: &SyncQueue,
+    team_id: Option<&str>,
+    project_id: Option<&str>,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let personal = queue
+        .get_metadata("last_pull_at")?
+        .unwrap_or_else(|| "never".to_string());
+    let Some(team_id) = team_id else {
+        return Ok(vec![("Last successful pull".to_string(), personal)]);
+    };
+    let team = match project_id {
+        Some(project_id) => {
+            queue.get_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))?
+        }
+        None => None,
+    }
+    .unwrap_or_else(|| "never".to_string());
+    Ok(vec![
+        ("Last successful pull (team)".to_string(), team),
+        (
+            "Personal pull watermark".to_string(),
+            format!("{personal} (team-linked: personal scope is not pulled)"),
+        ),
+    ])
+}
+
+/// [`status_pull_watermarks`] for this checkout's configured scope.
+fn status_pull_watermarks_for(
+    queue: &SyncQueue,
+    config: &CloudConfig,
+    cas_root: &Path,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let team_id = config.active_team_id();
+    let project_id = team_id
+        .as_ref()
+        .and_then(|_| crate::cloud::resolve_canonical_id_for_sync(cas_root).ok());
+    status_pull_watermarks(queue, team_id.as_deref(), project_id.as_deref())
+}
+
+/// The team-only mismatch warning (cas-25c1): the cloud rejected personal
+/// rows as `team_owned_project` while this checkout still has
+/// `cloud.team_only` off, so it keeps queueing rows the cloud will refuse.
+pub(crate) fn team_only_mismatch_line(queue: &SyncQueue, team_only: bool) -> Option<String> {
+    if team_only {
+        return None;
+    }
+    let rejected = queue.team_owned_personal_rejection_count().ok()?;
+    (rejected > 0).then(|| {
+        format!(
+            "Team-only mismatch: cloud.team_only is off but {rejected} personal row(s) were rejected as team_owned_project; {}",
+            crate::cloud::push_reason_hint("team_owned_project")
+        )
+    })
+}
+
 pub(crate) fn team_only_held_personal_rows(cas_root: &Path) -> Option<usize> {
     let queue = SyncQueue::open_read_only(cas_root).ok()?;
     queue.personal_row_count().ok()
@@ -2268,6 +2328,21 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     body["unauthored_skipped"] = serde_json::json!(unauthored_skipped);
                     if let Some(count) = held {
                         body["personal_rows_held_team_only"] = serde_json::json!(count);
+                    }
+                    if let Ok(queue) = SyncQueue::open_read_only(cas_root) {
+                        if !config.team_only
+                            && let Ok(rejected) = queue.team_owned_personal_rejection_count()
+                        {
+                            body["team_owned_rejections_team_only_off"] =
+                                serde_json::json!(rejected);
+                        }
+                        if let Ok(watermarks) =
+                            status_pull_watermarks_for(&queue, &config, cas_root)
+                        {
+                            body["pull_watermarks"] = serde_json::json!(
+                                watermarks.into_iter().collect::<BTreeMap<_, _>>()
+                            );
+                        }
                     }
                     if let (Some(obj), Some(counts)) =
                         (body.as_object_mut(), local_knowledge_counts(cas_root))
@@ -2388,13 +2463,20 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                                     stats.pending, stats.failed
                                 ))?;
                                 fmt.newline()?;
-                                fmt.write_muted("  Last successful pull: ")?;
-                                fmt.write_raw(
-                                    &queue
-                                        .get_metadata("last_pull_at")?
-                                        .unwrap_or_else(|| "never".to_string()),
-                                )?;
-                                fmt.newline()?;
+                                for (label, value) in
+                                    status_pull_watermarks_for(&queue, &config, cas_root)?
+                                {
+                                    fmt.write_muted(&format!("  {label}: "))?;
+                                    fmt.write_raw(&value)?;
+                                    fmt.newline()?;
+                                }
+                                if let Some(line) =
+                                    team_only_mismatch_line(&queue, config.team_only)
+                                {
+                                    fmt.write_colored("  \u{25CF} ", warning_color)?;
+                                    fmt.write_raw(&line)?;
+                                    fmt.newline()?;
+                                }
                                 if stats.total > 0 {
                                     fmt.newline()?;
                                     fmt.write_colored("  \u{25CF} ", warning_color)?;
@@ -2801,6 +2883,16 @@ pub struct SyncSummary {
     pub rejected_by_reason: BTreeMap<String, usize>,
     /// Terminal rows this build requeued once because an older client parked them.
     pub requeued_after_upgrade: usize,
+    /// cas-25c1: personal rows a team-linked sync leaves untouched (it pushes
+    /// in team scope only). Reported so the receipt matches `cas cloud queue`
+    /// instead of reading "0 failed" over a queue of parked rows.
+    pub held_personal_pending: usize,
+    pub held_personal_failed: usize,
+    /// Held personal rows the cloud refused, grouped by its reason.
+    pub held_personal_rejected: BTreeMap<String, usize>,
+    /// Personal rows rejected as `team_owned_project` while `cloud.team_only`
+    /// is off: the cloud record is team-owned but this checkout is not.
+    pub team_only_mismatch: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2867,6 +2959,10 @@ impl SyncSummary {
             skipped_lww: result.skipped_lww_acked,
             rejected_by_reason: result.remaining_backlog.rejected_by_reason.clone(),
             requeued_after_upgrade: result.requeued_after_upgrade,
+            held_personal_pending: 0,
+            held_personal_failed: 0,
+            held_personal_rejected: BTreeMap::new(),
+            team_only_mismatch: 0,
         }
     }
 
@@ -2922,6 +3018,10 @@ impl SyncSummary {
             skipped_lww: 0,
             rejected_by_reason: BTreeMap::new(),
             requeued_after_upgrade: 0,
+            held_personal_pending: 0,
+            held_personal_failed: 0,
+            held_personal_rejected: BTreeMap::new(),
+            team_only_mismatch: 0,
         }
     }
 
@@ -3317,6 +3417,11 @@ pub(crate) fn render_sync_summary(
                     parts.push("run cas cloud queue --retry".to_string());
                     fmt.warning(&format!("Push incomplete · {}", parts.join(" · ")))?;
                 }
+                // cas-25c1: never let a clean team receipt stand alone over a
+                // personal queue of parked or rejected rows.
+                if let Some((true, line)) = held_personal_line(summary) {
+                    fmt.warning(&line)?;
+                }
             } else {
                 if push_complete {
                     fmt.success("Push complete")?;
@@ -3331,6 +3436,10 @@ pub(crate) fn render_sync_summary(
                     summary.failed + team_failed
                 ))?;
                 fmt.newline()?;
+                if let Some((_, line)) = held_personal_line(summary) {
+                    fmt.write_raw(&format!("    {line}"))?;
+                    fmt.newline()?;
+                }
                 if summary.skipped_lww > 0 {
                     fmt.write_raw(&format!(
                         "    kept newer by cloud (acknowledged, removed from queue): {}",
@@ -4069,6 +4178,22 @@ fn execute_sync_with_output(
                 push_summary.merge_team_summary(&team_summary);
             }
         }
+        // cas-25c1: a team-linked sync never runs the personal push, so its
+        // receipt used to report "0 pending, 0 failed/parked" while the
+        // personal queue held thousands of rejected rows. Read the real
+        // backlog the queue commands count, after the team push settled.
+        if team_linked
+            && let Some(team_id) = cloud_config.active_team_id()
+            && let Some(push_summary) = summaries.first_mut()
+            && let Err(error) = refresh_team_linked_backlog(
+                push_summary,
+                cas_root,
+                &team_id,
+                cloud_config.team_only,
+            )
+        {
+            tracing::warn!(%error, "could not read the held queue backlog for the sync summary");
+        }
 
         // Personal pull AND team pull happen transitively here:
         // `execute_pull` invokes `execute_team_pull` at its tail when an
@@ -4124,6 +4249,67 @@ fn execute_sync_with_output(
 
 /// The push receipt of a team-linked sync before the team drain is merged in
 /// (cas-421e): no personal push ran, so it carries no personal counts.
+/// Fill a team-linked push summary with the queue's actual backlog
+/// (cas-25c1): the team rows still pending or parked, and the personal rows a
+/// team-linked sync holds untouched, with the cloud's rejection reasons and
+/// the `team_owned_project` mismatch that needs `cloud.team_only`.
+pub(crate) fn refresh_team_linked_backlog(
+    summary: &mut SyncSummary,
+    cas_root: &Path,
+    team_id: &str,
+    team_only: bool,
+) -> anyhow::Result<()> {
+    let queue = SyncQueue::open(cas_root)?;
+    queue.init()?;
+    let max_retries = CloudSyncerConfig::default().max_retries;
+    summary.team_backlog_pending = queue.pending_count_for_team(team_id, max_retries)?;
+    summary.team_backlog_failed = queue.failed_count_for_team(team_id, max_retries)?;
+    summary.held_personal_pending = queue.pending_count_for_entity_type(None, max_retries)?;
+    summary.held_personal_failed = queue.failed_count_for_entity_type(None, max_retries)?;
+    summary.held_personal_rejected =
+        queue.rejected_reason_counts_for_entity_type(None, max_retries)?;
+    summary.team_only_mismatch = if team_only {
+        0
+    } else {
+        queue.team_owned_personal_rejection_count()?
+    };
+    Ok(())
+}
+
+/// The held-personal line of a push receipt, and whether it needs attention.
+fn held_personal_line(summary: &SyncSummary) -> Option<(bool, String)> {
+    let held = summary.held_personal_pending + summary.held_personal_failed;
+    if held == 0 && summary.team_only_mismatch == 0 {
+        return None;
+    }
+    let mut text = format!(
+        "Personal queue held (team-linked sync pushes team rows only): {} pending, {} failed/parked",
+        summary.held_personal_pending, summary.held_personal_failed
+    );
+    if !summary.held_personal_rejected.is_empty() {
+        let reasons = summary
+            .held_personal_rejected
+            .iter()
+            .map(|(reason, count)| format!("{reason} \u{d7}{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!(" (rejected: {reasons})"));
+    }
+    if summary.team_only_mismatch > 0 {
+        text.push_str(&format!(
+            " \u{b7} cloud.team_only is off but {} row(s) were rejected as team_owned_project: {}",
+            summary.team_only_mismatch,
+            crate::cloud::push_reason_hint("team_owned_project")
+        ));
+    } else if summary.held_personal_failed > 0 {
+        text.push_str(" \u{b7} see `cas cloud queue`");
+    }
+    Some((
+        summary.held_personal_failed > 0 || summary.team_only_mismatch > 0,
+        text,
+    ))
+}
+
 fn team_only_push_summary() -> SyncSummary {
     let mut summary = SyncSummary::push(
         &crate::cloud::SyncResult::default(),
@@ -7691,6 +7877,212 @@ mod team_cmd_tests {
 
         assert!(tf.output().contains("1 conflict(s) resolved"));
         assert!(tf.output().contains("entry cas-conflict"));
+    }
+
+    /// cas-25c1 fixture: a team-linked checkout whose personal queue holds
+    /// rows the cloud refused, as prowl's did (team_owned_project plus
+    /// orphan_dependency), beside one pending personal row and one team row.
+    fn cas_25c1_queue_with_held_rejections(
+        team_row_pending: bool,
+    ) -> (TempDir, crate::cloud::SyncQueue) {
+        use crate::cloud::{EntityType, SyncOperation};
+        let temp = TempDir::new().unwrap();
+        let queue = crate::cloud::SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let max_retries = CloudSyncerConfig::default().max_retries;
+        for (id, reason) in [
+            ("owned-a", "team_owned_project"),
+            ("owned-b", "team_owned_project"),
+            ("orphan", "orphan_dependency"),
+        ] {
+            queue
+                .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+                .unwrap();
+            let row = queue
+                .list_all(100)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.entity_id == id)
+                .unwrap();
+            queue
+                .park_failed(row.id, "cloud rejected", max_retries)
+                .unwrap();
+            queue
+                .record_row_outcome(row.id, "rejected", Some(reason))
+                .unwrap();
+        }
+        queue
+            .enqueue(
+                EntityType::Task,
+                "still-pending",
+                SyncOperation::Upsert,
+                Some("{}"),
+            )
+            .unwrap();
+        if team_row_pending {
+            queue
+                .enqueue_for_team(
+                    EntityType::Task,
+                    "team-row",
+                    SyncOperation::Upsert,
+                    Some("{}"),
+                    "team-1",
+                )
+                .unwrap();
+        }
+        (temp, queue)
+    }
+
+    /// cas-25c1: prowl's `cas cloud sync -v` printed "Push complete ·
+    /// remaining: 0 pending, 0 failed/parked" while `cas cloud queue` held
+    /// 4050 rejected rows. A team-linked receipt must report the rows the
+    /// queue commands count and name the team-only fix.
+    #[test]
+    fn cas_25c1_team_linked_push_receipt_reports_held_personal_rejections() {
+        let (temp, _queue) = cas_25c1_queue_with_held_rejections(false);
+        let mut summary = team_only_push_summary();
+
+        refresh_team_linked_backlog(&mut summary, temp.path(), "team-1", false).unwrap();
+
+        assert_eq!(summary.held_personal_pending, 1);
+        assert_eq!(summary.held_personal_failed, 3);
+        assert_eq!(
+            summary.held_personal_rejected,
+            BTreeMap::from([
+                ("orphan_dependency".to_string(), 1),
+                ("team_owned_project".to_string(), 2),
+            ])
+        );
+        assert_eq!(summary.team_only_mismatch, 2);
+        assert_eq!(summary.team_backlog_pending, 0);
+        assert_eq!(summary.team_backlog_failed, 0);
+
+        let mut compact = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut compact.fmt(), &summary, false).unwrap();
+        let compact = compact.output();
+        assert!(compact.starts_with("[OK] Push complete"), "{compact}");
+        assert!(compact.contains("[WARN] Personal queue held"), "{compact}");
+        assert!(compact.contains("1 pending, 3 failed/parked"), "{compact}");
+        assert!(
+            compact.contains("orphan_dependency \u{d7}1, team_owned_project \u{d7}2"),
+            "{compact}"
+        );
+        assert!(
+            compact.contains(
+                "cloud.team_only is off but 2 row(s) were rejected as team_owned_project"
+            ),
+            "{compact}"
+        );
+        assert!(
+            compact.contains(
+                "`cas config set cloud.team_only true`, then `cas cloud queue --purge-team-owned`"
+            ),
+            "{compact}"
+        );
+
+        let mut verbose = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut verbose.fmt(), &summary, true).unwrap();
+        let verbose = verbose.output();
+        assert!(
+            verbose.contains("remaining: 0 pending, 0 failed/parked"),
+            "{verbose}"
+        );
+        assert!(
+            verbose.contains("    Personal queue held (team-linked sync pushes team rows only): 1 pending, 3 failed/parked"),
+            "{verbose}"
+        );
+    }
+
+    /// cas-25c1: with `cloud.team_only` on, held rejections are still counted
+    /// but no team-only fix is suggested; a pending team row makes the push
+    /// incomplete instead of reading "0 pending".
+    #[test]
+    fn cas_25c1_team_only_receipt_counts_team_backlog_without_the_fix_hint() {
+        let (temp, _queue) = cas_25c1_queue_with_held_rejections(true);
+        let mut summary = team_only_push_summary();
+
+        refresh_team_linked_backlog(&mut summary, temp.path(), "team-1", true).unwrap();
+
+        assert_eq!(summary.team_backlog_pending, 1);
+        assert_eq!(summary.team_only_mismatch, 0);
+        assert!(!summary.push_complete());
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+        let output = tf.output();
+        assert!(output.contains("[WARN] Push incomplete"), "{output}");
+        assert!(output.contains("3 failed/parked"), "{output}");
+        assert!(output.contains("see `cas cloud queue`"), "{output}");
+        assert!(!output.contains("cloud.team_only is off"), "{output}");
+    }
+
+    /// cas-25c1: a nothing-newer team pull advances the team watermark, but
+    /// status used to print only the personal `last_pull_at`, which a
+    /// team-linked checkout never pulls; both successful pulls looked missing.
+    #[test]
+    fn cas_25c1_status_reports_the_team_pull_watermark_when_team_linked() {
+        let temp = TempDir::new().unwrap();
+        let queue = crate::cloud::SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .set_metadata("last_pull_at", "2026-10-05T11:14:40Z")
+            .unwrap();
+        queue
+            .set_metadata(
+                "last_team_pull_at_team-1_github.com/acme/app",
+                "2026-10-05T12:12:03Z",
+            )
+            .unwrap();
+
+        assert_eq!(
+            status_pull_watermarks(&queue, None, None).unwrap(),
+            vec![(
+                "Last successful pull".to_string(),
+                "2026-10-05T11:14:40Z".to_string()
+            )]
+        );
+        assert_eq!(
+            status_pull_watermarks(&queue, Some("team-1"), Some("github.com/acme/app")).unwrap(),
+            vec![
+                (
+                    "Last successful pull (team)".to_string(),
+                    "2026-10-05T12:12:03Z".to_string()
+                ),
+                (
+                    "Personal pull watermark".to_string(),
+                    "2026-10-05T11:14:40Z (team-linked: personal scope is not pulled)".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            status_pull_watermarks(&queue, Some("team-2"), Some("github.com/acme/app")).unwrap()[0]
+                .1,
+            "never"
+        );
+    }
+
+    /// cas-25c1: status and doctor name the team-only mismatch with its fix,
+    /// and stay quiet once `cloud.team_only` is on.
+    #[test]
+    fn cas_25c1_team_only_mismatch_line_names_the_fix_only_when_off() {
+        let (_temp, queue) = cas_25c1_queue_with_held_rejections(false);
+
+        let line = team_only_mismatch_line(&queue, false).expect("mismatch is flagged");
+        assert!(
+            line.contains("2 personal row(s) were rejected as team_owned_project"),
+            "{line}"
+        );
+        assert!(
+            line.contains("cas config set cloud.team_only true"),
+            "{line}"
+        );
+        assert!(
+            line.contains("cas cloud queue --purge-team-owned"),
+            "{line}"
+        );
+        assert_eq!(team_only_mismatch_line(&queue, true), None);
+
+        queue.purge_team_owned_personal_rejections().unwrap();
+        assert_eq!(team_only_mismatch_line(&queue, false), None);
     }
 
     #[test]

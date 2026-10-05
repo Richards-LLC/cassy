@@ -4270,11 +4270,24 @@ fn cloud_team_only_check(cas_root: &Path) -> Check {
                 Check::new("cloud team-only", CheckStatus::Error, format!("{message}; {held} personal rows held (team_only)"))
             }
         },
-        Ok(_) => Check::new(
-            "cloud team-only",
-            CheckStatus::Ok,
-            "off; project rows use the default personal and team routing",
-        ),
+        Ok(config) => {
+            // cas-25c1: the cloud already said this project is team-owned.
+            // A checkout that never got `cloud.team_only` keeps queueing
+            // personal rows the cloud refuses; name the exact fix.
+            let mismatch = crate::cloud::SyncQueue::open_read_only(cas_root)
+                .ok()
+                .and_then(|queue| {
+                    crate::cli::cloud::team_only_mismatch_line(&queue, config.team_only)
+                });
+            match mismatch {
+                Some(line) => Check::new("cloud team-only", CheckStatus::Warning, line),
+                None => Check::new(
+                    "cloud team-only",
+                    CheckStatus::Ok,
+                    "off; project rows use the default personal and team routing",
+                ),
+            }
+        }
         Err(error) => Check::new(
             "cloud team-only",
             CheckStatus::Warning,
@@ -5728,6 +5741,53 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// cas-25c1: a checkout with `cloud.team_only` off whose personal rows
+    /// the cloud rejected as `team_owned_project` is the prowl mismatch. Doctor
+    /// must warn with the exact fix instead of reporting "off" as healthy.
+    #[test]
+    fn cas_25c1_team_only_check_flags_team_owned_rejections_while_off() {
+        use crate::cloud::{EntityType, SyncOperation, SyncQueue};
+        let temp = TempDir::new().unwrap();
+        let healthy = cloud_team_only_check(temp.path());
+        assert!(
+            matches!(healthy.status, CheckStatus::Ok),
+            "{}",
+            healthy.message
+        );
+
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .enqueue(EntityType::Task, "owned", SyncOperation::Upsert, Some("{}"))
+            .unwrap();
+        let row = queue.list_all(10).unwrap().pop().unwrap();
+        queue
+            .record_row_outcome(row.id, "rejected", Some("team_owned_project"))
+            .unwrap();
+        drop(queue);
+
+        let check = cloud_team_only_check(temp.path());
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("1 personal row(s) were rejected as team_owned_project"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("cas config set cloud.team_only true"),
+            "{}",
+            check.message
+        );
+    }
 
     #[test]
     fn doctor_preserves_database_schema_without_prompt_queue_cas_d6b9() {

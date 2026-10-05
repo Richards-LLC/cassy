@@ -165,6 +165,20 @@ describe("atomic Commander journal", () => {
     expect(writes).toBe(0);
     expect((await a.read(scope)).receipts[0].notification_id).toBe(99);
   });
+  it("an owner persisting its unconfirmed caption during the final check does not discard the wire claim (cas-9dc6)", async () => {
+    const { db } = journals();
+    let reads = 0, writes = 0;
+    const a = new CommanderJournal(db, async () => {
+      if (++reads === 2) {
+        const snapshot = await a.read(scope);
+        await a.reconcile(scope, snapshot.sends, snapshot.sends.map(send => ({ ...send, state: 'unconfirmed' })), fence);
+      }
+      return fence;
+    }, () => 1_000, false);
+    await a.reconcile(scope, [], [send('a')], fence);
+    expect(await a.dispatch(scope, 'a', fence, () => { writes++; return true; })).toBe('written');
+    expect(writes).toBe(1);
+  });
   it("revocation purges private content and fences stale writers, imports and ACKs", async () => {
     const { a, b } = journals();
     await a.reconcile(scope, [], [send("a")], fence);

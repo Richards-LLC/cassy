@@ -2794,3 +2794,9 @@ button.chip:disabled { cursor: default; }
   .conversation-topline .conversation-action { border-color: ButtonText; }
   .conversation-topline .conversation-action:focus-visible { outline-color: Highlight; }
 }
+/* Conversation progress is prose in a narrow rail, including unbroken IDs. */
+#status-view, .status-row { min-width: 0; max-width: 100%; }
+.status-row { box-sizing: border-box; overflow-wrap: anywhere; }
+.status-line .status-identifier { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.status-chip { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-family: var(--font-ui); letter-spacing: normal; text-transform: none; }
+.conversation-context .status-activity .status-identifier { display: inline; }

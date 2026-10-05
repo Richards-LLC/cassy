@@ -1,3 +1,4 @@
+import { plainTextMarkdown } from "./markdown-renderer";
 import { artifactHref, attachmentSize, attachmentTypeMark } from "./attachment-sheet";
 import type { ConversationHistory } from "./conversation-history";
 import type { ArtifactRef, OperatorReply } from "./types";
@@ -9,8 +10,8 @@ import type { ArtifactRef, OperatorReply } from "./types";
  * and the flow do not already show at a glance:
  *
  *   - Waiting on you: open asks and blockers, each a jump to its turn. The
- *     ask pinned above the composer is left out: the pinned card is where it
- *     is answered, so the rail does not show it a third time (journey F18).
+ *     latest ask is left out: its compact bookmark already points to the
+ *     single full question in the thread.
  *   - Tasks & progress: the session summary, agents and tasks from status
  *   - Attachments: every artifact the supervisor sent in this thread
  *   - Attention: open attention events for this thread
@@ -97,7 +98,8 @@ export function contextSections(input: ContextRailInput): ContextSection[] {
  */
 export const CONTEXT_ENTRY_LIMIT = 90;
 export function entryText(message: string): string {
-  const line = message.split(/\r?\n/).map((part) => part.trim()).find(Boolean) ?? "";
+  const first = message.split(/\r?\n/).map((part) => part.trim()).find(Boolean) ?? "";
+  const line = plainTextMarkdown(first);
   if (line.length <= CONTEXT_ENTRY_LIMIT) return line;
   const cut = line.slice(0, CONTEXT_ENTRY_LIMIT);
   const space = cut.lastIndexOf(" ");

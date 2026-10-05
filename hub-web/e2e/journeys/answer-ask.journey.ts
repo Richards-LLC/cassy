@@ -38,7 +38,7 @@ function youNow(): string[] {
   });
 }
 
-test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
+test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
   // The machine's clock runs five minutes ahead of this browser's, and its
   // durable history holds an open blocker (cas-ce17).
   const ahead = journeyStamp(300_000);
@@ -92,15 +92,12 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
   await journey.stage("The supervisor asks a question", async () => {
     ask = hub.supervisorSays(PELICAN, "The gate failed on one clippy warning. Fix it in the train, or ship with it allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship with allowlist"] });
     await expect(pinned).toBeVisible();
-    await expect(pinned.getByRole("button", { name: "Fix in-train" })).toBeVisible();
-    // The pinned card is the one place to answer (F18): the thread keeps a
-    // one-line reference and the rail does not list this question again.
-    const reference = page.getByRole("log").locator(".obj.t-a.ask-collapsed");
-    await expect(reference.locator(".ask-excerpt")).toHaveText("The gate failed on one clippy warning. Fix it in the train, or ship with it allowlisted?");
-    // One line, ellipsised if it must be (cas-97ea).
-    const lines = await reference.locator(".ask-excerpt").evaluate((element) => Math.round(element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight)));
-    expect(lines, "the reference is one line").toBe(1);
-    await expect(reference.getByRole("button")).toHaveCount(0);
+    await expect(page.getByRole("log").getByRole("button", { name: "Fix in-train" })).toBeVisible();
+    // One full question in the flow; the composer bookmark carries no choices.
+    const question = page.getByRole("log").locator(`.obj[data-notification-id="${ask}"]`);
+    await expect(question).toContainText("Fix it in the train, or ship with it allowlisted?");
+    await expect(question.getByRole("button")).toHaveCount(2);
+    await expect(pinned.locator(".obj")).toHaveCount(0);
     // The rail lists only the hydrated blocker (cas-ce17), never the pinned question.
     await expect(waiting.locator("li")).toHaveCount(1);
     await expect(waiting.locator('.context-jump[data-kind="blocker"]')).toHaveCount(1);
@@ -131,7 +128,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
 
   await journey.stage("Answer with one tap", async () => {
     const sent = hub.nextSend();
-    await pinned.getByRole("button", { name: "Fix in-train" }).click();
+    await page.getByRole("log").getByRole("button", { name: "Fix in-train" }).click();
     expect(await sent).toMatchObject({ text: "Fix in-train", in_reply_to: ask });
     await expect(pinned).toBeHidden();
     // The question stays in the thread with the chosen answer and no open choices.
@@ -187,79 +184,37 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(page.getByRole("log").locator(".blk-hint")).toHaveText(["Reply to unblock"]);
   });
 
-  await journey.stage("Fold, open and dismiss a question", async () => {
-    // cas-16eed: a long question never crowds out the conversation. It folds
-    // to a one-line bar while the operator writes on a phone, opens on a tap,
-    // and can be dismissed (or swiped off) — its thread copy keeps the choices.
+  await journey.stage("Jump to a long question and dismiss its bookmark", async () => {
     const composer = page.getByRole("textbox", { name: "Your message" });
+    const release = hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
+    const copy = page.getByRole("log").locator(`.obj[data-notification-id="${release}"]`);
     const bar = pinned.locator(".pinned-expand");
-    const release = hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask" });
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
-    // cas-16eed QA F01: a supervisor posting progress while it waits does not
-    // retire its question. An unprompted FYI and a status update later, the
-    // question is still pinned with its choices, and its copy in the thread
-    // does not claim it stopped waiting.
+    await expect(copy.getByRole("button", { name: "Open PR", exact: true })).toBeVisible();
     hub.supervisorSays(PELICAN, "FYI: the Mac tests are still running.");
     hub.supervisorSays(PELICAN, "Gate 2 of 3 is going.", { kind: "status" });
     await expect(page.getByRole("log").getByText("FYI: the Mac tests are still running.")).toBeVisible();
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
-    await expect(pinned.getByRole("button", { name: "Hold" })).toBeVisible();
-    await expect(page.getByRole("log").locator(`.obj.t-a[data-notification-id="${release}"]`)).not.toHaveAttribute("data-retired", /.+/);
-    await expect(page.getByRole("log").locator(".ask-retired")).toHaveCount(0);
-    // Desktop, light: Collapse and Dismiss sit on the card; the bar opens it
-    // again; writing in the composer leaves it open (there is room for both).
-    await pinned.getByRole("button", { name: "Collapse question" }).click();
+    await expect(copy).not.toHaveAttribute("data-retired", /.+/);
     await expect(bar).toHaveText("Waiting on you: open the PR to main and cut a release?");
-    await expect(bar).toHaveAttribute("aria-expanded", "false");
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toHaveCount(0);
-    await bar.click();
-    await expect(pinned.getByRole("button", { name: "Collapse question" })).toBeFocused();
-    await composer.focus();
-    await page.waitForTimeout(250);
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
-    // Phone, dark: focusing the composer folds it to one line.
+    await expect(pinned.getByRole("button", { name: "Open PR", exact: true })).toHaveCount(0);
     const desktop = page.viewportSize()!;
-    await page.emulateMedia({ colorScheme: "dark" });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await composer.evaluate((element) => (element as HTMLElement).blur());
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
+    await page.emulateMedia({ colorScheme: "dark" }); await page.setViewportSize({ width: 390, height: 844 });
     await composer.focus();
-    await expect(bar).toBeVisible();
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toHaveCount(0);
     const barBox = (await bar.boundingBox())!;
-    expect(barBox.height, "the bar is one line").toBeLessThanOrEqual(48);
-    expect(barBox.height, "the bar is a 44px target").toBeGreaterThanOrEqual(44);
-    await expect.poll(() => bar.locator(".pinned-bar-text").evaluate((element) => element.scrollWidth > element.clientWidth || element.getClientRects().length === 1)).toBe(true);
-    // The keyboard is up (about 440px of the page left): at least three lines
-    // of the latest conversation stay readable above the field.
+    expect(barBox.height).toBeLessThanOrEqual(48); expect(barBox.height).toBeGreaterThanOrEqual(44);
     await page.setViewportSize({ width: 390, height: 440 });
     const thread = page.locator(".conversation-reading.thread");
-    const room = await thread.evaluate((element) => {
-      const line = parseFloat(getComputedStyle(element.querySelector(".msgs .bub p, .msgs .obj p")!).lineHeight);
-      return { height: element.clientHeight, line };
-    });
-    expect(room.height, `thread height ${room.height}px holds three ${room.line}px lines`).toBeGreaterThanOrEqual(3 * room.line);
-    await expect(page.getByRole("log").locator(".turn").last()).toBeInViewport({ ratio: 0.2 });
-    // A tap on the bar opens the question.
+    const room = await thread.evaluate(element => ({ height: element.clientHeight, line: parseFloat(getComputedStyle(element.querySelector(".msgs .bub p, .msgs .obj p")!).lineHeight) }));
+    expect(room.height).toBeGreaterThanOrEqual(3 * room.line);
     await bar.click();
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
-    // cas-8674 (journey F6): the card's body scrolls inside about a quarter of
-    // this short screen, and the question itself comes last, under the
-    // preamble. Opened, the card shows the Ask line beside its choices, never
-    // two answers to a question scrolled out of sight.
-    const askLine = pinned.locator(".obj-body li", { hasText: "open the PR to main and cut a release?" });
-    await expect(askLine).toBeInViewport({ ratio: 1 });
-    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeInViewport();
+    await expect(page.locator(`[data-key="reply:${release}"]`)).toBeFocused();
+    await expect(pinned.locator(".obj")).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
-    // Swiped off on a touch screen, it unpins; the thread copy says so and keeps its choices.
     await swipeAway(page, ".pinned-ask", -260);
     await expect(pinned).toBeHidden();
-    const copy = page.getByRole("log").locator(`.obj.t-a[data-notification-id="${release}"]`);
     await expect(copy).toHaveAttribute("data-retired", "dismissed");
     await expect(copy.locator(".ask-retired")).toHaveText("Dismissed. You can still answer here.");
-    await expect(copy.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
-    await page.emulateMedia({ colorScheme: "light" });
-    await page.setViewportSize(desktop);
+    await expect(copy.getByRole("button", { name: "Open PR", exact: true })).toBeVisible();
+    await page.emulateMedia({ colorScheme: "light" }); await page.setViewportSize(desktop);
   });
 
   await journey.stage("Reply to a machine a day ahead", async () => {
@@ -359,41 +314,27 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
   });
 });
 
-// cas-450b (found in cas-8674 QA): with the phone keyboard up (390x440), the
-// opened card's "Yes, go ahead" lies under the folded bar's tap point, so the
-// second tap of a double tap answered the question. A double tap only opens it.
-test("HUB-J7 a double tap on the folded question opens it without answering it (cas-450b)", journeyPart, async ({ page, journey }) => {
+// The waiting bookmark never turns into a choice tray under a double tap.
+test("HUB-J7 double-tapping the bookmark jumps without answering (cas-450b, cas-6e3a)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
-  const pinned = page.getByRole("region", { name: `Waiting on you: question from ${PELICAN}` });
-  const bar = pinned.locator(".pinned-expand");
-  const yes = pinned.getByRole("button", { name: "Yes, go ahead" });
   let ask = 0;
-  await journey.stage("A question waits, folded to its bar while the phone keyboard is up", async () => {
-    await journey.open();
+  await journey.stage("Read a question on a short phone screen", async () => {
+    await page.setViewportSize({ width: 390, height: 440 }); await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-    ask = hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask" });
-    await expect(yes).toBeVisible();
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("textbox", { name: "Your message" }).focus();
-    await expect(bar).toBeVisible();
-    await page.setViewportSize({ width: 390, height: 440 });
-    await expect(bar).toBeVisible();
+    ask = hub.supervisorSays(PELICAN, "Open the PR and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
+    await expect(page.locator(".pinned-expand")).toBeVisible();
   });
-  await journey.stage("Double-tap the bar: the question opens and nothing is answered", async () => {
-    const box = (await bar.boundingBox())!;
+  await journey.stage("A double tap jumps without sending", async () => {
     const before = hub.sends.length;
-    await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
-    await page.waitForTimeout(600);
-    expect(hub.sends.map((send) => send.text).slice(before), "a double tap on the bar sends no answer").toEqual([]);
-    await expect(yes).toBeVisible();
-    // The opened card's choice does sit under the tap point: the guard, not the layout, keeps it unanswered.
-    const under = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.textContent?.trim() ?? null, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
-    expect(under).toBe("Yes, go ahead");
+    await page.locator(".pinned-expand").dblclick();
+    await expect(page.locator(`[data-key="reply:${ask}"]`)).toBeFocused();
+    expect(hub.sends.slice(before)).toEqual([]);
+    await expect(page.locator(".pinned-ask .obj")).toHaveCount(0);
   });
-  await journey.stage("A deliberate tap on Yes afterwards answers it", async () => {
+  await journey.stage("Deliberately choose an option in the thread", async () => {
     const sent = hub.nextSend();
-    await yes.click();
-    expect(await sent).toMatchObject({ text: "Yes, go ahead", in_reply_to: ask });
-    await expect(pinned).toBeHidden();
+    await page.getByRole("log").getByRole("button", { name: "Open PR", exact: true }).click();
+    expect(await sent).toMatchObject({ text: "Open PR", in_reply_to: ask });
+    await expect(page.locator(".pinned-ask")).toBeHidden();
   });
 });

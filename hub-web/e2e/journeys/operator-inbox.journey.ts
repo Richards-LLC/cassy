@@ -36,7 +36,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
 
   await journey.stage("Sign in on a brand-new phone with no machine paired", async () => {
     await journey.open();
-    await page.getByRole("button", { name: "Inbox", exact: true }).click();
+    await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
     await expect(inbox.getByText("this isn’t end-to-end encryption")).toBeVisible();
     await inbox.getByLabel("Name this browser").fill("Pixel 9");
     await inbox.getByRole("button", { name: "Sign in" }).click();
@@ -71,7 +71,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await other.clock.install({ time: journeyNow() });
     await routeOperatorCloud(desktop, cloud);
     await other.goto(page.url());
-    await other.getByRole("button", { name: "Inbox", exact: true }).click();
+    await other.getByRole("button", { name: "Operator inbox", exact: true }).click();
     const otherInbox = other.getByRole("dialog", { name: "Operator inbox" });
     await otherInbox.getByLabel("Name this browser").fill("Desk");
     await otherInbox.getByRole("button", { name: "Sign in" }).click();
@@ -92,7 +92,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     cloud.acceptCommand(command);
     await expect(inbox.getByText("Accepted by machine")).toBeVisible({ timeout: 15_000 });
     await page.reload();
-    await page.getByRole("button", { name: "Inbox", exact: true }).click();
+    await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByText("Started the release epic. Three lanes.")).toBeVisible();
     await expect(inbox.getByText("Accepted by machine")).toBeVisible();

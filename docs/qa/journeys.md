@@ -601,7 +601,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. Sign in on a brand-new phone with no machine paired — Inbox opens the "Operator inbox" dialog, which says the cloud holds the keys and "this isn’t end-to-end encryption"; Sign in shows a code of the form ABCD-EFGH and "Approve on Petra Stella Cloud" linking to the approval page with that code
+1. Sign in on a brand-new phone with no machine paired — "Operator inbox" at the foot of the list opens the inbox dialog, which says the cloud holds the keys and "this isn’t end-to-end encryption"; Sign in shows a code of the form ABCD-EFGH and "Approve on Petra Stella Cloud" linking to the approval page with that code
 2. Approve it from the account; the weeks of messages are there — after the account approves the code, the dialog lists "soundwave · amber-fox-29"; opening it shows all three supervisor messages (20, 9 and 1 days old), and each was stored on the phone and acknowledged once
 3. Reply while soundwave is off: it waits as Pending machine — "Reply — soundwave gets it when it’s back" queues "Go. Cut the release." and shows "Pending machine"; the cloud holds one pending command for soundwave
 4. A second browser profile sees the history and the queued reply — a desktop profile signs in with its own code and reads the same history and the queued reply; approved for reading only, it says it "can read this conversation but not leave replies"

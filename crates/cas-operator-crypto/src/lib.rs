@@ -14,6 +14,18 @@
 //! | Session event envelope v1 (`cas-op-event-v1`) | cas-src | cas-9b7d DESIGN D3 |
 //! | Command envelope v1 (`cas-op-command-v1`) | cas-src | cas-9b7d DESIGN D4 |
 //!
+//! Why the session event envelope carries no producer signature (DESIGN D3,
+//! approved): custody is in the cloud, not end-to-end (contract §1, S4). The
+//! cloud holds every epoch private key, so a signature could not stop the one
+//! party able to forge content without one. Producer authority is already
+//! enforced where it can be: the cloud admits an append only under the
+//! machine's PoP grant for that hub and project (§4.2, §7.1), and the AAD
+//! binds account, generation, epoch, event ID and routing, so a ciphertext
+//! cannot be replayed under another row. A signature would also need
+//! historical machine-key discovery for 90 days of replays after re-enrollment,
+//! which the contract does not provide. Observer notices use the cloud's own
+//! assertion instead (§7.4).
+//!
 //! Keys cross this crate's boundary as bytes only: a P-256 private key is the
 //! 32-byte big-endian scalar and a public key the 65-byte uncompressed SEC1
 //! point, matching `serializePrivateKey`/`serializePublicKey` in `@hpke/core`.

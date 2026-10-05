@@ -97,20 +97,35 @@ describe("cloud fixture (petra-stella-cloud tests/fixtures/operator-hpke-interop
       epoch: cloud.ids.epoch,
       deviceId: cloud.ids.deviceId,
     };
+    const epochPublic = fromHex(eventKey.pk_recipient_hex);
     const epochKey = await openEpochWrap(
       deviceKey,
       { enc: b64urlEncode(fromHex(wrap.enc_hex)), ct: b64urlEncode(fromHex(wrap.ciphertext_hex)) },
       ids,
+      epochPublic,
     );
+    expect(epochKey.privateKey.extractable).toBe(false);
     const contentKey = await open(epochKey, fromHex(eventKey.enc_hex), eventKey.info_utf8, fromHex(eventKey.ciphertext_hex), eventKey.aad_utf8);
     expect(toHex(contentKey)).toBe(eventKey.plaintext_hex);
+
+    // A scalar paired with another epoch's public key can never open its events.
+    const otherPublic = await exportPublicKey((await generateKeyPair()).publicKey);
+    const mismatched = await openEpochWrap(
+      deviceKey,
+      { enc: b64urlEncode(fromHex(wrap.enc_hex)), ct: b64urlEncode(fromHex(wrap.ciphertext_hex)) },
+      ids,
+      otherPublic,
+    );
+    expect(
+      await rejection(open(mismatched, fromHex(eventKey.enc_hex), eventKey.info_utf8, fromHex(eventKey.ciphertext_hex), eventKey.aad_utf8)),
+    ).toBe("open_failed");
 
     // Every binding of the wrap is load-bearing.
     for (const field of ["accountId", "feedGeneration", "epoch", "deviceId"] as const) {
       const tampered = { ...ids, [field]: `${ids[field]}x` };
       expect(
         await rejection(
-          openEpochWrap(deviceKey, { enc: b64urlEncode(fromHex(wrap.enc_hex)), ct: b64urlEncode(fromHex(wrap.ciphertext_hex)) }, tampered),
+          openEpochWrap(deviceKey, { enc: b64urlEncode(fromHex(wrap.enc_hex)), ct: b64urlEncode(fromHex(wrap.ciphertext_hex)) }, tampered, epochPublic),
         ),
       ).toBe("open_failed");
     }
@@ -199,7 +214,7 @@ describe("cas-src envelope fixture (DESIGN D3/D4)", () => {
     expect(await rejection(openEvent(secret, flipped, ENVELOPE_FIXTURE_EVENT_IDS))).toBe("open_failed");
 
     const other = await generateKeyPair();
-    expect(await rejection(openEvent(other.privateKey, envelope, ENVELOPE_FIXTURE_EVENT_IDS))).toBe("open_failed");
+    expect(await rejection(openEvent(other, envelope, ENVELOPE_FIXTURE_EVENT_IDS))).toBe("open_failed");
   });
 
   it("opens the command and refuses every substituted binding", async () => {
@@ -218,22 +233,23 @@ describe("cas-src envelope fixture (DESIGN D3/D4)", () => {
 
   it("round-trips fresh randomness and never repeats a ciphertext", async () => {
     const epoch = await generateKeyPair();
+    expect(epoch.privateKey.extractable).toBe(false);
     const plain = encoder.encode("hello ✦");
     const first = await sealEvent(epoch.publicKey, plain, ENVELOPE_FIXTURE_EVENT_IDS);
     const second = await sealEvent(epoch.publicKey, plain, ENVELOPE_FIXTURE_EVENT_IDS);
     expect(first.digest).not.toBe(second.digest);
-    expect(decoder.decode(await openEvent(epoch.privateKey, first.bytes, ENVELOPE_FIXTURE_EVENT_IDS))).toBe("hello ✦");
+    expect(decoder.decode(await openEvent(epoch, first.bytes, ENVELOPE_FIXTURE_EVENT_IDS))).toBe("hello ✦");
 
     const machine = await generateKeyPair();
     const command = await sealCommand(machine.publicKey, plain, ENVELOPE_FIXTURE_COMMAND_IDS);
-    expect(decoder.decode(await openCommand(machine.privateKey, command.bytes, ENVELOPE_FIXTURE_COMMAND_IDS))).toBe("hello ✦");
+    expect(decoder.decode(await openCommand(machine, command.bytes, ENVELOPE_FIXTURE_COMMAND_IDS))).toBe("hello ✦");
   });
 
   it("refuses malformed keys and oversized envelopes", async () => {
     expect(await rejection(importPublicKey(new Uint8Array(64)))).toBe("invalid_key");
     expect(await rejection(importPrivateKey(new Uint8Array(31)))).toBe("invalid_key");
     const epoch = await generateKeyPair();
-    expect(await rejection(openEvent(epoch.privateKey, new Uint8Array(65_537), ENVELOPE_FIXTURE_EVENT_IDS))).toBe("too_large");
-    expect(await rejection(openEvent(epoch.privateKey, encoder.encode("[]"), ENVELOPE_FIXTURE_EVENT_IDS))).toBe("malformed");
+    expect(await rejection(openEvent(epoch, new Uint8Array(65_537), ENVELOPE_FIXTURE_EVENT_IDS))).toBe("too_large");
+    expect(await rejection(openEvent(epoch, encoder.encode("[]"), ENVELOPE_FIXTURE_EVENT_IDS))).toBe("malformed");
   });
 });

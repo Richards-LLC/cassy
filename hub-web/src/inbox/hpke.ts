@@ -13,6 +13,11 @@
 // | Session event envelope v1 (cas-op-event-v1) | cas-src | cas-9b7d DESIGN D3 |
 // | Command envelope v1 (cas-op-command-v1) | cas-src | cas-9b7d DESIGN D4 |
 //
+// No producer signature on session events (DESIGN D3): custody is in the
+// cloud, which holds every epoch key and could forge content regardless;
+// append authority is the machine's PoP grant and the AAD binds the routing.
+// See the crate doc of cas-operator-crypto for the full reasoning.
+//
 // Keys cross this module as CryptoKeys inside the browser; raw bytes appear
 // only at the wire (a 32-byte big-endian scalar or a 65-byte uncompressed
 // point).
@@ -96,8 +101,13 @@ export async function digest(bytes: Uint8Array): Promise<string> {
 
 // ------------------------------------------------------------- keys
 
+/**
+ * A fresh P-256 key pair whose private half is non-extractable (device
+ * encryption key). HPKE opens take the pair, so the public key never has to
+ * be derived by exporting the private key.
+ */
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
-  return operatorSuite().kem.generateKeyPair();
+  return crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]) as Promise<CryptoKeyPair>;
 }
 
 /** RFC 9180 DeriveKeyPair, for deterministic fixtures only. */
@@ -120,6 +130,35 @@ export async function importPrivateKey(raw: Uint8Array): Promise<CryptoKey> {
     return await operatorSuite().kem.deserializePrivateKey(raw);
   } catch {
     throw new InboxCryptoError("invalid_key", "private key");
+  }
+}
+
+// RFC 5915 ECPrivateKey in PKCS#8 for P-256, without the optional public key:
+// the same prefix @hpke/core uses, so a raw scalar imports on every engine.
+const PKCS8_P256_PREFIX = new Uint8Array([
+  48, 65, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134,
+  72, 206, 61, 3, 1, 7, 4, 39, 48, 37, 2, 1, 1, 4, 32,
+]);
+
+/**
+ * Import a raw private scalar with its public point (an epoch key from
+ * `/keys/wraps` and the `pk` of its verified manifest) as a pair whose private
+ * half is non-extractable. A scalar that does not match `publicRaw` makes every
+ * later open fail, because the KEM context binds the recipient public key.
+ */
+export async function importPrivateKeyPair(raw: Uint8Array, publicRaw: Uint8Array): Promise<CryptoKeyPair> {
+  if (raw.length !== 32) throw new InboxCryptoError("invalid_key", "private key length");
+  const publicKey = await importPublicKey(publicRaw);
+  const pkcs8 = new Uint8Array(PKCS8_P256_PREFIX.length + raw.length);
+  pkcs8.set(PKCS8_P256_PREFIX, 0);
+  pkcs8.set(raw, PKCS8_P256_PREFIX.length);
+  try {
+    const privateKey = await crypto.subtle.importKey("pkcs8", pkcs8 as BufferSource, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+    return { privateKey, publicKey };
+  } catch {
+    throw new InboxCryptoError("invalid_key", "private key");
+  } finally {
+    pkcs8.fill(0);
   }
 }
 
@@ -157,7 +196,7 @@ export async function seal(
 }
 
 export async function open(
-  recipient: CryptoKey,
+  recipient: CryptoKey | CryptoKeyPair,
   enc: Uint8Array,
   info: string,
   ciphertext: Uint8Array,
@@ -217,14 +256,16 @@ export function epochWrapAad(ids: EpochWrapIds): string {
 }
 
 /**
- * Open a `/keys/wraps` entry with the device encryption key. Returns the epoch
- * private key as a CryptoKey; the raw scalar never leaves this function.
+ * Open a `/keys/wraps` entry with the device encryption key. `epochPublic` is
+ * the `pk` of the entry's verified manifest. Returns the epoch key pair
+ * (private half non-extractable); the raw scalar never leaves this function.
  */
 export async function openEpochWrap(
-  deviceKey: CryptoKey,
+  deviceKey: CryptoKey | CryptoKeyPair,
   wrap: { enc: string; ct: string },
   ids: EpochWrapIds,
-): Promise<CryptoKey> {
+  epochPublic: Uint8Array,
+): Promise<CryptoKeyPair> {
   const scalar = await open(
     deviceKey,
     b64urlDecode(wrap.enc, "enc"),
@@ -233,7 +274,7 @@ export async function openEpochWrap(
     epochWrapAad(ids),
   );
   try {
-    return await importPrivateKey(scalar);
+    return await importPrivateKeyPair(scalar, epochPublic);
   } finally {
     scalar.fill(0);
   }
@@ -241,7 +282,7 @@ export async function openEpochWrap(
 
 /** Open the enrollment `encryption_key_check`; returns base64url plaintext. */
 export async function openEnrollmentCheck(
-  deviceKey: CryptoKey,
+  deviceKey: CryptoKey | CryptoKeyPair,
   check: { enc: string; ct: string },
   enrollmentId: string,
 ): Promise<string> {
@@ -336,7 +377,7 @@ function stringField(record: Record<string, unknown>, key: string): string {
   return value;
 }
 
-async function openWrapped(spec: WrappedSpec, epochSecret: CryptoKey, envelope: Uint8Array): Promise<Uint8Array> {
+async function openWrapped(spec: WrappedSpec, epochSecret: CryptoKey | CryptoKeyPair, envelope: Uint8Array): Promise<Uint8Array> {
   const parsed = parseJson(envelope);
   if (parsed.v !== 1 || parsed.alg !== spec.alg) throw new InboxCryptoError("unsupported", "envelope");
   const epoch = stringField(parsed, "epoch");
@@ -377,7 +418,7 @@ function observerSpec(ids: ObserverIds): WrappedSpec {
 }
 
 /** Open a cloud observer notice; the §7.4 assertion checks remain the caller's. */
-export async function openObserverNotice(epochSecret: CryptoKey, envelope: Uint8Array, ids: ObserverIds) {
+export async function openObserverNotice(epochSecret: CryptoKey | CryptoKeyPair, envelope: Uint8Array, ids: ObserverIds) {
   return openWrapped(observerSpec(ids), epochSecret, envelope);
 }
 
@@ -430,7 +471,7 @@ export async function sealEvent(
   return sealWrapped(eventSpec(ids), epochPublic, plaintext, randomness);
 }
 
-export async function openEvent(epochSecret: CryptoKey, envelope: Uint8Array, ids: EventIds) {
+export async function openEvent(epochSecret: CryptoKey | CryptoKeyPair, envelope: Uint8Array, ids: EventIds) {
   return openWrapped(eventSpec(ids), epochSecret, envelope);
 }
 
@@ -480,7 +521,7 @@ export async function sealCommand(
   return { bytes, digest: await digest(bytes) };
 }
 
-export async function openCommand(machineSecret: CryptoKey, envelope: Uint8Array, ids: CommandIds) {
+export async function openCommand(machineSecret: CryptoKey | CryptoKeyPair, envelope: Uint8Array, ids: CommandIds) {
   const parsed = parseJson(envelope);
   if (parsed.v !== 1 || parsed.alg !== COMMAND_ALG) throw new InboxCryptoError("unsupported", "envelope");
   if (stringField(parsed, "kid") !== ids.machineKeyId) throw new InboxCryptoError("malformed", "kid");

@@ -1,13 +1,15 @@
 import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN } from "./world";
+import { activate, showConversationList, openConversation } from "./responsive-goals";
 
 test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page, journey }) => {
+  const originalViewport = page.viewportSize()!;
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const composer = page.getByRole("textbox", { name: "Your message" });
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await openConversation(page, "cas-src");
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
@@ -100,7 +102,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // A send during the outage is held, not refused: it waits in the thread
     // and goes out by itself, once, when the session is back (cas-0978).
     await composer.fill("Are you there?");
-    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     await expect(composer).toHaveValue("");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — sends when it's back");
@@ -134,7 +136,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(header).toHaveAttribute("aria-live", "polite");
     // The row previews the held message now, so it no longer shows the Live
     // status line; it must not say Reconnecting either.
+    await showConversationList(page);
     await expect(row).not.toContainText("Reconnecting");
+    await openConversation(page, "cas-src");
     await expect(footer).toContainText("Connected");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot connected");
     // The held message went out on its own, exactly once, and the waiting
@@ -159,7 +163,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   await journey.stage("Sending works again", async () => {
     await composer.fill("Are we back?");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     expect((await sent).text).toBe("Are we back?");
     hub.answerLatest(PELICAN, "Back. Nothing was lost.");
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
@@ -224,7 +228,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // says all clear. cas-1730, cas-0546: the conversation header's Interrupt
     // and Raw output stay in place, say why they wait in the banner's words,
     // to the eye and to a screen reader, and come back with the connection.
-    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.setViewportSize(originalViewport);
     const interrupt = page.getByRole("button", { name: "Interrupt the cas-src supervisor", exact: true });
     const raw = page.getByRole("button", { name: "Raw output", exact: true });
     const rail = () => page.evaluate(() => document.querySelector<HTMLElement>("#attention-panel .attention-empty p")?.innerText.trim() ?? "");
@@ -259,7 +263,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(page.getByRole("dialog", { name: "Raw output" })).toBeHidden();
     expect(hub.frames.filter((frame) => frame.kind === "InterruptPane"), "no interrupt during the outage").toHaveLength(interruptsBefore);
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
-    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.setViewportSize(originalViewport);
     hub.release(PELICAN);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect(header).toHaveText(" · Live");

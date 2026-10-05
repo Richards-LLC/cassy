@@ -1,3 +1,4 @@
+import { activate, phoneLayout, showConversationList } from "./responsive-goals";
 import { test, expect, expectWholeFocusRing, journeyPart } from "./journey";
 import { ATLAS, PELICAN, STUDIO } from "./world";
 import { SCOPES } from "./hub-double";
@@ -20,7 +21,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeInViewport({ ratio: 1 });
     // A read-only invitation cannot offer a control grant in the real bundle.
-    await dialog.getByText("Technical details").click();
+    await activate(page, dialog.getByText("Technical details"));
     for (const scope of ["machine:read", "session:read", "pane:read"]) {
       const checkbox = dialog.getByRole("checkbox", { name: scope, exact: true });
       await expect(checkbox).toBeEnabled();
@@ -41,7 +42,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     await expect(withheld).toBeInViewport({ ratio: 1 });
     await expect(dialog.locator(".pair-withheld-command code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
     await expect(dialog.locator(".pair-withheld-command code")).toBeInViewport({ ratio: 1 });
-    await dialog.getByText("Technical details").click();
+    await activate(page, dialog.getByText("Technical details"));
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     // The link carries the machine's hub address and name, as `cas hub pair`
     // prints it, and arrives in the tab that is already open (hashchange).
@@ -64,7 +65,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     // The address guidance waits behind a disclosure; its page-origin shortcut is an ordinary button.
     await expect(dialog.getByText("Where do I find this?")).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Use this page's address" })).toBeHidden();
-    await dialog.getByText("Where do I find this?").click();
+    await activate(page, dialog.getByText("Where do I find this?"));
     await expect(dialog.getByRole("button", { name: "Use this page's address" })).toBeVisible();
     // The stage ends back in the name field, drawing its whole focus ring.
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).focus();
@@ -73,9 +74,9 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
 
   await journey.stage("Check the technical details", async () => {
     // The raw scope boxes wait under Technical details.
-    await dialog.getByText("Where do I find this?").click();
+    await activate(page, dialog.getByText("Where do I find this?"));
     await expect(dialog.getByRole("checkbox", { name: "message:send" })).toBeHidden();
-    await dialog.getByText("Technical details").click();
+    await activate(page, dialog.getByText("Technical details"));
     // Its terms read in sentence case, not as shouting eyebrows (cas-b2e4 F02).
     const term = dialog.locator("details.pair-technical dt").first();
     await expect(term).toHaveText("Cassy Cloud origin");
@@ -85,7 +86,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
   });
 
   await journey.stage("Pair", async () => {
-    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await activate(page, dialog.getByRole("button", { name: "Pair", exact: true }));
     await expect(dialog).toBeHidden();
     expect(hub.exchanges).toHaveLength(1);
     expect(hub.exchanges[0]).toMatchObject({ token: TOKEN, hub_id: "atlas", operator_label: "Daniel" });
@@ -94,9 +95,10 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
   });
 
   await journey.stage("Reach the supervisor", async () => {
+    await showConversationList(page);
     const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
     await expect(row).toBeVisible({ timeout: 15_000 });
-    await row.click();
+    await activate(page, row);
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator("#toast")).toHaveText(/connected/);
     // It covers no heading either: at the top right it used to land on the
@@ -124,18 +126,19 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${MANAGE_TOKEN}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas%20%C2%B7%20Linux&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage`);
     await expect(dialog.getByText("One-time invitation ready. Check the machine, then add your name.")).toBeVisible();
     await expect(dialog.locator(".pair-lead").first()).toHaveText("This browser will be able to: Read sessions and terminals · Type, send messages and interrupt · Stop and restart workers and sessions");
-    await dialog.getByText("Technical details").click();
+    await activate(page, dialog.getByText("Technical details"));
     await expect(dialog.getByRole("checkbox", { name: "factory:manage", exact: true })).toBeChecked();
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
   });
   await journey.stage("Pair, and the pairing holds factory:manage", async () => {
-    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await activate(page, dialog.getByRole("button", { name: "Pair", exact: true }));
     await expect(dialog).toBeHidden();
     expect(hub.exchanges).toHaveLength(1);
     expect(hub.exchanges[0]?.requested_scopes).toEqual(["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt", "factory-manage"]);
   });
   await journey.stage("Paired machines names each pairing's fleet permissions", async () => {
-    await page.locator("#paired-machines-toggle").click();
+    await showConversationList(page);
+    await activate(page, page.locator("#paired-machines-toggle"));
     const machines = page.locator("#paired-machines-dialog");
     await expect(machines).toBeVisible();
     const atlas = machines.locator('[data-machine-id="atlas"] .paired-machine-fleet');
@@ -150,15 +153,18 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     // The command is reachable by keyboard and copies exactly.
     const copy = manage.getByRole("button", { name: "Copy command" });
-    await copy.focus();
-    await page.keyboard.press("Enter");
+    if (await phoneLayout(page)) await activate(page, copy);
+    else {
+      await copy.focus();
+      await page.keyboard.press("Enter");
+    }
     expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     // A control pairing may allow managing workers itself, once: the first
     // press says what it allows, the second grants it.
     const allow = studio.locator('[data-permission="operate"]').getByRole("button", { name: "Allow managing workers" });
-    await allow.click();
+    await activate(page, allow);
     await expect(studio.locator('[data-permission="operate"] .fleet-permission-allow')).toHaveText("Confirm: allow managing workers on Studio Mac · macOS");
-    await studio.locator('[data-permission="operate"] .fleet-permission-allow').click();
+    await activate(page, studio.locator('[data-permission="operate"] .fleet-permission-allow'));
     await expect(studio.locator('[data-permission="operate"] .fleet-permission-state')).toHaveText("Allowed");
     // Stop and restart still is not: it is never allowed from this browser.
     await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");

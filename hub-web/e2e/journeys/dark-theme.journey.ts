@@ -1,7 +1,9 @@
+import { phoneLayout, phoneDark } from "./responsive-goals";
 import { test, expect } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 
 test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
+  if (await phoneLayout(page)) { await phoneDark(page, journey); return; }
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
 
   await journey.stage("Open the conversation in the light theme", async () => {

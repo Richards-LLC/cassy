@@ -1,3 +1,4 @@
+import { activate, phoneLayout, phoneAsk, showConversationList, openConversation } from "./responsive-goals";
 import { test, expect, journeyPart } from "./journey";
 import { journeyNow, journeyStamp } from "./clock";
 import type { Page } from "@playwright/test";
@@ -39,6 +40,7 @@ function youNow(): string[] {
 }
 
 test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
+  if (await phoneLayout(page)) { await phoneAsk(page, journey); return; }
   // The machine's clock runs five minutes ahead of this browser's, and its
   // durable history holds an open blocker (cas-ce17).
   const ahead = journeyStamp(300_000);
@@ -315,28 +317,28 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], clockAheadMs: { [PELICAN]: 300_000 } });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const log = page.getByRole("log");
-  const row = list.getByRole("button", { name: /cas-src/ });
   let before: string[] = [];
 
   await journey.stage("The supervisor answers live", async () => {
     await journey.open();
-    await row.click();
+    await openConversation(page, "cas-src");
     await page.getByRole("textbox", { name: "Your message" }).fill("Is the gate green?");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     await sent;
     hub.answerLatest(PELICAN, "Yes, the gate is green.");
     await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
     // The visit cannot know the machine's lead yet: the answer shows its arrival, unmarked.
     await expect(log.locator("time .clock-ahead")).toHaveCount(0);
-    await expect(list.locator(".conversation-when")).toHaveText("now");
     before = await threadOrder(page);
+    await showConversationList(page);
+    await expect(list.locator(".conversation-when")).toHaveText("now");
   });
 
   await journey.stage("Reload three minutes later", async () => {
     await page.clock.fastForward(180_000);
     await page.reload();
-    await row.click();
+    await openConversation(page, "cas-src");
     await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
     // cas-9e33: the reload rebuilds the answer from the machine's stamp and
     // shows it exactly as the visit did: the same time, and no mark the visit
@@ -345,6 +347,7 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
     expect(await threadOrder(page), "the reload shows the thread the visit showed").toEqual(before);
     // cas-24fe: the row dates the answer from its arrival, not from the
     // machine's stamp in this browser's future.
+    await showConversationList(page);
     await expect(list.locator(".conversation-when")).toHaveText("3m");
   });
 
@@ -352,9 +355,11 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
     await page.clock.fastForward(300_000);
     await expect(list.locator(".conversation-when")).toHaveText("8m");
     // The reload measured the lead, so the next live answer says the clock is ahead.
+    await openConversation(page, "cas-src");
     hub.answerLatest(PELICAN, "Tagging 3.26.0 now.");
     await expect(log.getByText("Tagging 3.26.0 now.")).toBeVisible();
     await expect(log.locator("time .clock-ahead")).toHaveText([" · machine clock ahead"]);
+    await showConversationList(page);
     await expect(list.locator(".conversation-when")).toHaveText("now");
   });
 });

@@ -13,6 +13,8 @@
     "check:journey-receipts": "node --test e2e/journeys/receipt-directory.test.mjs",
     "prejourneys": "npm run check:journey-clock && npm run check:journey-receipts",
     "journeys": "node scripts/run-verified-tests.mjs playwright --project=journeys",
+    "prejourneys:responsive": "npm run check:journey-clock && npm run check:journey-receipts",
+    "journeys:responsive": "node scripts/run-verified-tests.mjs playwright --config playwright.responsive.config.ts",
     "prejourneys:real-hub": "npm run check:journey-clock && npm run check:journey-receipts",
     "journeys:real-hub": "node scripts/run-verified-tests.mjs playwright --config playwright.real-hub.config.ts"
   },

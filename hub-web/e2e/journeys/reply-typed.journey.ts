@@ -1,3 +1,4 @@
+import { phoneLayout, phoneReply } from "./responsive-goals";
 import { test, expect } from "./journey";
 import type { Machine } from "./hub-double";
 import { expectDraft, installDraftDiagnostic } from "./draft-diagnostic";
@@ -23,6 +24,7 @@ async function swipeAway(locator: import("@playwright/test").Locator, dx: number
 }
 
 test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
+  if (await phoneLayout(page)) { await phoneReply(page, journey); return; }
   // Nineteen stages; on a loaded host (load ~50) the full run took 108 s of
   // the old 120 s budget (cas-f657 QA N2). Every wait inside is event-driven,
   // so the budget only needs headroom, as HUB-J3 has.

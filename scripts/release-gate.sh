@@ -174,6 +174,13 @@ scratch_archive_history_file="$(dirname "$scratch_base")/.cas-release-gate-last-
 archive_size_file="${CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE:-}"
 readonly scratch_archive_history_file archive_size_file
 
+# A guardian owns every large scratch path, forwards graceful signals to the
+# entire child group, waits for it, then removes scratch and remap metadata.
+if [[ -z "${CAS_RELEASE_GATE_SCRATCH_RUN_DIR:-}" ]]; then
+    exec python3 "$repo_root/scripts/release_scratch.py" --repo "$repo_root" \
+        --base "$scratch_base" guard -- bash "$repo_root/scripts/release-gate.sh" "$@"
+fi
+
 # The gate IS the "slow CI environment" the `cas init` watchdog names.
 #
 # `cas init` aborts itself after CAS_INIT_TIMEOUT_SECS (default 300s) so a hang
@@ -202,13 +209,6 @@ export CAS_INIT_TIMEOUT_SECS
 readonly init_timeout_origin
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-release-gate.XXXXXX")"
-# A guardian owns every large scratch path, forwards graceful signals to the
-# entire child group, waits for it, then removes scratch and remap metadata.
-if [[ -z "${CAS_RELEASE_GATE_SCRATCH_RUN_DIR:-}" ]]; then
-    rm -rf "$tmp_dir"
-    exec python3 "$repo_root/scripts/release_scratch.py" --repo "$repo_root" \
-        --base "$scratch_base" guard -- bash "$repo_root/scripts/release-gate.sh" "$@"
-fi
 register_scratch() {
     python3 "$repo_root/scripts/release_scratch.py" --owner-dir "$CAS_RELEASE_GATE_SCRATCH_RUN_DIR" \
         --path "$1" register
@@ -217,7 +217,7 @@ register_scratch "$tmp_dir"
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-trap 'rm -rf "$tmp_dir"' EXIT
+# The guardian removes registered tmp_dir only after descendants are reaped.
 
 # The train supplies a unique attempt directory. Successful logs survive just
 # like failures; the temporary fallback remains useful for direct diagnostics.
@@ -271,7 +271,8 @@ def ignored(name):
         "CAS_AGENT_NAME", "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID",
         "CAS_RELEASE_GATE_LOG_DIR", "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE",
         "CAS_RELEASE_GATE_CACHE_DIR", "CAS_RELEASE_GATE_SWEEP_CACHE_DIR",
-        "CAS_RELEASE_GATE_HOME_DIR",
+        "CAS_RELEASE_GATE_HOME_DIR", "CAS_RELEASE_GATE_SCRATCH_RUN_DIR",
+        "CAS_RELEASE_GATE_SCRATCH_LEASE_FDS",
     } or name.startswith("CAS_RELEASE_TRAIN_")
 
 material = "".join(

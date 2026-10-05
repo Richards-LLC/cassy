@@ -602,21 +602,24 @@ def prove_owned(root):
         target = release_scratch.select_cache(target)
         cache = release_scratch.BoundedCache(target, env, root)
         record["cache"] = cache.events
-        with cache as clone_target, \
-                release_scratch.OwnedDirectory("assembly-clone-", scratch.parent) as directory:
-            clone = Path(directory) / "repo"
-            release_scratch.child_run(["git", "clone", "--quiet", "--shared", "--no-checkout",
-                            str(common_dir(root)), str(clone)], check=True)
-            release_scratch.child_run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
-            no_cas_ancestor(clone)
-            # Reuse compiled dependencies; Cargo invalidates producer paths.
-            try:
-                script_result, native_result, archive_result = run_contexts(
-                    root, clone, env, log_dir, clone_target, record["execution"])
-            finally:
-                write(path, record)  # retain admission/fallback evidence on failure
-            record["script_tests"] = script_result
-            record["contexts"] = {"worktree": native_result, "clone": archive_result}
+        try:
+            with cache as clone_target, \
+                    release_scratch.OwnedDirectory("assembly-clone-", scratch.parent) as directory:
+                clone = Path(directory) / "repo"
+                release_scratch.child_run(["git", "clone", "--quiet", "--shared", "--no-checkout",
+                                str(common_dir(root)), str(clone)], check=True)
+                release_scratch.child_run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
+                no_cas_ancestor(clone)
+                # Reuse compiled dependencies; Cargo invalidates producer paths.
+                try:
+                    script_result, native_result, archive_result = run_contexts(
+                        root, clone, env, log_dir, clone_target, record["execution"])
+                finally:
+                    write(path, record)  # retain admission/fallback evidence on failure
+                record["script_tests"] = script_result
+                record["contexts"] = {"worktree": native_result, "clone": archive_result}
+        finally:
+            write(path, record)  # include cleanup/cache decisions even on interruption
         current, _ = inputs(root)
         if current != expected or git(root, "rev-parse", "HEAD").decode().strip() != head:
             raise ValueError("assembly inputs changed while tests ran")

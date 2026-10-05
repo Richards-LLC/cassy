@@ -419,6 +419,7 @@ impl CasCore {
             proof_scope_fix_reason,
             state_patch,
             None,
+            None,
         )
         .await
     }
@@ -432,16 +433,26 @@ impl CasCore {
         proof_scope_fix_reason: Option<&str>,
         state_patch: Option<serde_json::Value>,
         delivery_mode: Option<&str>,
+        merged_into: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
-        let requested_fields =
+        let mut requested_fields =
             requested_update_fields(&req, target_repo.is_some(), target_branch.is_some());
+        if merged_into.is_some() { requested_fields.push("merged_into"); }
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        if merged_into.is_some() && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some() || req.status.is_some()) {
+            return Err(McpError { code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("INTEGRATION BATCH REJECTED: record merged_into separately from work-target, epic or status changes"), data: None });
+        }
+        let staged_batch = merged_into.map(|selector| self.prepare_integration_batch(&task, selector))
+            .transpose().map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None,
+            })?;
         let door_update = req.door.as_deref().map(|value| {
             if value.trim().is_empty() { Ok(None) } else { value.parse::<cas_types::TaskDoor>().map(Some) }
         }).transpose().map_err(|error| McpError {
@@ -778,7 +789,7 @@ impl CasCore {
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
-            task.updated_at = chrono::Utc::now();
+        task.updated_at = chrono::Utc::now();
             let target_description = if methodology_fix {
                 format!("Execution methodology corrected to {}.", task.execution_note.as_deref().unwrap_or("<cleared>"))
             } else if risk_fix {
@@ -2015,6 +2026,17 @@ impl CasCore {
 
         if state_patch.is_some() {
             changes.push("execution_state");
+        }
+
+        if let Some(batch) = staged_batch {
+            let note = batch.as_ref().map(|batch| format!(
+                "integration batch staged: {}@{} base={} delivery={} supervisor={}",
+                batch.branch, batch.tip, batch.base, batch.delivered_head, batch.supervisor_id
+            )).unwrap_or_else(|| "integration batch staging cleared by registered supervisor".into());
+            task.deliverables.integration_batch = batch;
+            changes.push("merged_into");
+            if !task.notes.is_empty() { task.notes.push('\n'); }
+            task.notes.push_str(&note);
         }
 
         if changes.is_empty() {

@@ -503,9 +503,24 @@ pub struct EvidenceOnlyEvidence {
     pub paths: Vec<String>,
 }
 
+/// Supervisor-pinned integration batch carrying one parked delivery. The batch
+/// remains awaiting merge until its aggregate delta lands on the task target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationBatchEvidence {
+    pub branch: String,
+    pub tip: String,
+    pub base: String,
+    pub delivered_head: String,
+    pub supervisor_id: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_batch: Option<IntegrationBatchEvidence>,
+
     /// Portable repository/branch binding used by close, verification, and
     /// worktree mutations. Legacy JSON defaults to no explicit binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -620,6 +635,8 @@ pub struct TaskDeliverables {
 #[derive(Debug, Deserialize)]
 struct TaskDeliverablesObject {
     #[serde(default)]
+    integration_batch: Option<IntegrationBatchEvidence>,
+    #[serde(default)]
     work_target: Option<WorkTarget>,
     #[serde(default)]
     pre_close_hook: Option<PreCloseHookEvidence>,
@@ -656,6 +673,7 @@ struct TaskDeliverablesObject {
 impl From<TaskDeliverablesObject> for TaskDeliverables {
     fn from(value: TaskDeliverablesObject) -> Self {
         Self {
+            integration_batch: value.integration_batch,
             work_target: value.work_target,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
@@ -914,6 +932,7 @@ impl TaskDeliverables {
     /// The anchor is never retained as active authority, and blank values are
     /// ignored so an empty recovery record cannot create identity.
     pub fn retain_factory_branch_anchor_as_history(&mut self) {
+        self.integration_batch = None;
         let Some(anchor) = self.factory_branch_anchor.take() else {
             return;
         };

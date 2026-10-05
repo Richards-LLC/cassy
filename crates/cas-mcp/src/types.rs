@@ -295,6 +295,12 @@ pub struct TaskRequest {
     #[serde(default)]
     pub state_patch: Option<serde_json::Value>,
 
+    /// For update: supervisor-only pinned batch receipt; empty clears staging.
+    #[schemars(description = "For update: registered-supervisor-only integration batch ref@SHA containing the parked delivery; empty clears staging. Ordinary close recognizes an exact batch squash on the target.")]
+    #[serde(default)]
+    pub merged_into: Option<String>,
+
+
     /// Note type (for notes action): progress, blocker, decision, discovery, question
     #[schemars(
         description = "Note type: 'progress', 'blocker', 'decision', 'discovery', 'question', 'platform_proof', 'loaded_proof'"

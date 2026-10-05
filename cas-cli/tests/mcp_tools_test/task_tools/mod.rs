@@ -12,3 +12,5 @@ mod operations;
 mod qa_evidence_gate;
 mod reopen_atomicity;
 mod verification_flow;
+
+mod integration_batch;

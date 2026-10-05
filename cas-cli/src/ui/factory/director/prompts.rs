@@ -934,6 +934,14 @@ fn classify_merge_alert_observations(
 /// Fetch and re-read both the local epic ref and `origin/<epic>`, then
 /// classify the factory branch against immutable commit IDs. Unknown Git
 /// state never masquerades as zero.
+fn staged_integration_batch(repo_root: &Path, task_id: &str) -> bool {
+    // Freshness checks must not initialize a Cassy database in another target repo.
+    if !repo_root.join(".cas/cas.db").is_file() { return false; }
+    crate::store::open_task_store(&repo_root.join(".cas"))
+        .and_then(|store| Ok(store.get(task_id)?))
+        .is_ok_and(|task| task.status == TaskStatus::AwaitingMerge && task.deliverables.integration_batch.is_some())
+}
+
 fn fresh_merge_alert_git_evidence(
     repo_root: &Path,
     task_id: &str,
@@ -980,6 +988,9 @@ pub fn check_merge_alert_freshness(
     };
     if task.task_status != TaskStatus::AwaitingMerge {
         return MergeAlertFreshness::NotApplicable;
+    }
+    if staged_integration_batch(repo_root, &task.task_id) {
+        return MergeAlertFreshness::Stale;
     }
     let factory_branch = format!("factory/{worker}");
     let (_, epic_branch, _) = resolve_merge_target_for_task(data, &task.task_id);
@@ -1038,6 +1049,9 @@ pub fn check_merge_alert_freshness_for_task(
         return MergeAlertFreshness::Stale;
     };
     if task.status != TaskStatus::AwaitingMerge {
+        return MergeAlertFreshness::Stale;
+    }
+    if staged_integration_batch(repo_root, task_id) {
         return MergeAlertFreshness::Stale;
     }
     let Some(worker) = task.assignee.clone() else {
@@ -7011,6 +7025,29 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn cas_4b26f_staged_batch_suppresses_merge_nag() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = dir.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut task = cas_types::Task::new("cas-b401".into(), "Batch delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let mut value = serde_json::to_value(task).unwrap();
+        value["deliverables"]["integration_batch"] = serde_json::json!({
+            "branch":"batch/X", "tip":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "delivered_head":"cccccccccccccccccccccccccccccccccccccccc",
+            "supervisor_id":"supervisor", "recorded_at":chrono::Utc::now()
+        });
+        store.add(&serde_json::from_value(value).unwrap()).unwrap();
+        let event = DirectorEvent::WorkerIdle { worker:"worker".into(), active_task:Some(ActiveLeaseSummary {
+            task_id:"cas-b401".into(), task_title:"Batch delivery".into(), task_status:TaskStatus::AwaitingMerge,
+            close_rejected_reason:Some("MERGE REQUIRED".into()), pending_qa:None,
+        }) };
+        assert!(matches!(check_merge_alert_freshness(&event, &make_data(0), dir.path()), MergeAlertFreshness::Stale));
+    }
+
 }
 
 #[cfg(test)]
@@ -7046,4 +7083,5 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         assert!(merge.text.starts_with(&observed.detail()));
         assert!(!merge.text.contains("is idle while task"));
     }
+
 }

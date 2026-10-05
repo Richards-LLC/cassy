@@ -6384,7 +6384,7 @@ impl CasCore {
 
     pub async fn cas_task_close_with_dispositions(
         &self,
-        Parameters(req): Parameters<TaskCloseRequest>,
+        Parameters(mut req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
         external_verification_receipt: Option<String>,
         negative_result: Option<NegativeResultCloseRequest>,
@@ -7229,6 +7229,28 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(format!("EVIDENCE ONLY CLOSE REJECTED: {message}"))),
             }
         } else { None };
+
+        // An integration receipt names the squash, while executable hooks and
+        // implementer/independent QA still judge the original reviewed anchor.
+        if let Some(batch) = task.deliverables.integration_batch.as_ref()
+            && let Some(receipt) = req.commit_receipt.as_deref()
+            && resolve_task_commit_receipt_sha(&close_project_root, receipt).ok().as_deref() != Some(batch.delivered_head.as_str())
+        {
+            fetch_parent_branch_best_effort(&close_project_root, &resolved_parent_branch);
+            let supplied = resolve_task_commit_receipt_sha(&close_project_root, receipt).ok();
+            let landed = super::super::integration_batch::landed_batch_squash(
+                &task, &close_project_root, &resolved_parent_branch, Some(receipt),
+            );
+            if supplied.is_none() || supplied != landed {
+                return Ok(Self::tool_error("INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash"));
+            }
+            let original = batch.delivered_head.clone();
+            append_close_decision_note(task_store.as_ref(), &mut task, &format!(
+                "integration batch receipt {} accepted; QA and executable hooks retain delivery anchor {}.",
+                supplied.expect("validated above"), original
+            ));
+            req.commit_receipt = Some(original);
+        }
 
         // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
         // repository this close is bound to. The cross-repo delivery in the
@@ -13099,6 +13121,25 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              call — fix the task's assignee/epic-branch fields and retry."
         ));
     }
+    if task.deliverables.integration_batch.is_some() {
+        fetch_parent_branch_best_effort(repo_path, parent_branch);
+        if let Some(squash) = super::super::integration_batch::landed_batch_squash(
+            task, repo_path, parent_branch, attribution.receipt,
+        ) {
+            let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
+            return MergeStateGateOutcome::ProceedWithNote(format!(
+                "integration batch {}@{} delivered {} as target-reachable squash {}; exact changed-path final blobs and modes match (supervisor {}).",
+                batch.branch, batch.tip, batch.delivered_head, squash, batch.supervisor_id
+            ));
+        }
+        let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
+        if !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch) {
+            return MergeStateGateOutcome::Reject(format!(
+                "⚠️ MERGE REQUIRED\n\nintegration batch {}@{} is staged but not proven on {}. A squash must carry exactly the batch's changed paths, final blobs and modes; extra or missing paths are refused. Publish the complete batch, then retry close (or a registered supervisor can clear merged_into to choose a different integration path).",
+                batch.branch, batch.tip, parent_branch
+            ));
+        }
+    }
     // cas-e33f (GH #1004): after a handoff the assignee (often the
     // supervisor) has no factory branch; measure the branch that actually
     // holds the task's commits.
@@ -14718,7 +14759,7 @@ pub(crate) fn effective_close_work_target(
 /// Never a bare `"main"` literal: tier 3 is a real resolution (configured
 /// value or git-detected default), not a guess, so this function always
 /// returns a genuine answer rather than silently guessing.
-fn resolve_close_parent_branch(
+pub(crate) fn resolve_close_parent_branch(
     worktree_parent_branch: Option<String>,
     epic_branch: Option<String>,
     epic_work_target_branch: Option<String>,
@@ -15853,7 +15894,7 @@ fn delivery_is_proven_on_parent(
 /// explicit post-integration evolution on the current target. This is evidence
 /// for the merge-before-close case only; it does not mutate the task's durable
 /// commit-time anchor.
-fn resolve_task_commit_receipt_sha(
+pub(crate) fn resolve_task_commit_receipt_sha(
     repo_path: &std::path::Path,
     receipt: &str,
 ) -> Result<String, String> {
@@ -17554,7 +17595,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             }
             checked_ref_reads.push(read);
         }
-        let refs_unresolved = !checked_ref_reads.is_empty() && !any_ref_resolved;
+        let mut refs_unresolved = !checked_ref_reads.is_empty() && !any_ref_resolved;
 
         // Summary mode intentionally stops after the cheap ancestry
         // measurement. Delivery-content reconciliation is the dominant
@@ -17586,10 +17627,17 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             continue;
         }
 
-        let mut merge_evidence_note = None;
+        let mut merge_evidence_note = has_delivery.then(|| super::super::integration_batch::landed_batch_squash(
+            t, repo_path, parent_branch, None,
+        )).flatten().map(|squash| format!(
+            "decision: child {} delivery is contained in target-reachable integration batch squash {}; original reviewed anchor retained.", t.id, squash
+        ));
+        if merge_evidence_note.is_some() { unmerged_count = 0; refs_unresolved = false; }
         let mut content_evolution_note = None;
         let mut dropped_paths = Vec::new();
-        let mut content_check_error = None;
+        let mut content_check_error = t.deliverables.integration_batch.as_ref().filter(|batch|
+            has_delivery && merge_evidence_note.is_none() && !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch)
+        ).map(|batch| format!("integration batch {}@{} is staged but its complete delta is not proven on {}", batch.branch, batch.tip, parent_branch));
         let mut content_directions = Vec::new();
         // A stranded live lane is the common close-gate case. Measure each
         // distinct branch once before attempting anchor reconciliation so the

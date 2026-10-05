@@ -2044,7 +2044,9 @@ fn status(cli: &Cli) -> Result<()> {
             };
             let transport = hub_transport_report(&paths, None);
             if cli.json {
-                let runtime_receipt = runtime_receipt(&paths, None, None, &transport, probe_window_started_at);
+                let runtime_receipt = runtime_receipt(
+                    &paths, None, None, &transport, probe_window_started_at,
+                );
                 println!(
                     "{}",
                     serde_json::json!({
@@ -2105,7 +2107,9 @@ fn status(cli: &Cli) -> Result<()> {
     // used to be visible only as a log that fell silent.
     let audit = crate::hub::audit_writer_report(paths.root(), chrono::Utc::now());
     if cli.json {
-        let runtime_receipt = runtime_receipt(&paths, Some(&record), Some(state), &transport, probe_window_started_at);
+        let runtime_receipt = runtime_receipt(
+            &paths, Some(&record), Some(state), &transport, probe_window_started_at,
+        );
         println!(
             "{}",
             serde_json::json!({
@@ -2153,30 +2157,85 @@ fn runtime_receipt(
     transport: &HubTransportReport,
     probe_window_started_at: chrono::DateTime<chrono::Utc>,
 ) -> crate::hub::observation::RuntimeReceipt {
-    use crate::hub::observation::{Observation, ObservationState, collect_runtime_receipt, requested_publication};
+    use crate::hub::observation::{
+        Observation, ObservationState, collect_runtime_receipt, requested_publication,
+    };
     let hub = match state {
-        Some(HubDisplayState::Running) => Observation::new(ObservationState::Healthy, "loopback_health_and_lock_ready", "current_status_probe"),
-        Some(HubDisplayState::Exited) => Observation::new(ObservationState::Failed, "hub_process_exited", "current_status_probe"),
-        Some(HubDisplayState::Unresponsive { .. }) => Observation::new(ObservationState::Failed, "hub_health_unresponsive", "current_status_probe"),
-        Some(HubDisplayState::Starting { wedged: true, .. }) => Observation::new(ObservationState::Failed, "hub_startup_wedged", "current_status_probe"),
-        Some(HubDisplayState::Starting { .. }) => Observation::new(ObservationState::Unknown, "hub_starting", "current_status_probe"),
-        Some(HubDisplayState::Stopping { .. }) => Observation::new(ObservationState::Unknown, "hub_stopping", "current_status_probe"),
-        None => Observation::new(ObservationState::Unknown, "runtime_record_unavailable", "current_status_probe"),
+        Some(HubDisplayState::Running) => Observation::new(
+            ObservationState::Healthy,
+            "loopback_health_and_lock_ready",
+            "current_status_probe",
+        ),
+        Some(HubDisplayState::Exited) => Observation::new(
+            ObservationState::Failed,
+            "hub_process_exited",
+            "current_status_probe",
+        ),
+        Some(HubDisplayState::Unresponsive { .. }) => Observation::new(
+            ObservationState::Failed,
+            "hub_health_unresponsive",
+            "current_status_probe",
+        ),
+        Some(HubDisplayState::Starting { wedged: true, .. }) => Observation::new(
+            ObservationState::Failed,
+            "hub_startup_wedged",
+            "current_status_probe",
+        ),
+        Some(HubDisplayState::Starting { .. }) => Observation::new(
+            ObservationState::Unknown,
+            "hub_starting",
+            "current_status_probe",
+        ),
+        Some(HubDisplayState::Stopping { .. }) => Observation::new(
+            ObservationState::Unknown,
+            "hub_stopping",
+            "current_status_probe",
+        ),
+        None => Observation::new(
+            ObservationState::Unknown,
+            "runtime_record_unavailable",
+            "current_status_probe",
+        ),
     };
     let publication = if transport.is_failure() {
-        Observation::new(ObservationState::Failed, "owned_serve_route_not_verified", "current_status_probe")
+        Observation::new(
+            ObservationState::Failed,
+            "owned_serve_route_not_verified",
+            "current_status_probe",
+        )
     } else if record.is_some_and(|record| record.transport_warning.is_some()) {
-        Observation::new(ObservationState::Failed, "serve_publication_unavailable", "current_status_probe")
-    } else if requested_publication(paths) == Some(false) && record.is_none_or(|r| r.tailscale_serve_target.is_none()) {
-        Observation::new(ObservationState::Disabled, "host_publication_opt_out", "host_config_and_current_status_probe")
-    } else if state == Some(HubDisplayState::Running) && record.is_some_and(|r| tailscale_enabled(r) && r.tailscale_serve_target.is_some() && r.public_url.is_some()) {
-        Observation::new(ObservationState::Healthy, "owned_serve_route_matches_live_hub", "current_status_probe")
+        Observation::new(
+            ObservationState::Failed,
+            "serve_publication_unavailable",
+            "current_status_probe",
+        )
+    } else if requested_publication(paths) == Some(false)
+        && record.is_none_or(|r| r.tailscale_serve_target.is_none())
+    {
+        Observation::new(
+            ObservationState::Disabled,
+            "host_publication_opt_out",
+            "host_config_and_current_status_probe",
+        )
+    } else if state == Some(HubDisplayState::Running)
+        && record.is_some_and(|r| {
+            tailscale_enabled(r) && r.tailscale_serve_target.is_some() && r.public_url.is_some()
+        })
+    {
+        Observation::new(
+            ObservationState::Healthy,
+            "owned_serve_route_matches_live_hub",
+            "current_status_probe",
+        )
     } else {
-        Observation::new(ObservationState::Unknown, "no_owned_publication_observed", "current_status_probe")
+        Observation::new(
+            ObservationState::Unknown,
+            "no_owned_publication_observed",
+            "current_status_probe",
+        )
     };
     collect_runtime_receipt(paths, record, hub, publication, probe_window_started_at)
 }
-
 /// The status screen's audit line (cas-0140): OK with the last row's age, or
 /// FAIL with when the writer started failing and why.
 fn render_audit_status(report: &crate::hub::AuditWriterReport) -> String {
@@ -2917,6 +2976,51 @@ mod tests {
                 .map(|port| format!("http://127.0.0.1:{port}")),
             transport_warning: None,
         }
+    }
+
+    #[test]
+    fn missing_runtime_receipt_is_read_only_and_unknown() {
+        use crate::hub::observation::ObservationState;
+        let home = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::for_home(home.path());
+        let receipt = runtime_receipt(
+            &paths,
+            None,
+            None,
+            &HubTransportReport::ok("no CAS-created route"),
+            chrono::Utc::now(),
+        );
+        assert_eq!(receipt.hub.state, ObservationState::Unknown);
+        assert_eq!(receipt.serve_publication.state, ObservationState::Unknown);
+        assert_eq!(
+            receipt.independent_monitoring.state,
+            ObservationState::Unsupported
+        );
+        assert!(!home.path().join(".cas").exists());
+    }
+
+    #[test]
+    fn runtime_receipt_preserves_transport_failure_beside_healthy_loopback() {
+        use crate::hub::observation::ObservationState;
+        let home = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::for_home(home.path());
+        let live = record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, Some(443));
+        let transport = HubTransportReport::fail("owned route missing", None, None);
+        let receipt = runtime_receipt(
+            &paths,
+            Some(&live),
+            Some(HubDisplayState::Running),
+            &transport,
+            chrono::Utc::now(),
+        );
+        assert_eq!(receipt.hub.state, ObservationState::Healthy);
+        assert_eq!(receipt.serve_publication.state, ObservationState::Failed);
+        assert_eq!(
+            receipt.external_reachability.state,
+            ObservationState::Unknown
+        );
+        assert_eq!(receipt.factory.jobs_resumed, None);
+        assert!(!receipt.boot_prerequisites.reboot_verified);
     }
 
     #[test]

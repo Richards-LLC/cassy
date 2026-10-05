@@ -145,7 +145,9 @@ impl SessionManager {
     }
 
     pub(crate) fn for_home_read_only(home: &Path) -> Self {
-        Self { sessions_dir: home.join(".cas").join(SESSIONS_DIR) }
+        Self {
+            sessions_dir: home.join(".cas").join(SESSIONS_DIR),
+        }
     }
 
     /// Ensure the sessions directory exists

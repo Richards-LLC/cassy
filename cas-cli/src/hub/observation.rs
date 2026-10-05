@@ -61,11 +61,13 @@ pub(crate) struct BootPrerequisites {
     pub gui_session_available: Option<bool>,
     pub condition: &'static str,
     pub reboot_verified: bool,
+    pub next_step: &'static str,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct RuntimeReceipt {
     pub schema_version: u32,
+    pub binary_version: &'static str,
     pub probe_window_started_at: String,
     pub observed_at: String,
     pub collection_duration_ms: u64,
@@ -135,6 +137,7 @@ pub(crate) fn collect_runtime_receipt(
     let boot_prerequisites = boot_prerequisites(home);
     RuntimeReceipt {
         schema_version: 1,
+        binary_version: env!("CARGO_PKG_VERSION"),
         probe_window_started_at: probe_window_started_at.to_rfc3339(),
         observed_at: chrono::Utc::now().to_rfc3339(),
         collection_duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -309,13 +312,16 @@ fn boot_prerequisites(home: Option<&Path>) -> BootPrerequisites {
         gui_session_available: None,
         condition: "unsupported_platform",
         reboot_verified: false,
+        next_step: "Use a supported service manager; local status cannot prove reboot recovery.",
     };
     let Some(home) = home else {
         facts.condition = "home_unavailable";
+        facts.next_step = "Inspect the runtime under the service owner's home.";
         return facts;
     };
     if dirs::home_dir().as_deref() != Some(home) {
         facts.condition = "foreign_home_manager_unobserved";
+        facts.next_step = "Run status as the service owner to inspect its manager.";
         return facts;
     }
     #[cfg(target_os = "linux")]
@@ -391,10 +397,27 @@ fn boot_prerequisites(home: Option<&Path>) -> BootPrerequisites {
             "service_not_installed"
         } else if facts.gui_session_available == Some(false) {
             "gui_login_required"
-        } else {
+        } else if facts.gui_session_available == Some(true) {
             "gui_login_recovery_not_reboot_verified"
+        } else {
+            "service_manager_observation_unavailable"
         };
     }
+    facts.next_step = match facts.condition {
+        "service_not_installed" => "Install the hub service before relying on automatic recovery.",
+        "service_not_boot_enabled" => "Enable the installed user service for boot recovery.",
+        "user_linger_required" => "Enable user linger before relying on recovery without login.",
+        "gui_login_required" => {
+            "Log in to the macOS GUI; this LaunchAgent cannot recover before login."
+        }
+        "gui_login_recovery_not_reboot_verified" => {
+            "Verify RunAtLoad, KeepAlive and hub health after GUI login; pre-login recovery is unsupported."
+        }
+        "configured_not_reboot_verified" => {
+            "Verify hub identity, health and publication in a supervised reboot test."
+        }
+        _ => "Inspect the service manager; its current state could not be verified.",
+    };
     facts
 }
 

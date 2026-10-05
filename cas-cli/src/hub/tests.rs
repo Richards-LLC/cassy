@@ -1445,9 +1445,11 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         response.headers()["content-type"],
         "text/html; charset=utf-8"
     );
+    // Owned: the body is consumed below, and the CSP is still checked after.
     let csp = response.headers()["content-security-policy"]
         .to_str()
-        .unwrap();
+        .unwrap()
+        .to_owned();
     for required in [
         "default-src 'none'",
         "script-src 'self' 'wasm-unsafe-eval'",

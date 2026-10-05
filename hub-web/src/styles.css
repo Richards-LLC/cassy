@@ -2866,7 +2866,7 @@ button.chip:disabled { cursor: default; }
 .operator-inbox-bubble { max-width: 100%; min-width: 0; margin: 0; padding: 12px 19px; overflow-wrap: anywhere; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift-sup); font-size: var(--fs-base); line-height: 1.45; }
 dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit; }
 .operator-inbox-reply .operator-inbox-bubble { color: var(--sup-fg); }
-.operator-inbox-message .operator-inbox-bubble, .operator-inbox-command .operator-inbox-bubble { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; box-shadow: none; white-space: pre-wrap; }
+.operator-inbox-message .operator-inbox-bubble, .operator-inbox-command .operator-inbox-bubble { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; white-space: pre-wrap; }
 .operator-inbox-bubble p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .operator-inbox-bubble p + p { margin-top: 8px; }
 .operator-inbox-bubble .markdown-heading { font-weight: var(--weight-semibold); }

@@ -212,6 +212,27 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
     await expect(admin, "admin is never pre-ticked: it needs explicit consent").not.toBeChecked();
     await expect(dialog.locator(".pair-admin-consent label.scope")).toContainText("See and revoke this machine's other browser installations");
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
+  });
+
+  for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+    for (const scheme of ["light", "dark"] as const) {
+      await journey.stage(`The consent reads whole at ${size.width}px in ${scheme}`, async () => {
+        await page.setViewportSize(size);
+        await page.emulateMedia({ colorScheme: scheme });
+        const consent = page.locator("#pair-dialog .pair-admin-consent");
+        await consent.scrollIntoViewIfNeeded();
+        await expect(consent).toBeInViewport();
+        expect(await consent.evaluate((element) => element.scrollWidth <= element.clientWidth), "the consent note wraps inside its box").toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
+      });
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.emulateMedia({ colorScheme: "light" });
+
+  await journey.stage("Consent is given from the keyboard", async () => {
+    const dialog = page.locator("#pair-dialog");
+    const admin = dialog.getByRole("checkbox", { name: /hub:admin/ });
     // Keyboard consent: focus the box and press Space.
     await admin.focus();
     await page.keyboard.press("Space");

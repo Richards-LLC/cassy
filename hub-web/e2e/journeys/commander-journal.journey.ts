@@ -4,6 +4,8 @@ import { ATLAS, PELICAN } from "./world";
 import { journalRows } from "./commander-journal-storage";
 import { journeyNow } from "./clock";
 import type { Page } from "@playwright/test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 async function choose(page: Page) {
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
@@ -11,6 +13,30 @@ async function choose(page: Page) {
 async function send(page: Page, text: string) {
   await page.getByRole("textbox", { name: "Your message" }).fill(text);
   await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+}
+
+async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") {
+  const qa = process.env.DELIVERY_QA;
+  if (!qa) return;
+  await mkdir(qa, { recursive: true });
+  const viewport = page.viewportSize()!;
+  for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
+      await expect(page.getByRole("log")).toContainText(state === "stored" ? "Stored on this device" : "Forwarded · not stored on this device");
+      await page.screenshot({ path: join(qa, `${state}-${colorScheme}-${size}.png`) });
+    }
+  }
+  const html = await page.locator(".conversation-reading").evaluate(node => node.outerHTML);
+  const css = await readFile("dist/app.css", "utf8");
+  await writeFile(join(qa, `${state}.html`), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body>${html}</body></html>`);
+  for (const [name, query, media] of [["forced-colors", "(forced-colors: active)", { forcedColors: "active" }], ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }], ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }]] as const) {
+    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
+    expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
+    await page.screenshot({ path: join(qa, `${state}-a11y-${name}.png`) });
+  }
+  await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, colorScheme: "light" });
+  await page.setViewportSize(viewport);
 }
 
 test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, async ({ page, context, journey }) => {
@@ -112,6 +138,7 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
     expect(await page.evaluate(() => (window as unknown as { __receiptOrder: string[] }).__receiptOrder.slice(0, 2))).toEqual(["reply-commit", "application-ack"]);
     await expect(page.getByRole("log").getByText("Stored on this device", { exact: true })).toBeVisible();
     await expect(page.getByRole("log")).not.toContainText("Read by operator");
+    await captureReceiptSurface(page, "stored");
   });
   await journey.stage("A reload replays the same immutable reply and re-ACKs without a second bubble", async () => {
     const before = hub.persistedReplies.length;
@@ -140,6 +167,7 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
     await expect(page.getByRole("log").getByText("Forwarded · not stored on this device", { exact: true })).toBeVisible();
     expect(hub.persistedReplies.filter((row) => row.notification_id === id)).toHaveLength(0);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(0);
+    await captureReceiptSurface(page, "forwarded");
   });
   await journey.stage("Reload recovers the unacknowledged reply from durable hub history", async () => {
     await page.reload(); await choose(page);

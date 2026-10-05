@@ -783,6 +783,17 @@ jobs:
           fi
           npm run journeys
 
+      # cas-4ce5: a journey flake in the queue left no trace to diagnose.
+      # Keep Playwright's traces, error-context.md and screenshots on failure.
+      - name: Upload Commander journey evidence on failure
+        if: failure() && steps.classify-diff.outputs.web-check-needed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-web-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: hub-web/e2e/.results/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Check
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:

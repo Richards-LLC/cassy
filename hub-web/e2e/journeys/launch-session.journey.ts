@@ -227,7 +227,15 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     expect(await allow.evaluate((button) => button.getBoundingClientRect().right <= innerWidth), "the long button fits the viewport").toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
-    await allow.tap();
+    // cas-84a2: on a loaded queue runner the tap's touch dispatch never came
+    // back while the sheet was still settling after the reload. Tap only once
+    // every finite animation on the page has finished (the sheet's own state,
+    // not a wall-clock wait), and give the tap its own deadline so a stall
+    // names the tap instead of eating the whole test timeout.
+    await page.evaluate(() => Promise.all(document.getAnimations()
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished.catch(() => undefined))));
+    await allow.tap({ timeout: 15_000 });
     await expect(sheet.getByText(`Allow “Start new sessions” on ${ATLAS.label}?`)).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
     ATLAS.label = originalLabel;

@@ -351,6 +351,28 @@ describe("held-send polish after cas-0653 (cas-a355)", () => {
     vi.restoreAllMocks();
   });
 
+  // cas-4ce5: a session attach held down through several failures kept doubling
+  // (16 s at the fifth, 30 s later), so a machine back after a long outage
+  // stayed "Reconnecting" well past the 10 s the catalog promises (HUB-J11).
+  it("caps the session attach backoff at the machine retry ceiling", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const onAttachState = vi.fn();
+    const { sup, internals } = supervisor({ onAttachState });
+    const machine = internals as unknown as Refusing & { scheduleAttach(session: string): void };
+    machine.desired = true;
+    const delays: Array<number | undefined> = [];
+    for (let failure = 0; failure < 7; failure += 1) {
+      machine.scheduleAttach("factory-a");
+      delays.push(onAttachState.mock.calls.filter(([, snapshot]) => snapshot.phase === "backoff").at(-1)?.[1]?.retryInMs);
+      for (const timer of machine.attachRetryTimers.values()) clearTimeout(timer);
+      machine.attachRetryTimers.clear();
+    }
+    expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, MACHINE_RETRY_CEILING_MS, MACHINE_RETRY_CEILING_MS, MACHINE_RETRY_CEILING_MS]);
+    sup.stop();
+  });
+
   // cas-2036 (cas-a355 QA N3): only a receipt used to reset the streak, so a
   // held send that expired unsent left the next drop starting at 8 s.
   it("starts the backoff afresh once the session stays live with no refusal, delivered send or not", async () => {

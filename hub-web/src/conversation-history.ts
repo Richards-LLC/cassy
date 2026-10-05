@@ -333,7 +333,14 @@ export class ConversationHistory {
   }
 
   /** Reconcile another tab's committed journal, without making a claim replayable. */
-  synchronizePending(sends: PendingSend[], now = Date.now()): PendingSend[] {
+  synchronizePending(sends: PendingSend[], now = Date.now(), receipts: Array<MessageQueued & { sentAt: number }> = []): PendingSend[] {
+    for (const receipt of receipts) {
+      const event = this.events.find(event => event.kind === "send" && event.value.id === receipt.client_ref);
+      if (event?.kind === "send" && event.value.target === receipt.target) {
+        event.value.sentAt ??= receipt.sentAt;
+        this.acknowledge(receipt);
+      }
+    }
     const stored = new Map(sends.map((send) => [send.id, send]));
     for (const event of [...this.events]) {
       if (event.kind !== "send" || event.value.notificationId !== undefined || event.value.dismissed || event.value.replaced) continue;
@@ -596,6 +603,8 @@ export class ConversationHistory {
     // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
     delete send.value.dismissed;
     send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
+    if (send.value.held) send.value.sentAt ??= Date.now();
+    delete send.value.held;
     delete send.value.error;
     return true;
   }

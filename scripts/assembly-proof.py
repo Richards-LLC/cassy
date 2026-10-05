@@ -12,6 +12,7 @@ import csv
 import fcntl
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -23,6 +24,10 @@ import sys
 import tempfile
 import time
 import tomllib
+
+_target_spec = importlib.util.spec_from_file_location("proof_target", Path(__file__).with_name("proof_target.py"))
+proof_target = importlib.util.module_from_spec(_target_spec)
+_target_spec.loader.exec_module(proof_target)
 
 FORMAT = 2
 MAX_AGE = 86400
@@ -52,7 +57,7 @@ IDENTITY = {"CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
             "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT",
             "AI_AGENT", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CAS_CLONE_PATH",
             "CAS_FACTORY_MODE", "CAS_FACTORY_SUPERVISOR_CLI", "CAS_FACTORY_WORKER_CLI"}
-VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR",
+VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR",
             "VERIFIED_TEST_LOG",
             # Train output locations do not change the compiled/tested candidate.
             "CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR",
@@ -356,12 +361,15 @@ def clone_scratch(env):
 
 
 def run_row(root, row, env, log_dir):
-    row_env = dict(env)
+    source = proof_target.prepare(root) if row != "ci-script-tests" else proof_target.identity(root)
+    row_env = proof_target.environment(env, source)
     row_env["CAS_RELEASE_GATE_LOG_DIR"] = str(log_dir / (row + "-rows"))
     row_env["CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE"] = str(log_dir / "archive-size-bytes")
     log = log_dir / (row + ".log")
     print(f"assembly proof: {row} in {root}; log: {log}", flush=True)
     with log.open("w") as stream:
+        stream.write("PROOF_SOURCE: " + json.dumps(source, sort_keys=True) + "\n")
+        stream.flush()
         result = subprocess.run(["bash", str(root / "scripts/release-gate.sh"),
                                  "0.0.0", "--only", row], cwd=root, env=row_env,
                                 stdout=stream, stderr=subprocess.STDOUT)
@@ -372,7 +380,7 @@ def run_row(root, row, env, log_dir):
     if not re.search(r"^PASS " + re.escape(row) + r" ", log.read_text(), re.M):
         raise ValueError(f"assembly {row} did not report a pass: {log}")
     result = {"status": "PASS", "row": row, "checkout": str(root), "log": str(log),
-              "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip()}
+              "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "head": source["head"], "target": source["target"]}
     for filename, key in (("timing.tsv", "timing"), ("compile-timing.tsv", "compile_timing")):
         timing_path = Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / filename
         if timing_path.is_file():
@@ -508,7 +516,9 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
     # are not all globally locked: serialize consumers after script admission.
     # Clone preparation may have taken time: admit against current memory,
     # not the earlier receipt snapshot. Knobs never bypass memory admission.
-    env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_LINK_GUARD_DIR=str(clone_target.parent / "linker-guards"))
+    clone_target = clone / "target"
+    env = dict(env, CARGO_TARGET_DIR=str(root / "target"), CARGO_BUILD_TARGET_DIR=str(root / "target"),
+               CAS_RELEASE_GATE_ASSEMBLY_LINK_GUARD_DIR=str(log_dir / "linker-guards"))
     execution.update(execution_plan(env))
     print("assembly scheduling: " + json.dumps(execution, sort_keys=True), flush=True)
     if execution["budget_bytes"] < SCRIPT_BYTES:
@@ -524,6 +534,7 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
                            CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps(env_policy(env)))
             if row == "archive-mode":
                 row_env["CARGO_TARGET_DIR"] = str(clone_target)
+                row_env["CARGO_BUILD_TARGET_DIR"] = str(clone_target)
             results.append(run_row(checkout, row, row_env, log_dir))
         return scripts, *results
     with tempfile.TemporaryDirectory(prefix="assembly-sync-", dir=log_dir) as directory:
@@ -532,7 +543,7 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
         native_env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR=str(sync),
                           CARGO_BUILD_JOBS=str(execution["compile_jobs"]),
                           CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps(env_policy(env)))
-        clone_env = dict(native_env, CARGO_TARGET_DIR=str(clone_target))
+        clone_env = dict(native_env, CARGO_TARGET_DIR=str(clone_target), CARGO_BUILD_TARGET_DIR=str(clone_target))
         with ThreadPoolExecutor(max_workers=3) as executor:
             scripts = executor.submit(run_row, root, "ci-script-tests", env, log_dir)
             native = executor.submit(run_row, root, "nextest", native_env, log_dir)
@@ -594,10 +605,12 @@ def prove(root):
                             str(common_dir(root)), str(clone)], check=True)
             subprocess.run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
             no_cas_ancestor(clone)
-            # Reuse compiled dependencies; Cargo invalidates producer paths.
+            # Each source root owns its outputs, including temporary clones.
+            # Seed only immutable dependencies, never workspace freshness.
+            proof_target.prepare(clone, cache=proof_target.cache_root(root))
             try:
                 script_result, native_result, archive_result = run_contexts(
-                    root, clone, env, log_dir, path.parent.parent / "assembly-target", record["execution"])
+                    root, clone, env, log_dir, clone / "target", record["execution"])
             finally:
                 write(path, record)  # retain admission/fallback evidence on failure
             record["script_tests"] = script_result

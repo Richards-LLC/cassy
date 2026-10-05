@@ -433,6 +433,7 @@ EOF
 mkdir -p "${work_target_repo}/scripts"
 cp "${SURFACE_GUARD}" "${work_target_repo}/scripts/check-scoped-test-surface.sh"
 cp "${GUARD}" "${work_target_repo}/scripts/run-scoped-tests.sh"
+cp "${SCRIPT_DIR}/proof_target.py" "${work_target_repo}/scripts/proof_target.py"
 expect pass "SCOPED_PROOF: targets=lib:worker result=PASS base=${work_target_base}" \
     "proof runner: WorkTarget baseline is carried by the passing receipt" \
     bash -c "cd '${work_target_repo}' && CARGO='${work_target_runner_stub}' SCOPED_PROOF_TARGET_BRANCH=epic '${work_target_repo}/scripts/run-scoped-tests.sh' --proof -p cas --lib worker"
@@ -627,6 +628,7 @@ fi
 mkdir -p "${mapping_repo}/scripts"
 cp "${SURFACE_GUARD}" "${mapping_repo}/scripts/check-scoped-test-surface.sh"
 cp "${GUARD}" "${mapping_repo}/scripts/run-scoped-tests.sh"
+cp "${SCRIPT_DIR}/proof_target.py" "${mapping_repo}/scripts/proof_target.py"
 runner_stub="$(make_stub cargo-proof-runner 0 <<'EOF'
     Summary [   0.001s] 1 tests run: 1 passed, 0 skipped
 EOF
@@ -638,6 +640,7 @@ sibling_repo="${tmpdir}/sibling-hub-repo"
 mkdir -p "${sibling_repo}/cas-cli/src/cli" "${sibling_repo}/cas-cli/tests" "${sibling_repo}/scripts"
 cp "${SURFACE_GUARD}" "${sibling_repo}/scripts/check-scoped-test-surface.sh"
 cp "${GUARD}" "${sibling_repo}/scripts/run-scoped-tests.sh"
+cp "${SCRIPT_DIR}/proof_target.py" "${sibling_repo}/scripts/proof_target.py"
 printf 'mod tests { #[test] fn status_case() {} }\n' >"${sibling_repo}/cas-cli/src/cli/hub.rs"
 printf 'mod tests { #[test] fn authorize_case() {} }\n' >"${sibling_repo}/cas-cli/src/cli/hub_reverse_pairing.rs"
 git -C "${sibling_repo}" init -q -b main

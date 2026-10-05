@@ -621,6 +621,23 @@ the embargo; explicitly setting it to an empty string lifts it. Resume then
 finishes the pending announcement evidence without republishing the runtime.
 An embargo never waives the publication or install requirement.
 
+### Supervisor proof targets
+
+Run `python3 scripts/assembly-proof.py prove <epic-worktree>` for assembly.
+Native and archive-clone producers each use their own `<worktree>/target`;
+`CARGO_TARGET_DIR` inherited from a different lane is replaced. For a scoped
+check, use `python3 scripts/proof_target.py run <worktree> -- cargo check --workspace --tests`.
+The scoped test wrapper applies the same target isolation. Command-line
+`--target-dir` overrides are refused, and every proof log records the source
+worktree, HEAD and target path. A target whose recorded source root differs is
+refused, including symlinked targets.
+
+The immutable `.cas/build-cache/current` snapshot seeds compiled dependencies
+with hardlinks where supported. Cargo freshness metadata is copied privately;
+workspace fingerprints/artifacts, incremental state and Cargo locks are never
+seeded. Workspace freshness is also discarded when adopting a legacy target or
+changing HEAD, so old source mtimes cannot bless another tree's exports.
+
 ### Worker build caches
 
 Factory worker spawns use `sccache` automatically when it is installed, while

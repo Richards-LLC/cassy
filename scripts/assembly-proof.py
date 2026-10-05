@@ -38,6 +38,13 @@ PRODUCER_BYTES = 8 * GIB
 SCRIPT_BYTES = 2 * GIB
 TEST_FIXED_BYTES = 4 * GIB
 TEST_THREAD_BYTES = GIB // 4
+# Soundwave incremental cas relink, b86ec0c2e + train9, 2026-10-05:
+# .cas/perf-98a0/link-rss.log, 0.5s ps sampler: max cc/mold 2.089 GiB,
+# rustc 4.555 GiB; 30 link processes peaked at 9.75 GiB summed. Round links
+# conservatively to 2.1 GiB/slot. Retain the cold-proof 8 GiB producer bound
+# above rather than assume incremental rustc RSS covers cold code generation.
+LINK_BYTES = math.ceil(2.1 * GIB)
+GUARD_HEADROOM_BYTES = 2 * GIB
 # Exact harness/session names: scrub these from the environment passed to every
 # test row as well as its fingerprint. Do not ignore CAS_FACTORY_* wholesale;
 # build controls and unknown future variables remain test inputs.
@@ -381,6 +388,13 @@ def run_row(root, row, env, log_dir):
     admission_path = Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / "memory-admission.json"
     if admission_path.is_file():
         result["test_memory"] = json.loads(admission_path.read_text())
+    for filename, key in (("compile-memory.jsonl", "compile_memory"), ("link-rss.jsonl", "link_rss")):
+        event_path = Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / filename
+        if event_path.is_file():
+            events = [json.loads(line) for line in event_path.read_text().splitlines()]
+            result[key] = events
+            if any(event.get("action", "").endswith("abort") or event.get("estimate_exceeded") for event in events):
+                raise ValueError(f"assembly {row} has unsafe memory evidence: {event_path}")
     if row == "ci-script-tests":
         return result
     passed = re.findall(r"PASS: ([1-9][0-9]*) test\(s\) passed", raw)
@@ -440,11 +454,14 @@ def memory_budget(env):
 
 
 def execution_plan(env):
+    positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS")
+    positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS")
     memory = memory_budget(env)
     requested = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS")
     cores = cpu_count()
     cap = min(requested or cores, max(1, cores // 2))
-    jobs = min(cap, max(0, (memory["budget_bytes"] - 2 * PRODUCER_BYTES - SCRIPT_BYTES)
+    jobs = min(cap, max(0, (memory["budget_bytes"] - 2 * PRODUCER_BYTES - SCRIPT_BYTES
+                           - LINK_BYTES - GUARD_HEADROOM_BYTES)
                         // (2 * COMPILE_JOB_BYTES)))
     mode = "concurrent" if jobs else "serial"
     reason = ("two producers and script tier fit above memory reserve" if jobs else
@@ -452,24 +469,37 @@ def execution_plan(env):
     return dict(memory, mode=mode, reason=reason, cores=cores, requested_compile_jobs=requested,
                 compile_jobs=jobs, per_job_bytes=COMPILE_JOB_BYTES,
                 producer_overhead_bytes=PRODUCER_BYTES, script_bytes=SCRIPT_BYTES,
+                link_jobs=1, per_link_bytes=LINK_BYTES, guard_headroom_bytes=GUARD_HEADROOM_BYTES,
+                link_estimate_source="soundwave b86ec0c2e + train9 incremental relink, 2026-10-05, .cas/perf-98a0/link-rss.log: max ld.mold 2190228 KiB (2.089 GiB), rustc 4775752 KiB (4.555 GiB), 0.5s ps; links rounded to 2.1 GiB; cold producer bound remains 8 GiB",
                 estimate_source="8 GiB large unit rounded from measured 7293348 KiB max RSS, soundwave proof 7e4c6f50 (abd6817b5); 256 MiB/dependency job and 2 GiB scripts assumed",
                 phases=[])
 
 
 def admit_phase(env, execution, phase, compile_phase=False):
-    memory = memory_budget(env)
-    if compile_phase:
-        cap = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS") or cpu_count()
-        count = min(cap, max(0, (memory["budget_bytes"] - PRODUCER_BYTES) // COMPILE_JOB_BYTES))
-    else:
-        count = min(cpu_count(), max(0, (memory["budget_bytes"] - TEST_FIXED_BYTES) // TEST_THREAD_BYTES))
-    event = dict(memory, phase=phase, admitted=bool(count),
-                 **({"compile_jobs": count} if compile_phase else {"test_threads": count}))
-    execution["phases"].append(event)
-    print("assembly memory admission: " + json.dumps(event, sort_keys=True), flush=True)
-    if not count:
-        raise ValueError(f"assembly {phase} cannot fit above memory reserve; retry when memory is available")
-    return str(count)
+    wait_secs = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS") or 600
+    poll_secs = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 2
+    started = time.monotonic()
+    while True:
+        memory = memory_budget(env)
+        if phase == "ci-script-tests":
+            count = int(memory["budget_bytes"] >= SCRIPT_BYTES)
+        elif compile_phase:
+            cap = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS") or cpu_count()
+            count = min(cap, max(0, (memory["budget_bytes"] - PRODUCER_BYTES - LINK_BYTES
+                                    - GUARD_HEADROOM_BYTES) // COMPILE_JOB_BYTES))
+        else:
+            count = min(cpu_count(), max(0, (memory["budget_bytes"] - TEST_FIXED_BYTES) // TEST_THREAD_BYTES))
+        elapsed = time.monotonic() - started
+        event = dict(memory, phase=phase, admitted=bool(count), elapsed_s=round(elapsed, 3),
+                     deadline_s=wait_secs,
+                     **({"compile_jobs": count} if compile_phase else {"test_threads": count}))
+        execution["phases"].append(event)
+        print("assembly memory admission: " + json.dumps(event, sort_keys=True), flush=True)
+        if count:
+            return str(count)
+        if elapsed >= wait_secs:
+            raise ValueError(f"assembly {phase} cannot fit above memory reserve after {wait_secs}s")
+        time.sleep(min(poll_secs, wait_secs - elapsed))
 
 
 def run_contexts(root, clone, env, log_dir, clone_target, execution):
@@ -478,10 +508,14 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
     # are not all globally locked: serialize consumers after script admission.
     # Clone preparation may have taken time: admit against current memory,
     # not the earlier receipt snapshot. Knobs never bypass memory admission.
+    env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_LINK_GUARD_DIR=str(clone_target.parent / "linker-guards"))
     execution.update(execution_plan(env))
     print("assembly scheduling: " + json.dumps(execution, sort_keys=True), flush=True)
     if execution["budget_bytes"] < SCRIPT_BYTES:
-        raise ValueError("assembly script tier cannot fit above memory reserve")
+        admit_phase(env, execution, "ci-script-tests")
+        samples = execution["phases"]
+        execution.update(execution_plan(env))
+        execution["phases"] = samples
     if execution["mode"] == "serial":
         scripts = run_row(root, "ci-script-tests", env, log_dir)
         results = []
@@ -496,7 +530,8 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
         sync = Path(directory)
         (sync / "owner").write_text(str(os.getpid()))
         native_env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR=str(sync),
-                          CARGO_BUILD_JOBS=str(execution["compile_jobs"]))
+                          CARGO_BUILD_JOBS=str(execution["compile_jobs"]),
+                          CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps(env_policy(env)))
         clone_env = dict(native_env, CARGO_TARGET_DIR=str(clone_target))
         with ThreadPoolExecutor(max_workers=3) as executor:
             scripts = executor.submit(run_row, root, "ci-script-tests", env, log_dir)
@@ -525,7 +560,9 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
 def env_policy(env):
     """Only admission knobs cross the shell boundary, never the full env."""
     return {key: env[key] for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS",
-                                    "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB") if key in env}
+                                    "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
+                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS",
+                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") if key in env}
 
 
 def prove(root):

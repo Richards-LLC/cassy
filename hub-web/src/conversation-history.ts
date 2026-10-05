@@ -586,6 +586,10 @@ export class ConversationHistory {
   isFailedSend(send: ConversationSend): boolean {
     return (send.state === "error" && !send.replaced) || (send.state === "unconfirmed" && !this.repliedSince(send));
   }
+  /** A later reply quiets the warning, but its explicit Send again still retries an unknown delivery. */
+  canRetrySend(send: ConversationSend): boolean {
+    return send.notificationId === undefined && !send.replaced && (send.state === "error" || send.state === "unconfirmed");
+  }
   /** Events as the thread shows them: without the failed sends the operator dismissed. */
   visibleEvents(): ConversationEvent[] {
     return this.events.filter((event) => !(event.kind === "send" && event.value.dismissed && this.isFailedSend(event.value)));

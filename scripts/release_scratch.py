@@ -25,6 +25,7 @@ PROC_ROOT = Path("/proc")
 TEARDOWN_WAIT_SECS = 20
 PROTOCOL = "cas-scratch-v1"
 REGENERABLE = ("suite.tar.zst", "extract", "tmp", "cargo-home", "bin")
+INVENTORY_ROOTS = set()
 
 
 def positive(env, key, default):
@@ -170,8 +171,14 @@ def process_uses(path, own_lock_fd=None, lease_managed=False):
                             return True
                     except FileNotFoundError:
                         pass
-                for argument in (process / "cmdline").read_bytes().split(b"\0"):
+                arguments = (process / "cmdline").read_bytes().split(b"\0")
+                for index, argument in enumerate(arguments):
                     value = os.fsdecode(argument).split("=", 1)[-1]
+                    # The GC's --cache argument describes this inventory, not
+                    # a user of its output. Keep own cwd/exe/maps/other FDs live.
+                    if (int(process.name) == os.getpid() and index > 0
+                            and arguments[index - 1] == b"--cache" and value in INVENTORY_ROOTS):
+                        continue
                     if value.startswith("/") and contains(path, Path(value)):
                         return True
                 for line in (process / "maps").read_text().splitlines():
@@ -673,6 +680,7 @@ def main():
         raise ValueError("--adopt-legacy-cache requires clean and --cache")
     report = sweep(args.repo, args.base, clean=args.action == "clean")
     if args.cache:
+        INVENTORY_ROOTS.add(str(args.cache.absolute()))
         report["caches"] = [cache_report(args.repo, path, clean=args.action == "clean",
                                               adopt=args.adopt_legacy_cache and path == args.cache)
                             for path in (args.cache, args.cache.with_name(args.cache.name + "-leased-v1"))]

@@ -751,7 +751,15 @@ pub(super) fn inactive_detached_warning(
                 ),
             )
         }
-        ServicePlatform::ManualLinux => (systemd_path()?.is_file(), ManagerProbe::Unavailable),
+        ServicePlatform::ManualLinux => {
+            let installed = systemd_path()?.is_file();
+            // Manual supervision without an installed systemd unit remains
+            // supported. An installed unit needs an observable manager.
+            if !installed {
+                return Ok(None);
+            }
+            (installed, ManagerProbe::Unavailable)
+        }
         ServicePlatform::Unsupported => return Ok(None),
     };
     // A hung diagnostic cannot establish either service health or inactivity.
@@ -1491,6 +1499,22 @@ exit 0
                 .contains("timed out")
         );
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unavailable_manager_preserves_manual_mode_and_installed_ownership_cas_8ee8() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let manager = fixture.path().join("systemctl");
+        crate::test_paths::warm_stub(&manager, "#!/bin/sh\nexit 1\n");
+        env.set(SYSTEMCTL_PATH_ENV, &manager);
+        let paths = HubRuntimePaths::default_for_user().unwrap();
+        assert_eq!(inactive_detached_warning(&paths, None).unwrap(), None);
+        write_service_file(&systemd_path().unwrap(), LEGACY_SYSTEMD_UNIT).unwrap();
+        assert_eq!(inactive_detached_warning(&paths, None).unwrap(), Some(MANAGER_UNAVAILABLE_WARNING));
+        let cli = Cli { json: false, full: false, verbose: false, command: None };
+        assert!(restart_supervised(&cli, false, 443).unwrap_err().to_string().contains("refusing to launch a detached hub"));
+    }
+
     #[test]
     fn profile_capture_failure_is_reported_without_failing_service_lifecycle() {
         let warning =

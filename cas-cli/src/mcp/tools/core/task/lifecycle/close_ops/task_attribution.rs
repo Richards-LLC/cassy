@@ -180,7 +180,7 @@ fn task_delivery_ranges(
     window: &TaskCommitReceiptWindow,
     tip: Option<&str>,
 ) -> Option<Vec<DeliveryRange>> {
-    task_delivery_selection(repo, parent, window, tip).map(|selection| selection.ranges)
+    task_delivery_selection(repo, parent, window, tip, true).map(|selection| selection.ranges)
 }
 
 /// The selected delivery ranges, plus whether a target-sync merge that would
@@ -198,6 +198,7 @@ fn task_delivery_selection(
     parent: &str,
     window: &TaskCommitReceiptWindow,
     tip: Option<&str>,
+    include_unowned_unmerged: bool,
 ) -> Option<DeliverySelection> {
     if !is_safe_git_refname(parent) {
         return None;
@@ -292,7 +293,7 @@ fn task_delivery_selection(
         .map(|c| {
             let candidate = !c.parent.is_empty()
                 && !c.foreign
-                && (c.owned || unmerged.contains(&c.sha))
+                && (c.owned || (include_unowned_unmerged && unmerged.contains(&c.sha)))
                 && (in_work_window(window, c.epoch, c.owned) || (historical_receipt && c.owned));
             // cas-2664 (7): a merge whose every non-first parent is already
             // on the target only brings the target into the lane; its tree
@@ -440,6 +441,23 @@ pub(super) fn paths(
         .transpose()
         .ok()?;
     let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    paths_from_ranges(repo, ranges)
+}
+
+/// cas-2d27: without a task delivery tip, a no-code supervisor close must
+/// not adopt unclaimed work from the closing checkout merely because it is
+/// unmerged and inside the task's clock window. Named/recorded task commits
+/// remain visible, so a no-code declaration cannot erase real delivery.
+pub(super) fn identified_paths(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<Vec<String>> {
+    let selection = task_delivery_selection(repo, target, window, None, false)?;
+    paths_from_ranges(repo, selection.ranges)
+}
+
+fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<String>> {
     let mut paths = Vec::new();
     for range in ranges {
         let changed = git_text(
@@ -471,7 +489,7 @@ pub(super) fn qa_paths(
         .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
         .transpose()
         .ok()?;
-    let selection = task_delivery_selection(repo, target, window, receipt.as_deref())?;
+    let selection = task_delivery_selection(repo, target, window, receipt.as_deref(), true)?;
     let ranges = selection.ranges;
     if ranges.is_empty() {
         // GH #1037 / cas-2664: a task whose only candidate commit was a

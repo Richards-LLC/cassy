@@ -24,7 +24,9 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
   await journey.stage("Two tabs keep different messages during the same outage", async () => {
     await journey.open(); await choose(page);
     await second.goto(page.url()); await choose(second);
-    hub.upstreamLost(PELICAN); other.upstreamLost(PELICAN);
+    await Promise.all([hub.down("atlas", { sockets: "close" }), other.down("atlas", { sockets: "close" })]);
+    await expect(page.locator("#conversation-connection")).not.toHaveText(" · Live");
+    await expect(second.locator("#conversation-connection")).not.toHaveText(" · Live");
     await Promise.all([send(page, "First tab keeps this"), send(second, "Second tab keeps that")]);
     await expect(page.getByRole("log").locator(".conversation-held")).not.toHaveCount(0);
     await expect(second.getByRole("log").locator(".conversation-held")).not.toHaveCount(0);
@@ -37,7 +39,7 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     await expect(second.getByRole("log").locator(".conversation-held")).toHaveCount(2);
   });
   await journey.stage("Both connections recover; each item crosses the wire once", async () => {
-    hub.upstreamBack(PELICAN); other.upstreamBack(PELICAN);
+    await Promise.all([hub.up("atlas"), other.up("atlas")]);
     await expect.poll(() => [...hub.sends, ...other.sends].map((row) => row.text).sort(), { timeout: 20_000 }).toEqual(["First tab keeps this", "Second tab keeps that"]);
     const sends = [...hub.sends, ...other.sends];
     expect(new Set(sends.map((row) => row.client_ref)).size).toBe(2);

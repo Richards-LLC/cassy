@@ -6,16 +6,18 @@ Hero form: The existing Connection log's evidence ledger, with its cause, layer,
 Distinctive move: A machine labelled Unsteady keeps its measured cause in the log even while its session attachment remains live; RTT and throughput estimates do not invent a changed route.
 Omitted: New layout, colours, controls or recovery policy. Existing Commander tokens, dialog, banners and Details hierarchy carry the correction.
 
-An unchanged notice retains its Details and Copy nodes when the rail's outage explanation changes. Copy receives the latest callback; changed copied payload replaces the old control. A whole-shell rebuild still restores the corresponding control by notice identity. Browser offline/online and wake hints retain their immediate recovery; a reported underlying transport-type change still probes, while quality-only changes leave the four-heartbeat rule in charge.
+An unchanged notice retains its Details and Copy nodes when the rail's outage explanation changes. Copy receives the latest callback; changed copied payload replaces the old control. Connection/lease-only shell rebuilds retain the panel for the same view and roster; a changed roster restores the corresponding control by notice identity. Browser offline/online and wake hints retain their immediate recovery; a reported underlying transport-type change still probes, while quality-only changes leave the four-heartbeat rule in charge.
 
 ## Critique
 
-The correction inherits the committed Commander layout. Its named-cause journey at8562f1637 passes actual1280/390 light/dark, keyboard export and close, and bounded secret-free export; its separate degraded-live log journey passes. Final strict polish, media-query assertions, Copy browser identity and loaded half-open proof remain required in the delivery ledger. No new visual result is claimed by this brief.
+Scored by true-parrot-22 on 2026-10-05 from the built dialog and the real production client. The integrated named-cause/export journey passes at 1280/390 in light/dark with actual keyboard and three isolated media-query assertions. Strict component inspection passes with zero findings across four renders; each screenshot was inspected. The unchanged notice's Copy identity and clipboard contents pass the complete HUB-J15 journey at 3c3940a6d, including structural roster replacement and notice retirement. The degraded-live cause passes its separate browser journey. Exact final-head evidence and the mandatory loaded half-open regression are recorded separately in the task ledger; native security execution remains supervisor-owned.
 
-| Dimension | Design assessment | Final mechanical evidence |
+| Dimension | Score | Evidence |
 | --- | --- | --- |
-| Distinctiveness | 4 — existing machine-specific evidence ledger | Pending fresh strict capture |
-| Fit | 4 — measured machine failure stays visible through a healthy attach | Degraded-live log journey PASS |
-| Hierarchy | 4 — cause and action precede the JSON record | Named-cause journey PASS |
-| Craft | 4 — unchanged copied notice keeps its control | Component regression PASS; browser pending |
-| Accessibility | 4 — stable focused Copy; keyboard-reachable log export | Keyboard PASS; final media queries pending |
+| Distinctiveness | 4 | The house evidence ledger names the machine's measured failure before technical JSON. |
+| Fit | 4 | Cause and recovery action lead; a healthy attach cannot hide a measured machine failure. |
+| Hierarchy | 4 | Cause, retry and last success precede one safe-export action and the bounded scrollable record. |
+| Craft | 4 | Strict PASS, zero findings in four built-dialog renders; inspected light/dark desktop/phone. Same-view transient rebuild keeps Copy; changed roster deliberately replaces it. |
+| Accessibility | 4 | Actual keyboard/export/focus restoration and isolated forced-colors, reduced-motion and contrast-more queries pass; no blanket Android or live-radio claim. |
+
+Mechanical receipt: task artifacts `scoped-panel-visual/visual-qa.json` (local built-dialog snapshot, not whole-product polish); interaction receipt `copy-corrected/journeys/HUB-J15`. Final evidence paths and SHA are in `cas-2b3a5/LEDGER.md` beside the fresh bundle.

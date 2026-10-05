@@ -46,6 +46,21 @@ impl SyncQueue {
             [],
         )?)
     }
+    /// Count the personal rows `purge_team_owned_personal_rejections` would
+    /// remove (cas-25c1). A non-zero count while `cloud.team_only` is off is
+    /// the cloud saying this project belongs to a team: status, doctor and the
+    /// sync summary name the mismatch and its fix instead of hiding the rows.
+    pub fn team_owned_personal_rejection_count(&self) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE team_id = ''
+             AND last_outcome = 'rejected' AND last_reason = 'team_owned_project'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Mark an item as successfully synced (removes from queue).
     pub fn mark_synced(&self, id: i64) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();

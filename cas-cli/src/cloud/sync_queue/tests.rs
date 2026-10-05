@@ -67,6 +67,55 @@ fn cas_8095_purge_removes_only_rejected_team_owned_personal_rows() {
     assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 0);
 }
 
+/// cas-25c1: the mismatch count is exactly the set the purge would remove:
+/// personal rows the cloud rejected as `team_owned_project`. Team rows, other
+/// rejection reasons and merely skipped rows are not the team-only mismatch.
+#[test]
+fn cas_25c1_team_owned_rejection_count_matches_the_purge_scope() {
+    let (_temp, queue) = create_test_queue();
+    for (id, outcome, reason) in [
+        ("owned-a", "rejected", "team_owned_project"),
+        ("owned-b", "rejected", "team_owned_project"),
+        ("orphan", "rejected", "orphan_dependency"),
+        ("skipped-owned", "skipped", "team_owned_project"),
+    ] {
+        queue
+            .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+            .unwrap();
+        let row = queue
+            .list_all(100)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap();
+        queue
+            .record_row_outcome(row.id, outcome, Some(reason))
+            .unwrap();
+    }
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "team-row",
+            SyncOperation::Upsert,
+            Some("{}"),
+            "team-1",
+        )
+        .unwrap();
+    let team_row = queue
+        .list_all(100)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "team-row")
+        .unwrap();
+    queue
+        .record_row_outcome(team_row.id, "rejected", Some("team_owned_project"))
+        .unwrap();
+
+    assert_eq!(queue.team_owned_personal_rejection_count().unwrap(), 2);
+    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 2);
+    assert_eq!(queue.team_owned_personal_rejection_count().unwrap(), 0);
+}
+
 #[test]
 fn foreign_and_unknown_stored_entries_never_enter_personal_or_team_queue() {
     use rusqlite::Connection;

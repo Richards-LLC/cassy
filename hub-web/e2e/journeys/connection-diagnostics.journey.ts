@@ -83,7 +83,9 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
   });
   for (const setting of ["reducedMotion", "forcedColors", "contrast"] as const) {
     await journey.stage(`Accessible log with ${setting}`, async () => {
-      await page.emulateMedia(setting === "reducedMotion" ? { reducedMotion: "reduce" } : setting === "forcedColors" ? { forcedColors: "active" } : { contrast: "more" });
+      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null,
+        ...(setting === "reducedMotion" ? { reducedMotion: "reduce" } : setting === "forcedColors" ? { forcedColors: "active" } : { contrast: "more" }),
+      });
       const query = setting === "reducedMotion" ? "(prefers-reduced-motion: reduce)" : setting === "forcedColors" ? "(forced-colors: active)" : "(prefers-contrast: more)";
       expect(await page.evaluate(query => matchMedia(query).matches, query), "the requested browser media mode is actually active").toBe(true);
       await page.screenshot({ path: join(RECEIPTS, `connection-log-${setting}.png`) });

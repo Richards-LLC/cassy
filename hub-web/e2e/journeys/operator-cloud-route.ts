@@ -5,6 +5,7 @@
 // deployed-cloud journey (cas-9b7d S5) is the acceptance gate.
 import type { BrowserContext, Page, Route } from "@playwright/test";
 import { OperatorCloudDouble } from "../../test/operator-cloud-double";
+import { journeyNow } from "./clock";
 
 export const OPERATOR_CLOUD = "https://petra-stella-cloud.vercel.app";
 
@@ -43,5 +44,7 @@ export async function routeOperatorCloud(target: Page | BrowserContext, double: 
 }
 
 export function operatorCloudDouble(): OperatorCloudDouble {
-  return new OperatorCloudDouble({ baseUrl: OPERATOR_CLOUD });
+  // The double shares the journey clock with the page, so proof times and
+  // token expiries agree without relying on the skew re-sign.
+  return new OperatorCloudDouble({ baseUrl: OPERATOR_CLOUD, now: journeyNow });
 }

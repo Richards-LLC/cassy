@@ -590,3 +590,31 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Another device holds control and this pairing cannot force a take: "Studio iPad is in control of this session. Interrupt works once it releases control.", and nothing is interrupted.
 - On a phone Raw output is a bottom sheet across the width; on a desktop a drawer on the right edge.
 - While the conversation is down both say why and wait (HUB-J11, HUB-J12, HUB-J14).
+
+### HUB-J19 · Read my inbox on a new phone while the machine is off
+
+- **Entry:** `/commander/` at 390×844 on a browser profile with no paired machine and no inbox sign-in, while soundwave (enrolled in the account's operator inbox) is off; a second desktop profile joins later
+- **Goal:** I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a reply that waits as Pending machine until soundwave is back and accepts it
+- **Touches:** `hub-web/src/inbox/*`, `hub-web/src/conversation-shell.ts`, `hub-web/test/operator-cloud-double.ts`
+- **Suite:** `hub-web/e2e/journeys/operator-inbox.journey.ts`, with the cloud answered by `hub-web/e2e/journeys/operator-cloud-route.ts`
+- **Gaps:** the cloud is a protocol double (PoP, enrollment check, epoch wraps, coverage, ACKs, commands), so the deployed-cloud two-profile journey of cas-9b7d S5 is the acceptance gate; soundwave's reservation and admission are modeled by the double, and proven by the hub's Rust tests (`operator_inbox::commands`)
+
+#### Steps
+
+1. Sign in on a brand-new phone with no machine paired — Inbox opens the "Operator inbox" dialog, which says the cloud holds the keys and "this isn’t end-to-end encryption"; Sign in shows a code of the form ABCD-EFGH and "Approve on Petra Stella Cloud" linking to the approval page with that code
+2. Approve it from the account; the weeks of messages are there — after the account approves the code, the dialog lists "soundwave · amber-fox-29"; opening it shows all three supervisor messages (20, 9 and 1 days old), and each was stored on the phone and acknowledged once
+3. Reply while soundwave is off: it waits as Pending machine — "Reply — soundwave gets it when it’s back" queues "Go. Cut the release." and shows "Pending machine"; the cloud holds one pending command for soundwave
+4. A second browser profile sees the history and the queued reply — a desktop profile signs in with its own code and reads the same history and the queued reply; approved for reading only, it says it "can read this conversation but not leave replies"
+5. soundwave returns and accepts the reply; a reload keeps everything — the reply reads "Accepted by machine"; after a reload the inbox is still signed in with the history and the status, and no new sign-in was asked
+
+#### Expected experience
+
+- The inbox needs no machine connection: retained messages read while every machine is off.
+- Sign-in is approved by the account, never by an older device.
+- A reply to an offline machine never claims more than the machine confirmed: Pending machine until its receipt, Accepted by machine after.
+
+#### Edge paths
+
+- A revoked or expired device returns to signed-out and its stored inbox is wiped (unit-tested in `src/inbox/controller.test.ts`).
+- An account reset warns once and continues on the new inbox.
+- Expired history shows "Older history has expired. Messages are kept for 90 days." instead of an empty success.

@@ -267,7 +267,13 @@ export class OperatorInboxController {
         await this.changed();
         return 60_000;
       }
-      await syncCommands(this.context(identity)).catch(() => undefined);
+      const before = JSON.stringify((await this.options.store.commands(identity.accountId)).map((command) => [command.commandId, command.state]));
+      const synced = await syncCommands(this.context(identity)).catch(() => null);
+      if (synced && JSON.stringify(synced.map((command) => [command.commandId, command.state])) !== before) await this.changed();
+      // Machine labels and command bindings for the inbox view (cached 5 min).
+      const hadMachines = this.machinesCache !== null;
+      await this.machines().catch(() => undefined);
+      if (!hadMachines && this.machinesCache) await this.changed();
       if (this.state.kind !== "ready") this.state = { kind: "ready", accountHint: identity.emailHint, label: identity.label };
       if (outcome && (outcome.stored.length > 0 || outcome.kind === "more")) await this.changed();
       if (!outcome) return 5_000;

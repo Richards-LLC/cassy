@@ -43,6 +43,8 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "env -u CAS_AGENT_ROLE npx playwright test",
             "nice -n 10 npx playwright test",
             "cat > README.md <<'EOF'\nexample\nEOF\nnpx playwright test",
+            "cat > README.md <<EOF\nexample\nEOF\nnpx playwright test",
+            "cat > README.md <<\"EOF\"\nexample\nEOF\nnpx playwright test",
         ] {
             let reason = denial(command, role).expect(command);
             assert!(reason.contains("scripts/journey-eval.sh"), "{reason}");
@@ -70,6 +72,9 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "npx vitest run",
         "npx tsc --noEmit",
         "cat > README.md <<'EOF'\nnpx playwright test\nEOF",
+        "cat > README.md <<EOF\nnpx playwright test\nEOF",
+        "cat > README.md <<\"EOF\"\nnpx playwright test\nEOF",
+        "cat > README.md <<-'EOF'\n\tnpx playwright test\n\tEOF",
         "printf '%s\\n' 'npx playwright test'",
         "# npx playwright test",
         "printf '%s\\n' scripts/journey-eval.sh --full",

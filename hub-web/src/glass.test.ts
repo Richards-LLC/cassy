@@ -58,6 +58,68 @@ function bubbleBackground(state: string | null): string | undefined {
   return painted;
 }
 
+const styles = read("./styles.css");
+type Rule = { selector: string; body: string; order: number };
+const flatten = (css: string, from: number): Rule[] => [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+  .flatMap((m, index) => m[1].replace(/\s+/g, " ").trim().split(/,(?![^(]*\))/).map((selector) => ({ selector: selector.trim(), body: m[2], order: from + index })));
+/** Drops @media blocks that do not apply to the default screen (forced colours, more contrast, reduced transparency, print). */
+function defaultScreen(css: string): string {
+  let out = css;
+  for (let at = out.search(/@media[^{]*(forced-colors: active|prefers-contrast|prefers-reduced-transparency|print)[^{]*\{/); at >= 0; at = out.search(/@media[^{]*(forced-colors: active|prefers-contrast|prefers-reduced-transparency|print)[^{]*\{/)) {
+    let depth = 0;
+    let end = out.indexOf("{", at);
+    for (; end < out.length; end += 1) {
+      if (out[end] === "{") depth += 1;
+      else if (out[end] === "}" && --depth === 0) break;
+    }
+    out = out.slice(0, at) + out.slice(end + 1);
+  }
+  return out;
+}
+// glass.css is imported after styles.css, so its rules win ties.
+const cascadeRules = [...flatten(defaultScreen(styles), 0), ...flatten(defaultScreen(glass), 100_000)];
+const declaration = (body: string, property: string) => body.match(new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`))?.[1]?.trim();
+/** Selector specificity as [ids, classes/attributes/pseudo-classes, elements]; :where counts zero, :not/:is their most specific argument. */
+function specificity(selector: string): [number, number, number] {
+  let rest = selector.replace(/:where\((?:[^()]|\([^()]*\))*\)/g, "");
+  const total: [number, number, number] = [0, 0, 0];
+  rest = rest.replace(/:(?:not|is)\(((?:[^()]|\([^()]*\))*)\)/g, (_m, inner: string) => {
+    const best = inner.split(/,(?![^(]*\))/).map((x) => specificity(x.trim())).sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2])[0];
+    for (const k of [0, 1, 2]) total[k] += best[k];
+    return "";
+  });
+  total[0] += (rest.match(/#[\w-]+/g) ?? []).length;
+  total[1] += (rest.match(/\.[\w-]+|\[[^\]]*\]|(?<!:):[\w-]+/g) ?? []).length;
+  total[2] += (rest.match(/(?:^|[\s>+~])[a-z][\w-]*/g) ?? []).length + (rest.match(/::[\w-]+/g) ?? []).length;
+  return total;
+}
+const STATES = ["hover", "focus-visible", "focus", "active"] as const;
+/**
+ * The winning background, colour and filter for `surface` in each
+ * interaction state that any rule names, resolved by specificity and order
+ * across styles.css and glass.css. Rules that add an ancestor in `exclude`
+ * (another surface's qualifier) or style a descendant are ignored.
+ */
+function interactionStates(surfaces: readonly string[], exclude: readonly string[] = []) {
+  const candidates = cascadeRules.flatMap((rule) => {
+    // Bare `button:hover…` rules reach every button surface too (styles.css's generic hover wash).
+    const surface = /^button(?=[:[]|$)/.test(rule.selector) && !/[\s>+~.#]/.test(rule.selector.replace(/\((?:[^()]|\([^()]*\))*\)/g, "")) ? "button" : surfaces.find((x) => rule.selector.includes(x));
+    if (!surface) return [];
+    const at = rule.selector.indexOf(surface);
+    if (at < 0 || exclude.some((x) => rule.selector.slice(0, at).includes(x))) return [];
+    const tail = rule.selector.slice(at + surface.length);
+    if (/^[\w-]/.test(tail) || /[\s>+~]/.test(tail.replace(/\((?:[^()]|\([^()]*\))*\)/g, ""))) return [];
+    const state = STATES.find((name) => new RegExp(`:${name}(?![\\w-])`).test(tail.replace(/:not\((?:[^()]|\([^()]*\))*\)/g, "")));
+    return [{ ...rule, state, weight: specificity(rule.selector) }];
+  });
+  const named = new Set(candidates.flatMap((c) => (c.state ? [c.state] : [])));
+  return [...named].map((state) => {
+    const applies = candidates.filter((c) => !c.state || c.state === state).sort((a, b) => a.weight[0] - b.weight[0] || a.weight[1] - b.weight[1] || a.weight[2] - b.weight[2] || a.order - b.order);
+    const win = (property: string, alt?: string) => applies.map((c) => declaration(c.body, property) ?? (alt ? declaration(c.body, alt) : undefined)).filter(Boolean).at(-1);
+    return { state, background: win("background", "background-color"), color: win("color"), filter: win("filter") };
+  });
+}
+
 type Rgba = [number, number, number, number];
 function parse(colour: string): Rgba {
   const hex = colour.match(/^#([0-9a-f]{6})$/i);
@@ -139,6 +201,42 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     }
   });
 
+  it.each([
+    // [surface (every one a button), its selectors in styles.css and glass.css, ancestors that mark a different surface, what lies beneath it, the colour it inherits]
+    ["a question answer", [".obj.t-a .obj-foot button.chip", ".obj.t-a .obj-foot .chip"], [".pinned-ask"], "--look-ask-tray", null],
+    ["a pinned question answer", [".pinned-ask .obj.t-a .obj-foot button.chip", ".pinned-ask .obj.t-a .obj-foot .chip"], [], "--look-ask-tray", null],
+    ["Send", ["#message-send.send"], [], "glass", null],
+    ["a primary action", [").primary"], [], "glass", null],
+    ["the compose button", [".compose-fab"], [], "glass", null],
+    ["Cancel in the operator's bubble", [".turn.you .bub .conversation-cancel", ".thread .conversation-edit"], [], "--look-you", "--you-bubble-fg"],
+  ] as const)("keeps %s readable in every hover, focus and active state", (label, surface, exclude, under, inherited) => {
+    // QA cas-205e: Glass's translucent --bg-hover replaced a question
+    // answer's opaque pill on hover, leaving dark ink on the ember tray at
+    // 1.95–2.64:1. Strict visual QA cannot see text over a gradient, so this
+    // resolves each state's winning background, colour and filter from both
+    // stylesheets and measures every stop beneath it.
+    const tokens: Record<string, string> = { ...(scheme === "light" ? houseLight : houseDark), ...t };
+    const resolve = (value: string): string => { const m = value.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/); return m ? resolve(tokens[m[1]] ?? m[2]) : value; };
+    const layers = (value: string): Rgba[] => (/gradient\(/.test(value) ? stops(value).map(parse) : [parse(value === "transparent" ? "rgba(0, 0, 0, 0)" : value)]);
+    // "glass": a frosted panel over every aurora colour, where Send, primaries and the compose button sit.
+    const underneath = under === "glass" ? aurora.map((b) => over(parse(t["--look-glass"]), b)) : layers(resolve(`var(${under})`));
+    const states = interactionStates(surface, exclude);
+    expect(states.length, `${label}: no interaction state found for ${surface}`).toBeGreaterThan(0);
+    for (const { state, background, color, filter } of states) {
+      const text = !color || color === "inherit" || color === "currentColor" ? (inherited ? `var(${inherited})` : color) : color;
+      expect(text, `${label} :${state} has no text colour`).toBeTruthy();
+      const ink = parse(resolve(text!));
+      let painted = background ?? "transparent";
+      const mix = painted.match(/^color-mix\(in srgb, currentColor (\d+)%, transparent\)$/);
+      if (mix) painted = `rgba(${ink[0]}, ${ink[1]}, ${ink[2]}, ${Number(mix[1]) / 100})`;
+      const brightness = Number(filter?.match(/brightness\(([\d.]+)\)/)?.[1] ?? 1);
+      const lit = (c: Rgba): Rgba => [0, 1, 2].map((i) => Math.min(255, c[i] * brightness)).concat(1) as Rgba;
+      const backdrops = layers(resolve(painted)).flatMap((top) => underneath.map((base) => lit(top[3] < 1 ? over(top, base) : top)));
+      const low = Math.min(...backdrops.map((b) => ratio(lit(ink), b)));
+      expect(low, `${scheme}: ${label} :${state} paints ${painted}${filter ? ` with ${filter}` : ""}, text ${text}`).toBeGreaterThanOrEqual(FLOOR);
+    }
+  });
+
   it("keeps timestamps that sit straight on the aurora readable in its reading field", () => {
     // The vivid corners lie under the frosted panels; the middle column is the reading field.
     const field = readingField(t);
@@ -189,13 +287,14 @@ describe("Glass structure", () => {
   });
 
   it("measures text on every gradient Glass paints", () => {
-    // Each gradient surface has a contrast pair above: Send and primaries
+    // Each gradient surface has a contrast pair above: Send and primaries at rest and hovered
     // (white on --look-send), the operator bubble (--look-you, by state), the
     // question card (--ask-fg on --look-ask), its tray (opaque chips on
     // --look-ask-tray) and the aurora (reading field). A new one needs a pair.
     const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
     const painted = new Set([...rules.matchAll(/background:\s*var\((--look-[\w-]+)\)/g)].map((m) => m[1]).filter((name) => /gradient\(|url\(/.test(light[name] ?? "")));
-    expect([...painted].sort()).toEqual(["--look-ask", "--look-ask-tray", "--look-aurora", "--look-send", "--look-you"]);
+    // Hovered Send and primaries (--look-send-hover) are measured by the interaction-state test.
+    expect([...painted].sort()).toEqual(["--look-ask", "--look-ask-tray", "--look-aurora", "--look-send", "--look-send-hover", "--look-you"]);
   });
 
   it("never paints the violet gradient under a refused or unconfirmed message", () => {

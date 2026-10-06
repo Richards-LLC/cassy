@@ -54,6 +54,7 @@
   --look-shadow-float: 0 8px 22px -8px rgba(54, 38, 140, 0.26);
   --look-send: linear-gradient(135deg, #7656FA 0%, #5B3FE0 55%, #3E5BEA 100%);
   --look-send-glow: 0 10px 24px -8px rgba(91, 63, 224, 0.55);
+  --look-send-hover: linear-gradient(135deg, #6847F2 0%, #4E33D2 55%, #3550DC 100%); /* deeper, never brighter: white stays ≥ 5.5:1 */
   --look-you: linear-gradient(135deg, #6C4DF5 0%, #4C3BD9 60%, #3651D8 100%);
   --look-you-glow: 0 10px 26px -10px rgba(91, 63, 224, 0.5);
   --look-ask: linear-gradient(140deg, #FFD983 0%, #FFB874 55%, #FFA184 100%);
@@ -101,6 +102,7 @@
   --tray-chip-bg: #FFFFFF;
   --tray-chip-fg: #2A1A05;
   --tray-chip-line: transparent;
+  --tray-chip-hover: #F3EEFF;
   --tray-focus: #FFFFFF;
   --lift: 0 1px 1px rgba(40, 30, 90, 0.05), 0 6px 18px -4px rgba(54, 38, 140, 0.16);
   --lift-strong: 0 1px 2px rgba(40, 30, 90, 0.08), 0 14px 34px -8px rgba(54, 38, 140, 0.26);
@@ -127,6 +129,7 @@
     --look-shadow-float: 0 8px 22px -8px rgba(0, 0, 0, 0.6);
     --look-send: linear-gradient(135deg, #7656FA 0%, #5B3FE0 55%, #3E5BEA 100%);
     --look-send-glow: 0 10px 26px -8px rgba(123, 92, 255, 0.6);
+    --look-send-hover: linear-gradient(135deg, #6847F2 0%, #4E33D2 55%, #3550DC 100%); /* deeper, never brighter: white stays ≥ 5.5:1 */
     --look-you: linear-gradient(135deg, #7656FA 0%, #5B47E8 60%, #4766E6 100%);
     --look-you-glow: 0 10px 26px -10px rgba(123, 92, 255, 0.5);
     --look-ask: linear-gradient(140deg, #FFCF73 0%, #FFAA62 55%, #FF8F6E 100%);
@@ -174,6 +177,7 @@
     --tray-chip-bg: #FFF6E6;
     --tray-chip-fg: #2A1A05;
     --tray-chip-line: transparent;
+    --tray-chip-hover: #F3EEFF;
     --tray-focus: #FFF6E6;
     --lift: 0 1px 1px rgba(0, 0, 0, 0.35), 0 8px 22px -6px rgba(0, 0, 0, 0.55);
     --lift-strong: 0 2px 3px rgba(0, 0, 0, 0.4), 0 18px 40px -10px rgba(0, 0, 0, 0.7);
@@ -199,6 +203,7 @@ html[data-scheme="dark"] {
   --look-shadow-float: 0 8px 22px -8px rgba(0, 0, 0, 0.6);
   --look-send: linear-gradient(135deg, #7656FA 0%, #5B3FE0 55%, #3E5BEA 100%);
   --look-send-glow: 0 10px 26px -8px rgba(123, 92, 255, 0.6);
+  --look-send-hover: linear-gradient(135deg, #6847F2 0%, #4E33D2 55%, #3550DC 100%); /* deeper, never brighter: white stays ≥ 5.5:1 */
   --look-you: linear-gradient(135deg, #7656FA 0%, #5B47E8 60%, #4766E6 100%);
   --look-you-glow: 0 10px 26px -10px rgba(123, 92, 255, 0.5);
   --look-ask: linear-gradient(140deg, #FFCF73 0%, #FFAA62 55%, #FF8F6E 100%);
@@ -246,6 +251,7 @@ html[data-scheme="dark"] {
   --tray-chip-bg: #FFF6E6;
   --tray-chip-fg: #2A1A05;
   --tray-chip-line: transparent;
+  --tray-chip-hover: #F3EEFF;
   --tray-focus: #FFF6E6;
   --lift: 0 1px 1px rgba(0, 0, 0, 0.35), 0 8px 22px -6px rgba(0, 0, 0, 0.55);
   --lift-strong: 0 2px 3px rgba(0, 0, 0, 0.4), 0 18px 40px -10px rgba(0, 0, 0, 0.7);
@@ -371,6 +377,22 @@ html[data-scheme="dark"] {
   :root .conversation-composer #message-send.send:not([aria-disabled="true"]),
   :root .compose-fab,
   :root :where(button, a).primary:not(:disabled):not([aria-disabled="true"]) { background: var(--look-send); color: #FFFFFF; box-shadow: var(--look-send-glow); }
+  /* Hover deepens the violet rather than brightening it. The base's
+     brightness(1.08) on --look-send dropped white to 4.27:1, and the generic
+     button:hover wash outranked the compose button and left white on a pale
+     tint at 1.17:1 (cas-205e). */
+  :root .conversation-composer #message-send.send:hover:not([aria-disabled="true"]),
+  :root button.compose-fab:hover:not(:disabled),
+  :root :where(button, a).primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--look-send-hover); filter: none; }
+
+  /* A question answer keeps an opaque pill on hover, tinted violet. The
+     generic translucent --bg-hover let the ember tray through and left its
+     dark label at 1.9–2.6:1 (cas-205e). Pinned answers keep their own pill. */
+  :root .obj.t-a .obj-foot button.chip:hover:not(:disabled) { background: var(--tray-chip-hover); }
+  :root .pinned-ask .obj.t-a .obj-foot button.chip:hover:not(:disabled) { background: var(--pin-chip-hover); }
+  /* Cancel on a waiting operator bubble darkens on hover; a light wash on the
+     violet gradient put its white label under 4.5:1 (cas-205e). */
+  :root .thread .turn.you .bub .conversation-cancel:hover { background: rgba(20, 12, 70, 0.24); }
 
   :root dialog {
     background: var(--look-glass-strong);

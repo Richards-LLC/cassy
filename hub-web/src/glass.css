@@ -412,5 +412,45 @@ html[data-scheme="dark"] {
     box-shadow: var(--look-shadow-float);
   }
   :root dialog::backdrop { background: var(--look-scrim); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+
+  /* A dialog's sticky action bar is part of the glass sheet, not an opaque
+     slab: strong glass, frosted, with a hairline above and a gap before it,
+     so the last field (an installation's Revoke) always clears it (cas-205e). */
+  :root dialog .dialog-actions {
+    margin-top: var(--space-3);
+    padding-block: var(--space-3) var(--space-1);
+    background: var(--look-glass-strong);
+    -webkit-backdrop-filter: var(--look-blur);
+    backdrop-filter: var(--look-blur);
+    border-top: 1px solid var(--look-glass-line);
+  }
+  /* Its plain buttons (Close, Back) read as buttons: an outlined pill on glass. */
+  :root dialog .dialog-actions button:not(.primary) { background: var(--look-glass-strong); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); }
+
+  /* Paired machines: the installations link and Remove sit apart, and Remove
+     reads as the destructive action it is (cas-205e). */
+  :root .paired-machine-installations { margin-inline-end: var(--space-2); }
+  :root .paired-machine .paired-machine-remove { color: var(--crit-bg); background: var(--look-glass-strong); border: 1.5px solid var(--crit-bg); border-radius: var(--radius-pill); }
+
+  /* A confirmation such as "Details copied" is a solid card that appears at
+     once: fading it in let the text beneath show through it (cas-205e). */
+  :root #toast { background: var(--bg-panel); transition-duration: .2s, 0s; transition-property: transform, opacity; }
+
+  /* The operator's own delivery line ("Sending…", "✓ Delivered") is full
+     white on the violet bubble: at 0.85 it fell to 4.2:1 on the light stop. */
+  :root .thread .turn.you .bub .conversation-delivery,
+  :root .thread .turn.you .bub .conversation-delivered { opacity: 1; }
+
+  @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+    /* Full-screen phone sheets have nothing to frost: they are opaque and
+       square, so the page never ghosts through them (cas-205e). */
+    :root dialog.launch-sheet,
+    :root .conversation-shell.attention-sheet-open > .conversation-context { background: var(--bg-panel); -webkit-backdrop-filter: none; backdrop-filter: none; border-radius: 0; margin: 0; box-shadow: none; }
+  }
 }
 
+/* More contrast: the operator's bubble is one flat colour, not a gradient,
+   so its text and delivery line meet the contrast it asks for (cas-205e). */
+@media (forced-colors: none) and (prefers-contrast: more) {
+  :root .thread .turn.you .bub:not(:is([data-state="error"], [data-state="unconfirmed"])) { background: var(--you-bubble-bg); box-shadow: none; }
+}

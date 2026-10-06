@@ -93,6 +93,20 @@ function specificity(selector: string): [number, number, number] {
   total[2] += (rest.match(/(?:^|[\s>+~])[a-z][\w-]*/g) ?? []).length + (rest.match(/::[\w-]+/g) ?? []).length;
   return total;
 }
+/** The winning value of `property` on `surface` at rest, by specificity and order across both stylesheets. */
+function restValue(surfaces: string | readonly string[], property: string): string | undefined {
+  const list = typeof surfaces === "string" ? [surfaces] : surfaces;
+  const applies = cascadeRules.filter((rule) => {
+    const surface = list.find((x) => rule.selector.includes(x));
+    if (!surface) return false;
+    const at = rule.selector.indexOf(surface);
+    if (at < 0) return false;
+    const tail = rule.selector.slice(at + surface.length);
+    return !/^[\w-]/.test(tail) && !/[\s>+~:]/.test(tail.replace(/:not\((?:[^()]|\([^()]*\))*\)/g, "").replace(/\((?:[^()]|\([^()]*\))*\)/g, ""));
+  }).map((rule) => ({ ...rule, weight: specificity(rule.selector) }))
+    .sort((a, b) => a.weight[0] - b.weight[0] || a.weight[1] - b.weight[1] || a.weight[2] - b.weight[2] || a.order - b.order);
+  return applies.map((rule) => declaration(rule.body, property)).filter(Boolean).at(-1);
+}
 const STATES = ["hover", "focus-visible", "focus", "active"] as const;
 /**
  * The winning background, colour and filter for `surface` in each
@@ -271,6 +285,55 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     }
   });
 
+  it("keeps the operator's delivery line at 4.5:1 on every violet stop", () => {
+    // cas-205e: "Sending…" and "✓ Delivered" sat at opacity 0.85, 4.21:1 on the light stop.
+    for (const meta of ["conversation-delivery", "conversation-delivered"]) {
+      const opacity = Number(restValue([`.turn.you .bub .${meta}`, `.thread .${meta}`], "opacity") ?? 1);
+      const ink = parse(t["--you-bubble-fg"]);
+      for (const stop of stops(t["--look-you"]).map(parse)) {
+        const shown = over([ink[0], ink[1], ink[2], opacity], stop);
+        expect(ratio(shown, stop), `${scheme}: ${meta} at opacity ${opacity} on ${stop}`).toBeGreaterThanOrEqual(FLOOR);
+      }
+    }
+  });
+
+  it("gives every dialog's sticky actions a frosted bar, a gap above it and outlined buttons", () => {
+    // cas-205e: an opaque bar fused with the installation sheet's last Revoke
+    // at 390 and made Close read like an empty field.
+    const tokens: Record<string, string> = { ...(scheme === "light" ? houseLight : houseDark), ...t };
+    const resolve = (value: string): string => { const m = value.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/); return m ? resolve(tokens[m[1]] ?? m[2]) : value; };
+    expect(restValue("dialog .dialog-actions", "background")).toBe("var(--look-glass-strong)");
+    expect(restValue("dialog .dialog-actions", "border-top")).toMatch(/^1px solid var\(--look-glass-line\)$/);
+    expect(restValue("dialog .dialog-actions", "margin-top")).toBe("var(--space-3)");
+    expect(Number.parseFloat(resolve("var(--space-3)"))).toBeGreaterThanOrEqual(8);
+    const edge = restValue("dialog .dialog-actions button:not(.primary)", "border")!;
+    expect(edge).toMatch(/solid var\(--line-strong\)/);
+    const sheet = aurora.map((b) => over(parse(t["--look-glass-strong"]), b));
+    const ring = parse(resolve("var(--line-strong)"));
+    expect(Math.min(...sheet.map((b) => ratio(over(ring, b), b))), `${scheme}: Close's outline on the sheet`).toBeGreaterThanOrEqual(1.5);
+    expect(Math.min(...sheet.map((b) => ratio(parse(t["--ink"]), b))), `${scheme}: Close's label on the sheet`).toBeGreaterThanOrEqual(FLOOR);
+  });
+
+  it("separates Browser installations from a destructive Remove in Paired machines", () => {
+    // cas-205e: the two buttons touched and read as one control.
+    const tokens: Record<string, string> = { ...(scheme === "light" ? houseLight : houseDark), ...t };
+    const resolve = (value: string): string => { const m = value.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/); return m ? resolve(tokens[m[1]] ?? m[2]) : value; };
+    expect(Number.parseFloat(resolve(restValue(".paired-machine-installations", "margin-inline-end")!))).toBeGreaterThanOrEqual(8);
+    const remove = ".paired-machine .paired-machine-remove";
+    expect(restValue(remove, "color")).toBe("var(--crit-bg)");
+    const sheet = aurora.map((b) => over(parse(t["--look-glass-strong"]), b));
+    const fill = sheet.map((b) => over(parse(resolve(restValue(remove, "background")!)), b));
+    expect(Math.min(...fill.map((b) => ratio(parse(resolve("var(--crit-bg)")), b))), `${scheme}: Remove's label`).toBeGreaterThanOrEqual(FLOOR);
+  });
+
+  it("shows the toast on a solid card", () => {
+    // cas-205e: "Details copied" let the text beneath show through.
+    const tokens: Record<string, string> = { ...(scheme === "light" ? houseLight : houseDark), ...t };
+    const card = parse(tokens[restValue("#toast", "background")!.match(/^var\((--[\w-]+)\)$/)![1]]);
+    expect(card[3], `${scheme}: toast background alpha`).toBe(1);
+    expect(ratio(parse(t["--ink"]), card)).toBeGreaterThanOrEqual(FLOOR);
+  });
+
   it("keeps timestamps that sit straight on the aurora readable in its reading field", () => {
     // The vivid corners lie under the frosted panels; the middle column is the reading field.
     const field = readingField(t);
@@ -314,7 +377,10 @@ describe("Glass structure", () => {
     // Nothing moves behind glass: an animated backdrop re-blurs every frosted
     // panel each frame (30 fps instead of 59, and journeys timed out at 4 workers).
     const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
-    for (const motion of ["animation", "@keyframes", "transition", "will-change"]) expect(rules, motion).not.toContain(motion);
+    for (const motion of ["animation", "@keyframes", "will-change"]) expect(rules, motion).not.toContain(motion);
+    // The one transition rule makes the toast appear at once (cas-205e); it adds no motion.
+    const transitions = [...rules.matchAll(/([^{}]+)\{[^{}]*transition[^{}]*\}/g)].map((m) => m[0].replace(/\s+/g, " ").trim());
+    expect(transitions).toEqual([":root #toast { background: var(--bg-panel); transition-duration: .2s, 0s; transition-property: transform, opacity; }"]);
     // Blur is for the four chrome panels and dialogs only, never per message:
     // a blur per bubble dropped a long thread's scroll from 56 fps to 43.
     expect(rules).not.toMatch(/\.bub[^{]*\{[^}]*backdrop-filter/);
@@ -329,6 +395,18 @@ describe("Glass structure", () => {
     const painted = new Set([...rules.matchAll(/background:\s*var\((--look-[\w-]+)\)/g)].map((m) => m[1]).filter((name) => /gradient\(|url\(/.test(light[name] ?? "")));
     // Hovered Send and primaries (--look-send-hover) are measured by the interaction-state test.
     expect([...painted].sort()).toEqual(["--look-ask", "--look-ask-tray", "--look-aurora", "--look-send", "--look-send-hover", "--look-you"]);
+  });
+
+  it("flattens the operator's bubble under more contrast and makes phone sheets opaque", () => {
+    // cas-205e: under prefers-contrast: more the gradient left the delivery
+    // line at 4.44:1; full-screen phone sheets let the page ghost through.
+    const at = glass.indexOf("@media (forced-colors: none) and (prefers-contrast: more) {");
+    expect(at, "a more-contrast block after the Glass surfaces").toBeGreaterThan(glass.lastIndexOf("background: var(--look-you)"));
+    expect(glass.slice(at)).toContain(':root .thread .turn.you .bub:not(:is([data-state="error"], [data-state="unconfirmed"])) { background: var(--you-bubble-bg); box-shadow: none; }');
+    for (const tokens of [light, dark]) expect(ratio(parse(tokens["--you-bubble-fg"]), parse(tokens["--you-bubble-bg"]))).toBeGreaterThanOrEqual(FLOOR);
+    const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(rules).toMatch(/:root dialog\.launch-sheet,\s*:root \.conversation-shell\.attention-sheet-open > \.conversation-context \{ background: var\(--bg-panel\); -webkit-backdrop-filter: none; backdrop-filter: none;/);
+    for (const tokens of [light, dark]) expect(parse(tokens["--bg-panel"])[3]).toBe(1);
   });
 
   it("never paints the violet gradient under a refused or unconfirmed message", () => {

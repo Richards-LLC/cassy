@@ -1712,7 +1712,12 @@ fn suggested_scoped_proof_command(
     target_repo: &std::path::Path,
     base: Option<&str>,
 ) -> String {
-    let mut targets = required_targets.to_vec();
+    // A persisted requirement or older caller may still name source suites.
+    // Resolve those against the delivered checkout before printing Cargo flags.
+    let Some(mut targets) = canonical_scoped_proof_targets(proof_repo, required_targets.to_vec())
+    else {
+        return "SCOPED PROOF SURFACE UNRESOLVED: required integration suites cannot be mapped to existing Cargo test targets; repair the checkout's test inventory before requesting a proof".to_string();
+    };
     for target in proof_validation_targets(proof_repo, target_repo, base).unwrap_or_default() {
         if !targets.contains(&target) {
             targets.push(target);
@@ -4042,6 +4047,19 @@ mod risk_proof_tests {
         for name in &prescribed {
             assert!(cargo_targets.contains(name.as_str()), "nonexistent target in {command}");
         }
+        let all_aliases = scoped_proof_test_inventory(&repo).into_keys().collect::<Vec<_>>();
+        assert!(!all_aliases.is_empty());
+        let all_command = suggested_scoped_proof_command(&all_aliases, &repo, target.path(), None);
+        let all_prescribed = parse_scoped_proof_target_args(&format!(
+            "SCOPED_PROOF_TARGET_ARGS: {}",
+            all_command.split_once("--lib ").unwrap().1,
+        ))
+        .unwrap();
+        assert_eq!(
+            all_prescribed.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+            cargo_targets,
+            "every suite must prescribe its existing Cargo harness: {all_command}",
+        );
         let required = canonical_scoped_proof_targets(&repo, aliases.to_vec()).unwrap();
         assert!(scoped_proof_note_covers(
             "SCOPED_PROOF: targets=lib,test:integration_contracts result=PASS",
@@ -4051,6 +4069,17 @@ mod risk_proof_tests {
             "SCOPED_PROOF: targets=lib,test:agent_definition_contract_test result=PASS",
             &required,
         ), ["integration_contracts"]);
+    }
+
+    #[test]
+    fn unknown_suggestion_target_fails_closed_cas_728e() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (repo, target) = consolidated_inventory_fixture(&mut env);
+        let command = suggested_scoped_proof_command(
+            &["missing_suite".into()], repo.path(), target.path(), None,
+        );
+        assert!(command.starts_with("SCOPED PROOF SURFACE UNRESOLVED"), "{command}");
+        assert!(!command.contains("--test"), "{command}");
     }
 
     #[test]

@@ -98,10 +98,12 @@ const STATES = ["hover", "focus-visible", "focus", "active"] as const;
  * The winning background, colour and filter for `surface` in each
  * interaction state that any rule names, resolved by specificity and order
  * across styles.css and glass.css. Rules that add an ancestor in `exclude`
- * (another surface's qualifier) or style a descendant are ignored.
+ * (another surface's qualifier), that contain a `without` marker (another
+ * state of the same surface) or that style a descendant are ignored.
  */
-function interactionStates(surfaces: readonly string[], exclude: readonly string[] = []) {
+function interactionStates(surfaces: readonly string[], exclude: readonly string[] = [], without: readonly string[] = []) {
   const candidates = cascadeRules.flatMap((rule) => {
+    if (without.some((x) => rule.selector.includes(x))) return [];
     // Bare `button:hover…` rules reach every button surface too (styles.css's generic hover wash).
     const surface = /^button(?=[:[]|$)/.test(rule.selector) && !/[\s>+~.#]/.test(rule.selector.replace(/\((?:[^()]|\([^()]*\))*\)/g, "")) ? "button" : surfaces.find((x) => rule.selector.includes(x));
     if (!surface) return [];
@@ -116,7 +118,7 @@ function interactionStates(surfaces: readonly string[], exclude: readonly string
   return [...named].map((state) => {
     const applies = candidates.filter((c) => !c.state || c.state === state).sort((a, b) => a.weight[0] - b.weight[0] || a.weight[1] - b.weight[1] || a.weight[2] - b.weight[2] || a.order - b.order);
     const win = (property: string, alt?: string) => applies.map((c) => declaration(c.body, property) ?? (alt ? declaration(c.body, alt) : undefined)).filter(Boolean).at(-1);
-    return { state, background: win("background", "background-color"), color: win("color"), filter: win("filter") };
+    return { state, background: win("background", "background-color"), color: win("color"), filter: win("filter"), shadow: win("box-shadow") };
   });
 }
 
@@ -234,6 +236,38 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
       const backdrops = layers(resolve(painted)).flatMap((top) => underneath.map((base) => lit(top[3] < 1 ? over(top, base) : top)));
       const low = Math.min(...backdrops.map((b) => ratio(lit(ink), b)));
       expect(low, `${scheme}: ${label} :${state} paints ${painted}${filter ? ` with ${filter}` : ""}, text ${text}`).toBeGreaterThanOrEqual(FLOOR);
+    }
+  });
+
+  it("marks the open conversation with a fill and edge that hover cannot match", () => {
+    // cas-6c8c: Glass hid the accent bar and set the open row to near-white
+    // glass (about 1.05:1 against the list) while a hovered row stayed lilac,
+    // so only the header said which conversation was open.
+    const tokens: Record<string, string> = { ...(scheme === "light" ? houseLight : houseDark), ...t };
+    const resolve = (value: string): string => { const m = value.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/); return m ? resolve(tokens[m[1]] ?? m[2]) : value; };
+    const list = aurora.map((b) => over(parse(t["--look-glass"]), b)); // the sidebar the rows sit on
+    const open = cascadeRules.filter((r) => r.selector === ':root .conversation-row[aria-current="true"]').at(-1);
+    expect(open, "glass.css styles the open row").toBeTruthy();
+    const fill = declaration(open!.body, "background")!;
+    const shadow = declaration(open!.body, "box-shadow") ?? "";
+    // The edge: a full inset ring (never a left bar) in a colour at 3:1 or better against the list and the row's own fill.
+    const ring = shadow.match(/inset 0 0 0 (\d+(?:\.\d+)?)px (var\([^)]+\)|#[0-9a-f]{6})/i);
+    expect(ring, `${scheme}: the open row has an inset edge`).toBeTruthy();
+    expect(Number(ring![1]), `${scheme}: open-row edge width (px)`).toBeGreaterThanOrEqual(2);
+    const edge = parse(resolve(ring![2]));
+    const filled = list.map((b) => over(parse(resolve(fill)), b));
+    expect(Math.min(...list.map((b) => ratio(edge, b))), `${scheme}: open-row edge against the list`).toBeGreaterThanOrEqual(3);
+    expect(Math.min(...filled.map((b) => ratio(edge, b))), `${scheme}: open-row edge against its fill`).toBeGreaterThanOrEqual(3);
+    for (const text of ["--ink", "--ink-mid"]) expect(Math.min(...filled.map((b) => ratio(parse(tokens[text]), b))), `${scheme}: ${text} on the open row`).toBeGreaterThanOrEqual(FLOOR);
+    // Hover on any other row: no edge, and a different fill.
+    for (const { state, background, shadow: hoverShadow } of interactionStates([".conversation-row"], [], ["aria-current"]).filter((x) => x.state === "hover")) {
+      expect(hoverShadow ?? "", `${scheme}: a :${state} row draws no open-row edge`).not.toMatch(/inset 0 0 0 \d/);
+      expect(background, `${scheme}: a :${state} row is not filled like the open one`).not.toBe(fill);
+    }
+    // The open row keeps its fill and edge when hovered or focused.
+    for (const { state, background, shadow: kept } of interactionStates(['.conversation-row[aria-current="true"]'], [])) {
+      expect(background, `${scheme}: the open row :${state}`).toBe(fill);
+      expect(kept, `${scheme}: the open row :${state}`).toBe(shadow);
     }
   });
 

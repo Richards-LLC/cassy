@@ -28,6 +28,14 @@ fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
 
+# The explicitly ignored disposable production probe owns a 15-minute
+# lifecycle deadline plus bounded HTTP cleanup. Never select this in assembly.
+[profile.live-presence]
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 18 }
+failure-output = "immediate-final"
+fail-fast = false
+
 [test-groups]
 # Each hub integration test launches several large debug binaries and its own
 # detached service. Bound macOS process-start contention while still running

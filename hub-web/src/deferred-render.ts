@@ -12,15 +12,28 @@
  * A rebuild therefore waits for the whole pointer gesture, not just the focus
  * change. `afterGesture` must schedule work that runs *after* the click event
  * the gesture is about to produce.
+ *
+ * A touch is later still: the browser fires pointerup when the finger lifts,
+ * and only then dispatches the tap's mousedown (which moves focus off the
+ * field) and its click, in later tasks. Releasing on pointerup let focusout
+ * flush the rebuild between them, so the tapped control was replaced and the
+ * tap did nothing (measured on the pairing dialog's Technical details). A
+ * lifted touch therefore holds the rebuild until its click, or until
+ * `touchWindow` passes without one.
  */
 export interface DeferredRenderOptions {
   readonly render: () => void;
   readonly afterGesture: (run: () => void) => void;
+  /** Runs `run` once a lifted touch has had time to produce its click. */
+  readonly touchWindow?: (run: () => void) => void;
 }
 
 export class DeferredRenderScheduler {
   private owed = false;
   private gestureDepth = 0;
+  private awaitingTap = false;
+  /** Which lifted touch a `touchWindow` timer belongs to; a stale one is ignored. */
+  private touches = 0;
 
   constructor(private readonly options: DeferredRenderOptions) {}
 
@@ -43,11 +56,31 @@ export class DeferredRenderScheduler {
   }
 
   gestureEnded(): void {
+    this.awaitingTap = false;
     if (this.gestureDepth === 0) return;
     this.gestureDepth = 0;
     // The click has not been dispatched yet; rebuilding now would still delete
     // the button the operator is pressing.
     this.options.afterGesture(() => this.flush());
+  }
+
+  /** A finger lifted; its click, if any, is still to come. */
+  touchEnded(): void {
+    if (this.gestureDepth === 0) return;
+    if (!this.options.touchWindow) {
+      this.gestureEnded();
+      return;
+    }
+    this.awaitingTap = true;
+    const touch = ++this.touches;
+    this.options.touchWindow(() => {
+      if (this.awaitingTap && touch === this.touches) this.gestureEnded();
+    });
+  }
+
+  /** A click was dispatched; a lifted touch waiting for it is over. */
+  clicked(): void {
+    if (this.awaitingTap) this.gestureEnded();
   }
 
   /** A gesture that will never produce a click still releases the rebuild. */

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host admission tests using Python children and fake JS runner; no browsers/npm."""
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
@@ -49,6 +50,212 @@ class AdmissionTests(unittest.TestCase):
     def admit(self, role, **kwargs):
         return host.admission(role, self.env, lambda _: HIGH, directory=self.pool,
                               wait_secs=.5, poll_secs=.02, report=self.events.append, **kwargs)
+
+    def start_counted_command(self, executable, name, budget):
+        binary = self.root / executable
+        if not binary.exists():
+            binary.write_text('#!' + sys.executable + '\n'
+                              'import pathlib,sys,time\n'
+                              'pathlib.Path(sys.argv[1]).write_text("started")\n'
+                              'while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n')
+            binary.chmod(0o755)
+        marker = self.root / (name + '-started')
+        release = self.root / (name + '-release')
+        launcher = (
+            f"import sys,pathlib;sys.path.insert(0,{str(ROOT/'scripts')!r});"
+            f"import importlib.util;spec=importlib.util.spec_from_file_location('worker',{str(ROOT/'scripts/worker-memory.py')!r});"
+            "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
+            f"m.proof.memory_budget=lambda env:{budget!r};"
+            f"sys.exit(m.run({[str(binary), str(marker), str(release)]!r},directory=pathlib.Path({str(self.pool)!r})))"
+        )
+        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3',
+                   CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS='1')
+        child = subprocess.Popen([sys.executable, '-c', launcher], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def cleanup():
+            release.touch()
+            if child.poll() is None: child.terminate()
+            child.communicate(timeout=5)
+        self.addCleanup(cleanup)
+        return child, marker, release
+
+    def wait_for_markers(self, markers):
+        deadline = time.monotonic() + 2
+        while not all(marker.exists() for marker in markers):
+            self.assertLess(time.monotonic(), deadline,
+                            f'commands did not run concurrently: {[p.name for p in markers if p.exists()]}')
+            time.sleep(.01)
+
+    def test_cas_4cb9_two_browser_suites_and_typecheck_run_concurrently(self):
+        commands = [self.start_counted_command('playwright', 'browser-one', HIGH),
+                    self.start_counted_command('playwright', 'browser-two', HIGH),
+                    self.start_counted_command('tsc', 'typecheck', HIGH)]
+        self.wait_for_markers([marker for _, marker, _ in commands])
+        # All three native commands are alive, waiting for our release barrier.
+        self.assertTrue(all(child.poll() is None for child, _, _ in commands))
+        for _, _, release in commands: release.touch()
+        for child, _, _ in commands:
+            stdout, stderr = child.communicate(timeout=5)
+            self.assertEqual(child.returncode, 0, stdout + stderr)
+
+    def test_cas_4cb9_low_budget_serializes_browser_suites(self):
+        low = dict(HIGH, budget_bytes=8*GIB)
+        first, one, release_one = self.start_counted_command('playwright', 'first', low)
+        self.wait_for_markers([one])
+        second, two, release_two = self.start_counted_command('playwright', 'second', low)
+        deadline = time.monotonic() + 2
+        while True:
+            self.assertFalse(two.exists(), 'low budget admitted two browser estimates')
+            self.assertLess(time.monotonic(), deadline)
+            readable, _, _ = select.select([second.stdout], [], [], .02)
+            if readable and 'waiting for host memory' in second.stdout.readline(): break
+        release_one.touch()
+        stdout, stderr = first.communicate(timeout=5)
+        self.assertEqual(first.returncode, 0, stdout + stderr)
+        self.wait_for_markers([two])
+        release_two.touch()
+        stdout, stderr = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 0, stdout + stderr)
+
+    def test_cas_4cb9_light_command_passes_waiting_browser_at_low_budget(self):
+        low = dict(HIGH, budget_bytes=8*GIB)
+        first, one, release_one = self.start_counted_command('playwright', 'first', low)
+        self.wait_for_markers([one])
+        second, two, release_two = self.start_counted_command('playwright', 'second', low)
+        light, typecheck, release_light = self.start_counted_command('tsc', 'typecheck', low)
+        self.wait_for_markers([one, typecheck])
+        self.assertFalse(two.exists(), 'waiting browser consumed light-command capacity')
+        release_light.touch()
+        stdout, stderr = light.communicate(timeout=5)
+        self.assertEqual(light.returncode, 0, stdout + stderr)
+        release_one.touch()
+        stdout, stderr = first.communicate(timeout=5)
+        self.assertEqual(first.returncode, 0, stdout + stderr)
+        self.wait_for_markers([two])
+        release_two.touch()
+        stdout, stderr = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 0, stdout + stderr)
+
+    def test_cas_4cb9_weights_follow_shell_and_actual_package_scripts(self):
+        cases = [
+            (['tsc', '--noEmit'], 1), (['vite', 'build'], 1),
+            (worker.constrained(['npx', 'vitest', 'run']), 2),
+            (['sh', '-c', 'tsc --noEmit && tsc --noEmit -p e2e'], 1),
+            (['bash', '-c', 'cd hub-web && npm run typecheck > /tmp/log 2>&1'], 1),
+            (['bash', '-c', 'cd hub-web && npm run build'], 1),
+            (['bash', '-c', 'cd hub-web && npm test'], 2),
+            (['bash', '-c', 'vitest run --maxWorkers=2'], 2),
+            (['bash', '-c', 'tsc && playwright test'], 4),
+            (['bash', '-c', 'tsc & vite build'], 4),
+            (['bash', '-c', 'tsc && "$COMMAND"'], 4),
+            (['bash', '-c', 'vitest run --maxWorkers=2 --maxWorkers=8'], 4),
+            (['vitest', 'run', '--maxWorkers=2', '--browser'], 4),
+            (['tsc', '--watch'], 4), (['npm', 'run', 'unknown'], 4),
+        ]
+        for command, weight in cases:
+            with self.subTest(command=command):
+                self.assertEqual(worker.estimate(command, ROOT), weight * GIB)
+
+    def test_cas_4cb9_package_entrypoints_have_weighted_admission(self):
+        commands = json.loads((ROOT/'hub-web/package.json').read_text())['scripts']
+        for name, weight in [('build', 1), ('typecheck', 1), ('visual-qa', 4)]:
+            self.assertEqual(worker.estimate(['sh', '-c', commands[name]], ROOT/'hub-web'), weight*GIB)
+
+    def test_cas_4cb9_legacy_proof_and_worker_exclude_new_workers(self):
+        host.private_directory(self.pool)
+        for role, mode in [('proof', fcntl.LOCK_SH), ('worker', fcntl.LOCK_EX)]:
+            with self.subTest(role=role), host.private_file(self.pool/'budget.lock') as budget:
+                fcntl.flock(budget, mode)
+                for applicant in ('proof', 'worker'):
+                    with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                        with self.admit(applicant): self.fail('admitted over legacy lease')
+
+    def test_cas_4cb9_legacy_proof_intent_waits_for_new_worker(self):
+        with self.admit('worker'), host.private_file(self.pool/'intent.lock') as intent:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(intent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_cas_4cb9_nested_admission_passes_live_slot_descriptors(self):
+        with self.admit('worker') as (env, fds):
+            self.assertTrue(host.inherited(env, self.pool))
+            with host.admission('worker', env, lambda _: self.fail('nested resampled'),
+                                directory=self.pool) as (_, nested_fds):
+                self.assertEqual(nested_fds, fds)
+            record = json.loads(env[host.LEASE_ENV])
+            with host.private_file(self.pool/record['slot'], False) as probe:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_cas_4cb9_node_style_nested_spawn_can_reuse_live_ancestor(self):
+        with self.admit('worker') as (env, _):
+            program = f'''import sys,pathlib,json
+sys.path.insert(0,{str(ROOT/'scripts')!r})
+import host_memory as host
+with host.admission('worker',dict(__import__('os').environ),lambda env: (_ for _ in ()).throw(AssertionError('resampled')),directory=pathlib.Path({str(self.pool)!r})) as (env,fds):
+    assert fds == (), fds
+'''
+            child = subprocess.run([sys.executable, '-c', program], env=env, capture_output=True, text=True)
+            self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+
+    def test_cas_4cb9_assembly_propagates_its_host_descriptors(self):
+        def inspect(root, clone, env, *args):
+            record = json.loads(env[host.LEASE_ENV])
+            inherited = worker.proof.release_scratch.inherited_leases(env)
+            self.assertEqual(inherited, set(record['fds']))
+            for fd in inherited: os.fstat(fd)
+            with host.private_file(self.pool/'intent.lock') as probe:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return 'ran'
+        with mock.patch.object(worker.proof, 'HOST_MEMORY_DIRECTORY', self.pool), \
+             mock.patch.object(worker.proof, '_run_contexts', side_effect=inspect):
+            self.assertEqual(worker.proof.run_contexts(self.root, self.root, self.env, self.root, self.root, {}), 'ran')
+
+    def test_cas_4cb9_slot_symlink_fails_closed(self):
+        host.private_directory(self.pool)
+        (self.root/'target').write_text('')
+        (self.pool/'slot-0.lock').symlink_to(self.root/'target')
+        with self.assertRaises(OSError):
+            with self.admit('worker'): self.fail('unsafe slot admitted')
+
+    def test_cas_4cb9_proof_window_excludes_another_proof(self):
+        with self.admit('proof'):
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                with self.admit('proof'): self.fail('parallel proof admitted')
+
+    def test_cas_4cb9_orphan_child_keeps_weight_and_proof_exclusion(self):
+        marker, release = self.root/'orphan-started', self.root/'orphan-release'
+        program = ('import pathlib,time;pathlib.Path(' + repr(str(marker)) + ').touch();'
+                   '\nwhile not pathlib.Path(' + repr(str(release)) + ').exists(): time.sleep(.01)')
+        launcher = f'''import os,sys,pathlib,subprocess,time
+sys.path.insert(0,{str(ROOT/'scripts')!r})
+import host_memory as host
+with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=pathlib.Path({str(self.pool)!r})) as (env,fds):
+    subprocess.Popen([sys.executable,'-c',{program!r}],env=env,pass_fds=fds)
+    while not pathlib.Path({str(marker)!r}).exists(): time.sleep(.01)
+    os._exit(0)
+'''
+        wrapper = subprocess.Popen([sys.executable, '-c', launcher], env=self.env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            self.wait_for_markers([marker])
+            self.assertEqual(wrapper.wait(timeout=3), 0)
+            low = dict(HIGH, budget_bytes=8*GIB)
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                with host.admission('worker', self.env, lambda _: low, directory=self.pool,
+                                    wait_secs=.1, poll_secs=.01, report=self.events.append):
+                    self.fail('orphan reservation lost')
+            with self.admit('worker', estimate_bytes=GIB):
+                self.assertEqual(self.events[-1]['reserved_bytes'], 4*GIB)
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                with self.admit('proof'): self.fail('proof started over orphan')
+        finally:
+            release.touch()
+            if wrapper.poll() is None: wrapper.kill()
+            wrapper.communicate(timeout=3)
+        with self.admit('proof'): pass
+        with self.admit('worker'):
+            self.assertEqual(self.events[-1]['reserved_bytes'], 0)
 
     def wait_for_proof(self, child, marker):
         # Node/Python startup can exceed a fixed sleep under assembly load.

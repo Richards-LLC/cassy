@@ -29,7 +29,9 @@ pub fn handle_pre_tool_use(
             .and_then(|value| value.as_str()).filter(|command| worker_suite_command(command, 0))
     {
         if let Some(helper) = worker_suite_helper(&input.cwd) {
-            let rewritten = format!("python3 {} -- bash -c {}",
+            // The helper classifies the actual shell/package payload. Do not
+            // pass a light-lane hint that could hide a browser or compound suite.
+            let rewritten = format!("python3 {} --shell-command {}",
                 shell_quote_path(&helper), shell_quote_path(Path::new(command)));
             let mut updated = input.tool_input.clone().unwrap_or_default();
             updated["command"] = serde_json::Value::String(rewritten);
@@ -1201,7 +1203,7 @@ fn worker_suite_command(command: &str, depth: usize) -> bool {
             match name {
                 "python3" | "python" if args.first().is_some_and(|arg| {
                     shell_word_basename(arg) == "worker-memory.py"
-                }) && args.get(1).is_some_and(|arg| arg == "--") => break,
+                }) && args.get(1).is_some_and(|arg| arg == "--" || arg == "--shell-command") => break,
                 "npm" | "pnpm" | "yarn" | "bun" => {
                     let args = suite_runner_args(args);
                     if args.first().is_some_and(|arg| matches!(arg.as_str(), "exec" | "x" | "dlx")) {
@@ -4111,6 +4113,7 @@ mod workspace_contract_tests {
         for command in [
             "git commit -m 'npm test'", "echo 'playwright test'", "node --check scripts/qa.mjs",
             "python3 /repo/scripts/worker-memory.py -- bash -c 'npm test'",
+            "python3 /repo/scripts/worker-memory.py --shell-command 'npm run typecheck'",
             "node -e 'require(\"fs\").readFileSync(\"secrets.json\")'",
             "node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'",
             "node /artifacts/qa.mjs", "node scripts/generate-tokens.mjs", "node --version",

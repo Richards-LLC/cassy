@@ -125,9 +125,15 @@ and verified test entry points also acquire admission when run directly.
 
 Admission uses `assembly-proof.py`'s fresh host memory snapshot and reserve
 (default: greater of 8 GiB or 25% of physical RAM). A suite needs an assumed
-2 GiB plus 2 GiB headroom. One suite runs per host/user. Proofs take priority
-and hold a shared host lease around all assembly producers and consumers;
-worker suites wait until those proofs finish. The linker pool remains separate.
+4 GiB for browser/unknown commands, 1 GiB for tsc/Vite builds or 2 GiB for
+capped Vitest, plus 2 GiB headroom. Concurrent suites take weighted FD-locked
+slots while the fresh budget covers all live reservations and headroom. Literal
+shell and npm scripts are classified from their actual commands; unknown or
+expanding scripts keep the browser estimate. Smaller commands can use remaining
+capacity while a browser waits. Proofs take priority and hold exclusive intent
+around all assembly producers and consumers; worker commands wait until those
+proofs finish. Legacy checkout budget leases still exclude new admissions.
+The linker pool remains separate.
 Nested commands reuse admission only while its private claim, live lock and
 process ancestry validate; setting an environment flag does not waive it.
 
@@ -139,8 +145,8 @@ with its own process group if fresh budget falls inside the 2 GiB headroom.
 These are admission estimates and sampled protection, not OS memory limits;
 other applications remain outside this cooperative protocol.
 
-Verified frontend tests enforce one Playwright worker and two Vitest workers,
-including caller-supplied worker flags. A proof's own child script tests reuse
+Verified frontend tests default to one Playwright worker, honour explicit requests
+up to four, and enforce two Vitest workers. A proof's own child script tests reuse
 its admitted budget rather than waiting on themselves. Use `TMPDIR` on the
 approved scratch volume for fixture staging. Script-level admission tests need
 no browsers or Cargo: `python3 scripts/test-worker-memory.py`.

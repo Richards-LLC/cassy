@@ -319,7 +319,7 @@ fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc
             }
             // cas-3ae7: an unfiltered Playwright suite is denied to workers by the
             // browser tier guard first, so admission is exercised on a named spec.
-            for command in ["npm test", "npm run test", "npx playwright test e2e/journeys/answer-ask.journey.ts", "vitest run", "bash scripts/journey-eval.sh"] {
+            for command in ["npm test", "npm run test", "npx playwright test e2e/journeys/answer-ask.journey.ts", "vitest run", "bash scripts/journey-eval.sh", "npm run typecheck", "npm run build", "tsc --noEmit", "vite build", "vitest run --maxWorkers=2"] {
                 let mut request = input(command, "worker");
                 request.cwd = cwd.into();
                 let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
@@ -329,6 +329,9 @@ fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc
                 if has_helper {
                     let rewritten = rewritten.expect("suite routed through host admission");
                     assert!(rewritten.contains("worker-memory.py") && rewritten.contains(command), "{rewritten}");
+                    // cas-4cb9: pass the actual payload for weighted admission;
+                    // a caller-supplied light hint must never hide a heavy suite.
+                    assert!(rewritten.contains(" --shell-command "), "{rewritten}");
                     if harness == "codex" {
                         assert_eq!(value.pointer("/hookSpecificOutput/permissionDecision").and_then(|value| value.as_str()), Some("allow"));
                     }

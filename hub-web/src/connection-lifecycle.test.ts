@@ -497,6 +497,15 @@ describe("Commander live connection lifecycle", () => {
     const before = socket.sent.length;
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
     expect(socket.sent).toHaveLength(before);
+    connection.retry();
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    const recovered = TransportSocket.instances[1]!;
+    recovered.open();
+    recovered.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(true);
+    expect(socket.sent).toHaveLength(before);
+    expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
   });
 
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {

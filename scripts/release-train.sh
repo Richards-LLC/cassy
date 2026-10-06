@@ -103,7 +103,7 @@ pid_file="$run_dir/gate.pid"
 # by `--gate --only` again (cas-704a: hub-web-tests and eight more were).
 readonly -a gate_rows=(
     scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
-    version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )

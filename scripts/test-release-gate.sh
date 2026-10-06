@@ -280,10 +280,14 @@ if [[ "$*" == 'zigbuild -p cas --release --target x86_64-unknown-linux-gnu --loc
   [[ "$(command -v zig)" == "${ZIG:?}" ]] || {
     echo 'release binary fixture: selected Zig is not on PATH' >&2; exit 1;
   }
-  [[ "${CARGO_ENCODED_RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_ENCODED" \
-      && "${RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS" ]] || {
+  # run_gate captures the caller's flags for the ISA controls. Older manual
+  # fixture invocations test other rows and do not supply these expectations.
+  if [[ -n "${GATE_FIXTURE_ISA_ORIGINAL_ENCODED+x}" ]]; then
+    [[ "${CARGO_ENCODED_RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_ENCODED" \
+        && "${RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS" ]] || {
     echo 'release binary fixture: publisher rustflags/linker were changed' >&2; exit 1;
-  }
+    }
+  fi
   [[ "${CFLAGS_x86_64_unknown_linux_gnu:-}" == -march=x86_64 && "${CXXFLAGS_x86_64_unknown_linux_gnu:-}" == -march=x86_64 ]] || {
     echo 'release binary fixture: missing baseline C/C++ flags' >&2; exit 1;
   }

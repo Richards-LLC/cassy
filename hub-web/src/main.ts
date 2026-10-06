@@ -1146,6 +1146,12 @@ async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> 
 async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {
   const invitation = pendingPairing?.kind === "invitation" ? pendingPairing : null;
   if (!invitation) throw new Error("Create a pairing request or open a one-time pairing link first.");
+  const browserName = form.querySelector<HTMLInputElement>('input[name="device"]');
+  if (browserName) {
+    browserName.value = browserName.value.trim();
+    browserName.setCustomValidity(browserName.value ? "" : "Enter a name for this browser.");
+    if (!browserName.reportValidity()) return false;
+  }
   const values = new FormData(form);
   pairingDraft = updatePairingDraft(pairingDraft, values.entries(), !invitation.hubUrl);
   const operation = pairingOperations.begin();
@@ -1153,6 +1159,9 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   exchangeOperationGeneration = operation.generation;
   pairingStatus = "Updating this browser installation… Cancel restores its previous access.";
   render();
+  // Pair is now disabled; keep the keyboard in the dialog on its available
+  // next action rather than letting the browser drop focus to the body.
+  document.querySelector<HTMLButtonElement>("#pair-dialog #pair-cancel")?.focus({ preventScroll: true });
   let machine: StoredMachine;
   try {
     machine = await installationAccess.pair({
@@ -4779,6 +4788,8 @@ function bindEvents(): void {
   }
   const pairForm = document.querySelector<HTMLFormElement>("#pair-form");
   const pairCancel = document.querySelector<HTMLButtonElement>("#pair-cancel");
+  const pairDevice = pairForm?.querySelector<HTMLInputElement>('input[name="device"]');
+  if (pairDevice) pairDevice.addEventListener("input", () => pairDevice.setCustomValidity(""));
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
   const pairCreate = document.querySelector<HTMLButtonElement>("#pair-create");
   const pairDialog = document.querySelector<HTMLDialogElement>("#pair-dialog");

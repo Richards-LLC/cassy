@@ -88,7 +88,7 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
       if (!device.revoked_at) {
         const revoke = doc.createElement("button"); revoke.type = "button"; revoke.textContent = device.device_id === machine.deviceId ? "Revoke this browser's access" : "Revoke this installation";
         revoke.onclick = async () => {
-          if (!doc.defaultView?.confirm(`Revoke ${device.device_label} (${device.device_id})? Its live connections will close. Replacing a lost browser requires a new pairing invitation.`)) return;
+          if (!doc.defaultView?.confirm(`Revoke ${label} (${device.device_id})? Its live connections will close. Replacing a lost browser requires a new pairing invitation.`)) return;
           revoke.disabled = true;
           try {
             await client.request("POST", `/v1/auth/devices/${encodeURIComponent(device.device_id)}/revoke`);

@@ -5,7 +5,7 @@ import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from
 import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
 import { ConversationHistory } from "./conversation-history";
-import type { StoredMachine } from "./types";
+import type { MessageQueued, StoredMachine } from "./types";
 
 const supervisors: HubConnectionSupervisor[] = [];
 afterEach(() => {
@@ -484,7 +484,7 @@ describe("Commander live connection lifecycle", () => {
     vi.stubGlobal("WebSocket", TransportSocket);
     const installation = await storedMachine("late-receipt");
     const history = new ConversationHistory();
-    const received = vi.fn((_session, receipt) => history.acknowledge(receipt));
+    const received = vi.fn((_session: string, receipt: MessageQueued) => history.acknowledge(receipt));
     const connection = new HubConnectionSupervisor(installation, {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
       onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},

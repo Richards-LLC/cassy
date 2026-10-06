@@ -62,6 +62,58 @@ fn worktree_metadata(path: &Path) -> io::Result<fs::Metadata> {
     Ok(metadata)
 }
 
+fn ignore_marker(worktree: &Path) -> io::Result<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::ffi::OsStringExt;
+    // Ownership-only fixtures need no Git repository. Real worker checkouts
+    // must keep this administrative marker out of untracked-source checks,
+    // even when the project does not ignore Cargo output.
+    if !worktree.join(".git").exists() {
+        return Ok(());
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("cannot resolve worker Git exclusions"));
+    }
+    let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let path = PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    // SAFETY: geteuid has no pointer arguments or side effects.
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1
+    {
+        return Err(io::Error::other("unsafe worker Git exclusions"));
+    }
+    let mut existing = String::new();
+    file.read_to_string(&mut existing)?;
+    let pattern = format!("/target/{MARKER}");
+    if !existing.lines().any(|line| line == pattern) {
+        file.write_all(format!("\n{pattern}\n").as_bytes())?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
 fn boot() -> io::Result<String> {
     #[cfg(target_os = "linux")]
     {
@@ -279,6 +331,9 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
             io::ErrorKind::WouldBlock,
             "target owner is still live",
         ));
+    }
+    if create {
+        ignore_marker(&worktree)?;
     }
     lease.builder = fresh;
     Ok(Some(lease))

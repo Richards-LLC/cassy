@@ -1463,11 +1463,39 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let args = vec!["-p".into(), "cas".into(), "--tests".into()];
         let head = fixture_head(&repo);
+        std::fs::write(
+            repo.join(".git/info/exclude"),
+            "# retained fixture comment\nfixture-admin\n",
+        )
+        .unwrap();
         for target in ["--lib", "--tests"] {
             let args = vec!["-p".into(), "cas".into(), target.into()];
             execute_at(&root, &args, &repo, &fake).unwrap();
             assert!(passing_receipt(&root, &repo, &head).is_some());
         }
+        // No project .gitignore: acquiring ownership must not dirty source,
+        // and repeated acquisition must preserve existing Git exclusions.
+        assert!(!repo.join(".gitignore").exists());
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            exclude
+                .lines()
+                .filter(|line| *line == "/target/.cas-worker-target-owner")
+                .count(),
+            1
+        );
+        assert!(
+            exclude.contains("# retained fixture comment\nfixture-admin\n"),
+            "existing Git exclusions remain"
+        );
+        std::fs::write(repo.join("target/dirty.rs"), "// actual source change").unwrap();
+        assert!(
+            execute_at(&root, &args, &repo, &fake)
+                .unwrap_err()
+                .to_string()
+                .contains("Commit the worker change")
+        );
+        std::fs::remove_file(repo.join("target/dirty.rs")).unwrap();
         std::fs::write(&fake, "#!/bin/sh\nexit 12\n").unwrap();
         assert!(
             execute_at(&root, &args, &repo, &fake)

@@ -1093,6 +1093,17 @@ mod session_filter_tests {
     use cas_types::{AgentRole, AgentType, EventEntityType, EventType};
 
     #[test]
+    fn dead_session_json_labels_dead_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        manager.save_metadata(&create_metadata("dead", i32::MAX as u32, "supervisor", &[], None, None, None)).unwrap();
+        let session = manager.find_session(Some("dead")).unwrap().unwrap();
+        let json = serde_json::to_value(SessionJson::from_session_info(&session, false)).unwrap();
+        assert_eq!(json["status"], "dead");
+        assert_eq!(json["is_running"], false);
+    }
+
+    #[test]
     fn factory_query_filters_include_live_registry_workers_missing_from_metadata() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();

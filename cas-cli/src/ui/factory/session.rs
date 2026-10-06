@@ -541,6 +541,90 @@ pub fn create_metadata(
 mod tests {
     use crate::ui::factory::session::*;
 
+    #[cfg(target_os = "linux")]
+    fn stale_socket(path: &Path) {
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recorded_session(name: &str, pid: u32) -> SessionManager {
+        let manager = SessionManager::new();
+        manager
+            .save_metadata(&create_metadata(name, pid, "supervisor", &[], None, None, None))
+            .unwrap();
+        manager
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_cleanup_removes_both_sockets_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("dead", i32::MAX as u32);
+        stale_socket(&socket_path("dead"));
+        stale_socket(&gui_socket_path("dead"));
+        assert_eq!(manager.cleanup_stale().unwrap(), 1);
+        assert!(!metadata_path("dead").exists());
+        assert!(!socket_path("dead").exists());
+        assert!(!gui_socket_path("dead").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orphan_cleanup_preserves_live_listener_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        manager.ensure_dir().unwrap();
+        let live = std::os::unix::net::UnixListener::bind(socket_path("unregistered-live")).unwrap();
+        stale_socket(&socket_path("unregistered-dead"));
+        stale_socket(&gui_socket_path("unregistered-dead"));
+        manager.cleanup_stale().unwrap();
+        assert!(socket_path("unregistered-live").exists());
+        assert!(!socket_path("unregistered-dead").exists());
+        assert!(!gui_socket_path("unregistered-dead").exists());
+        drop(live);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_record_cannot_unlink_live_listener_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("replaced", i32::MAX as u32);
+        let main = std::os::unix::net::UnixListener::bind(socket_path("replaced")).unwrap();
+        let gui = std::os::unix::net::UnixListener::bind(gui_socket_path("replaced")).unwrap();
+        manager.cleanup_stale().unwrap();
+        assert!(socket_path("replaced").exists());
+        assert!(gui_socket_path("replaced").exists());
+        drop((main, gui));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_pid_preserves_even_unheld_sockets_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("alive", std::process::id());
+        stale_socket(&socket_path("alive"));
+        stale_socket(&gui_socket_path("alive"));
+        assert_eq!(manager.cleanup_stale().unwrap(), 0);
+        assert!(metadata_path("alive").exists());
+        assert!(socket_path("alive").exists());
+        assert!(gui_socket_path("alive").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_stale_session_removes_gui_socket_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        recorded_session("killed", i32::MAX as u32);
+        stale_socket(&socket_path("killed"));
+        stale_socket(&gui_socket_path("killed"));
+        assert_eq!(
+            crate::cli::factory::end_session_by_name("killed").unwrap(),
+            crate::cli::factory::EndSessionOutcome::CleanedStale
+        );
+        assert!(!socket_path("killed").exists());
+        assert!(!gui_socket_path("killed").exists());
+    }
+
     #[test]
     fn create_metadata_preserves_only_same_session_roster_holds_cas_60dd() {
         let home = tempfile::tempdir().unwrap();

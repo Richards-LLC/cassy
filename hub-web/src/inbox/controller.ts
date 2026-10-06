@@ -16,6 +16,7 @@
 import { cancelOfflineMessage, queueOfflineMessage, syncCommands, type CommandContext, type CommandTarget } from "./commands";
 import { EpochKeyError, completeEnrollment, pollEnrollment, refreshEpochKeys, startEnrollment } from "./enrollment";
 import { IssuerKeys } from "./issuer";
+import { parsePresenceSnapshot, type PresenceSnapshot } from "./presence";
 import { replayRound, ReplayPageError, type MachineDirectory, type ReplayContext } from "./replay";
 import type { InboxEvent, InboxIdentity, InboxStore, PendingEnrollment, QueuedCommand } from "./store";
 import { OperatorClient, OperatorWireError, record, type Fetcher } from "./wire";
@@ -44,6 +45,8 @@ export interface InboxSnapshot {
   generationWarning: string | null;
   /** Expired history this device accepted, for "History expired" markers. */
   expiredThrough: string | null;
+  presence?: PresenceSnapshot | null;
+  presenceError?: string | null;
 }
 
 export interface ControllerOptions {
@@ -68,6 +71,11 @@ export class OperatorInboxController {
   private state: InboxState = { kind: "signed_out" };
   private machinesCache: { at: number; machines: InboxMachine[] } | null = null;
   private generationWarning: string | null = null;
+  private presenceSnapshot: PresenceSnapshot | null = null;
+  private presenceError: string | null = null;
+  private presenceFetchedAt = -Infinity;
+  private presenceRequest: Promise<void> | null = null;
+  private readonly monitoringDecisions = new Map<string, { enabled: boolean; decisionId: string; generation: string }>();
   private readonly listeners = new Set<(snapshot: InboxSnapshot) => void>();
   private readonly now: () => number;
 
@@ -124,6 +132,8 @@ export class OperatorInboxController {
       machines: this.machinesCache?.machines ?? [],
       generationWarning: this.generationWarning,
       expiredThrough: cursor?.acceptedExpiredThrough ?? null,
+      presence: this.presenceSnapshot,
+      presenceError: this.presenceError,
     };
   }
 
@@ -193,11 +203,81 @@ export class OperatorInboxController {
     this.identity = null;
     this.client.credential = null;
     this.machinesCache = null;
+    this.presenceSnapshot = null;
+    this.presenceError = null;
+    this.presenceFetchedAt = -Infinity;
+    this.monitoringDecisions.clear();
     this.state = next;
     await this.changed();
   }
 
   // ---------------------------------------------------------------- replay
+
+  canManageMonitoring(): boolean {
+    return this.identity?.grant.capabilities.includes("account:manage") ?? false;
+  }
+
+  /** Snapshot polling is independent of hub reachability and feed replay. */
+  async refreshPresence(force = false): Promise<void> {
+    const identity = this.identity;
+    if (!identity || (!force && this.now() - this.presenceFetchedAt < 30_000)) return;
+    if (this.presenceRequest) return this.presenceRequest;
+    const work = async () => {
+      try {
+        const response = await this.client.request({ method: "GET", path: "/api/operator/machine-presence", auth: "grant" });
+        const snapshot = parsePresenceSnapshot(response);
+        if (this.identity !== identity) return;
+        this.presenceSnapshot = snapshot;
+        this.presenceError = null;
+      } catch (error) {
+        if (this.identity !== identity) return;
+        if (error instanceof OperatorWireError && ["grant_revoked", "grant_expired", "grant_unknown"].includes(error.code)) {
+          await this.forget({ kind: "revoked", reason: "This device was signed out of the operator inbox." });
+          return;
+        }
+        this.presenceError = "Can't refresh machine status. Any last report below is from an earlier check.";
+      }
+      if (this.identity !== identity) return;
+      this.presenceFetchedAt = this.now();
+      await this.emit();
+    };
+    this.presenceRequest = work();
+    try { await this.presenceRequest; } finally { this.presenceRequest = null; }
+  }
+
+  /** Keep an unanswered decision ID/body for an explicit retry (§17.2). */
+  async setMonitoring(machineId: string, enabled: boolean): Promise<void> {
+    const identity = this.identity;
+    if (!identity || !this.canManageMonitoring()) throw new Error("This browser cannot change account monitoring.");
+    const machine = this.presenceSnapshot?.machines.find((machine) => machine.machineId === machineId);
+    if (!machine || machine.monitoring === "not_capable") throw new Error("Monitoring is unavailable for this machine.");
+    let decision = this.monitoringDecisions.get(machineId);
+    if (!decision || decision.enabled !== enabled) {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      const decisionId = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      decision = { enabled, decisionId, generation: machine.monitoringGeneration };
+      this.monitoringDecisions.set(machineId, decision);
+    }
+    try {
+      const response = await this.client.request({
+        method: "PUT", path: `/api/operator/machines/${encodeURIComponent(machineId)}/monitoring`, auth: "grant",
+        body: { wire_version: 1, enabled, decision_id: decision.decisionId, expected_monitoring_generation: decision.generation },
+      });
+      if (this.identity !== identity) return;
+      const monitoring = record(response.monitoring, "monitoring receipt");
+      if (response.wire_version !== 1 || response.machine_id !== machineId || monitoring.decision_id !== decision.decisionId || monitoring.state !== (enabled ? "enabled" : "disabled")) {
+        throw new Error("The monitoring decision could not be verified.");
+      }
+      this.monitoringDecisions.delete(machineId);
+      await this.refreshPresence(true);
+    } catch (error) {
+      if (this.identity === identity && error instanceof OperatorWireError && !error.retryable) {
+        this.monitoringDecisions.delete(machineId);
+        await this.refreshPresence(true);
+      }
+      throw error;
+    }
+  }
 
   async machines(force = false): Promise<InboxMachine[]> {
     if (!this.identity) return [];
@@ -274,6 +354,7 @@ export class OperatorInboxController {
       const hadMachines = this.machinesCache !== null;
       await this.machines().catch(() => undefined);
       if (!hadMachines && this.machinesCache) await this.changed();
+      await this.refreshPresence();
       if (this.state.kind !== "ready") this.state = { kind: "ready", accountHint: identity.emailHint, label: identity.label };
       if (outcome && (outcome.stored.length > 0 || outcome.kind === "more")) await this.changed();
       if (!outcome) return 5_000;

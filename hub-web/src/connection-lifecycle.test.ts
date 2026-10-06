@@ -5,7 +5,7 @@ import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from
 import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
 import { ConversationHistory } from "./conversation-history";
-import type { StoredMachine } from "./types";
+import type { MessageQueued, StoredMachine } from "./types";
 
 const supervisors: HubConnectionSupervisor[] = [];
 afterEach(() => {
@@ -205,7 +205,7 @@ describe("Commander live connection lifecycle", () => {
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
     const machine = await storedMachine("retired-resend");
-    const history = new ConversationHistory(), queued = vi.fn((_session, receipt) => history.acknowledge(receipt));
+    const history = new ConversationHistory(), queued = vi.fn((_session: string, receipt: MessageQueued) => history.acknowledge(receipt));
     const state = vi.fn(), error = vi.fn();
     const connection = new HubConnectionSupervisor(machine, {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},

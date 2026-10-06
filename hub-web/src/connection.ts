@@ -918,8 +918,8 @@ export class HubConnectionSupervisor {
   /**
    * Drop every terminal socket without waiting for it to close. A half-open
    * socket never finishes a closing handshake, so its onclose may not fire
-   * for minutes; its handlers are detached and the state it owned is reset
-   * here instead.
+   * for minutes. Reset its state here; only known send receipts can still
+   * settle after retirement, never transport state.
    */
   private abandonSockets(reason: string): void {
     this.machineSocketGeneration += 1;
@@ -939,7 +939,8 @@ export class HubConnectionSupervisor {
     if (this.probeTimer !== undefined) window.clearTimeout(this.probeTimer);
     this.probeTimer = undefined;
     for (const socket of this.sockets.values()) {
-      socket.onopen = null; socket.onmessage = null; socket.onerror = null; socket.onclose = null;
+      if (!this.legacySends.get(socket)?.length) socket.onmessage = null;
+      socket.onopen = null; socket.onerror = null; socket.onclose = null;
       try { socket.close(4000, "abandoned"); } catch { /* already closing */ }
     }
     this.sockets.clear();
@@ -1131,6 +1132,7 @@ export class HubConnectionSupervisor {
     };
     socket.onmessage = (message) => {
       if (this.sockets.get(session) === socket) void this.handleDaemonMessage(session, message.data, frameFence);
+      else void this.handleRetiredLegacyReceipt(session, socket, message.data, frameFence);
     };
     socket.onclose = (event) => {
       const timedOut = this.timedOutSockets.has(socket);
@@ -1697,6 +1699,25 @@ export class HubConnectionSupervisor {
       }
     }
     this.callbacks.onMachineEvent(event);
+  }
+
+  /** Retirement cannot revoke positive evidence for a send this socket wrote. */
+  private async handleRetiredLegacyReceipt(session: string, socket: WebSocket, input: string | ArrayBuffer | Blob, frameFence: CredentialFence): Promise<void> {
+    try {
+      const text = typeof input === "string" ? input : input instanceof Blob ? await input.text() : new TextDecoder().decode(input);
+      const queued = messageQueuedFromDaemon(JSON.parse(text));
+      const current = credentialFence(this.machine);
+      const written = this.legacySends.get(socket) ?? [];
+      if (!this.desired || !this.desiredSessions.has(session) || current.credentialId !== frameFence.credentialId || current.generation !== frameFence.generation
+        || !queued?.client_ref || !written.includes(queued.client_ref)) return;
+      // Consume every attempt with this ref: explicit Retry keeps the ref,
+      // and one positive receipt settles them all. Duplicate retired frames
+      // must not override the first queue identity or keep a handler alive.
+      const remaining = written.filter(ref => ref !== queued.client_ref);
+      this.legacySends.set(socket, remaining);
+      if (!remaining.length) socket.onmessage = null;
+      this.callbacks.onMessageQueued?.(session, queued, frameFence);
+    } catch { /* Malformed/unreadable retired frames provide no receipt. */ }
   }
 
   private async handleDaemonMessage(session: string, input: string | ArrayBuffer | Blob, frameFence = credentialFence(this.machine)): Promise<void> {

@@ -31,7 +31,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   test.setTimeout(240_000);
   // Temporary native transport control; removed before final acceptance.
   page.on("console", message => { if (message.text().startsWith("[DEBUG-547A-WS]")) console.log(message.text()); });
-  await page.addInitScript(() => {
+  const installSocketCapture = () => {
     const NativeSocket = window.WebSocket;
     let next = 0;
     window.WebSocket = class extends NativeSocket {
@@ -59,7 +59,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
         super.send(data);
       }
     };
-  });
+  };
   await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -68,6 +68,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
+    // routeWebSocket installs its constructor after init scripts; observe it
+    // here, before the first selected session opens its socket.
+    await page.evaluate(installSocketCapture);
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(send).toBeVisible();
   });

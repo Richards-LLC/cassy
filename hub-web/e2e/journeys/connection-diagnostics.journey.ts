@@ -62,6 +62,20 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
     const markup = await page.locator("#connection-log").evaluate(element => element.outerHTML);
     await writeFile(join(RECEIPTS, "connection-log-snapshot.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Built Commander connection log snapshot</title><style>${css}</style><body>${markup}<script>document.documentElement.dataset.scheme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';const dialog=document.querySelector('dialog');dialog.removeAttribute('open');dialog.showModal();</script></body></html>`);
+    // cas-97d58 QA F01: collapsed, Technical details still shows an expand
+    // affordance (a chevron), which turns when it opens; keyboard opens it.
+    const summary = page.locator(".connection-log-technical > summary");
+    const chevron = () => summary.evaluate((node) => { const mark = getComputedStyle(node, "::before"); return { content: mark.content, transform: mark.transform, width: mark.width }; });
+    const closed = await chevron();
+    expect(closed.content).not.toBe("none");
+    expect(closed.width).toBe("7px");
+    await summary.focus(); await page.keyboard.press("Enter");
+    await expect(page.locator(".connection-log-technical")).toHaveAttribute("open", "");
+    await expect.poll(async () => (await chevron()).transform).not.toBe(closed.transform);
+    const openMarkup = await page.locator("#connection-log").evaluate(element => element.outerHTML);
+    await writeFile(join(RECEIPTS, "connection-log-snapshot-open.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Built Commander connection log snapshot, details open</title><style>${css}</style><body>${openMarkup}<script>document.documentElement.dataset.scheme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';const dialog=document.querySelector('dialog');dialog.removeAttribute('open');dialog.showModal();</script></body></html>`);
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
   });
   for (const width of [1280, 390]) for (const scheme of ["light", "dark"] as const) {
     await journey.stage(`Named evidence at ${width}px ${scheme}`, async () => {

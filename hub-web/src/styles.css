@@ -1102,6 +1102,14 @@ main {
 .connection-log-technical { border-top: var(--line-width) solid var(--line-subtle); padding-top: var(--space-2); }
 .connection-log-technical > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; color: var(--text-hi); font-weight: var(--weight-medium); }
 .connection-log-technical > summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+/* cas-97d58 QA F01: the flex summary loses the native triangle, so it draws
+   its own expand affordance: a chevron of currentColor borders (kept in
+   forced colors), pointing right when closed and down when open. */
+.connection-log-technical > summary { gap: 10px; list-style: none; }
+.connection-log-technical > summary::-webkit-details-marker { display: none; }
+.connection-log-technical > summary::before { content: ""; flex: none; width: 7px; height: 7px; border-inline-end: 2px solid currentColor; border-block-end: 2px solid currentColor; transform: rotate(-45deg); transition: transform 120ms ease; }
+.connection-log-technical[open] > summary::before { transform: translateY(-2px) rotate(45deg); }
+@media (prefers-reduced-motion: reduce) { .connection-log-technical > summary::before { transition: none; } }
 .connection-log-evidence { margin: 0 0 var(--space-2); color: var(--text-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
 .connection-log pre {
   max-height: var(--connection-log-max-height);

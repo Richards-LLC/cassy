@@ -95,7 +95,12 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
     const part = testInfo.annotations.some((annotation) => annotation.type === JOURNEY_PART.type)
       ? testInfo.title.replace(/^[A-Z]+-J[0-9]+\s*/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96)
       : undefined;
-    const dir = part ? join(RECEIPTS, id, "parts", part) : join(RECEIPTS, id);
+    // Concurrent repeats must keep their captures instead of clearing another
+    // attempt's files through claimReceiptDirectory's retry cleanup.
+    // CLI --repeat-each does not change project.repeatEach. The first attempt
+    // keeps the ordinary bundle path; every later repeat has its own root.
+    const root = testInfo.repeatEachIndex > 0 ? join(RECEIPTS, `repeat-${testInfo.repeatEachIndex + 1}`) : RECEIPTS;
+    const dir = part ? join(root, id, "parts", part) : join(root, id);
     claimReceiptDirectory(dir, testInfo.title);
     const stages: Stage[] = [];
     const errors: string[] = [];
@@ -184,7 +189,7 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
     const top = bounds.top + parseFloat(clipStyle.borderTopWidth);
     const bottom = bounds.bottom - parseFloat(clipStyle.borderBottomWidth);
     const across = box.left - extent >= left - 0.5 && box.right + extent <= right + 0.5;
-    // A control that fills a clipping heading (the Terminal view title) loses
+    // A control that fills a clipping heading (a clipped title) loses
     // its ring top and bottom as well (cas-cf10 QA F01).
     const down = !vertical || (box.top - extent >= top - 0.5 && box.bottom + extent <= bottom + 0.5);
     return { outline: style.outlineStyle, fits: across && down };
@@ -193,13 +198,38 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
 }
 
 /** Two animation frames: let the UI paint before a screenshot. */
-async function settle(page: Page): Promise<void> {
+export async function settle(page: Page): Promise<void> {
   // A test that holds the page clock (ProtocolClock) holds animation frames
   // too; the screenshot then shows the held frame, after at most a short
   // real-time wait instead of a hang (cas-1f7e).
-  const painted = page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
-  await Promise.race([painted, new Promise((ok) => setTimeout(ok, 250))]);
-  painted.catch(() => undefined);
+  // Return the state immediately: evaluating the promise itself would leave
+  // no way to finish it when the virtual clock holds both frame callbacks.
+  const state = await page.evaluateHandle(() => {
+    let frame: number;
+    let finish!: () => void;
+    const painted = new Promise<void>((resolve) => {
+      finish = () => {
+        cancelAnimationFrame(frame);
+        resolve();
+      };
+      frame = requestAnimationFrame(() => { frame = requestAnimationFrame(finish); });
+    });
+    return { painted, finish };
+  });
+  const painted = state.evaluate(({ painted }) => painted);
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([painted, new Promise<void>((resolve) => { deadline = setTimeout(resolve, 250); })]);
+  } finally {
+    clearTimeout(deadline);
+    try {
+      await state.evaluate(({ finish }) => finish());
+    } finally {
+      // Drain even on navigation/close; do not turn a real page error into a
+      // successful screenshot or leave an evaluation to fail at teardown.
+      try { await painted; } finally { await state.dispose(); }
+    }
+  }
 }
 
 /**

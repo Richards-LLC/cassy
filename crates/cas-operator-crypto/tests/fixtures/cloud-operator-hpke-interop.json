@@ -1,0 +1,75 @@
+{
+  "fixture": "operator-hpke-interop",
+  "version": 1,
+  "contract": "docs/specs/2026-10-05-operator-inbox-cloud-contract.md §6.4, §6.6, §7.4",
+  "generator": "scripts/generate-operator-hpke-fixture.ts (@hpke/core 1.9.0)",
+  "suite": {
+    "kem_id": 16,
+    "kdf_id": 1,
+    "aead_id": 2,
+    "mode": 0,
+    "names": "DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM"
+  },
+  "encoding": "All *_hex fields are lowercase hex. Keys: sk = 32-byte big-endian scalar, pk = 65-byte uncompressed SEC1 point. ciphertext = AEAD ct || 16-byte tag, sequence number 0 (single-shot seal).",
+  "ids": {
+    "accountId": "acct-fixture-0001",
+    "feedGeneration": "1",
+    "epoch": "4",
+    "deviceId": "dev-fixture-0001",
+    "eventId": "evt-fixture-0001"
+  },
+  "cases": [
+    {
+      "name": "epoch_wrap",
+      "description": "An epoch private scalar released to a device (contract §6.4): info=psc-op-epoch-wrap-v1, aad=account_id|feed_generation|epoch|device_id. The plaintext equals event_content_key.sk_recipient_hex.",
+      "info_utf8": "psc-op-epoch-wrap-v1",
+      "aad_utf8": "acct-fixture-0001|1|4|dev-fixture-0001",
+      "ikm_recipient_hex": "3c8837a8ce13504e99e8fcc0680c595b968399a5258d0c67c04b5614ca5b4543",
+      "sk_recipient_hex": "c27db69405e840b42b19c144b8950f2c8836b58ff99728876730d20abd5b6eeb",
+      "pk_recipient_hex": "04b0cc3c011e1418c86d21e4bf7bdb6435e4fd1790c5e40b5721e71b9b8e181284a17b23cc3de35bc0b1d6cb80acbb0f68324db48671ca55ba2643e6fa0277b18c",
+      "ikm_ephemeral_hex": "67e53977d73211339f55bd763fa4f66e6b2b8374db76a05dada3355c08c949d8",
+      "enc_hex": "04f7979fef580d5e6a4d62e6881d7e4b29d2bb7082b4ad2e0aa6faa1fa40a9f4bb9805215379a6ffb07207446e2299be50d7e6d94cf79c026a2760e6bd97f6316b",
+      "plaintext_hex": "749302e08dac0b94eb53007e972965ab26b99a98af8239c160443ffd6641ca6e",
+      "ciphertext_hex": "9a2aba5074f1f46cedbc1ce31cec2a1e7b7b26ea26c5b7f5f1e28512e2be11893b381841eae47507ae9ab95202526db8"
+    },
+    {
+      "name": "event_content_key",
+      "description": "A 32-byte AES-256-GCM per-event content key HPKE-sealed to the epoch public key. info/aad are fixture strings; the production envelope strings are owned by cas-src.",
+      "info_utf8": "psc-op-fixture-event-key-v1",
+      "aad_utf8": "acct-fixture-0001|1|4|evt-fixture-0001",
+      "ikm_recipient_hex": "e522d84081e6686104b71dfe94eb6804a4d4ce652bd1503827e11ee827722bbf",
+      "sk_recipient_hex": "749302e08dac0b94eb53007e972965ab26b99a98af8239c160443ffd6641ca6e",
+      "pk_recipient_hex": "04a90a0d5753c645051c3e8e6c629d00e5293d6be39e362216784c640bf5ba38d99b5096e2870ba34f79e78b394fac619e528929095a7e29a8d93383ab55f0cb50",
+      "ikm_ephemeral_hex": "a46185b76331985bb29f2bb0812e3df531872960fe08883d0682e6f7fc5136d5",
+      "enc_hex": "04ede6871e1455af2d93dd75df2003973d571d8f2d4659fb53b4fa674a07958c79c1de2b2e792426df28440152ecd159879c83aefb5255ad533b57e45db78fffeb",
+      "plaintext_hex": "53abfd2128531449b7ce36d443a1baa970ae23031b93b6208fb12269f84b706c",
+      "ciphertext_hex": "40bf02f4aedec14f24300afd3ba90bae17c6eca698af3b1b3c4d764fdcd46a6f5ed765d257e34ee35e3d674539f8ef5d"
+    }
+  ],
+  "observer_notices": [
+    {
+      "name": "observer_notice_unobserved",
+      "description": "A cloud-sealed machine_unobserved notice (contract §7.4 observer envelope v1). Recipient: the epoch-4 key of event_content_key (sk_recipient_hex). Open wk with HPKE (info, aad), then AES-256-GCM-open ct with the content key, nonce n and the same aad. digest = sha256 of envelope_utf8 bytes.",
+      "ids": {
+        "accountId": "acct-fixture-0001",
+        "feedGeneration": "1",
+        "epoch": "4",
+        "deviceId": "dev-fixture-0001",
+        "eventId": "obs-fixture-notice-0001",
+        "machineId": "4f1c0a52-5d1e-4b7a-9c43-2a7e0f6b1d01",
+        "hubId": "hub-fixture-0001"
+      },
+      "info_utf8": "psc-op-observer-key-v1",
+      "aad_utf8": "psc-op-observer-v1|acct-fixture-0001|1|4|obs-fixture-notice-0001|hub-fixture-0001|application/vnd.psc.operator.machine-presence+json; v=1",
+      "ikm_ephemeral_hex": "38e1312a35fff2a4aa335414c0703022840e4216a36c1d880dcbc4c55515d156",
+      "content_key_hex": "031583d895f4bc4904d7919a5735fae5c02a9a0ad36a36b66e88b4b961c03c3b",
+      "enc_hex": "04da206eca076dac55b44242a742631ae5906799fa24c0cf2ffe41ca8ebbc68def69565b2d3779d022b8dda3e1e4f6810989bf34599d5eebd743d435e52081964c",
+      "wrapped_key_hex": "1fa9ebdf843343bc3eb4e925e9e26b976e2ff07dd29adaf00ffe6428566a8864cf7d1f86bf027cabda6f5b5f0234a5c5",
+      "nonce_hex": "69396e033f0f6b57f5f0bea8",
+      "body_ciphertext_hex": "2452e681830064ee1050143d8a86e7375f994c1ab033c5d8ddf4b9554be7adc101ab13b0b6c0c2a28d236c35ad7e22e446630b891cf6feb2a4b03102fa010e271cd7020d8eb5f4a41cc51090fe4e1ad1a1dedb7be86c567948bdc02d7f72b07917acc48ebdecf227a36fbf5061ada2eb317f394f783f8a5e3d3eccbf5849c6a885be441802f06144812414319154a2ebd65d63ac648946b36af85ee1cad81828d242b3d90c4c91ed9745a58a675b1397d7e46f7ca5c2856e5aed84f720d99b9356df9e429e1b56453d09d94770fa13642a091fb3b9e5c145f3ab5f2fd8b1c18d70e7e0a7402cf68f1bc532f4a71e95d49d08d618823acdafea79e29a264adfd771843622373f80bc63a46bbc6d6a40be2ad76623fe5aa674b70ab895262c344fa3128055cfe605a406eeab729a2005950f880ba122e6b783448c98c0c6c4688df34d1c8d38cb429bef27df4b6112c703773831f5d169beefdda134d71478f92244ba15f38c7e89e923aa48d751cdb59272e1a99ee544462ea668ae84be5da0b19d66003861a93b370ba0fa7712da10cae35cbaedf7e922cb860cd3304e872fd507597ee0717e4df517eec06520bc4a84fc565940ffa73980bf26a395434749c8c9245ec6b0ea98db856338da23a4a47ac027dc60af66bfca6d99b5a7a1f677bef118860c08aeab38a1f2ab45b37f6b74e38cda04ef01f65442cff79b26f1d1d44eb9d0f7",
+      "plaintext_utf8": "{\"type\":\"psc.operator.machine_presence\",\"v\":1,\"kind\":\"machine_unobserved\",\"account_id\":\"acct-fixture-0001\",\"machine_id\":\"4f1c0a52-5d1e-4b7a-9c43-2a7e0f6b1d01\",\"hub_id\":\"hub-fixture-0001\",\"outage_epoch\":\"1\",\"ref_event_id\":null,\"detected_at\":\"2026-10-05T16:04:00.000Z\",\"last_report_at\":\"2026-10-05T15:59:01.000Z\",\"deadline_at\":\"2026-10-05T16:03:01.000Z\",\"silence\":null,\"components\":[{\"component\":\"hub\",\"state\":\"up\",\"observed_at\":\"2026-10-05T15:58:59.000Z\"}],\"outage_opened_at\":null,\"recovered_at\":null}",
+      "envelope_utf8": "{\"v\":1,\"alg\":\"psc-op-observer-v1\",\"epoch\":\"4\",\"enc\":\"BNogbsoHbaxVtEJCp0JjGuWQZ5n6JMDPL_5Byo67xo3vaVZbLTd50CK43aPh5PaBCYm_NFmdXuvXQ9Q15SCBlkw\",\"wk\":\"H6nr34QzQ7w-tOkl6eJrl24v8H3SmtrwD_5kKFZqiGTPfR-GvwJ8q9pvW18CNKXF\",\"n\":\"aTluAz8Pa1f18L6o\",\"ct\":\"JFLmgYMAZO4QUBQ9iobnN1-ZTBqwM8XY3fS5VUvnrcEBqxOwtsDCoo0jbDWtfiLkRmMLiRz2_rKksDEC-gEOJxzXAg2OtfSkHMUQkP5OGtGh3tt76GxWeUi9wC1_crB5F6zEjr3s8iejb79QYa2i6zF_OU94P4pePT7Mv1hJxqiFvkQYAvBhRIEkFDGRVKLr1l1jrGSJRrNq-F7hytgYKNJCs9kMTJHtl0WlimdbE5fX5G98pcKFblrthPcg2ZuTVt-eQp4bVkU9CdlHcPoTZCoJH7O55cFF86tfL9ixwY1w5-CnQCz2jxvFMvSnHpXUnQjWGII6za_qeeKaJkrf13GENiI3P4C8Y6RrvG1qQL4q12Yj_lqmdLcKuJUmLDRPoxKAVc_mBaQG7qtymiAFlQ-IC6Ei5reDRIyYwMbEaI3zTRyNOMtCm-8n30thEscDdzgx9dFpvu_doTTXFHj5IkS6FfOMfonpI6pI11HNtZJy4ame5URGLqZoroS-XaCxnWYAOGGpOzcLoPp3EtoQyuNcuu336SLLhgzTME6HL9UHWX7gcX5N9RfuwGUgvEqE_FZZQP-nOYC_JqOVQ0dJyMkkXsaw6pjbhWM42iOkpHrAJ9xgr2a_ym2Ztaeh9ne-8RiGDAiuqzih8qtFs39rdOOM2gTvAfZUQs_3mybx0dROudD3\"}",
+      "digest": "sha256:8be71e5cdff5bba19988c93b4e5367c089c71b10940856a4996a095eb2903470"
+    }
+  ]
+}

@@ -215,7 +215,10 @@ test-ci-tiers:
 	cd .. && bash scripts/test-no-mecha-references.sh
 	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py
+	cd .. && python3 scripts/test-proof-target.py
 	cd .. && python3 scripts/test-assembly-memory.py
+	cd .. && python3 scripts/test-worker-memory.py
+	cd .. && python3 scripts/test-release-scratch.py
 	cd .. && python3 scripts/test-review-pr-body.py
 	cd .. && python3 scripts/test-builtin-contract-phrases.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
@@ -227,6 +230,8 @@ test-ci-tiers:
 	cd .. && ./scripts/test-classify-fast-admission.sh
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-self-hosted-rust-setup.sh
+	cd .. && python3 scripts/test-release-learning.py
+	cd .. && python3 scripts/test-release-publish-toolchain.py
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
 	cd .. && python3 scripts/test-release-completion.py
@@ -237,6 +242,8 @@ test-ci-tiers:
 	cd .. && ./scripts/test-check-release-runner-trust.sh
 	cd .. && ./scripts/test-check-release-preflight.sh
 	cd .. && ./scripts/test-journeys.sh
+	cd .. && python3 scripts/test-journey-receipt.py
+	cd .. && node --test scripts/test-verified-web-tests.mjs
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh

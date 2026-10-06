@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MACHINE_ACCENT_BASE, MACHINE_ACCENT_COUNT, MACHINE_ACCENT_STORAGE_KEY, assignMachineAccents, fleetMachineInitials, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineInitials, machineMonogram, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
+import { MACHINE_ACCENT_BASE, MACHINE_ACCENT_COUNT, MACHINE_ACCENT_STORAGE_KEY, assignMachineAccents, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineMonogram, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
 
 const tokens = readFileSync(fileURLToPath(new URL("./tokens.css", import.meta.url)), "utf8");
 
@@ -220,35 +220,22 @@ describe("Pebble accent contrast", () => {
   });
 });
 
-/** Composite a token over an opaque hex surface: hex passes through, rgba() is alpha-blended. */
-const flatten = (value: string, surface: string) => {
-  const rgba = value.match(/^rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)$/);
-  if (!rgba) return value;
-  const alpha = Number(rgba[4]);
-  return "#" + [1, 2, 3].map((i) => Math.round(Number(rgba[i]) * alpha + channel(surface, 2 * i - 1) * 255 * (1 - alpha)).toString(16).padStart(2, "0")).join("").toUpperCase();
-};
-
 describe("selected and active states carry a >= 3:1 edge cue (WCAG 1.4.11, cas-08b4)", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 
-  it("draws an accent edge bar on the selected conversation row and the active machine", () => {
+  it("draws an accent edge bar on the selected conversation row", () => {
     expect(css).toContain('.conversation-row[aria-current="true"]::before { content: ""; position: absolute;');
     expect(css).toMatch(/\.conversation-row\[aria-current="true"\]::before \{[^}]*background: var\(--accent\);/);
-    expect(css).toMatch(/\.machine-icon\.active::before \{[^}]*background: var\(--accent\);/);
     expect(css).toContain(".conversation-row { position: relative;");
   });
 
   it("measures each bar at or above 3:1 against the fill it sits on, in light and dark", () => {
     for (const scheme of ["light", "dark"]) {
-      const root = scope(`html[data-scheme="${scheme}"]`);
       for (let index = 0; index < MACHINE_ACCENT_COUNT; index += 1) {
         const machine = scope(`html[data-scheme="${scheme}"] .machine-accent-${index}`);
         const ratio = contrast(machine["--accent"], machine["--accent-soft"]);
         expect(ratio, `${scheme} · selected-row bar · accent ${index}: ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
       }
-      const active = flatten(root["--bg-active"], root["--bg-panel"]);
-      const ratio = contrast(root["--accent"], active);
-      expect(ratio, `${scheme} · active machine bar: ${root["--accent"]} on ${active} = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
     }
   });
 });
@@ -328,8 +315,8 @@ describe("dark tints instead of floods (P9, cas-9616)", () => {
 describe("one thread surface and one selection colour (journey F11)", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 
-  it("keeps the main-action button styles off the primary terminal pane", () => {
-    // pane-layout marks the primary pane .primary; an unscoped .primary:hover
+  it("keeps the main-action button styles off anything but controls", () => {
+    // The old primary pane carried .primary; an unscoped .primary:hover
     // brightened the whole thread from cream to white under the pointer.
     expect(css).not.toMatch(/^\.primary[\s:{,]/m);
     expect(css).toContain(":where(button, a).primary {");
@@ -348,55 +335,5 @@ describe("one thread surface and one selection colour (journey F11)", () => {
         expect(machine["--lift-sup"], `${scheme} · accent ${index}`).toBe(`${scope(`html[data-scheme="${scheme}"]`)["--lift"]}, inset 0 0 0 1px color-mix(in srgb, ${machine["--accent"]} 30%, transparent)`);
       }
     }
-  });
-});
-
-describe("machine rail initials (3.30.0 journey F3)", () => {
-  it("takes letters from the machine's own name, never a separator", () => {
-    expect(machineInitials("Atlas · Linux")).toBe("AT");
-    expect(machineInitials("Studio Mac · macOS")).toBe("SM");
-    expect(machineInitials("Alpha · Linux")).toBe("AL");
-    expect(machineInitials("build-box-2 · Linux")).toBe("BB");
-    expect(machineInitials("Atlas")).toBe("AT");
-    expect(machineInitials("  ")).toBe("?");
-  });
-
-  it("falls back to the whole label when the name part holds no letters", () => {
-    expect(machineInitials("· Linux")).toBe("LI");
-    expect(machineInitials("— · —")).toBe("?");
-  });
-});
-
-
-describe("fleet-unique rail initials (cas-cae2, journey F25)", () => {
-  const tags = (labels: string[]) => {
-    const map = fleetMachineInitials(labels.map((label, index) => ({ id: `m${index}`, label })));
-    return labels.map((_, index) => map.get(`m${index}`));
-  };
-
-  it("gives two machines whose initials match different tiles", () => {
-    expect(tags(["Atlas · Linux", "Attic · Linux", "Studio Mac · macOS"])).toEqual(["AL", "AT", "SM"]);
-    expect(tags(["Studio Mac · macOS", "Studio Max · macOS"])).toEqual(["SC", "SX"]);
-  });
-
-  it("keeps a machine's own initials when no other machine shares them", () => {
-    expect(tags(["Atlas · Linux", "Studio Mac · macOS", "build-box-2 · Linux"])).toEqual(["AT", "SM", "BB"]);
-    expect(tags([])).toEqual([]);
-  });
-
-  it("never reuses a tag another machine shows", () => {
-    // "Atlas" would take "AL", which "Alpha" already shows.
-    const shown = tags(["Atlas · Linux", "Attic · Linux", "Alpha · Linux"]);
-    expect(shown[2]).toBe("AL");
-    expect(new Set(shown).size).toBe(3);
-  });
-
-  it("numbers machines whose names cannot be told apart, in id order", () => {
-    expect(tags(["Atlas · Linux", "Atlas · macOS", "Atlas · Linux"])).toEqual(["A1", "A2", "A3"]);
-  });
-
-  it("is independent of the order the fleet is listed in", () => {
-    const fleet = [{ id: "b", label: "Attic · Linux" }, { id: "a", label: "Atlas · Linux" }];
-    expect([...fleetMachineInitials(fleet)].sort()).toEqual([...fleetMachineInitials([...fleet].reverse())].sort());
   });
 });

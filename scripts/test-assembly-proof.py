@@ -6,7 +6,11 @@ import io
 import importlib.util
 import itertools
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -23,6 +27,11 @@ class ReceiptTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # A private admission pool: live worker suites on this host must not
+        # make proof fixtures wait or time out.
+        patcher = mock.patch.object(proof, "HOST_MEMORY_DIRECTORY", self.root / ".host-memory")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.git("init", "-q")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("config", "user.name", "Fixture")
@@ -338,6 +347,96 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid timing.tsv"):
                 proof.run_row(self.root, "ci-script-tests", {}, logs)
 
+    def test_run_row_uses_checkout_target_and_logs_source_identity(self):
+        logs = self.root / '.cas/isolation-logs'
+        logs.mkdir(parents=True)
+        actual_run = proof.subprocess.run
+        captured = {}
+        link_rss = {"phase": "link-complete", "driver_pid": 101,
+                    "peak_waited_driver_rss_bytes": 20 * proof.GIB // 1024,
+                    "peak_mold_worker_rss_bytes": proof.GIB,
+                    "peak_process_tree_rss_bytes": proof.GIB + 20 * proof.GIB // 1024,
+                    "rss_sampling_status": "sampled", "rss_sample_count": 8,
+                    "mold_worker_peak": {"pid": 102, "start_identity": "fixture-start"}}
+
+        def gate(command, **kwargs):
+            if command[0] == 'git':
+                return actual_run(command, **kwargs)
+            captured.update(kwargs['env'])
+            rows = Path(kwargs['env']['CAS_RELEASE_GATE_LOG_DIR'])
+            rows.mkdir()
+            (rows / 'nextest.log').write_text('PASS: 1 test(s) passed\n')
+            (rows / 'link-rss.jsonl').write_text(json.dumps(link_rss) + '\n')
+            kwargs['stdout'].write('PASS nextest fixture\n')
+            return proof.subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(proof.subprocess, 'run', side_effect=gate):
+            result = proof.run_row(self.root, 'nextest', {'CARGO_TARGET_DIR': '/other/worktree/target'}, logs)
+        self.assertEqual(captured['CARGO_TARGET_DIR'], str(self.root / 'target'))
+        self.assertEqual(result['head'], self.git('rev-parse', 'HEAD'))
+        self.assertEqual(result['link_rss'], [link_rss], 'assembly receipt retains both RSS scopes and worker identity')
+        self.assertIn(str(self.root), (logs / 'nextest.log').read_text())
+        self.assertIn(self.git('rev-parse', 'HEAD'), (logs / 'nextest.log').read_text())
+
+    def test_merged_private_clone_target_keeps_bounded_owner_and_source_receipt(self):
+        # Real Git clones/leases and shell rows; only Cargo/tool probes are fake.
+        (self.root / '.gitignore').write_text('.cas/\ntarget/\n')
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        (scripts / 'release-gate.sh').write_text("""#!/bin/bash
+set -eu
+row=$3
+mkdir -p "$CAS_RELEASE_GATE_LOG_DIR"
+printf 'PASS: 1 test(s) passed\n' > "$CAS_RELEASE_GATE_LOG_DIR/$row.log"
+printf 7 > "$CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE"
+printf 'PASS %s fixture\n' "$row"
+""")
+        self.commit()
+        expected = {'format': proof.FORMAT, 'code_input': proof.code_input(self.root)}
+        head = self.git('rev-parse', 'HEAD')
+        path = proof.receipt_path(self.root, expected)
+        legacy = path.parent.parent / 'assembly-target'
+        leased = legacy.with_name(legacy.name + '-leased-v1')
+        for directory in (legacy, leased):
+            directory.mkdir(parents=True)
+            (directory / 'opaque').write_text('preserve unknown artifacts')
+        observed = {}
+
+        def contexts(root, clone, env, logs, target, execution):
+            observed['clone'] = clone
+            self.assertEqual(target, clone / 'target')
+            self.assertIsNotNone(proof.release_scratch.read_owner(target))
+            owner = json.loads((target / proof.proof_target.OWNER).read_text())
+            self.assertEqual(owner['worktree'], str(clone.resolve()))
+            self.assertEqual(owner['head'], head)
+            self.assertFalse(owner['dirty'])
+            self.assertTrue(proof.release_scratch.CURRENT.leases)
+            results = [proof.run_row(checkout, row, env, logs)
+                       for checkout, row in ((root, 'ci-script-tests'), (root, 'nextest'),
+                                             (clone, 'archive-mode'))]
+            for result in results:
+                source = json.loads(Path(result['log']).read_text().splitlines()[0].removeprefix('PROOF_SOURCE: '))
+                self.assertEqual(source['head'], head)
+                self.assertEqual(source['target'], str(Path(result['checkout']) / 'target'))
+            return tuple(results)
+
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / 'base'
+            env = {'CAS_RELEASE_GATE_HOME_DIR': str(scratch), 'CARGO_TARGET_DIR': '/foreign/target'}
+            with mock.patch.object(proof, 'clone_scratch', return_value=scratch), \
+                    mock.patch.object(proof, 'inputs', return_value=(expected, env)), \
+                    mock.patch.object(proof, 'execution_plan', return_value={}), \
+                    mock.patch.object(proof, 'run_contexts', side_effect=contexts):
+                record, receipt = proof.prove(self.root)
+        self.assertEqual(record['status'], 'PASS')
+        self.assertFalse(observed['clone'].parent.exists(), 'owned clone removed after child teardown')
+        self.assertTrue(record['cache'])
+        self.assertTrue(all(row['path'] == str(observed['clone'] / 'target') for row in record['cache']))
+        self.assertEqual({row['path'] for row in record['legacy_cache']}, {str(legacy), str(leased)})
+        for directory in (legacy, leased):
+            self.assertEqual((directory / 'opaque').read_text(), 'preserve unknown artifacts')
+        self.assertEqual(json.loads(receipt.read_text())['status'], 'PASS')
+
     def run_producer(self, failure=None, serial=False, deny_test=False, recover_test=False):
         self.path.unlink()
         scratch = tempfile.TemporaryDirectory()
@@ -351,6 +450,8 @@ class ReceiptTests(unittest.TestCase):
         def run(root, row, env, logs):
             rows.append(row)
             self.assertFalse(proof.IDENTITY & env.keys())
+            self.assertEqual(env['CARGO_TARGET_DIR'], str(root / 'target'))
+            self.assertEqual(env['CARGO_BUILD_TARGET_DIR'], str(root / 'target'))
             if not serial:
                 producers.wait(timeout=5)  # all three legs must overlap
             if row == "ci-script-tests":
@@ -387,6 +488,7 @@ class ReceiptTests(unittest.TestCase):
         if recover_test:
             snapshots = itertools.chain([memory, memory, dict(memory, available_bytes=17 * proof.GIB)], itertools.repeat(memory))
         with mock.patch.object(proof, "clone_scratch", return_value=Path(scratch.name) / "base"), \
+                mock.patch.dict(proof.os.environ, {"CAS_RELEASE_SCRATCH_EXTRA_BASES": "", "TMPDIR": scratch.name}), \
                 mock.patch.object(proof, "inputs", return_value=(self.expected, dict(proof.test_environment(self.root), CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS="1"))), \
                 mock.patch.object(proof, "memory_snapshot", return_value=memory, side_effect=snapshots), \
                 mock.patch.object(proof, "cpu_count", return_value=32), \
@@ -414,6 +516,55 @@ class ReceiptTests(unittest.TestCase):
     def test_script_failure_blocks_rust_suites_and_pass_publication(self):
         self.run_producer(failure="ci-script-tests")
 
+    def test_signal_tears_down_children_and_owned_scratch(self):
+        # Real process/signal boundary; fake only tool probes and test work.
+        script = '''
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location('proof', sys.argv[1])
+p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+root, scratch = map(pathlib.Path, sys.argv[2:4])
+p.clone_scratch = lambda env: scratch / 'base'
+p.inputs = lambda root: ({'format': p.FORMAT, 'code_input': 'signal-fixture'}, {})
+p.execution_plan = lambda env: {'mode': 'serial', 'phases': []}
+def contexts(root, clone, env, logs, target, execution):
+    return p.run_row(clone, 'archive-mode', dict(env, SCRATCH=str(scratch)), logs)
+p.run_contexts = contexts
+p.prove(root)
+'''
+        (self.root / "scripts").mkdir(exist_ok=True)
+        # A real gate row that blocks mid-archive; its own cleanup contract is
+        # exercised separately by the shell fixture suite.
+        (self.root / "scripts/release-gate.sh").write_text(
+            '#!/bin/bash\n'
+            'echo "$BASHPID" > "$SCRATCH/child-pid"\n'
+            'touch "$SCRATCH/ready"\n'
+            'exec python3 -c "import time; time.sleep(60)"\n')
+        self.commit()
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            child = subprocess.Popen([sys.executable, "-c", script,
+                                      str(Path(proof.__file__).resolve()), str(self.root), str(scratch)],
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 10
+                while not (scratch / "ready").exists() and child.poll() is None:
+                    self.assertLess(time.monotonic(), deadline, "archive fixture did not start")
+                    time.sleep(.02)
+                self.assertIsNone(child.poll(), "proof exited before archive fixture")
+                child.send_signal(signal.SIGTERM)
+                child.communicate(timeout=10)
+                self.assertFalse(list(scratch.glob("assembly-clone-*")), "SIGTERM leaked clone")
+                pid = int((scratch / "child-pid").read_text())
+                # The child must have been waited/reaped before scratch removal.
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+            finally:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.communicate(timeout=10)
+
     def test_script_pass_precedes_both_contexts_and_receipt_reuse(self):
         self.run_producer()
 
@@ -439,6 +590,9 @@ class ReceiptTests(unittest.TestCase):
                         "source": "fixture"}), mock.patch.object(proof, "cpu_count", return_value=cores):
                 plan = proof.execution_plan({})
                 self.assertEqual(plan["compile_jobs"], expected_jobs)
+                self.assertEqual(plan["link_jobs"], 8)
+                self.assertEqual(proof.execution_plan({"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": "2"})["link_jobs"], 2)
+                self.assertEqual(proof.env_policy({"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS": "2"})["CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS"], "2")
                 estimated = 2 * (expected_jobs * proof.COMPILE_JOB_BYTES + proof.PRODUCER_BYTES) + proof.SCRIPT_BYTES + proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
                 if expected_jobs:
                     self.assertLessEqual(estimated, plan["budget_bytes"])
@@ -471,7 +625,8 @@ class ReceiptTests(unittest.TestCase):
 
     def test_invalid_memory_and_job_knobs_fail_closed(self):
         for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS", "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
-                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS", "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS"):
+                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS", "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS",
+                    "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS"):
             for value in ("", "0", "-1", "auto", "1.5"):
                 with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
                     proof.execution_plan({key: value})
@@ -556,6 +711,7 @@ class ReceiptTests(unittest.TestCase):
             with self.subTest(base=base), \
                     mock.patch.dict(proof.os.environ, {"CAS_RELEASE_GATE_HOME_DIR": base}, clear=True), \
                     mock.patch.object(proof, "no_cas_ancestor") as ancestry, \
+                    mock.patch.object(proof.release_scratch, "sweep", return_value={}), \
                     mock.patch.object(proof, "inputs", side_effect=RuntimeError("guard accepted")):
                 with self.assertRaisesRegex(RuntimeError, "guard accepted"):
                     proof.prove(self.root)

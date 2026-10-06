@@ -306,7 +306,8 @@ impl FactoryDaemon {
         }
 
         match msg {
-            ClientMessage::OperatorReplyDelivered { .. } => {
+            ClientMessage::OperatorReplyDelivered { .. }
+            | ClientMessage::OperatorReplyPersisted { .. } => {
                 // Delivery receipts are emitted by the authenticated hub
                 // connector, never by the local GUI client.
             }

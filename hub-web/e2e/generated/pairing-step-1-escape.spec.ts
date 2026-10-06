@@ -8,20 +8,20 @@ test.describe("Pairing entry", () => {
     // 1. From a fresh page, navigate to /?fixture=pairing-step-1.
     await page.goto("/?fixture=pairing-step-1");
     const dialog = page.locator("dialog#pair-dialog");
-    const fleetOverview = page.getByRole("button", { name: "Fleet overview" });
-    const workspace = page.getByText("Pairing workspace", { exact: true });
+    const conversations = page.getByRole("heading", { name: "Conversations", exact: true });
+    const pairToggle = page.locator("#pair-toggle");
     await expect(dialog).toBeVisible();
     await expect(dialog).toHaveAttribute("open");
     await expect(page.locator("dialog#pair-dialog:modal")).toBeVisible();
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeVisible();
-    await expect(workspace).toBeVisible();
+    await expect(conversations).toBeVisible();
 
     // 2. Press Escape.
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
-    await expect(fleetOverview).toBeVisible();
-    await expect(workspace).toBeVisible();
-    await fleetOverview.focus();
-    await expect(fleetOverview).toBeFocused();
+    await expect(conversations).toBeVisible();
+    await expect(pairToggle).toBeVisible();
+    await pairToggle.focus();
+    await expect(pairToggle).toBeFocused();
   });
 });

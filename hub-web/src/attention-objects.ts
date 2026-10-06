@@ -1,4 +1,4 @@
-import { BLOCKER_HINT, entryText } from "./context-rail";
+import { BLOCKER_HINT } from "./context-rail";
 import { registerTurnRenderer, renderBody, type TurnRenderContext } from "./conversation-view";
 import { blockerEvidence } from "./thread-model";
 import type { AskRetirement } from "./conversation-history";
@@ -14,14 +14,11 @@ import type { OperatorReply } from "./types";
  * .chip, .window) and pairs.html.
  */
 
-/** Chips when the payload carries no options (OperatorReplyPayload has none yet). */
-export const DEFAULT_ASK_OPTIONS: readonly string[] = ["Yes, go ahead", "Hold"];
-
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
 
 export function askOptions(reply: OperatorReply): string[] {
   const options = (reply.options ?? []).map((option) => option.trim()).filter(Boolean);
-  return options.length > 0 ? options : [...DEFAULT_ASK_OPTIONS];
+  return options;
 }
 
 /**
@@ -35,17 +32,9 @@ export const RETIRED_LINES: Readonly<Record<AskRetirement, string>> = {
   "session-ended": "No longer waiting: the session that asked has ended.",
 };
 
-/** The collapsed in-flow copy's pointer to the pinned tray. */
-export const WAITING_LINE = "Waiting on you — answer below";
-
 /** True while `reply` still waits on the operator (an unanswered ask, an unacknowledged blocker). */
 export function isWaiting(reply: OperatorReply, context: Pick<TurnRenderContext, "history">): boolean {
   return context.history?.waiting().some((item) => item.notification_id === reply.notification_id) === true;
-}
-
-/** True when `reply` is the ask the view pins above the composer (the most recent unanswered one). */
-export function isPinnedAsk(reply: OperatorReply, context: Pick<TurnRenderContext, "history">): boolean {
-  return context.history?.pinnedAsk()?.notification_id === reply.notification_id;
 }
 
 function tick(document: Document): Element {
@@ -63,22 +52,6 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
   const body = document.createElement("div"); body.className = "obj-body"; body.append(...context.body());
   const foot = document.createElement("div"); foot.className = "obj-foot";
   const answer = context.history?.answered(reply.notification_id);
-  // P1 (cas-b1ee): while this ask is the one pinned above the composer, its
-  // copy in the flow collapses to a supervisor pebble with a waiting line; the
-  // chips live only in the pinned tray, so the operator never sees two live
-  // copies of the same question. Older unanswered asks keep their chips.
-  if (!answer && !context.pinned && isPinnedAsk(reply, context)) {
-    object.className = "obj t-a ask-collapsed";
-    object.dataset.answered = "false";
-    object.dataset.collapsed = "true";
-    // A compact reference, not a second copy (journey F18): its first line,
-    // cut at a word, points at the pinned card that carries the full question.
-    const excerpt = document.createElement("p"); excerpt.className = "ask-excerpt"; excerpt.textContent = entryText(reply.message);
-    const wait = document.createElement("p"); wait.className = "ask-waiting"; wait.textContent = WAITING_LINE;
-    body.replaceChildren(excerpt, wait);
-    object.append(body);
-    return object;
-  }
   const retired = answer || context.pinned ? undefined : context.history?.retirement(reply.notification_id);
   if (retired) {
     // cas-16eed: no longer waiting, so it quiets like an answered question
@@ -106,7 +79,8 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
       foot.append(chip);
     }
   }
-  object.append(body, foot);
+  object.append(body);
+  if (foot.childNodes.length > 0) object.append(foot);
   return object;
 }
 

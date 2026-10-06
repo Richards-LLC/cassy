@@ -21,8 +21,22 @@ export const LAUNCH_SCOPE: Scope = "session-launch";
 export const FACTORY_OPERATE_SCOPE: Scope = "factory-operate";
 export const FACTORY_MANAGE_SCOPE: Scope = "factory-manage";
 
+/**
+ * Hub administration (cas-5e53 F08): seeing and revoking this machine's other
+ * browser installations, and forcing a takeover. An invitation that names it
+ * must not fall back to read-only; the form offers it unticked, so holding it
+ * is always the operator's explicit choice.
+ */
+export const HUB_ADMIN_SCOPE: Scope = "hub-admin";
+
+/** What hub:admin lets a browser do, beside its box. */
+export const HUB_ADMIN_CONSENT = "See and revoke this machine's other browser installations";
+
 /** Scopes outside the default pairing that a form offers only when an invitation grants them. */
-const OPTIONAL_INVITATION_SCOPES: readonly Scope[] = [LAUNCH_SCOPE, FACTORY_OPERATE_SCOPE, FACTORY_MANAGE_SCOPE];
+const OPTIONAL_INVITATION_SCOPES: readonly Scope[] = [LAUNCH_SCOPE, FACTORY_OPERATE_SCOPE, FACTORY_MANAGE_SCOPE, HUB_ADMIN_SCOPE];
+
+/** Granted by an invitation, but held only when the operator ticks it. */
+const EXPLICIT_CONSENT_SCOPES: readonly Scope[] = [HUB_ADMIN_SCOPE];
 
 /** Every scope an invitation link may declare that this build understands. */
 const KNOWN_INVITATION_SCOPES: readonly Scope[] = [...PAIRING_SCOPES, ...OPTIONAL_INVITATION_SCOPES];
@@ -55,7 +69,7 @@ export function parseGrantedScopes(value: string | null | undefined): Scope[] | 
  */
 export function preselectedScopes(pending: PendingPairing | null | undefined): Scope[] {
   if (pending?.kind !== "invitation") return [...PAIRING_SCOPES];
-  return pending.scopes ? [...pending.scopes] : [...READ_ONLY_PAIRING_SCOPES];
+  return pending.scopes ? pending.scopes.filter((scope) => !EXPLICIT_CONSENT_SCOPES.includes(scope)) : [...READ_ONLY_PAIRING_SCOPES];
 }
 
 /** What a scope set lets this browser do, in the operator's words (F7). */
@@ -86,7 +100,7 @@ const SCOPE_CAPABILITY: Readonly<Record<Scope, string>> = {
   "session-launch": "Start new sessions",
   "factory-operate": FACTORY_OPERATE_CAPABILITY,
   "factory-manage": FACTORY_MANAGE_CAPABILITY,
-  "hub-admin": "Administer the hub",
+  "hub-admin": HUB_ADMIN_CONSENT,
 };
 
 /**
@@ -119,6 +133,8 @@ export interface ScopeChoice {
   /** Within the invitation's ceiling, so the box may be ticked at all. */
   granted: boolean;
   checked: boolean;
+  /** What ticking it allows, for a scope that needs explicit consent. */
+  note?: string;
 }
 
 export function scopeChoices(granted: readonly Scope[] | undefined, selected: readonly Scope[]): ScopeChoice[] {
@@ -128,7 +144,7 @@ export function scopeChoices(granted: readonly Scope[] | undefined, selected: re
   const offered = [...PAIRING_SCOPES, ...OPTIONAL_INVITATION_SCOPES.filter((scope) => granted?.includes(scope))];
   return offered.map((scope) => {
     const allowed = !granted || granted.includes(scope);
-    return { scope, label: scopeLabel(scope), granted: allowed, checked: allowed && selected.includes(scope) };
+    return { scope, label: scopeLabel(scope), granted: allowed, checked: allowed && selected.includes(scope), ...(scope === HUB_ADMIN_SCOPE ? { note: HUB_ADMIN_CONSENT } : {}) };
   });
 }
 

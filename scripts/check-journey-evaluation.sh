@@ -19,7 +19,7 @@ reports_dir="docs/qa/journey-evaluations"
 
 block() {
     printf 'BLOCKER journey-evaluation: %s\n' "$1" >&2
-    printf '  → run scripts/journey-eval.sh on the release candidate, have a taste-lane evaluator score it, and commit the report to %s (see docs/qa/journey-evaluation.md)\n' "$reports_dir" >&2
+    printf '  → run scripts/journey-eval.sh <epic-artifact-dir> --full --workers=4 on the release candidate, have a taste-lane evaluator score it, and commit the report to %s (see docs/qa/journey-evaluation.md)\n' "$reports_dir" >&2
     exit 1
 }
 

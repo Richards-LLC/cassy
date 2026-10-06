@@ -2854,6 +2854,91 @@ async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
 /// cas-a622: unsaved work still refuses a recycle, and the refusal names what
 /// to do instead of suggesting a `force=true` that recycling never honours.
 #[tokio::test]
+async fn test_clear_context_refusal_names_requested_action_and_preserves_work_cas_2fe4() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-2fe4")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_pushed_worker_repo(&env, "reset-worker");
+    let worker_id = register_codex_worker_at(&env, "reset-worker", "session-2fe4", &worker_path);
+    let mut task = Task::new("cas-2fe4-test".into(), "Keep my working task".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("reset-worker".into());
+    env.task_store().add(&task).unwrap();
+    let before = serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap();
+    let worker_before = serde_json::to_value(env.agent_store().get(&worker_id).unwrap()).unwrap();
+    let dirty = worker_path.join("dirty.txt");
+    std::fs::write(&dirty, "work that must survive\n").unwrap();
+
+    for action in ["clear_context", "recycle_worker"] {
+        for force in [None, Some(true)] {
+            let mut req = factory_req(action);
+            req.target = Some("reset-worker".into());
+            req.force = force;
+            let error = env
+                .service
+                .factory_request(Parameters(req))
+                .await
+                .unwrap_err();
+            assert!(
+                error.message.starts_with(action),
+                "{action}: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("only in its worktree"),
+                "{}",
+                error.message
+            );
+            assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+            assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
+            assert_eq!(
+                std::fs::read_to_string(&dirty).unwrap(),
+                "work that must survive\n"
+            );
+            assert_eq!(
+                serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap(),
+                before
+            );
+            assert_eq!(
+                serde_json::to_value(env.agent_store().get(&worker_id).unwrap()).unwrap(),
+                worker_before
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_clear_context_unconfirmed_reset_names_action_without_claiming_success_cas_2fe4() {
+    let (guard, fixture) = clear_context_fixture("reset-claude", "claude", "0");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+    env.agent_store()
+        .register(&Agent::new("test-sup".into(), "supervisor".into()))
+        .unwrap();
+    env.agent_store().register(&fixture.worker).unwrap();
+    let mut req = factory_req("clear_context");
+    req.target = Some(fixture.worker.name.clone());
+    let error = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.starts_with("clear_context:"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("UNCONFIRMED"), "{}", error.message);
+    assert!(
+        error.message.contains("command is still queued"),
+        "{}",
+        error.message
+    );
+    assert_eq!(env.prompt_queue().peek_all(10).unwrap().len(), 1);
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+}
+
+/// cas-a622: unsaved work still refuses a recycle, and the refusal names what
+/// to do instead of suggesting a `force=true` that recycling never honours.
+#[tokio::test]
 async fn test_recycle_worker_refuses_unpushed_commits_without_suggesting_force_cas_a622() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
     let env = FactoryTestEnv::new();
@@ -9778,6 +9863,57 @@ async fn cas_dcf2_wake_starvation_is_top_line_status_not_a_lifecycle_relay_gh390
     );
 }
 
+/// cas-d1659 (AC4): a busy worker's spent wake budget reads as pending for a
+/// busy recipient, not as an abandoned row that "will never be delivered".
+#[tokio::test]
+async fn cas_d1659_busy_recipient_status_is_pending_not_abandoned() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
+
+    let message_id = env
+        .prompt_queue()
+        .enqueue("supervisor", "watchful-koala-20", "blocking DDL ruling")
+        .expect("enqueue");
+    for _ in 0..3 {
+        env.prompt_queue()
+            .record_wake_gate_decline(message_id, "pane has not been silent long enough")
+            .expect("record busy wake decline");
+    }
+    env.prompt_queue()
+        .park_for_busy_recipient(
+            message_id,
+            Some("recipient busy: wake budget spent after 3 attempts"),
+            chrono::Utc::now() + chrono::Duration::minutes(2),
+        )
+        .expect("park for the busy recipient");
+
+    let mut status_req = coord_msg("message_status", "watchful-koala-20", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    assert!(
+        text.contains("stage: gated  pending_reason: awaiting_busy_recipient"),
+        "the busy-recipient state must be the status top line: {text}"
+    );
+    assert!(
+        text.contains("busy recipient: still pending"),
+        "status must say the message is still pending for a busy recipient: {text}"
+    );
+    assert!(
+        !text.contains("will never be delivered") && !text.contains("abandoned as undeliverable"),
+        "a busy recipient's message is neither abandoned nor on the selection deadline: {text}"
+    );
+}
+
 /// cas-4a27 (GH #334): the field reproduction had both halves at once: a
 /// supervisor's real response was indistinguishable from delayed spawn
 /// boilerplate, while the worker's escalation remained AwaitingAck because
@@ -11200,3 +11336,146 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
 
 #[path = "../../crates/cas-core/src/test_child.rs"]
 mod child_test_evidence;
+
+// Public MCP lifecycle regressions (cas-3e3a).
+#[tokio::test]
+async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() {
+    for action in ["recycle_worker", "clear_context"] {
+        let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-3e3a")]);
+        let env = FactoryTestEnv::new();
+        let path = init_pushed_worker_repo(&env, "checkpoint-worker");
+        let worker = register_codex_worker_at(&env, "checkpoint-worker", "session-3e3a", &path);
+        let handoff = env.cas_root.join("HANDOFF.md");
+        std::fs::write(&handoff, "Continue from this durable checkpoint.\n").unwrap();
+        let mut before = Vec::new();
+        for (id, status) in [
+            ("cas-3111", TaskStatus::InProgress),
+            ("cas-3222", TaskStatus::AwaitingMerge),
+            ("cas-3333", TaskStatus::Open),
+        ] {
+            let mut task = Task::new(id.into(), format!("checkpoint {id}"));
+            task.status = status;
+            task.assignee = Some("checkpoint-worker".into());
+            task.notes = format!("HANDOFF: {}", handoff.display());
+            env.task_store().add(&task).unwrap();
+            before.push((
+                id,
+                serde_json::to_value(env.task_store().get(id).unwrap()).unwrap(),
+            ));
+        }
+        assert!(
+            env.agent_store()
+                .try_claim("cas-3111", &worker, 600, Some("resume"))
+                .unwrap()
+                .is_success()
+        );
+        let lease = serde_json::to_value(env.agent_store().get_lease("cas-3111").unwrap()).unwrap();
+        let agent = serde_json::to_value(env.agent_store().get(&worker).unwrap()).unwrap();
+        let checkout = std::fs::read(path.join("README")).unwrap();
+
+        let mut request = coord_req(action);
+        request.target = Some("checkpoint-worker".into());
+        let result = env
+            .service
+            .factory(Parameters(request))
+            .await
+            .unwrap_or_else(|error| panic!("{action} without force: {}", error.message));
+        let text = get_text(&result);
+        assert!(
+            text.contains("Queued recycle") && text.contains("checkpoint-worker"),
+            "{text}"
+        );
+        let entries = env.spawn_queue().peek(10).unwrap();
+        assert_eq!(entries.len(), 1, "one same-worker lifecycle request");
+        assert_eq!(entries[0].action, cas_store::SpawnAction::Recycle);
+        assert_eq!(entries[0].worker_names, vec!["checkpoint-worker"]);
+        let spec: cas_mux::WorkerSpec =
+            serde_json::from_str(entries[0].worker_spec.as_deref().unwrap()).unwrap();
+        assert_eq!(spec.name.as_deref(), Some("checkpoint-worker"));
+        assert_eq!(spec.cli, SupervisorCli::Codex);
+        for (id, value) in before {
+            assert_eq!(
+                serde_json::to_value(env.task_store().get(id).unwrap()).unwrap(),
+                value,
+                "{action} keeps status, assignment and checkpoint notes for {id}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(env.agent_store().get_lease("cas-3111").unwrap()).unwrap(),
+            lease
+        );
+        assert_eq!(
+            serde_json::to_value(env.agent_store().get(&worker).unwrap()).unwrap(),
+            agent
+        );
+        assert_eq!(std::fs::read(path.join("README")).unwrap(), checkout);
+        assert!(handoff.is_file(), "the durable handoff survives");
+        assert!(
+            env.prompt_queue().peek_all(10).unwrap().is_empty(),
+            "Codex reset uses recycle, not an unsupported /clear"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_3e3a_public_refusals_offer_a_supported_remedy_and_preserve_work() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-3e3a-unsafe")]);
+    let env = FactoryTestEnv::new();
+    let path = init_pushed_worker_repo(&env, "unsafe-worker");
+    let worker = register_codex_worker_at(&env, "unsafe-worker", "session-3e3a-unsafe", &path);
+    let mut task = Task::new("cas-3444".into(), "Keep assigned work".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("unsafe-worker".into());
+    env.task_store().add(&task).unwrap();
+    let task_before = serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap();
+    let worker_before = serde_json::to_value(env.agent_store().get(&worker).unwrap()).unwrap();
+    let dirty = path.join("dirty.txt");
+    std::fs::write(&dirty, "Do not destroy this work.\n").unwrap();
+
+    for action in ["recycle_worker", "clear_context"] {
+        let mut request = coord_req(action);
+        request.target = Some("unsafe-worker".into());
+        let error = env.service.factory(Parameters(request)).await.unwrap_err();
+        assert!(error.message.starts_with(action), "{}", error.message);
+        assert!(
+            error.message.contains("commit and push"),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("force=true"),
+            "no unusable force remedy: {}",
+            error.message
+        );
+    }
+    // The public surface rejects force before touching state. It must never
+    // first tell the caller that this unsupported flag is required.
+    let mut request = coord_req("recycle_worker");
+    request.target = Some("unsafe-worker".into());
+    request.force = Some(true);
+    let error = env.service.factory(Parameters(request)).await.unwrap_err();
+    assert!(
+        error.message.contains("Unsupported parameter(s)") && error.message.contains("force"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("requires force=true"),
+        "{}",
+        error.message
+    );
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+    assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dirty).unwrap(),
+        "Do not destroy this work.\n"
+    );
+    assert_eq!(
+        serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap(),
+        task_before
+    );
+    assert_eq!(
+        serde_json::to_value(env.agent_store().get(&worker).unwrap()).unwrap(),
+        worker_before
+    );
+}

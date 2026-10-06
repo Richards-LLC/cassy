@@ -1,0 +1,51 @@
+{
+  "fixture": "cas-operator-envelope-interop",
+  "version": 1,
+  "design": "cas-9b7d DESIGN.md D3 (cas-op-event-v1) and D4 (cas-op-command-v1)",
+  "generator": "hub-web/src/inbox/envelope-fixture.ts (@hpke/core 1.9.0); Rust must reproduce every byte",
+  "suite": "DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM, base mode",
+  "encoding": "*_hex lowercase hex; sk 32-byte big-endian scalar; pk 65-byte uncompressed SEC1 point",
+  "event": {
+    "ids": {
+      "accountId": "acct-fixture-0001",
+      "feedGeneration": "1",
+      "keyEpoch": "7",
+      "eventId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "hubId": "hub-fixture-0001",
+      "projectId": "proj-fixture-0001",
+      "sessionId": "s_Xq9vH2c1d3Q8Kp0tR7mZbLwYfNa4UeJs6GhVoI5xCk8"
+    },
+    "key_info_utf8": "cas-op-event-key-v1",
+    "aad_utf8": "cas-op-event-v1|acct-fixture-0001|1|7|0f1e2d3c4b5a69788796a5b4c3d2e1f0|hub-fixture-0001|proj-fixture-0001|s_Xq9vH2c1d3Q8Kp0tR7mZbLwYfNa4UeJs6GhVoI5xCk8|application/vnd.cas.operator.turn+json; v=1",
+    "ikm_epoch_hex": "ab7dc1fc8959d3991aac7bfcfa1e7da00378c55a158062a707d2b8da155cf730",
+    "sk_epoch_hex": "cb1d51539e0d4bb8fbf6a69157858d4c130f1f0f9900046f384fd8e3f88a0c3f",
+    "pk_epoch_hex": "041b365fede93b2fe47c569608d8fd7e6f5b1e20c790f2c8a0435aaa8a776ef63ed5293ab1f421913990f341d5319c459229020b714a9ebc03f1f4ff0df8fa965f",
+    "content_key_hex": "3b2a1304f4619d996444245b2240a5cc0935e0a5e114648b221f29c8cde5bae3",
+    "nonce_hex": "9a4cd7900985e1dae9e2ba24",
+    "ikm_ephemeral_hex": "a3c4d52eda8ab0d197e34686b508e70a37aef5e2f4fa97491f34ebc851314ac5",
+    "plaintext_utf8": "{\"type\":\"cas.operator.turn\",\"v\":1,\"session_name\":\"cas-src-quiet hawk ✦\",\"role\":\"supervisor\",\"body\":\"Merged cas-4c78 — two devices replay independently.\"}",
+    "envelope_utf8": "{\"v\":1,\"alg\":\"cas-op-event-v1\",\"epoch\":\"7\",\"enc\":\"BDsQg7yhLwkErFuy19P3Esm5m9FIJGWrqsYpUDGOLP_MUhQQHb2aX4ihbigNcZRRCYcUqhJvgiaGbwpdZlQrk5c\",\"wk\":\"tYSOsuQdJLqDdKZHd8eJ6biGYSKTUf3wW4zkM1Rjj3xduUolOA4X16kGZ-fUIEoP\",\"n\":\"mkzXkAmF4drp4rok\",\"ct\":\"c-0rlBOM20ePqGg6q8eFMD7-xsCNVeAu6bUWqB0LDx7kN5wbQb9zx9_ViXAuNQNBswJ0SpnJalEOoDNAgZ2vg4NBfE23YAyrB9daxtnOGkH_FiCUOTtsV4osLD3NDlFdOssqwYDJ0MS4s6TI6teMWNzW5g2BrWnkekJqcwCcYbJE4NnLqiGOb7CGtzSoOU-CRN0UbO0_dLxPMv337ojHfTpt_zqGPe9BMpWVuy4\"}",
+    "digest": "sha256:1c73196399dcdd596b8992a33e6391fdbfbf803642ce7b1ecf20582539806efc"
+  },
+  "command": {
+    "ids": {
+      "accountId": "acct-fixture-0001",
+      "machineId": "4f1c0a52-5d1e-4b7a-9c43-2a7e0f6b1d01",
+      "commandId": "cmdFixture0001AbCdEfGhIjKl",
+      "hubId": "hub-fixture-0001",
+      "projectId": "proj-fixture-0001",
+      "sessionId": "s_Xq9vH2c1d3Q8Kp0tR7mZbLwYfNa4UeJs6GhVoI5xCk8",
+      "operation": "operator_message",
+      "machineKeyId": "kid-fixture-cmd-0001"
+    },
+    "info_utf8": "cas-op-command-v1",
+    "aad_utf8": "cas-op-command-v1|acct-fixture-0001|4f1c0a52-5d1e-4b7a-9c43-2a7e0f6b1d01|cmdFixture0001AbCdEfGhIjKl|hub-fixture-0001|proj-fixture-0001|s_Xq9vH2c1d3Q8Kp0tR7mZbLwYfNa4UeJs6GhVoI5xCk8|operator_message|kid-fixture-cmd-0001",
+    "ikm_machine_hex": "9b145290a28803949456e7dcd2942617c05554b37a4345d9ff7fc6cb0a403d13",
+    "sk_machine_hex": "40328e485bf7857be9eb1ae03853a165169341b8eae28ed9d2ba4ed266c12d6a",
+    "pk_machine_hex": "04e766db29f13bf6e397934c624327d769dbcfdeb33a06dae1bab56d7f430ae122eee1a87fc0696c5aed9d713fc884f6eea545200637cbfe2efc0cdc589fa7447c",
+    "ikm_ephemeral_hex": "64c6179fbaf16ae59ae9ecbf5c07a56eb9a3bc690a586e8a00395755e86cca5a",
+    "plaintext_utf8": "{\"type\":\"cas.operator.command\",\"v\":1,\"operation\":\"operator_message\",\"body\":\"Ship it once soundwave is back — gracias.\"}",
+    "envelope_utf8": "{\"v\":1,\"alg\":\"cas-op-command-v1\",\"kid\":\"kid-fixture-cmd-0001\",\"enc\":\"BKSyYmf2Ayua1kOe1qeRgsgOycyeSOdnpAWhJzaOKhoO_KvGUWYmv8jiKcGxeEWpBIldXET7mjKdH7pJtJOD1rM\",\"ct\":\"95tSsQhhbD0g9jzF5PFNSsPw1p-7ENyqqDkNui_HVuj3ARbaUsAnm-_WryqNMaN2LKkTPWdSbr7VPzw7BZBhJprkmYHRgfCRMd9poQwM5L6AxA8I8OwrHlO6W4MfSEHjWiBGFWT8OS6908FbFeBlePUh4WFI2QN80zE-1_clf5wyHWi4NKU0_WA\"}",
+    "digest": "sha256:5bf661eef103a2864164116cef686feeed51d791133d854c598f11f1c757854b"
+  }
+}

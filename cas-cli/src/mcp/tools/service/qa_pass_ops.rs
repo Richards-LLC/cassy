@@ -66,6 +66,29 @@ impl CasService {
         // against exactly the tip under review (cas-c3b8 contract v1).
         let bundle = crate::qa_pass::validate_round_bundle(std::path::Path::new(ledger_path), &claimed)
             .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
+        if verdict == QaVerdict::Approved {
+            let store = self.inner.open_task_store()?;
+            let delivery = store.get(task_id).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            if crate::qa_evidence::journeys::affects_hub(&delivery.deliverables.files_changed)
+                || crate::qa_evidence::journeys::recorded_selection(&delivery.notes, &claimed.bound_head).is_some()
+            {
+                let repo = crate::mcp::tools::core::task::lifecycle::close_ops::resolve_close_gate_repo_root(&cas_root)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+                let config = crate::config::Config::load(&cas_root)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+                let roots = crate::config::resolved_factory_artifact_paths(&cas_root, config.factory().artifacts_root.as_deref());
+                let manifest = bundle.canonicalize().map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+                let artifacts = roots.task_dirs(task_id).into_iter()
+                    .find(|dir| dir.canonicalize().is_ok_and(|root| manifest.starts_with(root)))
+                    .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "QA journey evidence escapes the owning task artifacts"))?;
+                let ctx = crate::qa_evidence::EvidenceContext {
+                    task_id, task_artifacts_dir: &artifacts, repo: &repo,
+                    delivered_head: &claimed.bound_head, notes: &delivery.notes, deployed_origins: &[],
+                };
+                crate::qa_evidence::journeys::check_round_journeys(&ctx, &manifest, &delivery.notes, &delivery.deliverables.files_changed)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {}. Next: {}", e.problem, e.command)))?;
+            }
+        }
         let pass = cas_store::resolve_qa_pass(
             &cas_root,
             task_id,
@@ -112,12 +135,14 @@ impl CasService {
         )))
     }
 
-    /// cas-74284: `verification action=qa_request task_id=<parked delivery>
+    /// cas-74284 / cas-9ffa: `verification action=qa_request task_id=<delivery>
     /// summary=<reason>`. Supervisor-only. Opens an independent QA round for a
     /// parked delivery the park did not judge user-facing (for example a
     /// hub-web change parked without a demo_statement, whose demo_statement
     /// the delivery-proof scope lock no longer lets anyone add). From then on
-    /// every merge gate waits for that round's verdict.
+    /// every merge gate waits for that round's verdict. An explicit head_sha
+    /// identifies pushed Open/InProgress corrections through the WorkTarget;
+    /// requesting QA does not park or close that delivery.
     pub(super) async fn verification_qa_request(
         &self,
         req: VerificationRequest,
@@ -128,9 +153,30 @@ impl CasService {
                 "qa_request is supervisor-only; a worker's close dispatches QA for a user-facing delivery itself",
             ));
         }
-        let task_id = required(req.task_id.as_deref(), "task_id (the parked delivery)")?;
+        let task_id = required(req.task_id.as_deref(), "task_id (the delivery to review)")?;
         let reason = required(req.summary.as_deref(), "summary (why this delivery needs independent QA)")?;
-        let supervisor = self.inner.get_agent_id()?;
+        let supervisor = if req.head_sha.is_some() {
+            // Recovering an explicit receipt can open review of an unparked
+            // delivery, so require the registered factory supervisor role.
+            self.inner.resolve_live_supervisor_authority()
+                .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                    "qa_request requires a live registered supervisor"))?.id
+        } else {
+            // Preserve the existing parked-request contract for a standalone
+            // Standard session running in supervisor mode. This does not grant
+            // workers, dead sessions, or explicit receipt recovery authority.
+            let id = self.inner.get_registered_agent_id_read_only()?;
+            let caller = self.inner.open_agent_store()?.get(&id)
+                .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                    "qa_request requires a live registered supervisor"))?;
+            if !caller.is_alive() || !matches!(caller.role,
+                cas_types::AgentRole::Supervisor | cas_types::AgentRole::Standard)
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "qa_request requires a live registered supervisor"));
+            }
+            caller.id
+        };
         let task = self
             .inner
             .open_task_store()?
@@ -150,7 +196,7 @@ impl CasService {
             .max(1);
         let dispatch = self
             .inner
-            .request_independent_qa(&task, reason.trim())
+            .request_independent_qa_at_receipt(&task, reason.trim(), req.head_sha.as_deref())
             .map_err(|why| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_request rejected: {why}")))?;
         let note = if rejected_rounds >= max_rounds {
             format!(

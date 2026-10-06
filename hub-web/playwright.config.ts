@@ -27,6 +27,13 @@ export default defineConfig({
   outputDir: process.env.JOURNEY_OUTPUT ?? "./e2e/.results",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
+  // cas-4ce5/cas-84a2: the merge queue runs on the factory host's self-hosted
+  // runners beside the fleet; Playwright's default (half the cores: 16 here)
+  // put 16 recording Chromiums on a loaded box and journeys stalled. Six keeps
+  // the suite to a few minutes without starving the renderers.
+  // cas-61dc: locally, host memory admission serializes suites, so each suite
+  // keeps one browser worker unless the caller (journey-eval.sh) asks for more.
+  workers: process.env.CI ? 6 : 1,
   retries: 0,
   reporter: [["list"], ["json", { outputFile: `${process.env.JOURNEY_OUTPUT ?? "e2e/.results"}/report.json` }]],
   use: { baseURL: origin, trace: "retain-on-failure" },

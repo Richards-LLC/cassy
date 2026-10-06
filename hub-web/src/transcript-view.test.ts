@@ -49,7 +49,6 @@ function source(rows: GhosttyRow[], overrides: Partial<TranscriptSource> = {}): 
     hasScrollbackAbove: () => false,
     scrollRows: vi.fn(),
     scrollToBottom: vi.fn(),
-    focus: vi.fn(),
     ...overrides,
   };
   return state as TranscriptSource & { rowsValue: GhosttyRow[] };
@@ -174,21 +173,14 @@ describe("transcript tail", () => {
   });
 });
 
-describe("transcript keyboard", () => {
-  it("opens the pane keyboard when the transcript is tapped", () => {
+describe("transcript is read-only (cas-0546)", () => {
+  it("reads on a tap and never hands the keyboard to the pane", () => {
     view.update();
     (view.element.querySelector(".transcript-line") as HTMLElement).click();
 
-    expect(host.focus).toHaveBeenCalled();
-  });
-
-  it("does not steal focus when the jump affordance is the target", () => {
-    view.update();
-    view.element.scrollTop = 200;
-    view.element.dispatchEvent(new Event("scroll"));
-    (view.element.querySelector(".transcript-jump") as HTMLButtonElement).click();
-
-    expect(host.focus).not.toHaveBeenCalled();
+    expect("focus" in host).toBe(false);
+    expect(view.element.querySelector("textarea, input, [contenteditable]")).toBeNull();
+    expect(document.activeElement?.tagName).not.toBe("TEXTAREA");
   });
 });
 

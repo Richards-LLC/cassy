@@ -45,23 +45,3 @@ export function paletteEnterTarget<T extends { readonly dataset: DOMStringMap }>
   }
   return shown.find((command) => command.dataset.paletteCurrent !== "true") ?? shown[0];
 }
-
-/**
- * The palette's control command in the words of a conversation-first user
- * (journey F16): what the device can do, with the terminal term ("Take
- * control", "Release control", "Force takeover") kept in the hint so it still
- * matches the header button and a filter for it still finds the row. An
- * unavailable command says why in the hint.
- */
-export function controlCommandCopy(input: {
-  readonly heldByMe: boolean;
-  readonly forceTakeover: boolean;
-  readonly controller?: string;
-  readonly disabledReason?: string;
-}): { readonly title: string; readonly hint: string } {
-  const title = input.heldByMe ? "Let other devices type here" : "Type here from this device";
-  if (input.disabledReason) return { title, hint: input.disabledReason };
-  if (input.heldByMe) return { title, hint: "Release control of this conversation" };
-  if (input.forceTakeover) return { title, hint: input.controller ? `Force takeover from ${input.controller}` : "Force takeover" };
-  return { title, hint: "Take control of this conversation" };
-}

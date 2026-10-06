@@ -474,14 +474,17 @@ pub(crate) fn seed_worker_target_from_baseline(
     if std::fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         anyhow::bail!("worker target is a symlink; refusing baseline re-seed");
     }
+    // Reject invalid snapshots before creating target provenance or seed data.
+    let base_commit = git_head(worktree_path)?;
+    let skipped_crates =
+        changed_workspace_crates(worktree_path, &metadata.source_commit, &base_commit)?;
+    #[cfg(unix)]
+    let _target_lease = crate::factory_target_cache::owner::acquire(cas_dir, worktree_path)?;
     let staging = worktree_path.join(".target-seed-in-progress");
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
 
-    let base_commit = git_head(worktree_path)?;
-    let skipped_crates =
-        changed_workspace_crates(worktree_path, &metadata.source_commit, &base_commit)?;
     let age_secs = target_seed_age(metadata.created_at_unix);
     let mut stats = TargetSeedStats {
         snapshot: snapshot_name.to_string(),
@@ -568,6 +571,10 @@ fn hardlink_seed_tree_inner(
             // recreates the lock file on first use, so omit it at every depth.
             if entry.file_name() == ".cargo-lock" {
                 continue;
+            }
+            #[cfg(unix)]
+            if entry.file_name() == crate::factory_target_cache::owner::MARKER {
+                continue; // A snapshot's ownership generation never seeds another target.
             }
             if entry.file_name() == TARGET_SEED_METADATA_FILE
                 || skipped_crates.iter().any(|crate_name| {
@@ -6535,6 +6542,10 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        // This regression also proves owned-target retirement provenance.
+        std::fs::write(repo.join(".gitignore"), "/target/\n").unwrap();
+        assert!(Command::new("git").args(["add", ".gitignore"]).current_dir(&repo).status().unwrap().success());
+        assert!(Command::new("git").args(["commit", "-qm", "ignore owned build output"]).current_dir(&repo).status().unwrap().success());
 
         let cas_dir = repo.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
@@ -6593,6 +6604,9 @@ mod spawn_isolation_tests {
         };
 
         let result = prep.run().expect("create and seed worker worktree");
+        assert!(crate::factory_target_cache::owner::for_retirement(
+            result.cwd.parent().unwrap().parent().unwrap(), &result.cwd,
+        ).unwrap().is_some(), "actual seeding must publish verifiable target provenance");
         let seeded_artifact = result
             .cwd
             .join("target")
@@ -6776,6 +6790,8 @@ mod spawn_isolation_tests {
         let err = seed_worker_target_from_baseline(&cas_dir, &repo.join("worker"))
             .expect_err("a snapshot with no ancestry must be rejected");
         assert!(err.to_string().contains("not an ancestor"), "{err}");
+        assert!(!repo.join("worker/target").exists());
+        assert!(!cas_dir.join("worker-target-owners").exists());
         assert!(
             !repo
                 .join("worker/target/debug/deps/libwarm.rlib")

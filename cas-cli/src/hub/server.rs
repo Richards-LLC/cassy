@@ -45,6 +45,7 @@ pub struct HubState<R: SessionReadModel> {
     /// (cas-566b). Held across the whole operation, which also serializes
     /// operations on this hub.
     operations: Arc<tokio::sync::Mutex<HashMap<(String, String), OperationReplay>>>,
+    recovery: super::connection_recovery::RecoveryTelemetry,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -67,6 +68,7 @@ impl<R: SessionReadModel> HubState<R> {
             response_transport: TransportSecurity::Plaintext,
             launches: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            recovery: super::connection_recovery::RecoveryTelemetry::default(),
         }
     }
 
@@ -94,6 +96,7 @@ impl<R: SessionReadModel> HubState<R> {
 
 pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
     let response_transport = state.response_transport;
+    let recovery = (state.recovery.clone(), state.auth.clone());
     Router::new()
         .route("/", get(commander_index))
         .route("/commander", get(commander_index))
@@ -108,9 +111,26 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/commander/symbols.woff2", get(commander_symbols_font))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
+        .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
             "/v1/auth/pairing/exchange",
             post(pairing_exchange::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/pairing/commit",
+            post(installation_commit::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/pairing/abort",
+            post(installation_abort::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/devices",
+            get(installation_inventory::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/devices/{device}/revoke",
+            post(installation_revoke::<R>).options(preflight::<R>),
         )
         .route(
             "/v1/auth/websocket-ticket",
@@ -124,13 +144,29 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/scopes",
             post(grant_own_scopes::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/auth/account/challenge",
+            post(account_challenge::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/account/enrollment",
+            post(account_enrollment::<R>).options(preflight::<R>),
+        )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
-        .route("/v1/launch/profiles", get(launch_profiles::<R>).options(preflight::<R>))
+        .route(
+            "/v1/launch/profiles",
+            get(launch_profiles::<R>).options(preflight::<R>),
+        )
         .route(
             "/v1/diagnostics",
             get(diagnostics::<R>).options(preflight::<R>),
         )
-        .route("/v1/sessions", get(sessions::<R>).post(launch_session::<R>).options(preflight::<R>))
+        .route(
+            "/v1/sessions",
+            get(sessions::<R>)
+                .post(launch_session::<R>)
+                .options(preflight::<R>),
+        )
         .route("/v1/projects", get(projects::<R>).options(preflight::<R>))
         .route(
             "/v1/projects/browse",
@@ -164,10 +200,45 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(recovery, connection_evidence))
         .layer(middleware::from_fn_with_state(
             response_transport,
             security_headers,
         ))
+}
+
+async fn connection_evidence(
+    State((telemetry, auth)): State<(super::connection_recovery::RecoveryTelemetry, Option<AuthStore>)>,
+    request: Request<Body>, next: Next,
+) -> Response {
+    let category = super::connection_recovery::category(request.uri().path());
+    let preflight = request.method() == axum::http::Method::OPTIONS;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut response = next.run(request).await;
+    let status = response.status().as_u16();
+    let reason = response.headers().get("x-cas-refusal").and_then(|value| value.to_str().ok());
+    if let Some(count) = telemetry.record(category, preflight, status, &request_id, reason)
+        && (preflight || status == 401 || status == 403) {
+        if let Some(auth) = auth {
+            let _ = auth.audit_connection(category, preflight, status, &request_id, reason.map(super::connection_recovery::refusal), count);
+        }
+    }
+    response.headers_mut().insert("x-cas-request-id", HeaderValue::from_str(&request_id).expect("UUID header"));
+    // Request IDs are observable to this origin only after the route grants
+    // CORS. Unbound pairing attempts must receive no CORS disclosure headers.
+    if response.headers().contains_key("access-control-allow-origin") {
+        let prior_expose = response.headers().get("access-control-expose-headers")
+            .and_then(|value| value.to_str().ok()).unwrap_or_default();
+        let expose = if prior_expose.split(',').any(|name| name.trim().eq_ignore_ascii_case("X-Cas-Request-Id")) {
+            prior_expose.to_owned()
+        } else if prior_expose.is_empty() {
+            "X-Cas-Request-Id".to_owned()
+        } else {
+            format!("{prior_expose}, X-Cas-Request-Id")
+        };
+        response.headers_mut().insert("access-control-expose-headers", HeaderValue::from_str(&expose).expect("fixed header extension"));
+    }
+    response
 }
 
 fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
@@ -231,6 +302,11 @@ async fn commander_symbols_font() -> Response {
     )
 }
 
+/// cas-9b7d: the one reviewed cloud operator inbox API source in the hub's
+/// CSP connect-src (production origin, operator path prefix only).
+#[cfg(test)]
+pub(crate) const OPERATOR_INBOX_CSP_SOURCE: &str = "https://petra-stella-cloud.vercel.app/api/operator/";
+
 async fn security_headers(
     State(transport): State<TransportSecurity>,
     request: Request<Body>,
@@ -253,9 +329,19 @@ async fn security_headers(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // connect-src: `https:`/`wss:` reach the paired machines the operator
+    // chose (arbitrary hub hosts) and the loopback hub. Two cloud services are
+    // reviewed and named exactly (cas-9b7d): the pairing relay and, under
+    // OPERATOR_INBOX_CSP_SOURCE, the production cloud operator inbox API
+    // (`/api/operator/` only, no wildcard, nothing for non-production). They
+    // are the embedded page's only external origins (`h4_csp_03`).
     headers.insert(
         "content-security-policy",
-        HeaderValue::from_static("default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"),
+        HeaderValue::from_static(concat!(
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "https://petra-stella-cloud.vercel.app/api/operator/",
+            "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"
+        )),
     );
     response
 }
@@ -268,7 +354,10 @@ async fn preflight<R: SessionReadModel>(
     let Some(origin) = origin(&headers) else {
         return unauthorized();
     };
-    if uri.path() == "/v1/auth/pairing/exchange" {
+    if matches!(
+        uri.path(),
+        "/v1/auth/pairing/exchange" | "/v1/auth/pairing/commit" | "/v1/auth/pairing/abort" | "/v1/auth/pairing/protocol"
+    ) {
         return pairing_preflight(&origin, &headers);
     }
     // A health probe contains only readiness data, so the reviewed hosted
@@ -571,6 +660,7 @@ async fn diagnostics<R: SessionReadModel>(
             "tailscale_status": tailscale,
             "daemon_health": {"status":"ready", "sessions":session_count},
             "checked_at": chrono::Utc::now(),
+            "connection_recovery": state.recovery.snapshot(),
         }))
         .into_response(),
         &headers,
@@ -780,15 +870,17 @@ async fn end_session<R: SessionReadModel>(
         )
     {
         return with_cors(
-            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "audit_unavailable",
+                &error.to_string(),
+            ),
             &headers,
         );
     }
     let name = session.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        crate::cli::factory::end_session_by_name(&name)
-    })
-    .await;
+    let outcome =
+        tokio::task::spawn_blocking(move || crate::cli::factory::end_session_by_name(&name)).await;
     if let Some((auth, context)) = audited.as_ref() {
         let (audit_outcome, detail) = match &outcome {
             Ok(Ok(crate::cli::factory::EndSessionOutcome::NotFound)) => ("not_found", None),
@@ -995,7 +1087,11 @@ async fn session_operation<R: SessionReadModel>(
     let op_id = request.op_id.trim().to_string();
     if op_id.is_empty() || op_id.len() > 128 {
         return with_cors(
-            launch_error(StatusCode::BAD_REQUEST, "invalid_op_id", "op_id must be 1-128 characters"),
+            launch_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_op_id",
+                "op_id must be 1-128 characters",
+            ),
             &headers,
         );
     }
@@ -1004,7 +1100,10 @@ async fn session_operation<R: SessionReadModel>(
     replays.retain(|_, replay| replay.at.elapsed() < OPERATION_REPLAY_TTL);
     let key = (context.device_id.clone(), op_id.clone());
     if let Some(replay) = replays.get(&key) {
-        return with_cors((replay.status, Json(replay.body.clone())).into_response(), &headers);
+        return with_cors(
+            (replay.status, Json(replay.body.clone())).into_response(),
+            &headers,
+        );
     }
 
     let sessions = match state.catalog.list().await {
@@ -1023,17 +1122,31 @@ async fn session_operation<R: SessionReadModel>(
     let now = chrono::Utc::now();
     if auth.ensure_active_context(&context, now).is_err() {
         return with_cors(
-            launch_error(StatusCode::UNAUTHORIZED, "revoked", "device credential is no longer active"),
+            launch_error(
+                StatusCode::UNAUTHORIZED,
+                "revoked",
+                "device credential is no longer active",
+            ),
             &headers,
         );
     }
     let action = operation.action();
     let subject = operation.subject();
-    if let Err(error) =
-        auth.audit_operation(&context, "requested", action, scope, &session, Some(subject.clone()), now)
-    {
+    if let Err(error) = auth.audit_operation(
+        &context,
+        "requested",
+        action,
+        scope,
+        &session,
+        Some(subject.clone()),
+        now,
+    ) {
         return with_cors(
-            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "audit_unavailable",
+                &error.to_string(),
+            ),
             &headers,
         );
     }
@@ -1077,9 +1190,15 @@ async fn session_operation<R: SessionReadModel>(
             format!("{subject}; {detail}"),
         ),
     };
-    if let Err(error) =
-        auth.audit_operation(&context, audit_outcome, action, scope, &session, Some(detail), chrono::Utc::now())
-    {
+    if let Err(error) = auth.audit_operation(
+        &context,
+        audit_outcome,
+        action,
+        scope,
+        &session,
+        Some(detail),
+        chrono::Utc::now(),
+    ) {
         tracing::warn!(%error, %session, action, "cas-566b: operation outcome audit row could not be written");
     }
     if status == StatusCode::OK {
@@ -1115,7 +1234,11 @@ async fn run_fleet_operation(
                     "count must be between 1 and 4".to_string(),
                 ));
             }
-            ("spawn_workers", None, WorkerOperation::Spawn { count, task_id })
+            (
+                "spawn_workers",
+                None,
+                WorkerOperation::Spawn { count, task_id },
+            )
         }
         FleetOperation::SetWorkerHold { worker, hold } => (
             "set_worker_hold",
@@ -1141,8 +1264,14 @@ async fn run_fleet_operation(
         }
         // O5 runs the supervisor's async task_update on the hub's runtime.
         FleetOperation::AssignTask { task_id, assignee } => {
-            return run_assign_task(&cas_dir, &task_id, assignee.as_deref(), expected, &attribution)
-                .await;
+            return run_assign_task(
+                &cas_dir,
+                &task_id,
+                assignee.as_deref(),
+                expected,
+                &attribution,
+            )
+            .await;
         }
         other => {
             return tokio::task::spawn_blocking(move || {
@@ -1206,7 +1335,9 @@ fn run_store_operation(
             })?;
             let current = fleet::pinned_epic(session);
             if current != expected.epic_id {
-                return Err(OperationError::Stale(serde_json::json!({"epic_id": current})));
+                return Err(OperationError::Stale(
+                    serde_json::json!({"epic_id": current}),
+                ));
             }
             let request = match (clear, epic_id.as_deref().map(str::trim)) {
                 (true, _) => FocusEpic::Clear,
@@ -1657,7 +1788,12 @@ fn systemd_unit_command(
     command.arg("--").arg(executable)
         .args(["hub", "reap-daemon", "--session", name, "--cwd"])
         .arg(root)
-        .args(["--workers", &workers.to_string(), "--supervisor-cli", cli.backend().name()]);
+        .args([
+            "--workers",
+            &workers.to_string(),
+            "--supervisor-cli",
+            cli.backend().name(),
+        ]);
     apply_launch_environment(&mut command, environment);
     command
 }
@@ -1708,8 +1844,10 @@ fn spawn_factory_daemon(
             }
             Err(error) => return Err(error.into()),
         }
-        let scope = crate::ui::factory::cgroup::create_server_scope(name, "daemon")
-            .ok_or_else(|| anyhow::anyhow!("no separate Cassy cgroup available after systemd-run failed"))?;
+        let scope =
+            crate::ui::factory::cgroup::create_server_scope(name, "daemon").ok_or_else(|| {
+                anyhow::anyhow!("no separate Cassy cgroup available after systemd-run failed")
+            })?;
         if !crate::ui::factory::cgroup::outside_current_scope(&scope) {
             crate::ui::factory::cgroup::remove_scope(&scope);
             anyhow::bail!("separate Cassy cgroup is inside the hub's own scope");
@@ -1831,7 +1969,7 @@ async fn events<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(error) = authorize(
+    let context = match authorize(
         &state,
         HubAction::SessionRead,
         Scope::SessionRead,
@@ -1839,31 +1977,74 @@ async fn events<R: SessionReadModel>(
         "GET",
         "/v1/events",
     ) {
-        return with_cors(unauthorized_for(&error), &headers);
-    }
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
     // Subscribe before snapshotting. A concurrent event can consequently be
     // replayed once and then observed live once; sequence+revision make that a
     // harmless idempotent upsert, while the ordering avoids a lost-event gap.
     let receiver = state.events.subscribe();
+    let history = state.events.history();
+    let metadata = Event::default().event("stream_metadata").json_data(serde_json::json!({
+        "kind": "stream_metadata", "epoch": state.events.epoch.as_str(),
+        "oldest_sequence": history.first().map_or(0, |event| event.sequence),
+        "latest_sequence": history.last().map_or(0, |event| event.sequence),
+        "retained": history.len(),
+    })).expect("fixed stream metadata");
+    let initial = stream::iter(vec![Ok::<Event, Infallible>(metadata)]);
     let replay = stream::iter(
-        state
-            .events
-            .history()
+        history
             .into_iter()
             .map(|event| Ok::<Event, Infallible>(machine_event_sse(event))),
     );
-    let live = stream::unfold(receiver, |mut receiver| async move {
-        loop {
+    let audit = state.auth.clone();
+    let live_context = context.clone();
+    let live = stream::unfold((receiver, false), move |(mut receiver, ended)| {
+        let audit = audit.clone();
+        let context = live_context.clone();
+        async move {
+        if ended { return None; }
             match receiver.recv().await {
                 Ok(event) => {
-                    return Some((Ok::<Event, Infallible>(machine_event_sse(event)), receiver));
+                    Some((Ok::<Event, Infallible>(machine_event_sse(event)), (receiver, false)))
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let request_id = context.as_ref().map(|value| value.request_id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    if let Some(audit) = audit {
+                        let _ = audit.audit_connection("events", false, 200, &request_id, Some("viewer_lagged"), skipped);
+                    }
+                    let event = Event::default().event("viewer_lagged").json_data(serde_json::json!({
+                        "kind": "viewer_lagged", "skipped": skipped, "request_id": request_id,
+                    })).expect("fixed lag schema");
+                    // End after the explicit marker. Reconnecting snapshots
+                    // retained revisions; silently skipping would lose them.
+                    Some((Ok::<Event, Infallible>(event), (receiver, true)))
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
             }
         }
     });
-    let output = replay.chain(live);
+    let auth = state.auth.clone();
+    let mut ticks = tokio::time::interval(Duration::from_millis(250));
+    let termination = async move {
+        loop {
+            // A newly-created timer may yield even on its first due tick.
+            // Check the grant before that yield: buffered metadata/replay
+            // must not escape before the live tail gets polled (cas-2b3a5).
+            if let (Some(auth), Some(context)) = (&auth, &context) {
+                if auth
+                    .ensure_active_context(context, chrono::Utc::now())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            ticks.tick().await;
+        }
+    };
+    let complete = stream::iter(vec![Ok::<Event, Infallible>(Event::default().event("replay_complete")
+        .json_data(serde_json::json!({"kind":"replay_complete"})).expect("fixed replay marker"))]);
+    let output = initial.chain(replay).chain(complete).chain(live).take_until(termination);
     with_cors(
         Sse::new(output)
             .keep_alive(KeepAlive::default())
@@ -2186,24 +2367,11 @@ async fn proxy_socket(
                         continue;
                     }
                     trace_conversation_history_relay(&session, &frame.bytes);
-                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
                     }
-                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
-                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
-                    }) {
-                        let _ = connector
-                            .send(
-                                &session,
-                                ClientMessage::OperatorReplyDelivered {
-                                    notification_id,
-                                    device_id,
-                                },
-                            )
-                            .await;
-                    }
+
                 }
                 Err(ViewerRecvError::Lagged { skipped }) => {
                     let error = serde_json::json!({"error":"viewer_lagged","skipped":skipped});
@@ -2304,6 +2472,7 @@ async fn handle_client_message(
     let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let now = chrono::Utc::now();
     let read_message = is_pane_read_message(&message);
+    store.ensure_active_context(context, now)?;
     let allowed = if matches!(message, ClientMessage::ResizePane { .. }) {
         store.may_resize_panes(context, session, now)?
     } else if read_message {
@@ -2334,7 +2503,8 @@ async fn handle_client_message(
         // this message answers, cas-a8ea8) — is forwarded unchanged.
         *attribution = verified_attribution(context);
     }
-    if let ClientMessage::ConversationHistoryRequest { device_id, .. } = &mut message {
+    if let ClientMessage::ConversationHistoryRequest { device_id, .. }
+        | ClientMessage::OperatorReplyPersisted { device_id, .. } = &mut message {
         // History is private to the authenticated paired device. Do not trust
         // a browser-supplied selector, even though this is a read operation.
         *device_id = context.device_id.clone();
@@ -2415,6 +2585,7 @@ pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
         ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
+            | ClientMessage::OperatorReplyPersisted { .. }
     )
 }
 
@@ -2439,11 +2610,132 @@ async fn pairing_exchange<R: SessionReadModel>(
     exchange.source = exchange.controller_origin.clone();
     match auth.exchange_pairing(exchange, chrono::Utc::now()) {
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
+        Err(PairingExchangeError::Conflict) if bound_origin => with_cors((StatusCode::CONFLICT, Json(serde_json::json!({"error":"installation_conflict"}))).into_response(), &headers),
         Err(PairingExchangeError::Throttled {
             retry_after_seconds,
         }) if bound_origin => with_cors(pairing_throttled(retry_after_seconds), &headers),
         Err(_) if bound_origin => with_cors(unauthorized(), &headers),
         Err(_) => unauthorized(),
+    }
+}
+
+#[derive(Deserialize)]
+struct InstallationProtocolRequest { controller_origin: String, pairing_token_hash: String }
+
+async fn installation_protocol<R: SessionReadModel>(
+    State(state): State<HubState<R>>, headers: HeaderMap, Json(request): Json<InstallationProtocolRequest>,
+) -> Response {
+    if origin(&headers).as_deref() != Some(request.controller_origin.as_str()) {
+        return unauthorized();
+    }
+    if state.auth.as_ref().is_none_or(|auth| !auth.installation_protocol_matches(&request.pairing_token_hash, &request.controller_origin, chrono::Utc::now()).unwrap_or(false)) {
+        return unauthorized();
+    }
+    with_cors(Json(serde_json::json!({"installation_protocol":1})).into_response(), &headers)
+}
+
+async fn installation_commit<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(action): Json<super::auth::InstallationAction>,
+) -> Response {
+    installation_transition(state, headers, action, true)
+}
+async fn installation_abort<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(action): Json<super::auth::InstallationAction>,
+) -> Response {
+    installation_transition(state, headers, action, false)
+}
+fn installation_transition<R: SessionReadModel>(
+    state: HubState<R>,
+    headers: HeaderMap,
+    action: super::auth::InstallationAction,
+    commit: bool,
+) -> Response {
+    if origin(&headers).as_deref() != Some(action.controller_origin.as_str()) {
+        return unauthorized();
+    }
+    let Some(auth) = state.auth else {
+        return unauthorized();
+    };
+    match auth.installation_action(action, commit, chrono::Utc::now()) {
+        Ok(()) => with_cors(StatusCode::NO_CONTENT.into_response(), &headers),
+        Err(_) => with_cors(
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error":"installation_conflict"})),
+            )
+                .into_response(),
+            &headers,
+        ),
+    }
+}
+async fn installation_inventory<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    let context = match authorize(
+        &state,
+        HubAction::MachineRead,
+        Scope::MachineRead,
+        &headers,
+        "GET",
+        "/v1/auth/devices",
+    ) {
+        Ok(Some(context)) => context,
+        _ => return with_cors(unauthorized(), &headers),
+    };
+    let Some(auth) = &state.auth else {
+        return unauthorized();
+    };
+    match auth.list_devices() {
+        Ok(devices) => with_cors(
+            Json(
+                devices
+                    .into_iter()
+                    .filter(|d| context.has(Scope::HubAdmin) || d.device_id == context.device_id)
+                    .collect::<Vec<_>>(),
+            )
+            .into_response(),
+            &headers,
+        ),
+        Err(error) => with_cors(internal_error(error), &headers),
+    }
+}
+async fn installation_revoke<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(device): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/auth/devices/{device}/revoke");
+    let context = match authorize(
+        &state,
+        HubAction::Mutation,
+        Scope::MachineRead,
+        &headers,
+        "POST",
+        &uri,
+    ) {
+        Ok(Some(context)) => context,
+        _ => return with_cors(unauthorized(), &headers),
+    };
+    if context.device_id != device && !context.has(Scope::HubAdmin) {
+        return with_cors(unauthorized(), &headers);
+    }
+    let Some(auth) = &state.auth else {
+        return unauthorized();
+    };
+    if auth
+        .ensure_active_context(&context, chrono::Utc::now())
+        .is_err()
+    {
+        return with_cors(unauthorized(), &headers);
+    }
+    match auth.revoke_installation(&context, &device, chrono::Utc::now()) {
+        Ok(_) => with_cors(StatusCode::NO_CONTENT.into_response(), &headers),
+        Err(error) => with_cors(internal_error(error), &headers),
     }
 }
 
@@ -2550,6 +2842,110 @@ async fn grant_own_scopes<R: SessionReadModel>(
             tracing::error!(%error, scope = scope.as_str(), "self-grant failed");
             with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"grant_failed"}))).into_response(), &headers)
         }
+    }
+}
+
+/// DPoP-authenticate a mutation on `path` (the grant_own_scopes pattern).
+fn authenticate_mutation<R: SessionReadModel>(
+    state: &HubState<R>,
+    auth: &AuthStore,
+    headers: &HeaderMap,
+    path: &str,
+) -> anyhow::Result<AuthContext> {
+    let origin = request_origin(state, HubAction::Mutation, headers, "POST")?;
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .context("authorization required")?;
+    let proof = headers
+        .get("dpop")
+        .and_then(|value| value.to_str().ok())
+        .context("proof required")?;
+    auth.authenticate_dpop(authorization, proof, &origin, "POST", path, chrono::Utc::now())
+}
+
+/// cas-4634: a one-use challenge for this device's account enrollment
+/// assertion (contract §5.5). The device names it to the cloud, which signs
+/// it into a `psc-op-enrollment+jwt` for this hub.
+async fn account_challenge<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let context = match authenticate_mutation(&state, auth, &headers, "/v1/auth/account/challenge") {
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    match auth.issue_account_challenge(&context, chrono::Utc::now()) {
+        Ok((challenge, expires_at)) => with_cors(
+            Json(serde_json::json!({"hub_id": state.machine.id, "hub_challenge": challenge, "expires_at": expires_at})).into_response(),
+            &headers,
+        ),
+        Err(error) => {
+            tracing::error!(%error, "account challenge failed");
+            with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"challenge_failed"}))).into_response(), &headers)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AccountEnrollmentRequest {
+    assertion: String,
+}
+
+/// cas-4634: verify the cloud's enrollment assertion and bind this exact
+/// installation to the asserted account device. Every refusal is a closed
+/// code; the assertion itself is never logged.
+async fn account_enrollment<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(request): Json<AccountEnrollmentRequest>,
+) -> Response {
+    let Some(auth) = state.auth.clone() else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let context = match authenticate_mutation(&state, &auth, &headers, "/v1/auth/account/enrollment") {
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    if request.assertion.len() > 16 * 1024 {
+        return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"assertion_malformed"}))).into_response(), &headers);
+    }
+    let verifier = crate::hub::operator_inbox::assertion::HubVerifier::shared(auth.state_dir());
+    let token = request.assertion;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let now = chrono::Utc::now();
+        let (assertion, account) = match verifier.verify(&token, now) {
+            Ok(verified) => verified,
+            Err(error) => return Ok(Err(error.code())),
+        };
+        auth.bind_account(&context, &assertion, Some(&account), now)
+            .map(|bound| bound.map_err(|refusal| match refusal {
+                crate::hub::auth::EnrollmentRefusal::ChallengeUnknown => "challenge_unknown",
+                crate::hub::auth::EnrollmentRefusal::ChallengeExpired => "challenge_expired",
+                crate::hub::auth::EnrollmentRefusal::WrongHub => "wrong_hub",
+                crate::hub::auth::EnrollmentRefusal::AssertionExpired => "assertion_expired",
+                crate::hub::auth::EnrollmentRefusal::InstallationMismatch => "installation_mismatch",
+                crate::hub::auth::EnrollmentRefusal::OriginMismatch => "origin_mismatch",
+                crate::hub::auth::EnrollmentRefusal::AccountMismatch => "account_mismatch",
+                crate::hub::auth::EnrollmentRefusal::HubNotEnrolled => "hub_not_enrolled",
+            }))
+    })
+    .await;
+    match outcome {
+        Ok(Ok(Ok(enrollment))) => with_cors(Json(serde_json::json!({"account_enrollment": enrollment})).into_response(), &headers),
+        Ok(Ok(Err(code))) => {
+            let status = match code {
+                "issuer_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+                "hub_not_enrolled" => StatusCode::CONFLICT,
+                _ => StatusCode::FORBIDDEN,
+            };
+            with_cors((status, Json(serde_json::json!({"error": code}))).into_response(), &headers)
+        }
+        Ok(Err(error)) => with_cors(unauthorized_for(&error), &headers),
+        Err(_) => with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"enrollment_failed"}))).into_response(), &headers),
     }
 }
 
@@ -2709,10 +3105,7 @@ pub(super) fn operator_reply_allowed(
 
 /// A live send belongs in every other authenticated viewer's thread. The
 /// sender already has its optimistic bubble and receives MessageQueued.
-fn operator_message_allowed(
-    auth: &Option<(AuthStore, AuthContext)>,
-    bytes: &[u8],
-) -> bool {
+fn operator_message_allowed(auth: &Option<(AuthStore, AuthContext)>, bytes: &[u8]) -> bool {
     let Ok(DaemonMessage::OperatorMessage(message)) =
         serde_json::from_slice::<DaemonMessage>(bytes)
     else {
@@ -3001,7 +3394,6 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         continue;
                     }
                     trace_conversation_history_relay(&session, &frame.bytes);
-                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
@@ -3013,20 +3405,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => break,
                     };
                     if result.is_err() { break; }
-                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
-                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
-                    }) {
-                        let _ = state
-                            .connector
-                            .send(
-                                &session,
-                                ClientMessage::OperatorReplyDelivered {
-                                    notification_id,
-                                    device_id,
-                                },
-                            )
-                            .await;
-                    }
+
                 }
                 Some(MachineOutbound::Lagged { session, skipped }) => {
                     let envelope = serde_json::json!({
@@ -3154,14 +3533,28 @@ async fn proxy_machine_socket<R: SessionReadModel>(
             },
             event = async {
                 if events_subscribed {
-                    machine_events.recv().await.ok()
+                    machine_events.recv().await
                 } else {
                     futures_util::future::pending().await
                 }
             } => {
-                if let Some(event) = event {
-                    let envelope = serde_json::json!({"channel":"events","event":event});
-                    if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                match event {
+                    Ok(event) => {
+                        let envelope = serde_json::json!({"channel":"events","event":event});
+                        if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let request_id = auth.as_ref().map(|(_, context)| context.request_id.clone())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        if let Some((store, _)) = auth.as_ref() {
+                            let _ = store.audit_connection("events", false, 200, &request_id, Some("viewer_lagged"), skipped);
+                        }
+                        let envelope = serde_json::json!({"channel":"events","event":{
+                            "kind":"viewer_lagged", "skipped":skipped, "request_id":request_id,
+                        }});
+                        if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => { events_subscribed = false; }
                 }
             },
             revoked = async {
@@ -3457,8 +3850,9 @@ fn unauthorized_for(error: &anyhow::Error) -> Response {
     }
     response.headers_mut().insert(
         "access-control-expose-headers",
-        HeaderValue::from_static("WWW-Authenticate"),
+        HeaderValue::from_static("WWW-Authenticate, X-Cas-Request-Id"),
     );
+    response.headers_mut().insert("x-cas-refusal", HeaderValue::from_static(super::connection_recovery::refusal(refusal.code())));
     response
 }
 

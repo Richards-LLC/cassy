@@ -67,6 +67,7 @@ git -C "$fixture/repo" remote add origin "$fixture/origin.git"
 mkdir -p "$fixture/repo/cas-cli" "$fixture/repo/scripts" "$fixture/repo/hooks"
 printf '[package]\nversion = "9.99.9"\n' >"$fixture/repo/cas-cli/Cargo.toml"
 cp "$release" "$fixture/repo/scripts/release.sh"
+cp "$script_dir/release-zig.sh" "$fixture/repo/scripts/release-zig.sh"
 printf '# Cassy factory worker push guard\n' >"$fixture/repo/hooks/pre-push"
 git -C "$fixture/repo" add .
 git -C "$fixture/repo" commit -qm 'release fixture'

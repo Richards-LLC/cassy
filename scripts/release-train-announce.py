@@ -128,7 +128,7 @@ def validate(draft_arg: str, body_dir_arg: str, pre_publication: bool = False) -
 
 
 def record_latency(tag: str, receipt_arg: str, draft_arg: str) -> None:
-    """Put the measured budget result in the Dev trailer before announcement."""
+    """Put measured release effort in both replies and timing in the Dev reply."""
     values = {}
     for line in Path(receipt_arg).read_text(encoding="utf-8").splitlines():
         key, separator, value = line.partition("=")
@@ -138,8 +138,10 @@ def record_latency(tag: str, receipt_arg: str, draft_arg: str) -> None:
     seconds = values.get("PUBLISH_LATENCY_SECONDS", "")
     budget = values.get("BUDGET_SECONDS", "")
     within = values.get("WITHIN_BUDGET", "")
+    interventions = values.get("INTERVENTIONS", "")
     if (values.get("TAG") != tag or not seconds.isascii() or not seconds.isdecimal()
-            or not budget.isascii() or not budget.isdecimal() or within not in {"true", "false"}):
+            or not budget.isascii() or not budget.isdecimal() or within not in {"true", "false"}
+            or not interventions.isascii() or not interventions.isdecimal()):
         fail("missing or incoherent latency measurement")
     try:
         start = datetime.fromisoformat(values["TAG_PUSHED_AT"].replace("Z", "+00:00"))
@@ -156,13 +158,19 @@ def record_latency(tag: str, receipt_arg: str, draft_arg: str) -> None:
     state = "within budget" if within == "true" else "over budget"
     line = (f"• *Publication timing* — Tag to published: {seconds}s; {state} ({budget}s); "
             f"WITHIN_BUDGET={within}.")
-    dev = re.sub(r"(?m)^• \*Publication timing\* — .*\n?", "", bodies[3]).rstrip()
-    dev = dev + "\n\n" + line
-    lint_body(3, dev)
+    effort = f"• *Release effort* — {int(interventions)} manual interventions were needed to publish this release."
+    for index in (1, 3):
+        body = re.sub(r"(?m)^• \*(?:Release effort|Publication timing)\* — .*\n?", "", bodies[index]).rstrip()
+        bodies[index] = body + "\n\n" + effort
+    bodies[3] += "\n\n" + line + f" INTERVENTIONS={int(interventions)}."
+    for index in (1, 3):
+        lint_body(index, bodies[index])
     source = draft.read_text(encoding="utf-8")
     fences = list(re.finditer(r"\x60\x60\x60(?:text)?\r?\n(.*?)\r?\n\x60\x60\x60", source, re.DOTALL))
-    match = fences[3]
-    updated = source[:match.start(1)] + dev + source[match.end(1):]
+    updated = source
+    for index in (3, 1):
+        match = fences[index]
+        updated = updated[:match.start(1)] + bodies[index] + updated[match.end(1):]
     if updated != source:
         temporary = draft.with_name(f".{draft.name}.latency")
         temporary.write_text(updated, encoding="utf-8")

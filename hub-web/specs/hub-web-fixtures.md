@@ -2,7 +2,7 @@
 
 ## Application Overview
 
-Base URL: the fixture server playwright.config.ts starts on this checkout's own port (e2e/checkout-ports.mjs; override with HUB_E2E_PORT). Every scenario starts from a fresh browser page, selects its fixture with /?fixture=<name>, uses Seed e2e/seed.spec.ts, and can run in any order. The plan covers the six requested fixture states with happy paths, invalid input, and failure-state affordances. Commander shell fixtures render production UI with placeholder callbacks for backend actions; assertions stop at observable fixture behavior. A scenario fails whenever any listed expectation is unmet.
+Base URL: the fixture server playwright.config.ts starts on this checkout's own port (e2e/checkout-ports.mjs; override with HUB_E2E_PORT). Every scenario starts from a fresh browser page, selects its fixture with /?fixture=<name>, uses Seed e2e/seed.spec.ts, and can run in any order. The plan covers the requested fixture states with happy paths, invalid input, and failure-state affordances. Commander shell fixtures render production UI with placeholder callbacks for backend actions; assertions stop at observable fixture behavior. A scenario fails whenever any listed expectation is unmet.
 
 ## Test Scenarios
 
@@ -108,83 +108,15 @@ Base URL: the fixture server playwright.config.ts starts on this checkout's own 
 **Steps:**
 
   1. From a fresh page, navigate to /?fixture=pairing-step-1.
-    - expect: The Pair a machine dialog is open and the underlying pairing workspace is inert.
+    - expect: The Pair a machine dialog is open over the conversation list, which is inert.
   2. Press Escape.
-    - expect: The dialog closes and Fleet overview and the pairing workspace become accessible; fail if the modal remains open or traps focus.
+    - expect: The dialog closes and the conversation list and its Pair a machine control become accessible; fail if the modal remains open or traps focus.
 
-### 7. Attention panel
-
-**Seed:** `e2e/seed.spec.ts`
-
-#### 7.1. Attention panel distinguishes critical, warning, and info events
-
-**File:** `e2e/generated/attention-12-severity-actions.spec.ts`
-
-**Steps:**
-
-  1. From a fresh page, navigate to /?fixture=attention-12.
-    - expect: Attention is the selected tab, the panel says 12 events need attention, and the session group is expanded with count 12.
-  2. Inspect the Daemon connection lost article, a Connection attempt warning article, and the Connection attempt 4 info article.
-    - expect: The critical event and warning event each have Retry and severity-specific Dismiss buttons.
-    - expect: The info event has Dismiss info event and no Retry; fail if an event is missing or action availability is assigned to the wrong severity.
-
-### 8. Attention panel
+### 7. Failed connection
 
 **Seed:** `e2e/seed.spec.ts`
 
-#### 8.1. Attention event details disclose and hide diagnostic payload
-
-**File:** `e2e/generated/attention-12-details.spec.ts`
-
-**Steps:**
-
-  1. From a fresh page, navigate to /?fixture=attention-12 and locate the Daemon connection lost article.
-    - expect: Its Details disclosure is closed and the diagnostic JSON is not visible.
-  2. Click the article's Details disclosure.
-    - expect: The diagnostic payload shows fixture attention-12 and event 1, alongside a Copy button.
-    - expect: The event headline and Retry remain visible.
-  3. Click Details again.
-    - expect: The payload and Copy button are hidden again; fail if opening details changes the 12-event count.
-
-### 9. Populated fleet
-
-**Seed:** `e2e/seed.spec.ts`
-
-#### 9.1. Fleet summary and work-state table agree with the session ledger
-
-**File:** `e2e/generated/fleet-populated-summary.spec.ts`
-
-**Steps:**
-
-  1. From a fresh page, navigate to /?fixture=fleet-populated.
-    - expect: Fleet shows 2 machines, 3 sessions, 1 not live, and the status “1 of 3 sessions needs you; 2 working.”
-  2. Inspect the work-state table and Session ledger.
-    - expect: The table has rows for quiet-marten, bright-otter, and calm-heron, with quiet-marten in Needs you and the other two in Working.
-    - expect: The ledger has two sessions under live Atlas laptop and one under degraded Forge desktop; fail if totals or session identities differ across views.
-
-### 10. Populated fleet
-
-**Seed:** `e2e/seed.spec.ts`
-
-#### 10.1. Fleet ledger exposes distinct open controls for all three sessions
-
-**File:** `e2e/generated/fleet-populated-session-controls.spec.ts`
-
-**Steps:**
-
-  1. From a fresh page, navigate to /?fixture=fleet-populated.
-    - expect: The Session ledger is visible.
-  2. Locate each ledger button by accessible name: Open bright-otter on Atlas laptop, Open calm-heron on Atlas laptop, and Open quiet-marten on Forge desktop.
-    - expect: Each button is unique and enabled.
-    - expect: The associated labels show editing with 3 workers, testing with 1 worker, and blocked with 6 workers respectively; fail if a session is assigned to the wrong machine.
-  3. Activate the Open quiet-marten on Forge desktop button.
-    - expect: The fixture remains rendered without an error; its open callback is a placeholder, so no session navigation is required.
-
-### 11. Failed connection
-
-**Seed:** `e2e/seed.spec.ts`
-
-#### 11.1. Failed connection explains the third attempt and offers recovery controls
+#### 7.1. Failed connection explains the third attempt and offers recovery controls
 
 **File:** `e2e/generated/connection-failed-retry-actions.spec.ts`
 

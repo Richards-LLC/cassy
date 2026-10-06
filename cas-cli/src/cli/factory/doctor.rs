@@ -106,11 +106,11 @@ pub(super) fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&Path>) ->
 /// Codex fallback: doctor must name Codex as *required* when configuration
 /// explicitly requests it, rather than hiding the condition it is reporting.
 fn required_harnesses(args: &FactoryArgs, project_root: &Path) -> Result<Vec<SupervisorCli>> {
-    let worker_cli = parse_cli(&args.worker_cli)?;
+    let worker_cli = parse_cli(args.worker_cli_or_default())?;
     let supervisor_cli = parse_cli(&args.supervisor_cli)?;
     let project_config = Some(project_root.join(".cas").join("config.toml"));
     let sources = ConfigSources {
-        cli_flag: (worker_cli != SupervisorCli::Claude).then_some(worker_cli),
+        cli_flag: super::worker_cli_cascade_flag(worker_cli, args.worker_cli.is_some()),
         worker_spec_jsons: args.worker_spec.clone(),
         project_config: project_config.clone(),
         ..ConfigSources::default()

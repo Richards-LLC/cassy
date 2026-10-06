@@ -23,9 +23,9 @@ import {
 } from "./thread-model";
 
 /**
- * Pebble thread (cas-d167). The default conversation shows only operator
- * turns and supervisor→operator turns; the live pane never appears here — the
- * terminal stays the explicit alternate view.
+ * Pebble thread (cas-d167). The conversation shows only operator turns and
+ * supervisor→operator turns; the live pane never appears here — its raw text
+ * is the header's read-only Raw output drawer (cas-0546).
  */
 
 /** What a kind-specific renderer receives. */
@@ -119,6 +119,7 @@ export interface ConversationViewOptions {
   editMessage?: (text: string, send: ConversationSend) => void;
   /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
   retryMessage?: (send: ConversationSend) => void;
+  cancelMessage?: (send: ConversationSend) => void;
   /**
    * A send refused because this device does not control the session offers
    * Take control on the message itself, beside Retry (cas-3433): the refusal
@@ -156,13 +157,11 @@ export interface ConversationViewOptions {
    * thread shows it, so a live session never reads as idle or as a copy.
    */
   activity?: () => { at?: number; label?: string; terminal?: boolean } | undefined;
-  /** The empty thread offers the session's Terminal view (cas-55a4). */
-  openTerminal?: () => void;
   /**
    * The conversation header's connection label ("Live", "Degraded",
    * "Reconnecting", "Needs pairing", …). The empty thread reads it, so it
-   * never promises new messages or offers Terminal view over a connection
-   * that cannot carry them (cas-010f). Unset reads as live.
+   * never promises new messages over a connection that cannot carry them
+   * (cas-010f). Unset reads as live.
    */
   connection?: () => string | undefined;
   /** Requests the next older durable page when history has more turns. */
@@ -196,7 +195,6 @@ const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentC
 /** Warning triangle for a refused send; decorative — the "Not sent" text carries the meaning. */
 const CLOSE = '<svg class="close" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
 const CHEVRON_UP = '<svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10l4-4 4 4"/></svg>';
-const CHEVRON_DOWN = '<svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
 
 /**
  * The line the collapsed question bar shows (cas-16eed): the question itself
@@ -205,9 +203,8 @@ const CHEVRON_DOWN = '<svg class="chevron" viewBox="0 0 16 16" fill="none" strok
  * leading "Ask:" / "Question:" label are dropped; the bar ellipsises.
  */
 export function askLine(message: string): string {
-  const lines = message.split(/\r?\n/).map((line) => line
+  const lines = message.split(/\r?\n/).map((line) => plainTextMarkdown(line)
     .replace(/^\s*(?:[-*•+]|\d+[.)])\s+/, "")
-    .replace(/\*\*|__|`/g, "")
     .replace(/^\s*(?:ask|question|decision needed|decision)\s*:\s*/i, "")
     .trim()).filter(Boolean);
   const question = [...lines].reverse().find((line) => line.endsWith("?"));
@@ -260,32 +257,13 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   bubble.focus({ preventScroll: true });
 }
 
-/** The header's connection label, as the empty thread and Terminal view's offer read it. */
+/** The header's connection label, as the empty thread reads it. */
 function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "reconnecting" | "unreachable" {
   return label === undefined || label === "Live" ? "live"
     : label === "Degraded" ? "degraded"
       : label === NEEDS_PAIRING ? "pairing"
         : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
           : "unreachable";
-}
-
-/**
- * Why the conversation header's Terminal view can't open now, or nothing
- * when it can (cas-6b75, journey F03). The empty card stops offering
- * Terminal view once the connection is lost; the header says the same
- * instead of offering a terminal it cannot reach. A first connection
- * ("Connecting", "Idle") is on its way, not lost, so it is still offered.
- */
-export function terminalOfferReason(connection: string | undefined, machine: string | undefined): string | undefined {
-  if (connection === "Connecting" || connection === "Idle") return undefined;
-  const where = machine || "this machine";
-  const subjectMachine = machine || "This machine";
-  switch (connectionKind(connection)) {
-    case "pairing": return `${subjectMachine} needs pairing again before Terminal view can open.`;
-    case "reconnecting": return `Reconnecting to ${where} — Terminal view opens once it's back.`;
-    case "unreachable": return `${subjectMachine} can't be reached — Terminal view opens once it's back.`;
-    default: return undefined;
-  }
 }
 
 /**
@@ -296,10 +274,9 @@ export function terminalOfferReason(connection: string | undefined, machine: str
  *   says why instead of claiming there is nothing;
  * - `empty`: the page resolved with no turns of this session's own.
  * Plain words only: no product codename, and the generated session codename
- * stays in the card's meta line. Terminal view is offered only while the
- * connection can carry it.
+ * stays in the card's meta line.
  */
-export function emptyThreadCopy(input: { project?: string; machine?: string; connection?: string; resolved: boolean }): { state: "loading" | "waiting" | "empty"; said: string; terminal: boolean } {
+export function emptyThreadCopy(input: { project?: string; machine?: string; connection?: string; resolved: boolean }): { state: "loading" | "waiting" | "empty"; said: string } {
   const subject = input.project ? `the ${input.project} supervisor` : "this supervisor";
   const where = input.machine || "this machine";
   const subjectMachine = input.machine || "This machine";
@@ -307,22 +284,22 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
   const kind = connectionKind(label);
   const none = `No messages from ${subject} in this session yet`;
   if (!input.resolved) {
-    if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "", terminal: false };
-    if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.`, terminal: false };
-    if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.`, terminal: false };
-    return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.`, terminal: false };
+    if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "" };
+    if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.` };
+    if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.` };
+    return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.` };
   }
-  if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.`, terminal: true };
-  if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.`, terminal: true };
-  if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.`, terminal: false };
-  if (kind === "reconnecting") return { state: "empty", said: `${none}. Reconnecting to ${where} — anything new will show here once it's back.`, terminal: false };
-  return { state: "empty", said: `${none}. ${subjectMachine} can't be reached — anything new will show here once it's back.`, terminal: false };
+  if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.` };
+  if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.` };
+  if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.` };
+  if (kind === "reconnecting") return { state: "empty", said: `${none}. Reconnecting to ${where} — anything new will show here once it's back.` };
+  return { state: "empty", said: `${none}. ${subjectMachine} can't be reached — anything new will show here once it's back.` };
 }
 
 /**
  * The empty thread's activity line (cas-010f): plain words, no queue jargon.
- * Terminal output is the same time Terminal view's pane header shows;
- * otherwise the session's own last activity.
+ * The supervisor's terminal output when that is newest; otherwise the
+ * session's own last activity.
  */
 export function emptyCardActivityText(activity: { at?: number; terminal?: boolean }, now: number): string {
   if (activity.at === undefined) return "";
@@ -409,18 +386,11 @@ export function unsentChipCopy(count: number, unconfirmed: number): { text: stri
   return { text: `${count} dismissed`, label: `Show ${count} dismissed ${messages}, ${status}` };
 }
 
-/**
- * How long a just-opened pinned question ignores presses on its choices: a
- * double tap's second tap, not a deliberate answer (cas-450b).
- */
-const PINNED_OPEN_GUARD_MS = 400;
-
 export class ConversationView {
   readonly element: HTMLElement;
   /**
-   * The unanswered ask, pinned directly above the composer as well as in the
-   * flow (Pebble 3). Mount it beside the composer; it hides itself when no ask
-   * is waiting and unpins on answer.
+   * A compact bookmark above the composer points to the complete question
+   * in the flow. It hides when no ask is waiting and clears on answer.
    */
   readonly pinned: HTMLElement;
   private readonly head: HTMLElement;
@@ -442,16 +412,8 @@ export class ConversationView {
    */
   readonly unsent: HTMLButtonElement;
   private readonly options: ConversationViewOptions;
-  /**
-   * The pinned question folds to a one-line bar while the operator composes
-   * on a small screen (cas-16eed). `pinnedChoice` is the operator's own
-   * collapse or expand, which wins over that; an expand lasts until the next
-   * time composing starts, a collapse until the question changes.
-   */
+  /** Composer focus/keyboard state, used to keep the thread tail visible. */
   private composing = false;
-  private pinnedChoice?: { id: number; collapsed: boolean };
-  /** When the folded bar last opened the question (cas-450b). */
-  private pinnedOpenedAt = -Infinity;
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
@@ -503,8 +465,6 @@ export class ConversationView {
     const { supervisor } = this.options;
     this.element = document.createElement("div");
     this.element.className = "conversation-reading thread";
-    // Kept in place when a terminal surface mounts beneath it (cas-04ee).
-    this.element.dataset.mountOverlay = "";
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
@@ -543,17 +503,6 @@ export class ConversationView {
     this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
-    // cas-450b: the opened card can put a choice right under the folded bar's
-    // tap point (a phone with its keyboard up), so the second tap of a double
-    // tap would answer the question. A choice ignores a press that arrives
-    // within a double tap of the bar opening it; a deliberate tap still answers.
-    this.pinned.addEventListener("click", (event) => {
-      if (performance.now() - this.pinnedOpenedAt >= PINNED_OPEN_GUARD_MS) return;
-      const target = event.target instanceof Element ? event.target.closest("button") : null;
-      if (!target || !target.closest(".obj")) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }, true);
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     this.element.addEventListener("scroll", () => {
@@ -842,79 +791,45 @@ export class ConversationView {
   }
 
   /**
-   * The most recent unanswered ask, pinned above the composer; answering,
+   * The most recent unanswered ask, bookmarked above the composer; answering,
    * dismissing or retiring it unpins it (cas-16eed). Collapsed, it is a
    * one-line bar naming the question; expanded, the whole card with its
    * choices. Either way it offers Dismiss, and on a touch screen it swipes off.
    */
   private renderPinned(document: Document): void {
     const ask = this.history.pinnedAsk();
-    const render = ask && turnRenderers.get("ask");
-    if (!ask || !render) {
-      this.pinned.hidden = true; this.pinned.replaceChildren(); delete this.pinned.dataset.signature; delete this.pinned.dataset.collapsed;
+    if (!ask || !turnRenderers.has("ask")) {
+      this.pinned.hidden = true; this.pinned.replaceChildren(); delete this.pinned.dataset.signature;
       return;
     }
-    const collapsed = this.pinnedCollapsed(ask.notification_id);
-    const signature = JSON.stringify([ask.notification_id, ask.message, ask.options, collapsed]);
+    const signature = JSON.stringify([ask.notification_id, ask.message]);
     if (!this.pinned.hidden && this.pinned.dataset.signature === signature) return;
-    const active = document.activeElement;
-    const hadFocus = active instanceof HTMLElement && this.pinned.contains(active) ? active.className : undefined;
+    const focused = document.activeElement instanceof HTMLElement && this.pinned.contains(document.activeElement)
+      ? document.activeElement.className : undefined;
     this.pinned.dataset.signature = signature;
-    this.pinned.dataset.collapsed = String(collapsed);
+    this.pinned.dataset.collapsed = "true";
+    const bar = document.createElement("div"); bar.className = "pinned-bar";
+    const jump = document.createElement("button"); jump.type = "button"; jump.className = "pinned-expand";
+    const label = document.createElement("span"); label.className = "pinned-bar-label"; label.textContent = "Waiting on you:";
+    const text = document.createElement("span"); text.className = "pinned-bar-text"; text.textContent = askLine(ask.message);
+    const glyph = document.createElement("template"); glyph.innerHTML = CHEVRON_UP;
+    jump.append(label, " ", text, glyph.content.firstElementChild!);
+    jump.title = "Go to the question";
+    jump.onclick = () => {
+      const turn = this.element.querySelector<HTMLElement>(`[data-key="reply:${ask.notification_id}"]`);
+      if (turn) {
+        turn.tabIndex = -1;
+        turn.scrollIntoView?.({ block: "center" });
+        turn.focus({ preventScroll: true });
+      }
+      // Only the latest ask owns the shared composer's reply target.
+      if (!(ask.options ?? []).some(option => option.trim())) document.getElementById("message-text")?.focus({ preventScroll: true });
+    };
     const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.className = "pinned-dismiss";
-    dismiss.setAttribute("aria-label", "Dismiss question");
-    dismiss.title = "Dismiss question";
-    dismiss.innerHTML = CLOSE;
+    dismiss.setAttribute("aria-label", "Dismiss question"); dismiss.title = "Dismiss question"; dismiss.innerHTML = CLOSE;
     dismiss.onclick = () => this.dismissAsk(ask.notification_id, true);
-    if (collapsed) {
-      const bar = document.createElement("div"); bar.className = "pinned-bar";
-      const expand = document.createElement("button"); expand.type = "button"; expand.className = "pinned-expand";
-      expand.setAttribute("aria-expanded", "false");
-      const label = document.createElement("span"); label.className = "pinned-bar-label"; label.textContent = "Waiting on you:";
-      const text = document.createElement("span"); text.className = "pinned-bar-text"; text.textContent = askLine(ask.message);
-      const glyph = document.createElement("template"); glyph.innerHTML = CHEVRON_UP;
-      expand.append(label, " ", text, glyph.content.firstElementChild!);
-      expand.title = "Show the question";
-      expand.onclick = () => {
-        this.pinnedOpenedAt = performance.now();
-        this.pinnedChoice = { id: ask.notification_id, collapsed: false };
-        this.renderPinned(document);
-        this.pinned.querySelector<HTMLElement>(".pinned-collapse")?.focus({ preventScroll: true });
-      };
-      bar.append(expand, dismiss);
-      this.pinned.replaceChildren(bar);
-    } else {
-      const turn: ThreadTurn = { key: `reply:${ask.notification_id}`, side: "supervisor", kind: "ask", event: { kind: "reply", value: ask }, first: true, last: true };
-      const context = this.context(document, turn, ask, true);
-      const object = render(ask, context);
-      object.dataset.kind = "ask"; object.dataset.pinned = "true";
-      const head = document.createElement("div"); head.className = "pinned-head";
-      const label = document.createElement("span"); label.className = "pinned-label"; label.textContent = "Waiting on you";
-      const collapse = document.createElement("button"); collapse.type = "button"; collapse.className = "pinned-collapse";
-      collapse.setAttribute("aria-expanded", "true");
-      collapse.setAttribute("aria-label", "Collapse question");
-      collapse.title = "Collapse question";
-      collapse.innerHTML = CHEVRON_DOWN;
-      collapse.onclick = () => {
-        this.pinnedChoice = { id: ask.notification_id, collapsed: true };
-        this.renderPinned(document);
-        this.pinned.querySelector<HTMLElement>(".pinned-expand")?.focus({ preventScroll: true });
-      };
-      head.append(label, collapse, dismiss);
-      this.pinned.replaceChildren(head, object);
-    }
-    this.pinned.hidden = false;
-    const body = collapsed ? null : this.pinned.querySelector<HTMLElement>(".obj-body");
-    if (body) revealAskLine(body, ask.message);
-    // A control rebuilt under keyboard focus hands it to its counterpart.
-    if (hadFocus && !this.pinned.contains(document.activeElement)) {
-      [...this.pinned.querySelectorAll<HTMLElement>("button")].find((button) => button.className === hadFocus)?.focus({ preventScroll: true });
-    }
-  }
-
-  private pinnedCollapsed(id: number): boolean {
-    if (this.pinnedChoice?.id === id) return this.pinnedChoice.collapsed;
-    return this.composing;
+    bar.append(jump, dismiss); this.pinned.replaceChildren(bar); this.pinned.hidden = false;
+    if (focused) [...this.pinned.querySelectorAll<HTMLElement>("button")].find(button => button.className === focused)?.focus({ preventScroll: true });
   }
 
   /**
@@ -927,7 +842,6 @@ export class ConversationView {
   setComposing(composing: boolean): void {
     if (this.disposed || this.composing === composing) return;
     this.composing = composing;
-    if (composing && this.pinnedChoice && !this.pinnedChoice.collapsed) this.pinnedChoice = undefined;
     this.renderPinned(this.element.ownerDocument);
     if (this.following) this.pin();
   }
@@ -1031,7 +945,7 @@ export class ConversationView {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
     const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
-    // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
+    // The bookmark target changes when the newest waiting question changes.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     // A question that stops waiting (dismissed, or its session ended) repaints quiet (cas-16eed).
     const retired = reply?.kind === "ask" || reply?.kind === "blocker" ? this.history.retirement(reply.notification_id) : undefined;
@@ -1078,8 +992,7 @@ export class ConversationView {
     const echo = this.options.echo?.()?.trim() || "";
     const activity = this.options.activity?.();
     const activityText = activity ? emptyCardActivityText(activity, Date.now()) : "";
-    const terminal = copy.terminal && this.options.openTerminal !== undefined;
-    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, terminal, copy.said]);
+    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, copy.said]);
     if (this.empty.dataset.signature === signature) return;
     this.empty.dataset.signature = signature;
     const document = this.element.ownerDocument;
@@ -1107,18 +1020,10 @@ export class ConversationView {
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
     said.textContent = copy.said;
     const children: HTMLElement[] = [mono, name, where, said];
-    if (activityText || terminal) {
-      // One quiet line: when the session last did anything, then the way into
-      // Terminal view, named as the header names it (cas-010f).
+    if (activityText) {
+      // One quiet line: when the session last did anything (cas-010f).
       const foot = document.createElement("p"); foot.className = "empty-foot";
-      if (activityText) { const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live); }
-      if (terminal) {
-        if (activityText) { const dot = document.createElement("span"); dot.className = "empty-foot-sep"; dot.setAttribute("aria-hidden", "true"); dot.textContent = "·"; foot.append(dot); }
-        const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
-        open.textContent = "Terminal view";
-        open.onclick = () => this.options.openTerminal?.();
-        foot.append(open);
-      }
+      const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live);
       children.push(foot);
     }
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
@@ -1332,6 +1237,13 @@ export class ConversationView {
       // and it will be sent by itself, once, when the machine is back.
       state.textContent = send.held ? "Waiting for the connection — sends when it's back" : "Sending…";
       bubble.append(state);
+      if (send.held && this.options.cancelMessage) {
+        const cancel = document.createElement("button");
+        cancel.type = "button"; cancel.className = "conversation-edit";
+        cancel.textContent = "Cancel"; cancel.setAttribute("aria-label", "Cancel waiting message");
+        cancel.onclick = () => this.options.cancelMessage?.(send);
+        bubble.append(cancel);
+      }
     } else if (this.history.showsDelivered(send)) {
       // F5: the receipt is the difference between a delivered message and a
       // lost one, so a delivered send says so until the reply linked to it
@@ -1558,6 +1470,12 @@ export class ConversationView {
       if (sheets.length && !bubble.textContent?.trim() && !bubble.querySelector(".evi")) bubble.classList.add("bub-empty");
     }
     bubble.dataset.kind = kind;
+    if (reply.device_persisted !== undefined) {
+      const receipt = document.createElement("small");
+      receipt.className = "reply-storage-receipt";
+      receipt.textContent = reply.device_persisted ? "Stored on this device" : "Forwarded · not stored on this device";
+      bubble.append(receipt);
+    }
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
     // cas-e829: an answer to another session's turn stays in this thread and
     // only names what it answers; the earlier session itself is read-only.

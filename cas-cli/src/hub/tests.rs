@@ -16,6 +16,121 @@ use crate::ui::factory::{
     SessionState, daemon_capabilities,
 };
 
+/// cas-5e53: an already-open SSE grant must end after another auth-store
+/// process revokes its device, even with no event traffic or browser heartbeat.
+#[tokio::test]
+async fn installation_revoke_ends_open_sse_and_refuses_inventory_credential() {
+    installation_revoke_sse(false).await;
+}
+
+#[tokio::test]
+async fn installation_revoke_ends_idle_live_sse_after_replay_complete_cas_2b3a5() {
+    installation_revoke_sse(true).await;
+}
+
+async fn installation_revoke_sse(drain_replay: bool) {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let signing = SigningKey::random(&mut OsRng);
+    let now = Utc::now();
+    let invitation = auth.mint_pairing("https://controller.example", Scope::default_read_only(), now).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", Scope::default_read_only());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![fixture_session("factory-a")])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let request = |path: &str| Request::get(path)
+        .header("origin", "https://controller.example")
+        .header("authorization", format!("DPoP {}", credential.credential))
+        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", path, Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        .body(Body::empty()).unwrap();
+    let inventory = app.clone().oneshot(request("/v1/auth/devices")).await.unwrap();
+    assert_eq!(inventory.status(), StatusCode::OK);
+    let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(devices[0]["device_id"], credential.device_id);
+    assert_eq!(devices[0]["account_enrollment"]["state"], "unenrolled");
+    let opened = app.clone().oneshot(request("/v1/events")).await.unwrap();
+    assert_eq!(opened.status(), StatusCode::OK);
+    let mut stream = opened.into_body().into_data_stream();
+    if drain_replay {
+        let mut received = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !received.contains("event: replay_complete") {
+                let frame = stream.next().await.expect("authorized replay stays open").unwrap();
+                received.push_str(std::str::from_utf8(&frame).unwrap());
+            }
+        }).await.expect("metadata and complete marker arrive before revocation");
+        assert!(received.contains("event: stream_metadata"));
+    }
+    let other_process = AuthStore::open(&root, "machine-test").unwrap();
+    other_process.revoke_device(&credential.device_id, Utc::now()).unwrap();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await.expect("SSE must terminate without a heartbeat");
+    assert!(ended.is_none());
+    assert_eq!(app.oneshot(request("/v1/auth/devices")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+}
+
+/// cas-4634: the account challenge is issued to an authenticated device,
+/// and an enrollment assertion on a hub with no operator-inbox principal is
+/// refused with a closed code, leaving the installation unenrolled.
+#[tokio::test]
+async fn account_enrollment_routes_need_a_session_and_an_enrolled_hub() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let signing = SigningKey::random(&mut OsRng);
+    let now = Utc::now();
+    let invitation = auth.mint_pairing("https://controller.example", Scope::default_read_only(), now).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", Scope::default_read_only());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![fixture_session("factory-a")])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let post = |path: &str, body: &str, signed: bool| {
+        let mut request = Request::post(path)
+            .header("origin", "https://controller.example")
+            .header("content-type", "application/json");
+        if signed {
+            request = request
+                .header("authorization", format!("DPoP {}", credential.credential))
+                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", path, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+        }
+        request.body(Body::from(body.to_owned())).unwrap()
+    };
+    let refused = app.clone().oneshot(post("/v1/auth/account/challenge", "{}", false)).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let issued = app.clone().oneshot(post("/v1/auth/account/challenge", "{}", true)).await.unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued: serde_json::Value = serde_json::from_slice(&to_bytes(issued.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(issued["hub_id"], "machine-test");
+    assert!(issued["hub_challenge"].as_str().is_some_and(|challenge| challenge.len() >= 32));
+    let enrollment = app.clone().oneshot(post("/v1/auth/account/enrollment", r#"{"assertion":"a.b.c"}"#, true)).await.unwrap();
+    assert_eq!(enrollment.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(&to_bytes(enrollment.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(body["error"], "hub_not_enrolled");
+    let inventory = app.oneshot(Request::get("/v1/auth/devices")
+        .header("origin", "https://controller.example")
+        .header("authorization", format!("DPoP {}", credential.credential))
+        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", "/v1/auth/devices", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(devices[0]["account_enrollment"]["state"], "unenrolled");
+}
+
 #[test]
 fn operator_reply_relay_reaches_another_authenticated_device() {
     let temp = private_tempdir();
@@ -1052,6 +1167,7 @@ async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&PairingExchange {
+                        installation: None,
                         controller_origin: "https://evil.example".into(),
                         ..refused_exchange.clone()
                     })
@@ -1159,7 +1275,7 @@ async fn h2_pair_02_bound_sixth_exchange_is_throttled_without_disclosing_unbound
     assert_eq!(throttled.headers()["vary"], "Origin");
     assert_eq!(
         throttled.headers()["access-control-expose-headers"],
-        "Retry-After"
+        "Retry-After, X-Cas-Request-Id"
     );
     assert!(
         !throttled
@@ -1182,6 +1298,7 @@ async fn h2_pair_02_bound_sixth_exchange_is_throttled_without_disclosing_unbound
     assert!(auth.list_devices().unwrap().is_empty());
 
     let unbound_exchange = PairingExchange {
+                        installation: None,
         token: "unknown-pairing-capability".into(),
         ..refused_exchange
     };
@@ -1328,9 +1445,11 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         response.headers()["content-type"],
         "text/html; charset=utf-8"
     );
+    // Owned: the body is consumed below, and the CSP is still checked after.
     let csp = response.headers()["content-security-policy"]
         .to_str()
-        .unwrap();
+        .unwrap()
+        .to_owned();
     for required in [
         "default-src 'none'",
         "script-src 'self' 'wasm-unsafe-eval'",
@@ -1355,9 +1474,32 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
     let relay_metadata =
         "name=\"cas-pairing-relay-origin\" content=\"https://petra-stella-cloud.vercel.app\"";
     assert!(html.contains(relay_metadata));
+    // cas-9b7d: the cloud operator inbox is the second reviewed origin. Its
+    // API is named exactly in connect-src (production, /api/operator/ only).
+    let inbox_metadata =
+        "name=\"cas-operator-inbox-origin\" content=\"https://petra-stella-cloud.vercel.app\"";
+    assert!(html.contains(inbox_metadata));
+    assert_eq!(
+        csp.matches(super::server::OPERATOR_INBOX_CSP_SOURCE).count(),
+        1,
+        "the operator inbox API source is pinned once in connect-src: {csp}"
+    );
+    let connect_src = csp
+        .split(';')
+        .map(str::trim)
+        .find(|directive| directive.starts_with("connect-src "))
+        .expect("connect-src directive");
+    assert_eq!(
+        connect_src,
+        "connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* https://petra-stella-cloud.vercel.app/api/operator/",
+        "connect-src names exactly the reviewed sources"
+    );
     assert!(
-        !html.replacen(relay_metadata, "", 1).contains("https://"),
-        "the reviewed pairing relay must be the embedded page's only external origin"
+        !html
+            .replacen(relay_metadata, "", 1)
+            .replacen(inbox_metadata, "", 1)
+            .contains("https://"),
+        "the reviewed pairing relay and operator inbox must be the embedded page's only external origins"
     );
     assert!(!html.contains("<script>"), "inline scripts are forbidden");
 
@@ -3490,7 +3632,8 @@ async fn cas_d636_the_401_carries_a_machine_readable_reason_and_the_hub_clock() 
     assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(stale.headers()["access-control-allow-origin"], "https://controller.example");
     assert_eq!(stale.headers()["www-authenticate"], "DPoP error=\"invalid_dpop_proof\", error_description=\"stale_proof\"");
-    assert_eq!(stale.headers()["access-control-expose-headers"], "WWW-Authenticate");
+    // This origin is bound: correlate the refusal with its safe request ID.
+    assert_eq!(stale.headers()["access-control-expose-headers"], "WWW-Authenticate, X-Cas-Request-Id");
     let body: serde_json::Value = serde_json::from_slice(&to_bytes(stale.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["reason"], "stale_proof");
     assert_eq!(body["retryable"], true);

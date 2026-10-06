@@ -112,6 +112,45 @@ reconciliation without requiring another filesystem event. Doctor autofix keeps
 its warning while retirements are deferred and supplies `cas index code` to retry;
 it reports the symbol index fixed only after deferred work and errors are clear.
 
+### Worker browser and JS memory admission
+
+Worker browser/Vitest suites, npm test/build/typecheck/journey scripts and
+known Node suite entry points run through
+`python3 scripts/worker-memory.py -- <command>`. The worker PreToolUse hook
+routes those commands automatically when the checkout has that helper.
+Without it the hook warns and retains the existing permission guards.
+Plain npm reads, inline Node code and arbitrary Node scripts retain their
+existing permission decisions. The hub-web build, typecheck, visual-QA
+and verified test entry points also acquire admission when run directly.
+
+Admission uses `assembly-proof.py`'s fresh host memory snapshot and reserve
+(default: greater of 8 GiB or 25% of physical RAM). A suite needs an assumed
+4 GiB for browser/unknown commands, 1 GiB for tsc/Vite builds or 2 GiB for
+capped Vitest, plus 2 GiB headroom. Concurrent suites take weighted FD-locked
+slots while the fresh budget covers all live reservations and headroom. Literal
+shell and npm scripts are classified from their actual commands; unknown or
+expanding scripts keep the browser estimate. Smaller commands can use remaining
+capacity while a browser waits. Proofs take priority and hold exclusive intent
+around all assembly producers and consumers; worker commands wait until those
+proofs finish. Legacy checkout budget leases still exclude new admissions.
+The linker pool remains separate.
+Nested commands reuse admission only while its private claim, live lock and
+process ancestry validate; setting an environment flag does not waive it.
+
+Waits print `waiting for host memory (proof running), N s` and memory samples.
+`CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS` bounds waiting (default 600 s),
+with `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS` resampling (default 1 s).
+Expiry fails before starting the suite. A running worker command is terminated
+with its own process group if fresh budget falls inside the 2 GiB headroom.
+These are admission estimates and sampled protection, not OS memory limits;
+other applications remain outside this cooperative protocol.
+
+Verified frontend tests default to one Playwright worker, honour explicit requests
+up to four, and enforce two Vitest workers. A proof's own child script tests reuse
+its admitted budget rather than waiting on themselves. Use `TMPDIR` on the
+approved scratch volume for fixture staging. Script-level admission tests need
+no browsers or Cargo: `python3 scripts/test-worker-memory.py`.
+
 ### cas-src close surfaces
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
@@ -490,13 +529,42 @@ the larger of 25% of physical RAM and 8 GiB. Both knobs accept positive integers
 The producer budget uses 8 GiB for the large cas compile/link unit, rounded up
 from soundwave's measured 7,293,348 KiB maximum RSS (serial proof `7e4c6f50`,
 head `abd6817b5`), plus an assumed 256 MiB per dependency job and 2 GiB for
-scripts. A shared host/user linker slot bounds both producers to one link at a
-time, budgeted at 2.1 GiB. Soundwave's 2026-10-05 incremental relink sampler
+scripts. A shared host/user linker pool bounds both producers, budgeted at
+2.1 GiB per link. Soundwave's 2026-10-05 incremental relink sampler
 (`.cas/perf-98a0/link-rss.log`, 0.5s samples) measured 2,190,228 KiB maximum
 `ld.mold` RSS (2.089 GiB), with `rustc` peaking at 4,775,752 KiB (4.555 GiB).
 The cold-proof 8 GiB producer bound remains because incremental code generation
 does not establish the cold peak. Link admission rechecks memory while holding
-the slot; every invocation records child peak RSS in `link-rss.jsonl`.
+an atomic admission lock. The live slot count is
+`clamp(floor((MemAvailable - reserve - 2 GiB) / 2.1 GiB), 1, maximum)`,
+where `CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS` sets the maximum (default 8,
+positive integer). A count of 1 still waits if one link cannot fit. All active
+leases count, including higher slots after memory shrinks or a different cap
+is chosen. Queued children reserve a full estimate before starting; the pool
+is host/user-wide under `/var/tmp`, independent of producer `TMPDIR`.
+Every memory-sampled attempt records capacity and occupancy; every admission
+records its slot. `execution.link_jobs` is the configured maximum, while
+`link_slots` in each admission is the fresh capacity. Each invocation records
+`peak_waited_driver_rss_bytes` in `link-rss.jsonl`: `wait4` RSS for the exact
+waited driver, excluding unwaited workers and unrelated children. The same
+invocation also records `peak_mold_worker_rss_bytes` (largest observed single
+`mold`/`ld.mold` worker) and `peak_process_tree_rss_bytes` (largest sampled sum
+of the driver and its observed descendants). Sampling runs every 100 ms using
+Linux `/proc/*/stat` or macOS `ps`; observed descendants stay attributed by PID
+and start identity after reparenting. The worker peak includes its PID, start
+identity and sample timestamp for comparison with a synchronized external
+sampler. Tree sums may double-count shared pages, and short-lived workers that
+fork and reparent between samples may be missed. These are sampled lower
+bounds, not a complete whole-link high-water mark. `rss_sampling_status`,
+errors, sample count and bounded post-driver drain report incomplete evidence;
+no samples produce null values rather than a fabricated zero peak. A zero
+worker peak with samples means no named mold worker was observed.
+The added observations do not change native linker flags, process groups,
+leases, admission estimates or the memory reserve guard. `estimate_exceeded`
+still checks the waited driver; `sampled_tree_estimate_exceeded` is observational.
+The external 2.1 GiB estimate above still sizes links pending same-link native
+assembly calibration. The producer start budget reserves one link; additional
+links require fresh pool admission.
 Supervisor memory/PSI samples must validate the estimates on each host.
 Insufficient concurrent capacity selects sequential legs with a fresh memory
 admission before each phase. `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS`
@@ -621,6 +689,23 @@ the embargo; explicitly setting it to an empty string lifts it. Resume then
 finishes the pending announcement evidence without republishing the runtime.
 An embargo never waives the publication or install requirement.
 
+### Supervisor proof targets
+
+Run `python3 scripts/assembly-proof.py prove <epic-worktree>` for assembly.
+Native and archive-clone producers each use their own `<worktree>/target`;
+`CARGO_TARGET_DIR` inherited from a different lane is replaced. For a scoped
+check, use `python3 scripts/proof_target.py run <worktree> -- cargo check --workspace --tests`.
+The scoped test wrapper applies the same target isolation. Command-line
+`--target-dir` overrides are refused, and every proof log records the source
+worktree, HEAD and target path. A target whose recorded source root differs is
+refused, including symlinked targets.
+
+The immutable `.cas/build-cache/current` snapshot seeds compiled dependencies
+with hardlinks where supported. Cargo freshness metadata is copied privately;
+workspace fingerprints/artifacts, incremental state and Cargo locks are never
+seeded. Workspace freshness is also discarded when adopting a legacy target or
+changing HEAD, so old source mtimes cannot bless another tree's exports.
+
 ### Worker build caches
 
 Factory worker spawns use `sccache` automatically when it is installed, while
@@ -638,6 +723,72 @@ Place durable check logs at `target/worker-check.log`, nextest reports under
 The next check re-seeds missing debug outputs from the immutable baseline.
 Active builders and open test/output handles prevent reclamation. Source files,
 receipts and the baseline stay intact; concurrent workers keep independent targets.
+
+Actual worker shutdown also reclaims the complete `target/` after lane, Cargo
+lock, registered-checkout and process checks. Before deletion, non-build files
+including check logs and `nextest` receipts are copied, synced and verified in
+`<project-artifacts>/<last-task>/retired-target/<worker>/<head>-<attempt>/`.
+A worker without an associated task uses the inventory-only `_retired-workers`
+namespace. Recycle keeps its warm target; parked checkouts remain registered.
+Failed evidence copying preserves the target and reports the deferred path and
+retained bytes. Newly CAS-created private targets have a durable external
+record in `.cas/worker-target-owners`, binding checkout and target device/inode,
+plus a unique generation marker inside the target to defeat inode reuse,
+lease inode, creator/builder PID start time and Linux boot identity. This record
+precedes seeding or build data. The capped runner holds the target lifetime
+lease. Checkout directories may use ordinary group-writable Git permissions;
+the target and ownership directory are created privately, and the marker,
+record and lease files reject group or world writes. The runner passes the
+lease to descendants; lane and slot locks remain private to the
+runner. A held lease or matching live owner prevents retirement, including after
+the runner dies. Ownership markers require `target/` to be ignored already.
+Otherwise acquisition places no marker, reports legacy output in the trace and
+continues with retirement disabled. CAS never edits the operator's Git
+configuration or shared exclusions to make a checkout clean.
+Retirement holds the same lease through evidence copying and
+quarantine, revalidating ownership before deletion. On Linux only, verified
+lease-managed targets tolerate opaque unrelated processes while still checking
+every readable output handle, executable and mapping. Unknown legacy targets,
+replaced inodes and unavailable owner identities remain retained with bytes;
+they are never silently adopted. macOS keeps the conservative `lsof` probe.
+
+Assembly and release scratch uses an owner record, PID start-time identity and
+an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before
+cleanup; the parent allows 20 seconds for a nested guard's 5-second escalation.
+A dead lease-managed owner may be swept despite opaque unrelated processes.
+Unknown-provenance paths remain fail-closed. Registered remaps and their bases
+stay intact; only dead owned bases' `suite.tar.zst`, `extract`, `tmp`,
+`cargo-home` and `bin` siblings may be reclaimed (unregistration: cas-638d).
+`gc_report` includes paths, reclaimed/reclaimable and retained bytes in
+`RELEASE_SCRATCH_STATUS_JSON`; scratch `gc_cleanup` requires both `force=true`
+and `dry_run=false`. Reports never create locks or owner records.
+
+Verified dead owners are swept on the next start, including fresh SIGKILL
+leftovers; age only protects unknown provenance. A surviving descendant's
+inherited flock defers cleanup even after its parent exits. The guardian owns
+Bash temporary directories too, so an EXIT trap cannot outrun child teardown.
+`CAS_RELEASE_SCRATCH_MAX_AGE_HOURS` defaults to 6 for unknown paths.
+Each assembly clone uses its own `repo/target` inside owned scratch. A
+`BoundedCache` lease encloses that target's actual use and records cap/age
+cleanup before and after the proof: `CAS_ASSEMBLY_TARGET_MAX_GIB` defaults to
+20 GiB and `CAS_ASSEMBLY_TARGET_MAX_AGE_DAYS` to 7 days. Whole-clone teardown
+still waits for inherited child leases. Only immutable worker dependency
+snapshots seed the clone; workspace artifacts and freshness are private.
+Receipts and `gc_report` retain both legacy `assembly-target` and
+`assembly-target-leased-v1` inventory paths. Neither is a Cargo proof target.
+Unknown, live or opaque caches are retained without silent adoption. Explicit adoption is
+available only in a quiet window and refuses held leases or unknown/live users:
+
+```bash
+python3 scripts/release_scratch.py --repo "$PWD" \
+  --cache .cas/merge-sweeps/assembly-target --adopt-legacy-cache clean
+```
+
+On soundwave, opaque `systemd --user` evidence makes adoption refuse. The
+supervisor must remove the reported legacy cache by hand in a quiet window,
+after confirming no Cargo process is running and no cache lease is held. It was
+29 GB at discovery; use the inventory receipt for its current byte count.
+Never silently adopt or delete an unknown cache to bypass the liveness check.
 
 Lane compile previews carry provenance and a lifetime owner lock. Explicit
 `gc_cleanup force=true dry_run=false` removes stale owned detached previews,
@@ -1001,9 +1152,22 @@ wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
 
-Use `npm test` and `npm run journeys -- <args>` in `hub-web`, or
-`scripts/journey-eval.sh` for journey bundles. These runners refuse successful
-zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
+Workers and independent QA run `npm test`, `npm run typecheck` in `hub-web`,
+and `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected
+journeys at four workers. The wrapper resolves the task's declared target;
+`--affected <base>` binds an explicit base. No browser runs for an empty impact
+selection; it emits an explicit receipt. Caller spec/grep filters are refused.
+
+Factory PreToolUse denies worker/reviewer `--full`, unfiltered Playwright and
+unfiltered journey npm scripts. Named spec or canonical-ID runs remain allowed
+for iteration; a failing spec may be rerun at one worker, retaining the original
+failure. Reuse implementer exact-tip receipts in independent QA and do not
+rerun browsers for doc/ledger-only commits with unchanged evaluated inputs.
+The supervisor runs `scripts/journey-eval.sh <epic-artifact-dir> --full --workers=4`
+once at epic assembly; merge queue runs the full suite again. Receipts fold all
+native parts by actual catalog ID and record full base/head, pass/fail/skip
+counts, Playwright version and the native exit code. Native runners refuse
+successful zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
 when requested. Rust re-exec helpers require the exact child name, one selected
 test, and one passing result; intentional signal/atexit children instead prove
 entry into the test body before their early exit.

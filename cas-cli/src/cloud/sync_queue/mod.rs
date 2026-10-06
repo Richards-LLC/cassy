@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 use crate::error::CasError;
 
+mod dependency_repair;
 mod dependency_tombstones;
 mod maintenance;
 mod metadata;

@@ -46,6 +46,21 @@ impl SyncQueue {
             [],
         )?)
     }
+    /// Count the personal rows `purge_team_owned_personal_rejections` would
+    /// remove (cas-25c1). A non-zero count while `cloud.team_only` is off is
+    /// the cloud saying this project belongs to a team: status, doctor and the
+    /// sync summary name the mismatch and its fix instead of hiding the rows.
+    pub fn team_owned_personal_rejection_count(&self) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE team_id = ''
+             AND last_outcome = 'rejected' AND last_reason = 'team_owned_project'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Mark an item as successfully synced (removes from queue).
     pub fn mark_synced(&self, id: i64) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();
@@ -210,12 +225,13 @@ impl SyncQueue {
     ) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            r#"
+            &format!(r#"
             SELECT COUNT(*) FROM sync_queue
-            WHERE retry_count >= ?1 AND (team_id IS NULL OR team_id = '')
+            WHERE retry_count >= ?1 AND NOT {intentional}
+              AND (team_id IS NULL OR team_id = '')
               AND entity_type != 'knowledge_page'
               AND (?2 IS NULL OR entity_type = ?2)
-            "#,
+            "#, intentional = super::dependency_repair::INTENTIONAL_PARK),
             params![max_retries, entity_type.map(|kind| kind.as_str())],
             |row| row.get(0),
         )?;
@@ -261,7 +277,7 @@ impl SyncQueue {
     ) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sync_queue WHERE retry_count >= ?1 AND team_id = ?2",
+            &format!("SELECT COUNT(*) FROM sync_queue WHERE retry_count >= ?1 AND team_id = ?2 AND NOT {}", super::dependency_repair::INTENTIONAL_PARK),
             params![max_retries, team_id],
             |row| row.get(0),
         )?;

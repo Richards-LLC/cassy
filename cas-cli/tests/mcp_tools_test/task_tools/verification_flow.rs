@@ -348,6 +348,128 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
     core
 }
 
+/// cas-5c7a closed external ops while the supervisor checkout carried other
+/// Rust work beyond the task's main target. No delivery receipt or lane was
+/// recorded for the chore; its portable external proof is the delivery.
+async fn no_code_scoped_close_fixture(
+    test_env: &mut TestEnvGuard,
+    own_commit: bool,
+    external_ref: Option<&str>,
+) -> (TempDir, String) {
+    let (temp, _core) = setup_cas(test_env);
+    let repo = temp.path();
+    let cas_dir = repo.join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = 'cas-2d27-fixture'\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n",
+    )
+    .unwrap();
+    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::create_dir_all(repo.join("cas-cli/tests")).unwrap();
+    std::fs::create_dir_all(repo.join("cas-cli/src")).unwrap();
+    std::fs::write(
+        repo.join("cas-cli/Cargo.toml"),
+        "[package]\nname = 'cas'\nversion = '0.1.0'\nedition = '2024'\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("cas-cli/src/lib.rs"), "pub fn seed() {}\n").unwrap();
+    proof_boundary_git(repo, &["add", ".gitignore", "cas-cli"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "seed main"]);
+    proof_boundary_git(repo, &["checkout", "-q", "-b", "epic/unrelated-work"]);
+    // This is intentionally unclaimed lane work: a task window alone must
+    // not turn a no-code supervisor close into delivery of the epic's tests.
+    std::fs::write(
+        repo.join("cas-cli/tests/ops_regression.rs"),
+        "#[test]\nfn ops_regression() { assert!(true); }\n",
+    )
+    .unwrap();
+    proof_boundary_git(repo, &["add", "cas-cli/tests/ops_regression.rs"]);
+    let message = if own_commit {
+        "test(cas-5c7a): actual task delivery"
+    } else {
+        "test: unrelated epic proof"
+    };
+    proof_boundary_git(repo, &["commit", "-q", "-m", message]);
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-5c7a".into(), "Repair cloud identity".into());
+    task.status = TaskStatus::InProgress;
+    task.task_type = TaskType::Chore;
+    task.execution_note = Some("no-code".into());
+    task.external_ref = external_ref.map(str::to_string);
+    task.risk = vec![cas::types::TaskRisk::None];
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-2d27-fixture".into(),
+        target_branch: "main".into(),
+    });
+    tasks.add(&task).unwrap();
+    let supervisor = registered_supervisor(&cas_dir, "no-code-ops-supervisor").await;
+    let mut request = close_request(&task.id, "reviewed external ops; no code delivery");
+    request.supervisor_override = Some(true);
+    let closed = extract_text(
+        supervisor
+            .cas_task_close(Parameters(request))
+            .await
+            .unwrap(),
+    );
+    (temp, closed)
+}
+
+#[tokio::test]
+async fn no_code_chore_close_ignores_unrelated_scoped_rust_diff_cas_2d27() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, closed) =
+        no_code_scoped_close_fixture(&mut test_env, false, Some("petra-stella-cloud#82")).await;
+    assert!(closed.contains("Closed task:"), "{closed}");
+    let stored = open_task_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get("cas-5c7a")
+        .unwrap();
+    assert_eq!(stored.status, TaskStatus::Closed);
+    assert!(stored.notes.contains("petra-stella-cloud#82"));
+    assert!(!stored.notes.contains("SCOPED_PROOF:"));
+    assert!(stored.deliverables.factory_branch_anchor.is_none());
+}
+
+#[tokio::test]
+async fn no_code_chore_with_own_rust_commit_keeps_scoped_proof_gate_cas_2d27() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, refused) =
+        no_code_scoped_close_fixture(&mut test_env, true, Some("petra-stella-cloud#82")).await;
+    assert!(
+        refused.contains("scoped proof receipt has base None"),
+        "{refused}"
+    );
+    assert!(refused.contains("--test ops_regression"), "{refused}");
+    assert_eq!(
+        open_task_store(&temp.path().join(".cas"))
+            .unwrap()
+            .get("cas-5c7a")
+            .unwrap()
+            .status,
+        TaskStatus::InProgress
+    );
+}
+
+#[tokio::test]
+async fn no_code_chore_without_portable_external_proof_still_refuses_cas_2d27() {
+    for external_ref in [None, Some("/tmp/host-local-proof")] {
+        let mut test_env = TestEnvGuard::temp_home();
+        let (temp, refused) =
+            no_code_scoped_close_fixture(&mut test_env, false, external_ref).await;
+        assert!(refused.contains("NO-CODE PROOF REQUIRED"), "{refused}");
+        assert_eq!(
+            open_task_store(&temp.path().join(".cas"))
+                .unwrap()
+                .get("cas-5c7a")
+                .unwrap()
+                .status,
+            TaskStatus::InProgress
+        );
+    }
+}
+
 #[tokio::test]
 async fn public_verdicts_project_only_their_receipt_bound_delivery() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -11567,6 +11689,105 @@ fn supervisor_scopes_restore_prior_values_on_unwind_cas_525b() {
     assert!(std::env::var_os("CAS_FACTORY_WORKER_CLI").is_none());
 }
 
+
+/// Exercise both public entry points involved in the historical dead end:
+/// the notes traffic limit and the post-merge snapshot close gate.
+async fn snapshot_hash_note_close_cas_1f28(correct_hash: bool) {
+    use sha2::{Digest, Sha256};
+
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas_as(&mut env, AgentRole::Supervisor);
+    let repo = temp.path();
+    let cas_dir = repo.join(".cas");
+    std::fs::write(cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = 'cas-1f28-fixture'\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n").unwrap();
+    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    let path = "crates/cas-mux/src/opencode_projection.snapshot.json";
+    std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+    std::fs::write(repo.join(path), "{\"prompt\":\"old\"}\n").unwrap();
+    proof_boundary_git(repo, &["add", ".gitignore", path]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "seed"]);
+    let branch = "factory/snapshot-worker-cas-1f28";
+    proof_boundary_git(repo, &["checkout", "-q", "-b", branch]);
+    let changed = format!("{{\"prompt\":\"worker {}\"}}", "x".repeat(3200));
+    assert!(changed.chars().count() > 1500);
+    std::fs::write(repo.join(path), format!("{changed}\n")).unwrap();
+    proof_boundary_git(repo, &["add", path]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "fix(cas-1f28): reviewed worker projection"]);
+    let output = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap();
+    assert!(output.status.success());
+    let tip = String::from_utf8(output.stdout).unwrap().trim().to_string();
+    proof_boundary_git(repo, &["checkout", "-q", "main"]);
+    proof_boundary_git(repo, &["merge", "-q", "--ff-only", branch]);
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-1f28".into(), "Review long worker snapshot".into());
+    task.task_type = TaskType::Bug;
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("snapshot-worker".into());
+    task.risk = vec![cas::types::TaskRisk::None];
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.parked_branch = Some(branch.into());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-1f28-fixture".into(), target_branch: "main".into(),
+    });
+    store.add(&task).unwrap();
+    let service = CasService::new(core, None);
+    let close = || serde_json::json!({
+        "action": "close", "id": task.id, "commit_receipt": tip,
+        "supervisor_override": true, "reason": "Reviewed the merged worker projection against its contract",
+    });
+    let (failed, refusal) = snapshot_task_call_cas_1f28(&service, close()).await;
+    assert!(failed && refusal.contains("SNAPSHOT APPROVAL REQUIRED"), "{refusal}");
+    assert!(refusal.contains("sha256:"), "{refusal}");
+    assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+
+    // Sending the old literal prescription through MCP is actually refused;
+    // validating a string directly would miss entry-point limit regressions.
+    let before_notes = store.get(&task.id).unwrap().notes;
+    let literal = format!("snapshot-approved: {path} — +{changed} — matches reviewed behavior");
+    let (failed, refusal) = snapshot_task_call_cas_1f28(&service, serde_json::json!({
+        "action": "notes", "id": task.id, "note_type": "decision", "notes": literal,
+    })).await;
+    assert!(failed && refusal.contains("1500"), "{refusal}");
+    assert_eq!(store.get(&task.id).unwrap().notes, before_notes);
+
+    let signed_line = if correct_hash { format!("+{changed}") } else { format!("+{changed}different tail") };
+    let hash = format!("{:x}", Sha256::digest(signed_line.as_bytes()));
+    let note = format!("snapshot-approved: {path} — sha256:{hash} — matches reviewed worker behavior");
+    assert!(note.chars().count() < 1500);
+    let (failed, text) = snapshot_task_call_cas_1f28(&service, serde_json::json!({
+        "action": "notes", "id": task.id, "note_type": "decision", "notes": note,
+    })).await;
+    assert!(!failed, "bounded decision note must reach the store: {text}");
+    assert!(store.get(&task.id).unwrap().notes.contains(&note));
+    let (failed, text) = snapshot_task_call_cas_1f28(&service, close()).await;
+    if correct_hash {
+        assert!(!failed && text.contains("Closed task:"), "{text}");
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
+    } else {
+        assert!(failed && text.contains("SNAPSHOT APPROVAL REQUIRED"), "{text}");
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+    }
+}
+
+async fn snapshot_task_call_cas_1f28(service: &CasService, value: serde_json::Value) -> (bool, String) {
+    let request: cas_mcp::TaskRequest = serde_json::from_value(value).unwrap();
+    match service.task(Parameters(request)).await {
+        Ok(response) => (response.is_error == Some(true), extract_text(response)),
+        Err(error) => (true, error.message.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn long_snapshot_hash_decision_fits_note_limit_and_closes_cas_1f28() {
+    snapshot_hash_note_close_cas_1f28(true).await;
+}
+
+#[tokio::test]
+async fn mismatched_long_snapshot_hash_still_refuses_close_cas_1f28() {
+    snapshot_hash_note_close_cas_1f28(false).await;
+}
 
 // GH #1121: successful evidence must close without a product-code merge.
 #[tokio::test]

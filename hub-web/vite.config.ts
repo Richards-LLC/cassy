@@ -18,6 +18,9 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
   define: { __HUB_BUILD__: JSON.stringify(hubBuild) },
   base: "/commander/",
+  // cas-9b7d: keep @hpke/common's Node-only `import("crypto")` fallback out
+  // of the bundle; dist must hold exactly the files the hub embeds.
+  resolve: { alias: { crypto: fileURLToPath(new URL("./src/shims/node-crypto-unavailable.ts", import.meta.url)) } },
   // Playwright specs live under e2e/ and must not be collected by vitest.
   // check-journey-clock.test.mjs uses node:test and runs via `npm run check:journey-clock`.
   test: { exclude: [...configDefaults.exclude, "e2e/**", "scripts/check-journey-clock.test.mjs"] },
@@ -27,6 +30,9 @@ export default defineConfig({
     rollupOptions: {
       output: {
         entryFileNames: "app.js",
+        // The hub serves only app.js for script (server.rs include_bytes):
+        // any dynamic import must stay inside it, never become a chunk.
+        inlineDynamicImports: true,
         chunkFileNames: "chunk-[name].js",
         assetFileNames(asset) {
           const name = asset.names[0] ?? "asset";

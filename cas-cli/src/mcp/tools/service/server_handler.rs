@@ -359,13 +359,26 @@ impl CasService {
                     // is not followed by a late write the caller never sees.
                     handle.abort();
                 }
-                let outcome = self.mutation_timeout_outcome(tool_name, arguments, commit);
+                // cas-24d8: a close commits intermediate writes (a gate note,
+                // a parked anchor) long before its Closed write. Reporting
+                // those as COMMITTED told the supervisor a close was done
+                // while the task was still awaiting_merge. Only the terminal
+                // write makes a close committed; until then it is running.
+                let close_unfinished = tool_name == "task"
+                    && receipt.action() == "close"
+                    && commit.is_some()
+                    && receipt.terminal.get().is_none();
+                let outcome = if close_unfinished {
+                    "IN_PROGRESS (the close has not committed: only intermediate writes have, so the task's status is unchanged so far; the close keeps running in the background — re-query with task action=show before retrying)".to_string()
+                } else {
+                    self.mutation_timeout_outcome(tool_name, arguments, commit)
+                };
                 warn!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, budget_ms = budget.as_millis() as u64, mutation_outcome = %outcome, "MCP response deadline elapsed");
                 Err(rmcp::ErrorData {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                     message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
                         "budget_ms": budget.as_millis() as u64,
@@ -754,6 +767,38 @@ mod tests {
                 .notes
                 .contains("committed note")
         );
+    }
+
+    /// cas-24d8: a close that committed only an intermediate write (a gate
+    /// note, a parked anchor) before the deadline has not closed anything.
+    /// It must not be reported as COMMITTED.
+    #[tokio::test]
+    async fn close_deadline_after_an_intermediate_write_reports_in_progress_cas_24d8() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        let temp = tempfile::tempdir().unwrap();
+        let service = CasService::new(
+            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments = serde_json::json!({"action":"close", "id":"cas-park"});
+        let close = async {
+            super::super::mutation_receipt::task_committed("cas-park");
+            std::future::pending().await
+        };
+        let error = service
+            .call_with_deadline(
+                "task",
+                arguments.as_object(),
+                std::time::Duration::from_millis(20),
+                close,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("IN_PROGRESS"), "{error:?}");
+        assert!(!error.message.contains("COMMITTED ("), "{error:?}");
+        assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
     }
 
     #[tokio::test]

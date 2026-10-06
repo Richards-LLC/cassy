@@ -1,10 +1,15 @@
+import { withRequestDeadline } from "./request-deadline";
 import { pairingExchangeFailure, unreachableHubMessage } from "./pairing-messages";
 import type { PendingInvitation, PairingRelayDelivery } from "./pending-pairing";
 import type { PairingInstallIdentity, Scope, StoredMachine } from "./types";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-interface ExchangeOptions {
+export interface ExchangeOptions {
+  rotateKey?: boolean;
+  installation?: {operation_id: string; credential: string; device_id: string | null; expected_generation: number; proof: string; previous_proof: string | null};
+  commitPrepared?: () => Promise<void>;
+  abortPrepared?: () => Promise<void>;
   invitation: PendingInvitation;
   controllerOrigin: string;
   legacyHubUrl?: string;
@@ -79,45 +84,62 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
   if (!scopes?.length) {
     throw new PairingExchangeError("Tick at least one scope this invitation grants, then tap Pair again.", { recoverable: true });
   }
-  const { privateKey, publicKey } = await options.createKey();
-  ensureCurrent(options);
-  const endpoint = new URL("/v1/auth/pairing/exchange", baseUrl);
-  let response: Response;
-  try {
-    response = await options.fetcher(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "omit",
-      signal: options.signal,
-      body: JSON.stringify({
-        token: invitation.token,
-        hub_id: invitation.hubId,
-        controller_origin: options.controllerOrigin,
-        public_key_jwk: publicKey,
-        device_label: options.deviceLabel,
-        operator_label: options.operatorLabel,
-        requested_scopes: scopes,
-      }),
-    });
-  } catch (error) {
-    // A cancelled exchange keeps its own cancellation path. Any other fetch
-    // rejection is uncertain: the POST may have reached the hub before its
-    // response was lost, so retain a retry without claiming nonconsumption.
-    if (options.signal?.aborted || options.isCurrent?.() === false) throw error;
-    throw new PairingExchangeError(unreachableHubMessage(endpoint.origin), { recoverable: true });
-  }
-  ensureCurrent(options);
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    const failure = pairingExchangeFailure({
-      status: response.status,
-      body: detail,
-      controllerOrigin: options.controllerOrigin,
-      retryAfter: response.headers.get("Retry-After"),
-    });
-    throw new PairingExchangeError(failure.message, { recoverable: failure.keepInvitation });
-  }
-  const credential = await response.json().catch(() => null) as Record<string, unknown> | null;
+  const { privateKey, publicKey, credential } = await withRequestDeadline(async signal => {
+    const bounded = { ...options, signal };
+    const { privateKey, publicKey } = await options.createKey();
+    ensureCurrent(bounded);
+    const endpoint = new URL("/v1/auth/pairing/exchange", baseUrl);
+    let response: Response;
+    try {
+      response = await options.fetcher(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "omit",
+        signal: bounded.signal,
+        body: JSON.stringify({
+          token: invitation.token,
+          hub_id: invitation.hubId,
+          controller_origin: options.controllerOrigin,
+          public_key_jwk: publicKey,
+          device_label: options.deviceLabel,
+          operator_label: options.operatorLabel,
+          requested_scopes: scopes,
+          ...(options.installation ? { installation: options.installation } : {}),
+        }),
+      });
+    } catch (error) {
+      // A cancelled exchange keeps its own cancellation path. Any other fetch
+      // rejection is uncertain: the POST may have reached the hub before its
+      // response was lost, so retain a retry without claiming nonconsumption.
+      if (bounded.signal.aborted || options.isCurrent?.() === false) throw error;
+      throw new PairingExchangeError(unreachableHubMessage(endpoint.origin), { recoverable: true });
+    }
+    ensureCurrent(bounded);
+    if (response.status === 409 && options.installation) throw new PairingExchangeError("Another tab updated this installation. Retry pairing to use its current access.", { recoverable: true });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      const failure = pairingExchangeFailure({
+        status: response.status,
+        body: detail,
+        controllerOrigin: options.controllerOrigin,
+        retryAfter: response.headers.get("Retry-After"),
+      });
+      throw new PairingExchangeError(failure.message, { recoverable: failure.keepInvitation });
+    }
+    const credential = await response.json().catch(() => null) as Record<string, unknown> | null;
+    ensureCurrent(bounded);
+    return { privateKey, publicKey, credential };
+  }, options.signal).catch(error => {
+    if (options.signal?.aborted || options.isCurrent?.() === false) {
+      throw new PairingExchangeError("Pairing was cancelled before the credential could be installed.");
+    }
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new PairingExchangeError("Pairing timed out after 10s. Allow Local network access for this page in your browser's site settings, check Tailscale, then tap Pair again. This invitation may already have been used; if retry is refused, ask the machine for a fresh invitation.", { recoverable: true });
+    }
+    throw error;
+  });
+  // The deadline ends before storage starts; installation keeps the original
+  // cancellation boundary and can complete or roll back its writes safely.
   ensureCurrent(options);
   if (!credential || typeof credential.device_id !== "string" || typeof credential.credential_id !== "string" || typeof credential.credential !== "string" || typeof credential.expires_at !== "string" || !Array.isArray(credential.scopes)) {
     throw new PairingExchangeError("The paired hub returned an invalid credential.");
@@ -127,6 +149,8 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     throw new PairingExchangeError("The paired hub returned invalid credential scopes.");
   }
   const machine: StoredMachine = {
+    credentialGeneration: typeof credential.credential_generation === "number" ? credential.credential_generation : undefined,
+    accountEnrollment: { state: "unenrolled" },
     id: invitation.hubId,
     label: invitation.machineLabel ?? options.machineLabel ?? invitation.hubId.slice(0, 8),
     baseUrl,
@@ -167,6 +191,8 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       ensureCurrent(options);
     }
     ensureCurrent(options);
+    await options.commitPrepared?.();
+    ensureCurrent(options);
     if (!await persist(() => options.activatePersisted(identity, options.signal))) {
       throw new PairingExchangeError("This pairing credential was superseded before installation completed.");
     }
@@ -174,6 +200,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
   } catch (error) {
     if (staged) {
       try {
+        await options.abortPrepared?.();
         await options.rollbackPersisted(identity);
       } catch (cleanupError) {
         throw new PairingCleanupError(cleanupError);

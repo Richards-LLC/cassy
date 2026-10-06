@@ -1,5 +1,7 @@
 # Visual-QA plan for the Commander
 
+> **Retired (cas-0546, 2026-10-05).** The Terminal view this document designs (fleet board, session ledger, machine rail, pane grid, fleet-wide Attention feed, take-control, side composer) was removed; Conversations is Commander's only surface (see `hub-web/DESIGN.md`). Kept as a historical design record.
+
 What `scripts/visual-qa.mjs` finds on the 3.17.3 Commander today, class by class, with the
 justification each allowlist entry will carry in Unit 6 (cas-211c) — or **must fix**, naming the
 unit that owns it. Unit 7 (cas-b296) shows the delta against the counts below.

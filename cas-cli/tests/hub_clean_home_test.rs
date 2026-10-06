@@ -2121,3 +2121,49 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
 
 #[path = "../../crates/cas-core/src/test_child.rs"]
 mod child_test_evidence;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
+    let home = private_home();
+    let manager = home.path().join("slow-systemctl");
+    let pid_log = home.path().join("manager-pids");
+    cas::test_paths::warm_stub(
+        &manager,
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"$CAS_MANAGER_PID_LOG\"\nexec /usr/bin/tail -f /dev/null\n",
+    );
+    let started = Instant::now();
+    let output = cas_command(home.path(), &system_path())
+        .env("CAS_HUB_SYSTEMCTL", &manager)
+        .env("CAS_MANAGER_PID_LOG", &pid_log)
+        .args(["hub", "status", "--json"])
+        .timeout(Duration::from_secs(4))
+        .output();
+    let elapsed = started.elapsed();
+    // Reap only this fixture's diagnostic children if the old unbounded path
+    // outlives the CLI's independent assertion timeout. No live manager used.
+    if let Ok(pids) = fs::read_to_string(&pid_log) {
+        for pid in pids.lines().filter_map(|line| line.parse::<i32>().ok()) {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+    let output = output.expect("run bounded status");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "manager pinned status: {elapsed:?}"
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("one status document");
+    assert_eq!(status["service_status"], "unknown", "{status}");
+    assert!(
+        status["service_warning"]
+            .as_str()
+            .unwrap()
+            .contains("timed out")
+    );
+    assert_eq!(
+        status["runtime_receipt"]["boot_prerequisites"]["service_active"],
+        Value::Null
+    );
+    assert_eq!(status["runtime_receipt"]["hub"]["state"], "unknown");
+    assert!(!home.path().join(".cas/hub").exists());
+}

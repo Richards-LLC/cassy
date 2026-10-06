@@ -28,7 +28,13 @@ Projects that keep a catalog describe the contract in
 ## Run them and keep the receipts
 
 Run the project's journey suite, for example
-`scripts/journey-eval.sh <artifacts_root>/<project-key>/<task-id> --grep <ID>`. Each
+`scripts/journey-eval.sh <artifacts_root>/<project-key>/<task-id>`. It resolves
+the task target, selects affected journeys itself and runs four workers.
+`--affected <base>` sets an explicit base. The producer owns the native ID
+filter, including supplemental specs and parts. No selected IDs writes an
+explicit empty receipt without launching a browser. Factory workers and QA
+cannot use `--full` or an unfiltered Playwright run; the supervisor owns the
+full epic assembly run and the merge queue runs it again. Each
 journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
 `producer` field of its `bundle.json` set to `journey`.
 
@@ -50,7 +56,13 @@ The files are:
 | `result.json` | The stage titles and timings |
 
 `<task-id>/journeys/JOURNEYS.md` summarises the run. Cite these paths in the
-ledger.
+ledger. `journey-receipt.json` records full base/head SHAs, the canonical
+selection IDs, native per-ID pass/fail/skip counts, tool version and suite exit.
+Include its path as `journey_receipt` in the implementer/QA bundle. Repeat runs
+archive prior receipts under `journey-runs/`; retain the original failed run
+when checking a single failing spec at one worker. Reviewers may reuse the
+implementer's receipt for the exact same tip. Document-only rebinds follow
+[the receipt contract](evidence-bundle.md#affected-journey-receipt).
 
 ## Score the experience
 

@@ -7,6 +7,312 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.47.0] - 2026-10-06
+
+### Added — Commander cloud operator inbox
+
+- Commander can read and answer supervisors from any signed-in browser while
+  the machine is off. The cloud keeps up to 90 days of conversation history,
+  encrypted when stored and sent (HPKE and AES-GCM through the new
+  `cas-operator-crypto` crate and a byte-identical browser implementation).
+  The cloud holds the keys, so this is not end-to-end encryption, and the
+  sign-in screen says so. A newly signed-in browser, such as a new phone,
+  replays and decrypts that history; a message that can't be opened or
+  verified is never shown, and the thread says how many were withheld.
+- A reply typed while the machine is off is held as a command sealed to the
+  machine's key. It reads "Pending machine" until the machine admits it and
+  "Accepted by machine" after its signed receipt; the same command is resent
+  unchanged after an outage and admitted at most once. Undelivered commands
+  expire after 24 hours.
+- Sign-in is approved by the operator's Petra Stella Cloud account: the
+  "Operator inbox" dialog shows a code to confirm on the cloud, or to approve
+  from an enrolled machine with `cas hub operator approve <code>`.
+- The hub enrolls the machine with the cloud (`cas hub operator enroll`,
+  `status`, `approve`, `deny`, `principals`, `revoke-device`,
+  `revoke-machine`, `bind`, `detach`, `drain`). The machine key lives in
+  `~/.cas/hub/operator-inbox/machine.json` (mode 0600), and requests carry a
+  proof-of-possession signature.
+- Every operator-visible turn (MCP reply, mirrored transcript, watchdog notice)
+  is written together with an immutable outbox row in one SQLite transaction
+  (migration m263 `operator_delivery_outbox`), so a turn can't be stored
+  without its delivery record. A 15-second drain loop sends pending rows. The
+  hub's content-security policy names exactly the cloud's operator inbox API
+  origin, with no wildcard.
+- The hub verifies the cloud's signed enrollment assertion before marking an
+  installation enrolled: `POST /v1/auth/account/challenge` and
+  `/v1/auth/account/enrollment` (one-use challenge, 5-minute lifetime, at most
+  4 per device; the assertion's audience, key thumbprint and account must
+  match). The installation inventory's Account row reads "Not in an operator
+  inbox" or "Operator inbox (key epoch N)".
+
+### Fixed — Commander sends and replies
+
+- Held sends are claimed atomically per item in an IndexedDB journal scoped to
+  the hub, device and session, so two tabs can no longer both send the same
+  message. Waiting and uncertain sends survive a reload and are never resent
+  automatically.
+- A message sent from two tabs, or across a reload, goes out exactly once: a
+  delivery receipt seen in either tab settles the send in both, and Retry
+  works from either tab, resending under the message's original reference so
+  a late receipt can't produce a second copy or leave Retry stuck.
+- The composer's "will go out by itself" line shows only while a message is
+  actually held, and clears once it is delivered, including when another tab
+  delivered it.
+- Sending after this device's control of the session has lapsed takes control
+  and then sends; the "Taking control of … to deliver this message" notice now
+  clears as soon as control is held instead of staying under the reply.
+- A refused or unavailable send settles against the claim that sent it, so
+  Cancel removes a waiting message and a late refusal can't put a newer Retry
+  back on hold.
+- A resolved delivery notice stays resolved after a reload: notices are no
+  longer kept in the device's reply journal, and older journaled notices are
+  pruned, so they can't come back as Blocker bubbles in the conversation.
+- A reply counts as delivered to a device only after that browser stores it:
+  the browser sends `OperatorReplyPersisted` and the hub records a per-device
+  receipt (migration m264 `operator_reply_device_receipts`). Reply captions
+  read "Forwarded · not stored on this device" and then "Stored on this
+  device"; neither claims the reply was read.
+
+### Changed — Commander pairing and installations
+
+- Re-pairing a browser proves its retained signing key and rotates that same
+  installation's credential instead of creating a new device each time (one
+  host had accumulated 14). New routes `/v1/auth/pairing/{protocol,commit,abort}`,
+  `/v1/auth/devices` and `/v1/auth/devices/{device}/revoke`; tabs coordinate
+  through a Web Lock and a secret-free catalog generation.
+- Each Paired machines row opens an installation inventory: "This browser"
+  with its device ID, generation, first paired, last use, origin, key
+  fingerprint and account. "Revoke" confirms the exact device ID, "Remove from
+  this browser" is separate, and an uncertain cleanup offers "Retry cleanup".
+- An invitation can request "Hub administration" (`hub:admin`), never
+  pre-ticked, which allows revoking other installations.
+
+### Added — Commander connection causes and diagnostics
+
+- "Connection details" opens a Connection log that states the cause (for
+  example "Hub says access was revoked", "Event sequence gap detected" or
+  "Network or browser policy blocked the request"), the recovery action, the
+  next retry and the last successful connection. "Export safe diagnostics"
+  downloads `commander-connection-diagnostics.json` without credentials, keys
+  or prompts.
+- 18 typed causes are kept in a bounded 64-entry transition log. The hub adds
+  `X-Cas-Request-Id` (exposed only to granted origins) and `x-cas-refusal`,
+  and the event stream sends explicit lag and epoch markers instead of
+  silently skipping records. Reads, pairing and credential refresh have 10 s
+  deadlines; catalog refresh is limited to one request in flight plus one
+  trailing, at least 1 s apart.
+
+### Changed — Commander conversations
+
+- The legacy Terminal view is removed; Conversations is Commander's only
+  surface (about 6,200 lines deleted; the bundle shrinks from 501 KB to 449 KB
+  of JS and from 177 KB to 136 KB of CSS). The conversation header gains
+  Interrupt (it names the device it took control from, or says inline why it
+  can't act) and Raw output, a read-only drawer on desktop and a bottom sheet
+  on phones.
+- Questions show quick replies only for options they declare; otherwise the
+  reply goes in the composer. Each question appears once, in the thread, with a
+  compact "Waiting on you" bookmark that jumps to it. Only questions and
+  blockers count as waiting on you.
+- Previews render Markdown as plain text, statuses read "In progress",
+  "Awaiting merge" or "Held", and the side rail lists the real roster with each
+  member's current work, or "Current work not reported".
+- A failed fleet action's note spans the full row at desktop widths and names
+  its subject without squeezing to a narrow column.
+
+### Fixed — Commander sessions, recovery and layout
+
+- New session asks once: the first "Allow starting sessions on <machine>"
+  grants the permission and opens the project list, instead of leading to a
+  second confirmation sheet that asked for the same permission under another
+  name.
+- A half-open machine stays "Unsteady" until four heartbeats are missed. A
+  failed or timed-out catalog read triggered by an event is now left to the
+  heartbeat instead of ending the event stream, which had turned "Unsteady"
+  into "Reconnecting" after one missed beat. A refused pairing still ends the
+  stream at once.
+- A keyboard-focused or open conversation row shows the whole machine name,
+  wrapped clear of the time stamp; resting rows keep their one-line ellipsis.
+- On phones, the header's machine line no longer clips its glyphs, and a
+  conversation opened from search by touch lands focus on the reading region
+  instead of dropping it to the page, without raising the on-screen keyboard.
+- In a landscape phone pane (844×390) the connection-failure card scrolls
+  vertically, so Retry and Diagnose are no longer cut off.
+
+### Fixed — cloud sync
+
+- A team-linked sync's receipt counts the real queue: the team backlog, held
+  personal pending and failed rows with their rejection reasons, and a warning
+  when held rows failed. It had read "0 pending, 0 failed/parked" while
+  thousands of personal rows sat rejected as `team_owned_project`.
+- `cas cloud status` reports the team pull watermark, advanced on every
+  successful team pull including ones with nothing newer, and labels the
+  personal one. Status and `cas doctor` flag personal `team_owned_project`
+  rejections while `cloud.team_only` is off, with the exact fix command.
+- Healing a historical parent-child dependency stages its own-project endpoint
+  tasks that are missing on the cloud, insert-only so a pending newer write and
+  its retry metadata survive, and holds the edge until those tasks exist.
+  Deleted, moved and foreign endpoints are refused and parked with a reason
+  instead of burning retries as `orphan_dependency`. Legacy memories with no
+  origin project park as `unattributed_origin`, and intentional parks are
+  reported apart from failures. Existing stranded rows repair after an updated
+  runtime pulls, then pushes once.
+
+### Fixed — Commander hub status
+
+- `cas hub status --json` adds a read-only `runtime_receipt` after a restart:
+  separate results for the hub, Serve publication, external reach and
+  projects, boot prerequisites (Linux linger, macOS login) and the next step.
+  It never claims jobs resumed.
+- Service-manager probes have a 500 ms limit, so a stuck `systemctl` or
+  `launchctl` no longer blocks status; the state reads "service manager
+  unknown (timed out)" and restart refuses to change service ownership while
+  it is unknown.
+
+### Changed — browser test tiering
+
+- Journey selection follows source impact. `scripts/journeys-for-diff.py`
+  ignores the rebuilt `hub-web/dist` and maps changes through each journey's
+  declared touches, static imports, `main.ts` symbol ownership and changed CSS
+  selectors; tokens, base rules and unattributable changes still select the
+  whole surface. A one-module fix selected 1 journey instead of all 18.
+- `scripts/journey-eval.sh <artifact-dir>` runs the affected selection at 4
+  workers by default (`--affected <base>`, `--workers=1..4`, `--task <id>`);
+  an empty selection launches no browser. `--full` runs the whole suite and is
+  reserved for epic assembly; a PreToolUse guard denies `--full` and
+  unfiltered Playwright to workers and QA reviewers.
+- Close and QA gates recompute the selection at the delivered tip and require
+  a passing `journey-receipt.json` for every selected journey, refusing with
+  the missing, failing or unrecorded IDs. An epic close requires one
+  full-suite receipt. Previously each hub-web delivery ran the full ~80-test
+  suite three times, about an hour of browser tests.
+
+### Added — release learning loop
+
+- The release receipts stage refuses to finish until every blocked stage and
+  every hand fix maps to a learned gate row or an open task, and prints the
+  exact `release-gate.sh --learn` command to record it. Four missed lessons
+  from 3.42.0–3.46.0 are back-filled in the failure log.
+- `INTERVENTIONS` is counted from the evidence (resumed blocked stages, hand
+  fixes and manual rows) instead of `kind=manual` rows only, which had printed
+  0 since 3.42.0; 3.46.0 replays as 8. The release report gets a "Manual
+  interventions" row and both Slack replies a "Release effort" line.
+- A `publish-toolchain` gate and cut-preflight row loads the real
+  `cargo-zigbuild` configuration before a release lands, catching the class of
+  error that needed hotfix PR #1132 in 3.46.0. A failed publish deletes the
+  local tag it created once the remote is proven to have none.
+- The off-main tooling warning captures git noise and skips merged, stale,
+  epic-covered and duplicate refs, printing one summary line.
+
+### Fixed — factory messaging and workers
+
+- A message to a busy worker whose wake budget runs out is parked as
+  `awaiting_busy_recipient` instead of abandoned; turn-start and tool-boundary
+  hooks still surface it, and `message_status` reads "busy recipient: still
+  pending". The "reassign or recycle" notice fires only after 10 minutes of
+  transcript silence, once per message.
+- `--worker-cli claude` is honoured instead of being replaced by the stock
+  worker default; a worker that falls back from Codex to Claude is labelled
+  and messaged as Claude; `--worker-spec` names name the initial workers, and
+  duplicate or supervisor-clashing names are refused.
+- A clean worker holding tasks can be recycled without `force` and keeps its
+  name, tasks, lease and worktree; `clear_context` errors now name
+  `clear_context`.
+
+### Fixed — close and QA gates
+
+- A park binds its QA round to the delivered tip when every commit since the
+  recorded anchor belongs to the task's own branch, and `qa_request` rebinds a
+  stale pending round to the tip. A shared worker branch or another open
+  task's anchor never moves the anchor, and a close without `commit_receipt`
+  refuses rather than bind QA to a shared branch's old work.
+- A supervisor close of a parked child on a large epic is bounded: the
+  delivery content gate has a 35 s budget, logs
+  `stage=delivery_content_gate elapsed_ms`, and returns a retryable "DELIVERY
+  CONTENT CHECK TIMED OUT" refusal that changes nothing. Its line walk skips
+  unchanged history, batches diffs and messages and leaves regenerated
+  `hub-web/dist` bundles to the regenerated-artifact rule; one replay fell
+  from about 60,000 git processes to about 1,300. A deadline after only an
+  intermediate write reports IN_PROGRESS, not COMMITTED.
+- A registered supervisor can park and close a retired worker's corrected
+  delivery from its pushed commit, validated against the task's work target
+  rather than the retired worker's moved-on worktree, and `qa_request` accepts
+  an explicit head on a reopened task. Unmerged receipts are still refused.
+- A supervisor close whose `commit_receipt` is already an ancestor of the
+  task's work target succeeds without `supervisor_override` when the
+  assignee's checkout is detached on other work. It had failed with "expected
+  task worktree branch …, found ``". Worker self-close, non-supervisor callers
+  and unmerged receipts keep the existing checks.
+- Approving a changed snapshot line by its SHA-256 is now proven end to end
+  through the MCP notes and close path: a literal over the 1,500-character
+  note limit is refused, the correct hash closes, and a same-prefix wrong hash
+  is refused.
+- Close suggestions prescribe real Cargo test targets: modules that now live
+  inside combined targets such as `integration_contracts` are mapped to them,
+  and unknown suites fail closed, instead of a prescribed command failing with
+  "no test target named".
+
+### Fixed — QA and release tooling
+
+- Scoped visual QA matches findings by rule, page, state, viewport, text and
+  accessible name rather than the full CSS selector, so renaming an element no
+  longer turns an existing finding into a new one.
+- The contrast inspector resolves CSS Color 4 colours and opaque background
+  layers; a button reported at 2.57:1 now reads its true 12.08:1.
+- Assembly admits parallel test-binary links from live free memory
+  (`CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS`, default 8) instead of one at a time;
+  the reserve and compile guard are unchanged.
+- Worker browser and JS test suites (npm/npx, Playwright, Vitest and the
+  hub-web build, typecheck and visual-QA entry points) now wait for shared
+  host-memory admission through `scripts/worker-memory.py` instead of starving
+  the release proof. Admission uses weighted counting slots against the fresh
+  memory budget: two browser suites and a typecheck run side by side under a
+  normal budget, a low budget (8 GiB) still runs browser suites one at a time,
+  and light commands (typecheck, Vite build, capped Vitest) never wait behind a
+  browser suite. Proofs keep exclusive priority, waits print
+  `waiting for host memory (proof running), N s` bounded by
+  `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS` (default 600), and a running
+  suite is stopped if free memory falls inside its headroom. A credential or
+  other hook deny still wins over admission. Previously 125 headless browsers
+  pushed free memory below the proof's reserve and aborted it, and a single
+  exclusive lock then made a 1-second build wait minutes behind a browser
+  suite.
+- Script-test fixtures, in-process and subprocess, use private admission pools,
+  so a fixture proof no longer holds or waits on the real host locks. Production
+  admission is unchanged, and no environment variable bypasses it.
+- Assembly link memory receipts also sample the forked `mold` workers of the
+  same link, not only the waited process.
+- Newly seeded worker `target/` directories carry CAS ownership provenance
+  (checkout, target and lease identity, a generation marker, and process start
+  and boot time) before any build data, so retirement can reclaim them even
+  when an unrelated unreadable process is present. A `target/` that git does
+  not ignore stays legacy, with no marker and no reclaim, and seeding still
+  succeeds.
+- Visual QA treats content the engine skips (`content-visibility: hidden`,
+  Chromium's closed `<details>`) as not drawn, and ellipsised one-line text
+  stops the inspector's horizontal clip walk, so neither raises a false
+  clipping finding; a real visible clip still fails.
+- Commander journey fixtures follow the real phone layout in a responsive
+  four-variant lane, and a journey's screenshot settling can no longer outlive
+  its page, with repeat captures isolated per run.
+- Each worktree's Rust proof builds into its own target directory
+  (`scripts/proof_target.py`), and proof logs record the worktree, HEAD and
+  target, so another worktree's build output can't produce a false result.
+- Proof and release scratch is removed on every exit path. An owner record,
+  process start-time identity and an inherited lock let TERM, INT and HUP reap
+  child groups before cleanup, and the next start sweeps verified dead owners,
+  including killed ones; paths of unknown origin are kept until
+  `CAS_RELEASE_SCRATCH_MAX_AGE_HOURS` (default 6). The shared assembly cache is
+  evicted whole above `CAS_ASSEMBLY_TARGET_MAX_GIB` (20 GiB) or after
+  `CAS_ASSEMBLY_TARGET_MAX_AGE_DAYS` (7 days). Worker shutdown reclaims the
+  worker's `target/` after copying its logs and test receipts to the task's
+  artifacts. `gc_report` lists reclaimable and retained bytes; scratch
+  `gc_cleanup` needs `force=true` and `dry_run=false`. On one host about
+  9.7 GB of leaked scratch and a 29 GB assembly cache had built up.
+- Merge-queue journeys cap session reattach delays at 10 s, wait for the retry
+  and for animations to settle, run Playwright with 6 workers in CI, and
+  upload the hidden `.results` traces on failure.
+
 ## [3.46.0] - 2026-10-05
 
 ### Changed — faster assembly proof

@@ -5289,6 +5289,20 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_clear_context_impl(req).await.map_err(|mut error| {
+            // Codex delegates to safe recycling; the caller still requested
+            // clear_context. Keep that action on every error, including
+            // post-condition failures after a Claude control was queued.
+            // A neutral prefix preserves whether the reset was attempted.
+            error.message = format!("clear_context: {}", error.message).into();
+            error
+        })
+    }
+
+    async fn factory_clear_context_impl(
+        &self,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::factory_context_reset as reset;
         use crate::store::{open_agent_store, open_prompt_queue_store};
         use cas_types::{AgentRole, AgentStatus};
@@ -6153,6 +6167,7 @@ impl CasService {
             );
         }
         out.push_str(&orphan_processes.render());
+        out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
         out.push_str(&artifact_report.render());
         // GH #704: leaked disposable roots under $TMPDIR filled a 32 GB tmpfs
         // and broke every live session's shell output. Name them here, with
@@ -6808,6 +6823,7 @@ impl CasService {
             orphan_process_summary.skipped,
         );
         output.push_str(&artifact_cleanup.render());
+        output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -7352,6 +7368,9 @@ pub(crate) fn retire_dead_worker_for_shutdown(
                 &held_task_ids,
                 "dead worker retired by shutdown request",
             );
+        }
+        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
+            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
         }
         recipients.insert(agent.id.clone());
         if let Some(session_id) = &agent.cc_session_id {

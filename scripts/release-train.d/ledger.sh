@@ -110,6 +110,9 @@ cut_stage_failure() {
 cut_run_stage() {
     local stage="$1" function_name="cut_stage_${1//-/_}" receipt status=0
     receipt="$(cut_stage_file "$stage")"
+    if [[ "$stage" == receipts ]]; then
+        python3 "$script_dir/release-learning.py" --check "$worktree" "$run_dir" || return 1
+    fi
     if cut_stage_done "$stage" "$receipt"; then
         # A historical done marker cannot prove a newly advanced main or a
         # replaced installed binary. Re-check rule-175 on every completion.

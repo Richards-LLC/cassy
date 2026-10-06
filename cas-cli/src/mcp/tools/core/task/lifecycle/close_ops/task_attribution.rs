@@ -180,7 +180,7 @@ fn task_delivery_ranges(
     window: &TaskCommitReceiptWindow,
     tip: Option<&str>,
 ) -> Option<Vec<DeliveryRange>> {
-    task_delivery_selection(repo, parent, window, tip).map(|selection| selection.ranges)
+    task_delivery_selection(repo, parent, window, tip, true).map(|selection| selection.ranges)
 }
 
 /// The selected delivery ranges, plus whether a target-sync merge that would
@@ -198,6 +198,7 @@ fn task_delivery_selection(
     parent: &str,
     window: &TaskCommitReceiptWindow,
     tip: Option<&str>,
+    include_unowned_unmerged: bool,
 ) -> Option<DeliverySelection> {
     if !is_safe_git_refname(parent) {
         return None;
@@ -292,7 +293,7 @@ fn task_delivery_selection(
         .map(|c| {
             let candidate = !c.parent.is_empty()
                 && !c.foreign
-                && (c.owned || unmerged.contains(&c.sha))
+                && (c.owned || (include_unowned_unmerged && unmerged.contains(&c.sha)))
                 && (in_work_window(window, c.epoch, c.owned) || (historical_receipt && c.owned));
             // cas-2664 (7): a merge whose every non-first parent is already
             // on the target only brings the target into the lane; its tree
@@ -440,6 +441,23 @@ pub(super) fn paths(
         .transpose()
         .ok()?;
     let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    paths_from_ranges(repo, ranges)
+}
+
+/// cas-2d27: without a task delivery tip, a no-code supervisor close must
+/// not adopt unclaimed work from the closing checkout merely because it is
+/// unmerged and inside the task's clock window. Named/recorded task commits
+/// remain visible, so a no-code declaration cannot erase real delivery.
+pub(super) fn identified_paths(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<Vec<String>> {
+    let selection = task_delivery_selection(repo, target, window, None, false)?;
+    paths_from_ranges(repo, selection.ranges)
+}
+
+fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<String>> {
     let mut paths = Vec::new();
     for range in ranges {
         let changed = git_text(
@@ -471,7 +489,7 @@ pub(super) fn qa_paths(
         .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
         .transpose()
         .ok()?;
-    let selection = task_delivery_selection(repo, target, window, receipt.as_deref())?;
+    let selection = task_delivery_selection(repo, target, window, receipt.as_deref(), true)?;
     let ranges = selection.ranges;
     if ranges.is_empty() {
         // GH #1037 / cas-2664: a task whose only candidate commit was a
@@ -940,6 +958,7 @@ pub(super) fn merge_tip_content_presence(
             }
         }
     }
+    let carries_source = std::cell::OnceCell::new();
     for commit in &commits {
         match super::delivery_content_presence_in_parent(repo, commit, target) {
             DeliveryContentPresence::Present { paths } => append_unique(&mut present_paths, paths),
@@ -949,6 +968,15 @@ pub(super) fn merge_tip_content_presence(
             }
             DeliveryContentPresence::Dropped { paths } => {
                 for path in paths {
+                    if super::artifact_left_to_regeneration_rule(
+                        repo,
+                        merge_tip,
+                        &path,
+                        &carries_source,
+                    ) {
+                        append_unique(&mut dropped_paths, vec![path]);
+                        continue;
+                    }
                     // A resolution may replace only the owned lines in its
                     // novel hunks, on a path whose final effect was proven.
                     // It never enters the later-commit list for other paths.
@@ -1117,7 +1145,12 @@ pub(super) fn ordinary_anchor_content_presence(
         let mut dropped = Vec::new();
         let mut proven_paths = Vec::new();
         let mut commits = Vec::new();
+        let carries_source = std::cell::OnceCell::new();
         for path in paths {
+            if super::artifact_left_to_regeneration_rule(repo, &anchor, path, &carries_source) {
+                dropped.push(path.clone());
+                continue;
+            }
             let authorized: Vec<_> = resolutions
                 .iter()
                 .filter(|(_, resolved)| resolved == path)
@@ -3054,6 +3087,54 @@ mod tests {
         assert_eq!(
             has_task_attributable_reviewable_changes(p, "main", &window()),
             Some(false)
+        );
+    }
+
+    /// cas-24d8: the ownership walk skips edges that leave the path's blob
+    /// unchanged (a long run of unrelated commits, a side merge that never
+    /// touches the file) without losing the edge that does change it.
+    #[test]
+    fn unrelated_history_is_skipped_but_a_later_deletion_is_still_caught_cas_24d8() {
+        let dir = fixture();
+        let repo = dir.path();
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let delivery = commit(
+            repo,
+            "copy.txt",
+            "old\ndelivered();\n",
+            "cas-taskb: delivery",
+        );
+        for index in 0..40 {
+            commit(
+                repo,
+                "other.txt",
+                &format!("{index}\n"),
+                &format!("unrelated {index}"),
+            );
+        }
+        git(repo, &["checkout", "-qb", "side"]);
+        commit(repo, "side.txt", "side\n", "side work");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(repo, &base, &delivery, "main", "copy.txt")
+                .unwrap(),
+            Some(DeliveryContentPresence::Present {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+        commit(repo, "copy.txt", "old\n", "drop the delivered line");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(repo, &base, &delivery, "main", "copy.txt")
+                .unwrap(),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
         );
     }
 }

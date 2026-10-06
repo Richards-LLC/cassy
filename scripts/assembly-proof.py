@@ -12,6 +12,7 @@ import csv
 import fcntl
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -23,6 +24,13 @@ import sys
 import tempfile
 import time
 import tomllib
+# Also support the existing importlib fixture/receipt consumers.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_scratch
+
+_target_spec = importlib.util.spec_from_file_location("proof_target", Path(__file__).with_name("proof_target.py"))
+proof_target = importlib.util.module_from_spec(_target_spec)
+_target_spec.loader.exec_module(proof_target)
 
 FORMAT = 2
 MAX_AGE = 86400
@@ -52,7 +60,7 @@ IDENTITY = {"CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
             "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT",
             "AI_AGENT", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CAS_CLONE_PATH",
             "CAS_FACTORY_MODE", "CAS_FACTORY_SUPERVISOR_CLI", "CAS_FACTORY_WORKER_CLI"}
-VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR",
+VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR",
             "VERIFIED_TEST_LOG",
             # Train output locations do not change the compiled/tested candidate.
             "CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR",
@@ -356,13 +364,16 @@ def clone_scratch(env):
 
 
 def run_row(root, row, env, log_dir):
-    row_env = dict(env)
+    source = proof_target.prepare(root) if row != "ci-script-tests" else proof_target.identity(root)
+    row_env = proof_target.environment(env, source)
     row_env["CAS_RELEASE_GATE_LOG_DIR"] = str(log_dir / (row + "-rows"))
     row_env["CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE"] = str(log_dir / "archive-size-bytes")
     log = log_dir / (row + ".log")
     print(f"assembly proof: {row} in {root}; log: {log}", flush=True)
     with log.open("w") as stream:
-        result = subprocess.run(["bash", str(root / "scripts/release-gate.sh"),
+        stream.write("PROOF_SOURCE: " + json.dumps(source, sort_keys=True) + "\n")
+        stream.flush()
+        result = release_scratch.child_run(["bash", str(root / "scripts/release-gate.sh"),
                                  "0.0.0", "--only", row], cwd=root, env=row_env,
                                 stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode:
@@ -372,7 +383,7 @@ def run_row(root, row, env, log_dir):
     if not re.search(r"^PASS " + re.escape(row) + r" ", log.read_text(), re.M):
         raise ValueError(f"assembly {row} did not report a pass: {log}")
     result = {"status": "PASS", "row": row, "checkout": str(root), "log": str(log),
-              "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip()}
+              "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "head": source["head"], "target": source["target"]}
     for filename, key in (("timing.tsv", "timing"), ("compile-timing.tsv", "compile_timing")):
         timing_path = Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / filename
         if timing_path.is_file():
@@ -456,6 +467,7 @@ def memory_budget(env):
 def execution_plan(env):
     positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS")
     positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS")
+    link_jobs = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") or 8
     memory = memory_budget(env)
     requested = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS")
     cores = cpu_count()
@@ -469,7 +481,7 @@ def execution_plan(env):
     return dict(memory, mode=mode, reason=reason, cores=cores, requested_compile_jobs=requested,
                 compile_jobs=jobs, per_job_bytes=COMPILE_JOB_BYTES,
                 producer_overhead_bytes=PRODUCER_BYTES, script_bytes=SCRIPT_BYTES,
-                link_jobs=1, per_link_bytes=LINK_BYTES, guard_headroom_bytes=GUARD_HEADROOM_BYTES,
+                link_jobs=link_jobs, link_admission="fresh-memory shared pool", per_link_bytes=LINK_BYTES, guard_headroom_bytes=GUARD_HEADROOM_BYTES,
                 link_estimate_source="soundwave b86ec0c2e + train9 incremental relink, 2026-10-05, .cas/perf-98a0/link-rss.log: max ld.mold 2190228 KiB (2.089 GiB), rustc 4775752 KiB (4.555 GiB), 0.5s ps; links rounded to 2.1 GiB; cold producer bound remains 8 GiB",
                 estimate_source="8 GiB large unit rounded from measured 7293348 KiB max RSS, soundwave proof 7e4c6f50 (abd6817b5); 256 MiB/dependency job and 2 GiB scripts assumed",
                 phases=[])
@@ -502,13 +514,36 @@ def admit_phase(env, execution, phase, compile_phase=False):
         time.sleep(min(poll_secs, wait_secs - elapsed))
 
 
+# None selects the real host/user admission directory. In-process tests point
+# it at a private directory so they never contend with live worker suites.
+HOST_MEMORY_DIRECTORY = None
+
+
 def run_contexts(root, clone, env, log_dir, clone_target, execution):
+    # Worker suites and proofs use one host/user budget across worktrees and
+    # clones. This is independent of the link-specific admission pool.
+    spec = importlib.util.spec_from_file_location("host_memory", Path(__file__).with_name("host_memory.py"))
+    host = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(host)
+    wait = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS") or 600
+    poll = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 1
+    with host.admission("proof", env, memory_budget, wait, poll, HOST_MEMORY_DIRECTORY) as (admitted_env, fds):
+        # Reuse the release child's existing descriptor propagation contract so
+        # proof intent/budget stay live through nested native producer scripts.
+        inherited = release_scratch.inherited_leases(admitted_env) | set(fds)
+        admitted_env = dict(admitted_env, CAS_RELEASE_GATE_SCRATCH_LEASE_FDS=",".join(map(str, sorted(inherited))))
+        return _run_contexts(root, clone, admitted_env, log_dir, clone_target, execution)
+
+
+def _run_contexts(root, clone, env, log_dir, clone_target, execution):
     # Builds and script fixtures have independent checkouts/targets/logs. Test
     # groups only constrain one nextest process, and host ports/hub processes
     # are not all globally locked: serialize consumers after script admission.
     # Clone preparation may have taken time: admit against current memory,
     # not the earlier receipt snapshot. Knobs never bypass memory admission.
-    env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_LINK_GUARD_DIR=str(clone_target.parent / "linker-guards"))
+    clone_target = clone / "target"
+    env = dict(env, CARGO_TARGET_DIR=str(root / "target"), CARGO_BUILD_TARGET_DIR=str(root / "target"),
+               CAS_RELEASE_GATE_ASSEMBLY_LINK_GUARD_DIR=str(log_dir / "linker-guards"))
     execution.update(execution_plan(env))
     print("assembly scheduling: " + json.dumps(execution, sort_keys=True), flush=True)
     if execution["budget_bytes"] < SCRIPT_BYTES:
@@ -524,6 +559,7 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
                            CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps(env_policy(env)))
             if row == "archive-mode":
                 row_env["CARGO_TARGET_DIR"] = str(clone_target)
+                row_env["CARGO_BUILD_TARGET_DIR"] = str(clone_target)
             results.append(run_row(checkout, row, row_env, log_dir))
         return scripts, *results
     with tempfile.TemporaryDirectory(prefix="assembly-sync-", dir=log_dir) as directory:
@@ -532,7 +568,7 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
         native_env = dict(env, CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR=str(sync),
                           CARGO_BUILD_JOBS=str(execution["compile_jobs"]),
                           CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=json.dumps(env_policy(env)))
-        clone_env = dict(native_env, CARGO_TARGET_DIR=str(clone_target))
+        clone_env = dict(native_env, CARGO_TARGET_DIR=str(clone_target), CARGO_BUILD_TARGET_DIR=str(clone_target))
         with ThreadPoolExecutor(max_workers=3) as executor:
             scripts = executor.submit(run_row, root, "ci-script-tests", env, log_dir)
             native = executor.submit(run_row, root, "nextest", native_env, log_dir)
@@ -562,12 +598,19 @@ def env_policy(env):
     return {key: env[key] for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS",
                                     "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
                                     "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS",
-                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") if key in env}
+                                    "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS",
+                                    "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") if key in env}
 
 
 def prove(root):
+    with release_scratch.ChildScope():
+        return prove_owned(root)
+
+
+def prove_owned(root):
     # Refuse an unusable clone context before tool probing or the native suite.
     scratch = clone_scratch(os.environ)
+    scratch_report = release_scratch.sweep(root, scratch, clean=True)
     expected, env = inputs(root)
     path = receipt_path(root, expected)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -578,7 +621,7 @@ def prove(root):
             return found
         head = git(root, "rev-parse", "HEAD").decode().strip()
         record = {"inputs": expected, "status": "RUNNING", "head": head,
-                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {},
+                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {}, "scratch": scratch_report,
                   "environment_keys": {key: digest(value.encode())
                                        for key, value in environment_material(root, env).items()}}
         write(path, record)
@@ -588,20 +631,37 @@ def prove(root):
         write(path, record)
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
-        with tempfile.TemporaryDirectory(prefix="assembly-clone-", dir=scratch.parent) as directory:
-            clone = Path(directory) / "repo"
-            subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout",
-                            str(common_dir(root)), str(clone)], check=True)
-            subprocess.run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
-            no_cas_ancestor(clone)
-            # Reuse compiled dependencies; Cargo invalidates producer paths.
-            try:
-                script_result, native_result, archive_result = run_contexts(
-                    root, clone, env, log_dir, path.parent.parent / "assembly-target", record["execution"])
-            finally:
-                write(path, record)  # retain admission/fallback evidence on failure
-            record["script_tests"] = script_result
-            record["contexts"] = {"worktree": native_result, "clone": archive_result}
+        legacy_target = path.parent.parent / "assembly-target"
+        # Inventory both old shared cache layouts without silently adopting
+        # opaque or live outputs. They are no longer Cargo proof targets.
+        record["legacy_cache"] = [release_scratch.cache_report(root, candidate, env=env)
+                                  for candidate in (legacy_target, legacy_target.with_name(legacy_target.name + "-leased-v1"))]
+        try:
+            with release_scratch.OwnedDirectory("assembly-clone-", scratch.parent) as directory:
+                clone = Path(directory) / "repo"
+                release_scratch.child_run(["git", "clone", "--quiet", "--shared", "--no-checkout",
+                                str(common_dir(root)), str(clone)], check=True)
+                release_scratch.child_run(["git", "-C", str(clone), "checkout", "--quiet", "--detach", head], check=True)
+                no_cas_ancestor(clone)
+                # The private cache's sibling lifetime lock is administrative,
+                # not a candidate source file. Ignore it only in this clone.
+                with (clone / ".git/info/exclude").open("a") as exclude:
+                    exclude.write("\n/target.lock\n")
+                cache = release_scratch.BoundedCache(clone / "target", env, root)
+                record["cache"] = cache.events
+                with cache as clone_target:
+                    # Every source root owns its output/freshness. Only immutable
+                    # worker dependency snapshots seed the disposable clone.
+                    proof_target.prepare(clone, cache=proof_target.cache_root(root))
+                    try:
+                        script_result, native_result, archive_result = run_contexts(
+                            root, clone, env, log_dir, clone_target, record["execution"])
+                    finally:
+                        write(path, record)  # retain admission/fallback evidence on failure
+                    record["script_tests"] = script_result
+                    record["contexts"] = {"worktree": native_result, "clone": archive_result}
+        finally:
+            write(path, record)  # include cleanup/cache decisions even on interruption
         current, _ = inputs(root)
         if current != expected or git(root, "rev-parse", "HEAD").decode().strip() != head:
             raise ValueError("assembly inputs changed while tests ran")

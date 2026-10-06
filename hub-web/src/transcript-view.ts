@@ -19,8 +19,6 @@ export interface TranscriptSource {
   hasScrollbackAbove(): boolean;
   scrollRows(delta: number): void;
   scrollToBottom(): void;
-  /** Opens the pane's keyboard: reading a transcript must not cost typing. */
-  focus(): void;
 }
 
 /** Rows paged in when the reader reaches the top of the current screen. */
@@ -54,9 +52,6 @@ export class TranscriptView {
     this.jump.onclick = () => this.jumpToLatest();
     this.element.append(this.lines, this.jump);
     this.element.addEventListener("scroll", this.onScroll, { passive: true });
-    // Reading view or not, a tap on the pane is still how the operator opens
-    // the keyboard for it.
-    this.element.addEventListener("click", this.onClick);
   }
 
   /** Re-reads the grid and repaints the lines whose content actually changed. */
@@ -138,12 +133,6 @@ export class TranscriptView {
     }
   };
 
-  private readonly onClick = (event: MouseEvent): void => {
-    if (this.disposed || event.target === this.jump) return;
-    if (this.element.ownerDocument.getSelection()?.isCollapsed === false) return;
-    this.source.focus();
-  };
-
   private setJumpVisible(visible: boolean): void {
     if (this.jump.hidden !== !visible) this.jump.hidden = !visible;
   }
@@ -163,7 +152,6 @@ export class TranscriptView {
   dispose(): void {
     this.disposed = true;
     this.element.removeEventListener("scroll", this.onScroll);
-    this.element.removeEventListener("click", this.onClick);
     this.element.remove();
   }
 }

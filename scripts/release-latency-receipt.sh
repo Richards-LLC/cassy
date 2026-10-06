@@ -64,68 +64,11 @@ if [[ -z "$run_dir" ]]; then
 fi
 
 intervention_count() {
-    local log="${run_dir:-}/interventions.log"
-    [[ -s "$log" ]] || { printf '0\n'; return; }
-    awk '
-        function field(prefix,    i) {
-            for (i = 1; i <= NF; i++) if (index($i, prefix) == 1) return substr($i, length(prefix) + 1)
-            return ""
-        }
-        {
-            kind = field("kind="); command = field("subcommand="); resume = field("resume="); blockers = field("blockers=")
-            if (kind != "manual") next
-            if (command == "--cut" && resume == "true" && blockers != "" && blockers != "none") {
-                count = split(blockers, names, ",")
-                for (i = 1; i <= count; i++) if (names[i] ~ /^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$/) seen[names[i]]++
-            } else count_manual++
-        }
-        END {
-            for (name in seen) count_manual++
-            print count_manual + 0
-        }
-    ' "$log"
+    python3 "$(dirname "${BASH_SOURCE[0]}")/release-interventions.py" count "$run_dir"
 }
 
 intervention_blockers() {
-    local log="${run_dir:-}/interventions.log" raw='' path base stage
-    if [[ -s "$log" ]]; then
-        raw="$(awk '
-            function field(prefix,    i) {
-                for (i = 1; i <= NF; i++) if (index($i, prefix) == 1) return substr($i, length(prefix) + 1)
-                return ""
-            }
-            function canonical(name) { return name ~ /^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$/ }
-            function add(name) { if (canonical(name) && !seen[name]++) names[++n] = name }
-            {
-                if (field("kind=") != "manual") next
-                add(field("stage=")); blockers = field("blockers=")
-                if (blockers != "" && blockers != "none") {
-                    count = split(blockers, values, ",")
-                    for (i = 1; i <= count; i++) add(values[i])
-                }
-            }
-            END {
-                for (i = 1; i <= n; i++) printf "%s%s", (i == 1 ? "" : ","), names[i]
-            }
-        ' "$log")"
-    fi
-    if [[ -z "$raw" && -s "${run_dir:-}/blockers.log" ]]; then
-        raw="$(tr '\n' ',' <"$run_dir/blockers.log" | sed 's/,$//')"
-    fi
-    if [[ -z "$raw" && -n "$run_dir" ]]; then
-        for path in "$run_dir"/stage.*.blocked "$run_dir"/blocker.*; do
-            [[ -e "$path" ]] || continue
-            base="$(basename "$path")"
-            case "$base" in
-                stage.*.blocked) stage="${base#stage.}"; stage="${stage%.blocked}" ;;
-                blocker.*) stage="${base#blocker.}" ;;
-                *) continue ;;
-            esac
-            [[ -n "$stage" ]] || continue
-            raw="${raw:+$raw,}$stage"
-        done
-    fi
-    printf '%s\n' "${raw:-none}"
+    python3 "$(dirname "${BASH_SOURCE[0]}")/release-interventions.py" stages "$run_dir"
 }
 
 epoch_delta() {

@@ -1,0 +1,29 @@
+[package]
+name = "cas-operator-crypto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "HPKE envelopes for the Commander operator inbox (cloud wire v1, cas-9b7d)"
+license = "MIT"
+
+[lints]
+workspace = true
+
+# Pinned by the cloud contract §6.6 (petra-stella-cloud
+# docs/specs/2026-10-05-operator-inbox-cloud-contract.md). `hpke` 0.14 brings
+# its own p256 0.14 / aes-gcm 0.11 / sha2 0.11 / rand_core 0.10 line; this crate
+# keeps every key as bytes at its boundary so no type from that line leaks into
+# cas-cli, which stays on p256 0.13.
+[dependencies]
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "getrandom", "nistp", "aes"] }
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
+base64 = "0.22"
+rand = "0.9.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror.workspace = true
+zeroize = "1.8"
+
+[dev-dependencies]
+hex = "0.4.3"

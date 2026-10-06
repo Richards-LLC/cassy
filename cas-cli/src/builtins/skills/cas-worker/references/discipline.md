@@ -64,7 +64,24 @@ The supervisor runs the full build and tests once at epic assembly and records
 `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` on
 the epic. Child closes reference it; assembly failures return as follow-up tasks.
 
-## Non-Rust work is unaffected
+## Browser checks
+
+Browser suites use the same tiering as Rust: workers and independent QA run
+vitest, tsc and source-impact-selected journeys. Where available, use
+`scripts/journey-eval.sh <task-artifact-dir>`: default task-target selection,
+four workers, explicit empty receipt when nothing is affected. Pass
+`--affected <base>` to bind an explicit ancestor base. Arbitrary spec/grep
+filters cannot substitute for the producer's selection. Manual named-spec or
+canonical-ID runs remain available for iteration and failure controls.
+
+The hook denies factory workers/reviewers `--full`, unfiltered Playwright and
+unfiltered journey npm scripts. Supervisor `--full` runs once at epic assembly;
+merge queue runs the full suite. Reuse implementer receipts at the exact QA tip.
+Documentation/ledger-only rebinds must prove product/catalog/tool inputs are
+unchanged. A failure control runs only the failing spec with one worker, keeps
+the original failure, and never turns that original receipt into PASS.
+
+## Other non-Rust checks
 
 Run non-Rust suites (for example `npm`/`vitest`/`playwright`) in the worker.
 Record exact passed and failed counts in the close note. A green exit without

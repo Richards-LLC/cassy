@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Memory guard and stable linker admission for assembly producers.
 
-Linkers share one host/user slot, independent of Cargo dependency job counts.
-The wrapper preserves the selected native linker and records child peak RSS.
+Linkers share memory-bounded host/user slots, independent of Cargo job counts.
+The wrapper preserves native linker flags and records driver rusage separately
+from sampled RSS of that invocation and its observed forked workers.
 """
 import argparse
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import importlib.util
@@ -12,12 +14,12 @@ import json
 import os
 from pathlib import Path
 import platform
-import resource
+import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 
@@ -44,50 +46,246 @@ def poll(env):
     return proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 1
 
 
+# Stable across native/archive TMPDIRs, proof roots and source-keyed wrappers.
+# Lease files are tiny; build and fixture scratch remains separately configured.
+LINK_LEASE_ROOT = Path("/var/tmp")
+
+
+def link_capacity(env, memory):
+    maximum = proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") or 8
+    return min(maximum, max(1, (memory["budget_bytes"] - proof.GUARD_HEADROOM_BYTES)
+                            // proof.LINK_BYTES))
+
+
+def lease_file(path):
+    # Never follow an injected link or share another user's admission state.
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    stream = os.fdopen(fd, "a+")
+    metadata = os.fstat(fd)
+    if metadata.st_uid != os.getuid() or not stat.S_ISREG(metadata.st_mode):
+        stream.close()
+        raise ValueError("assembly link lease is not an owned regular file")
+    return stream
+
+
+def claim_slot(directory, env):
+    """Sample and count every live lease under one atomic admission lock.
+
+    Count high-numbered slots too when capacity shrinks or another proof uses a
+    different cap. Free leases stay locked until selection is complete, so an
+    unstarted linker is charged its full estimate, not its current zero RSS.
+    """
+    with lease_file(directory / "admission.lock") as admission:
+        fcntl.flock(admission, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        memory = proof.memory_budget(env)
+        capacity = link_capacity(env, memory)
+        event = dict(memory, link_slots=capacity,
+                     configured_link_jobs=proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS") or 8,
+                     active_links=0, admitted=False)
+        with ExitStack() as probes:
+            free = []
+            indices = set()
+            for path in directory.glob("slot-*.lock"):
+                match = re.fullmatch(r"slot-([0-9]+)\.lock", path.name)
+                if not match:
+                    continue
+                index = int(match[1])
+                indices.add(index)
+                candidate = probes.enter_context(lease_file(path))
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    free.append((index, candidate))
+                except BlockingIOError:
+                    event["active_links"] += 1
+            fits = memory["budget_bytes"] >= proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
+            if fits and event["active_links"] < capacity:
+                if free:
+                    index, selected = min(free, key=lambda item: item[0])
+                else:
+                    index = 0
+                    while index in indices:
+                        index += 1
+                    selected = probes.enter_context(lease_file(directory / f"slot-{index}.lock"))
+                    fcntl.flock(selected, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Duplicate the same open description before closing probes.
+                # It keeps the lease locked through the child and its descendants.
+                lease = os.fdopen(os.dup(selected.fileno()), "a+")
+                event.update(admitted=True, slot_index=index)
+                return lease, event
+            event["reason"] = "memory reserve/headroom" if not fits else "live link capacity occupied"
+            return None, event
+
+
+# Passive observation preserves the producer process group and inherited leases.
+# Samples are lower bounds: a worker that forks and reparents between samples
+# may never be observed. Remember start identity once seen, including on reparent.
+RSS_SAMPLE_SECS = .1
+RSS_DRAIN_SECS = 5
+
+
+def process_snapshot():
+    """Return pid -> (parent pid, start identity, resident bytes, name, state)."""
+    if platform.system() == "Darwin":
+        rows = subprocess.check_output(
+            ["ps", "-axo", "pid=,ppid=,lstart=,rss=,stat=,comm="], text=True)
+        result = {}
+        for line in rows.splitlines():
+            fields = line.split(None, 9)
+            if len(fields) != 10:
+                raise ValueError("invalid process RSS snapshot")
+            result[int(fields[0])] = (int(fields[1]), " ".join(fields[2:7]),
+                                     int(fields[7]) * 1024, Path(fields[9]).name, fields[8][0])
+        return result
+    if platform.system() != "Linux":
+        raise ValueError("process RSS sampling requires Linux /proc or macOS ps")
+    result = {}
+    pagesize = os.sysconf("SC_PAGE_SIZE")
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            raw = (path / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        # comm can contain spaces and parentheses; stat fields follow the last ).
+        comm, tail = raw.rsplit(")", 1)
+        fields = tail.split()
+        result[int(path.name)] = (int(fields[1]), fields[19],
+                                  int(fields[21]) * pagesize,
+                                  comm.split("(", 1)[1], fields[0])
+    return result
+
+
+class LinkRssSampler:
+    def __init__(self, driver_pid):
+        self.driver_pid = driver_pid
+        self.known = {}
+        self.samples = 0
+        self.peak_tree = 0
+        self.peak_worker = 0
+        self.worker_peak = None
+        self.errors = []
+
+    def sample(self):
+        try:
+            snapshot = process_snapshot()
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            if not self.errors:
+                self.errors.append(type(exc).__name__ + ": " + str(exc))
+            return False
+        if not self.known and self.driver_pid in snapshot:
+            self.known[self.driver_pid] = snapshot[self.driver_pid][1]
+        # Only the same process lifetime can seed descendants. PID reuse must
+        # not adopt another link after the original process has exited.
+        current = {pid for pid, start in self.known.items()
+                   if pid in snapshot and snapshot[pid][1] == start}
+        while True:
+            descendants = {pid for pid, row in snapshot.items() if row[0] in current}
+            fresh = descendants - current
+            if not fresh:
+                break
+            for pid in fresh:
+                self.known[pid] = snapshot[pid][1]
+            current.update(fresh)
+        live = {pid for pid in current if snapshot[pid][4] not in ("Z", "X")}
+        if live:
+            self.samples += 1
+            self.peak_tree = max(self.peak_tree, sum(snapshot[pid][2] for pid in live))
+            for pid in live:
+                parent, start, rss, name, state = snapshot[pid]
+                if name in ("mold", "ld.mold") and rss > self.peak_worker:
+                    self.peak_worker = rss
+                    self.worker_peak = {"pid": pid, "start_identity": start,
+                                        "name": name, "rss_bytes": rss,
+                                        "sample_unix_ns": time.time_ns()}
+        return bool(live)
+
+    def receipt(self, drain_expired):
+        return {"driver_pid": self.driver_pid,
+                "peak_process_tree_rss_bytes": self.peak_tree if self.samples else None,
+                "peak_mold_worker_rss_bytes": self.peak_worker if self.samples else None,
+                "mold_worker_peak": self.worker_peak,
+                "rss_sample_count": self.samples, "rss_sample_interval_s": RSS_SAMPLE_SECS,
+                "rss_sampling_status": ("partial" if self.errors or drain_expired else
+                                        "sampled" if self.samples else "unavailable"),
+                "rss_sampling_errors": self.errors, "rss_drain_expired": drain_expired,
+                "rss_sampling_limit": "sampled lower bound; workers that fork and reparent between samples may be missed; summed RSS double-counts shared pages"}
+
+
+def wait_with_rss(child):
+    sampler = LinkRssSampler(child.pid)
+    waited_usage = None
+    drain_started = None
+    drain_expired = False
+    while True:
+        live = sampler.sample()
+        if waited_usage is None:
+            pid, status, usage = os.wait4(child.pid, os.WNOHANG)
+            if pid:
+                child.returncode = os.waitstatus_to_exitcode(status)
+                waited_usage = usage
+                drain_started = time.monotonic()
+        if waited_usage is not None:
+            if not live:
+                break
+            if time.monotonic() - drain_started >= RSS_DRAIN_SECS:
+                drain_expired = True
+                break
+        time.sleep(RSS_SAMPLE_SECS)
+    peak = waited_usage.ru_maxrss
+    peak_bytes = int(peak if platform.system() == "Darwin" else peak * 1024)
+    return peak_bytes, sampler.receipt(drain_expired)
+
+
 def link(command):
     env = settings(os.environ)
-    directory = Path(tempfile.gettempdir()) / f"cas-assembly-links-{os.getuid()}"
+    directory = LINK_LEASE_ROOT / f"cas-assembly-links-{os.getuid()}"
     if directory.is_symlink():
         raise ValueError("unsafe assembly link lease directory")
     directory.mkdir(mode=0o700, exist_ok=True)
-    if directory.stat().st_uid != os.getuid():
-        raise ValueError("assembly link lease has another owner")
-    lock_path = directory / "slot.lock"
-    if lock_path.is_symlink():
-        raise ValueError("unsafe assembly link lease")
+    metadata = directory.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise ValueError("assembly link directory must be private and owned")
+    # Validate before waiting, including under a busy admission lock.
+    proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS")
     started = time.monotonic()
     receipt = os.environ["CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG"]
-    with lock_path.open("a+") as lease:
-        # A bounded wait includes time queued behind another producer/linker.
-        while True:
-            memory = proof.memory_budget(env)
-            elapsed = time.monotonic() - started
-            event = dict(memory, phase="link", elapsed_s=round(elapsed, 3), admitted=False)
-            try:
-                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fits = memory["budget_bytes"] >= proof.LINK_BYTES + proof.GUARD_HEADROOM_BYTES
-                event["admitted"] = fits
-                if fits:
-                    append(receipt, event)
-                    break
-                fcntl.flock(lease, fcntl.LOCK_UN)
-            except BlockingIOError:
-                event["reason"] = "another linker owns host slot"
-            append(receipt, event)
-            if elapsed >= deadline(env):
-                raise ValueError("assembly linker memory/slot deadline expired")
-            time.sleep(min(poll(env), deadline(env) - elapsed))
-        # Preserve the lease in descendants if a wrapper is killed abruptly.
-        child = subprocess.run(command, pass_fds=(lease.fileno(),))
-        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        peak_bytes = int(peak if platform.system() == "Darwin" else peak * 1024)
+    while True:
+        elapsed = time.monotonic() - started
+        try:
+            lease, event = claim_slot(directory, env)
+        except BlockingIOError:
+            lease, event = None, {"admitted": False, "reason": "another link admission is in progress"}
+        event.update(phase="link", elapsed_s=round(elapsed, 3))
+        append(receipt, event)
+        if lease is not None:
+            break
+        if elapsed >= deadline(env):
+            raise ValueError("assembly linker memory/slot deadline expired")
+        time.sleep(min(poll(env), deadline(env) - elapsed))
+    with lease:
+        child = subprocess.Popen(command, pass_fds=tuple({lease.fileno()} | proof.release_scratch.inherited_leases()))
+        try:
+            peak_bytes, sampled = wait_with_rss(child)
+        finally:
+            # Keep cleanup on the same process group/lease contract as before.
+            if child.returncode is None:
+                child.kill()
+                child.wait()
+        exceeded = peak_bytes > proof.LINK_BYTES
         append(receipt, {"phase": "link-complete", "status": child.returncode,
-                         "peak_child_rss_bytes": peak_bytes, "estimate_bytes": proof.LINK_BYTES,
-                         "estimate_exceeded": peak_bytes > proof.LINK_BYTES,
+                         "slot_index": event["slot_index"], "link_slots": event["link_slots"],
+                         "peak_waited_driver_rss_bytes": peak_bytes, "estimate_bytes": proof.LINK_BYTES,
+                         **sampled,
+                         "rss_scope": "waited driver RSS excludes unwaited workers; sampled process tree includes observed mold workers",
+                         "estimate_exceeded": exceeded,
+                         "sampled_tree_estimate_exceeded": (None if sampled["peak_process_tree_rss_bytes"] is None
+                                                            else sampled["peak_process_tree_rss_bytes"] > proof.LINK_BYTES),
+                         "estimate_check_scope": "waited driver; sampled tree is observational",
                          "wall_s": round(time.monotonic() - started, 3),
-                         "measurement_source": "waited linker-driver child ru_maxrss (Linux KiB, macOS bytes); includes waited descendants"})
-        if peak_bytes > proof.LINK_BYTES:
-            print("assembly linker exceeded memory estimate; recalibration required", file=sys.stderr)
+                         "measurement_source": "driver wait4 ru_maxrss (Linux KiB, macOS bytes); sampled /proc stat RSS or macOS ps RSS (KiB) for the same driver and observed descendants"})
+        if exceeded:
+            print("assembly linker driver exceeded memory estimate; recalibration required", file=sys.stderr)
             return 1
         return child.returncode
 
@@ -176,15 +374,24 @@ def compile_guard(command, policy, events, root):
         for event in admission["phases"]:
             append(events, event)
     env["CARGO_BUILD_JOBS"] = str(min(int(env.get("CARGO_BUILD_JOBS", jobs)), int(jobs)))
-    child = subprocess.Popen(command, env=env, start_new_session=True)
+    child = None
     paused = False
     paused_at = None
     handlers = {}
+    interrupted = []
     def forward(sig, frame):
-        raise InterruptedError("assembly compile interrupted by " + signal.Signals(sig).name)
+        for watched in handlers:
+            signal.signal(watched, signal.SIG_IGN)
+        interrupted.append(signal.Signals(sig).name)
+        if child is not None:
+            raise InterruptedError("assembly compile interrupted by " + interrupted[0])
     try:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             handlers[sig] = signal.signal(sig, forward)
+        child = subprocess.Popen(command, env=env, start_new_session=True,
+                                 pass_fds=tuple(proof.release_scratch.inherited_leases(env)))
+        if interrupted:
+            raise InterruptedError("assembly compile interrupted during child creation by " + interrupted[0])
         while child.poll() is None:
             memory = proof.memory_budget(policy)
             event = dict(memory, phase="compile", paused=paused, action="sample")
@@ -209,16 +416,19 @@ def compile_guard(command, policy, events, root):
     finally:
         # Resume stopped descendants before termination; otherwise TERM would
         # stay pending indefinitely and scratch teardown could race builders.
-        for sig in (signal.SIGCONT, signal.SIGTERM):
+        for watched in handlers:
+            signal.signal(watched, signal.SIG_IGN)
+        if child is not None:
+            for sig in (signal.SIGCONT, signal.SIGTERM):
+                try:
+                    os.killpg(child.pid, sig)
+                except ProcessLookupError:
+                    pass
             try:
-                os.killpg(child.pid, sig)
-            except ProcessLookupError:
-                pass
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
 

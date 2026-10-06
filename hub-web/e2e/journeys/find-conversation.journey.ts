@@ -1,3 +1,4 @@
+import { activate, phoneLayout, phoneFind, showConversationList } from "./responsive-goals";
 import { join } from "node:path";
 import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { journeyStamp } from "./clock";
@@ -55,6 +56,7 @@ for (const width of [1280, 390]) for (const long of [true, false]) {
 }
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
+  if (await phoneLayout(page)) { await phoneFind(page, journey); return; }
   // Fourteen stages, two searches, three page loads and the palette. On a
   // quiet host the test takes about 72 s (50 s of stages); on the loaded
   // merge-queue host its passing runs took up to 2.2 min and 6 of 10 at
@@ -269,6 +271,19 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(row.locator(".conversation-when")).toBeVisible();
     expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
     await expect(row.locator(".conversation-machine")).toHaveAttribute("title", "Forge build box with an unusual hostname");
+    // cas-7374: the ellipsis is for the resting row only. Reached from the
+    // keyboard, the row shows the whole machine name, wrapped in its title
+    // column, still clear of the time stamp and with no leading dot.
+    await row.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(row).toBeFocused();
+    expect(await row.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
+    expect(await clearOfTime()).toEqual({ ellipsised: false, clear: true });
+    expect(await noLeadingDot()).toBe(true);
+    await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-focused.png") });
+    await row.evaluate((node) => (node as HTMLElement).blur());
+    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
     // Phone width: the same, with the list as the whole page.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
@@ -290,21 +305,20 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     // Commands are grouped; the debugging switches wait, collapsed, in Advanced.
     const palette = page.locator("#command-palette");
-    // Commands sit with what they act on: the lease with this session,
-    // Paired machines with the machines, and "Dismiss all info" only when
-    // there is something to dismiss (3.30.0 journey F4).
-    // With no session open there is no "This session" group at all.
+    // Commands sit with what they act on: Paired machines with the
+    // machines, and "Dismiss all info" only when there is something to
+    // dismiss (3.30.0 journey F4).
     await expect(palette.locator(".palette-group-heading:visible")).toHaveText(["Conversations", "Machines", "Appearance", "Advanced"]);
     await expect(palette.locator('[data-palette-group="conversations"] .palette-command:not([data-palette-session])')).toHaveCount(0);
     await expect(palette.locator('[data-palette-group="machines"]')).toContainText("Paired machines");
     await expect(palette.getByRole("button", { name: /Dismiss all info/ })).toHaveCount(0);
-    await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
-    await expect(palette.getByRole("button", { name: /Open the terminal view/ })).toBeHidden();
-    // cas-71af (9ecd QA F01): the collapsed Advanced row speaks the palette's
-    // own words, machines and terminal, with no leftover "sessions".
-    await expect(palette.locator('[data-palette-action="terminal-view"] small')).toHaveText("Machines and terminal controls");
-    await filter.fill("worker");
-    await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeVisible();
+    // cas-0546: Conversations is the only surface. No command opens a
+    // terminal, shows worker panes or takes control; Advanced holds only the
+    // dormant-session switch.
+    await expect(palette.getByRole("button", { name: /terminal|worker panes|control/i, includeHidden: true })).toHaveCount(0);
+    await expect(palette.locator(".palette-advanced .palette-command")).toHaveText([/^Show dormant sessions/]);
+    await filter.fill("dormant");
+    await expect(palette.getByRole("button", { name: /Show dormant sessions/ })).toBeVisible();
     // cas-537f: "light" matches a conversation and an appearance; the one
     // Enter runs is marked, and named as the filter's active descendant.
     await filter.fill("light");
@@ -328,7 +342,6 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(rows.visible()).toHaveCount(1);
     await expect(rows.visible().first()).toContainText("Jump to gabber-studio");
     await filter.fill(OTTER);
-    await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     const commands = page.locator("#command-palette .palette-command");
     await expect(commands.visible()).toHaveCount(1);
     await expect(commands.visible().first()).toContainText("Jump to gabber-studio");
@@ -337,19 +350,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
-    // A mouse jump lands in the opened conversation's composer too, and
-    // landing there must not freeze the shell at its pre-load state: once
-    // this first visit's lease loads, the palette offers to let other devices
-    // type here, "Release control" kept as its hint (journey F16).
+    // A mouse jump lands in the opened conversation's composer too. With a
+    // conversation open the palette keeps the same groups: its actions
+    // (Raw output, Interrupt) are in the conversation header, and the
+    // palette speaks of conversations, not sessions (cas-0546).
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
-    const control = page.locator('#command-palette [data-palette-action="control"]');
-    await expect(control.locator("span")).toHaveText("Let other devices type here");
-    await expect(control.locator("small")).toHaveText("Release control of this conversation");
-    // The lease command sits in its own group once a conversation is open,
-    // and the palette speaks of conversations, not sessions.
-    await expect(page.locator("#palette-group-session")).toHaveText("This conversation");
+    await expect(page.locator("#command-palette .palette-group-heading")).toHaveText(["Conversations", "Machines", "Appearance", "Advanced"]);
+    await expect(page.locator('#command-palette [data-palette-action="control"]')).toHaveCount(0);
     await expect(page.locator("#command-palette-query")).toHaveAttribute("placeholder", "Type a command or conversation");
-    await expect(page.locator('#command-palette [data-palette-group="session"] [data-palette-action="control"]')).toHaveCount(1);
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });
 
@@ -606,7 +614,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   await journey.stage("A first open that misses the 3-second mark retries calmly, and the footer stays Connected", async () => {
     // cas-28df: a conversation whose first attach sends no session state
     // within 3 s retries. On a live machine that used to drop the footer to
-    // "1 connected" and flash "Terminal unavailable" and the full retry
+    // "1 connected" and flash an unavailable notice and the full retry
     // timeline. A fresh visit reopens lighthouse; the double answers its first
     // attach only after 3.5 s, so the first try times out and the retry opens it.
     await page.addInitScript(() => {
@@ -630,7 +638,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const seen = await page.evaluate(() => (window as unknown as { __retrySeen: { footer: string[]; pane: string[] } }).__retrySeen);
     expect(seen.pane.some((text) => text.startsWith("Opening the conversation…")), "the pane said it was opening").toBe(true);
     expect(seen.footer, "the footer once every machine was up").toEqual(["Connected"]);
-    const alarm = seen.pane.filter((text) => /Terminal unavailable|interrupted|retrying|Try again|relay|attempt|diagnostic|handshake/i.test(text));
+    const alarm = seen.pane.filter((text) => /unavailable|interrupted|retrying|Try again|relay|attempt|diagnostic|handshake/i.test(text));
     expect(alarm, "retry wording on the default surface while it opened").toEqual([]);
     await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Connected");
   });
@@ -643,22 +651,30 @@ test.describe("on a Mac", () => {
   test.use({ journeyPlatform: "mac" });
 
   test("HUB-J3 on a Mac, every surface names the palette chord ⌘K (cas-2a33)", journeyPart, async ({ page, journey }) => {
-    await journey.stage("On a Mac, the search, the palette and Terminal view all say ⌘K, and ⌘K opens them", async () => {
+    await journey.stage("On a Mac, the search and the Appearance & commands control say ⌘K, and ⌘K opens them", async () => {
       await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
       await journey.open();
+      const phone = await phoneLayout(page);
       const search = page.getByRole("searchbox", { name: "Search conversations" });
-      await expect(search).toHaveAttribute("placeholder", "Search conversations (⌘K)");
-      await page.keyboard.press("Meta+k");
-      await expect(search).toBeFocused();
-      await page.keyboard.press("Meta+k");
+      await expect(search).toHaveAttribute("placeholder", phone ? "Search conversations" : "Search conversations (⌘K)");
+      if (phone) await activate(page, page.getByRole("button", { name: "Appearance & commands", exact: true }));
+      else {
+        await page.keyboard.press("Meta+k");
+        await expect(search).toBeFocused();
+        await page.keyboard.press("Meta+k");
+      }
       await expect(page.getByRole("searchbox", { name: "Filter commands" })).toBeFocused();
-      await page.keyboard.press("Escape");
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-      await page.locator("#conversation-terminal").click();
-      const paletteButton = page.getByRole("button", { name: "Open command palette (⌘K)", exact: true });
-      await expect(paletteButton).toHaveText("⌘K");
-      await expect(paletteButton).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
+      if (phone) await activate(page, page.getByRole("button", { name: "Close command palette", exact: true }));
+      else await page.keyboard.press("Escape");
+      await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }));
+      await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+      await showConversationList(page);
+      // The list returns through Back on phone; its
+      // Appearance & commands control names the same chord in its tooltip.
+      await expect(page.getByRole("button", { name: "Appearance & commands", exact: true })).toHaveAttribute("title", "Appearance & commands (⌘K twice)");
+      await expect(search).toHaveAttribute("placeholder", phone ? "Search conversations" : "Search conversations (⌘K)");
       await expect(page.locator("body")).not.toContainText("Ctrl K");
+      expect(await page.evaluate(() => [...document.querySelectorAll("[title], [placeholder], [aria-label]")].map((node) => `${node.getAttribute("title") ?? ""} ${node.getAttribute("placeholder") ?? ""} ${node.getAttribute("aria-label") ?? ""}`).filter((text) => text.includes("Ctrl K")))).toEqual([]);
     });
   });
 });

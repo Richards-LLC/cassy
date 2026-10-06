@@ -937,6 +937,7 @@ export class HubConnectionSupervisor {
     for (const socket of this.sockets.values()) {
       // Stop every state-producing handler, but drain already queued positive
       // receipts for refs this socket wrote. They cannot revive the transport.
+      if (!this.legacySends.get(socket)?.length) socket.onmessage = null;
       socket.onopen = null; socket.onerror = null; socket.onclose = null;
       try { socket.close(4000, "abandoned"); } catch { /* already closing */ }
     }

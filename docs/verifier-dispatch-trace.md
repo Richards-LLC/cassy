@@ -58,6 +58,7 @@ warning and the task stays stuck in `pending_verification=true`.
 - Actual mutation path (after gate passes): `close_ops.rs:351-574`.
 
 ### Jail enforcement (the path that WAS the `VERIFICATION_JAIL_BLOCKED`
+
 signal)
 - `cas-cli/src/mcp/server/mod.rs:617-676`
   `CasCore::authorize_agent_action`.
@@ -217,7 +218,7 @@ The "filter" is a natural-language rule baked into the task-verifier agent's sys
 
 ## Appendix: call path summary
 
-```
+```text
 mcp__cas__task action=close id=X
   └─ cas_task_close (close_ops.rs:8)
       ├─ get(task)                                      :14
@@ -238,7 +239,7 @@ mcp__cas__task action=close id=X
       └─ Close + notes + unblock + epic rollup          :351-574
 ```
 
-```
+```text
 any mutating MCP tool call
   └─ authorize_agent_action (server/mod.rs:617)
       ├─ supervisor? exempt                              :640-644

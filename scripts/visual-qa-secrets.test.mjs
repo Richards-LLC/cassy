@@ -160,3 +160,115 @@ test('runner-owned tracing continues journeys with one safe warning and no harne
     assert.equal((await readdir(dir)).some(name => name.endsWith('.zip')), false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+// cas-b10d: the close gate counts assertions only from the runner's own
+// test.trace, so signed-in evidence keeps runner tracing on and scrubs the
+// finished zip. Entry names and event shapes are those a runner zip carries.
+function storedZip(entries) {
+  const crc = (bytes) => {
+    let value = 0xffffffff;
+    for (const byte of bytes) {
+      value ^= byte;
+      for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+    }
+    return (value ^ 0xffffffff) >>> 0;
+  };
+  const bodies = [], directory = [];
+  let offset = 0;
+  for (const [entryName, text] of entries) {
+    const name = Buffer.from(entryName), bytes = Buffer.from(text), sum = crc(bytes);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(sum, 14); local.writeUInt32LE(bytes.length, 18); local.writeUInt32LE(bytes.length, 22); local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(sum, 16); central.writeUInt32LE(bytes.length, 20); central.writeUInt32LE(bytes.length, 24); central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42);
+    bodies.push(local, name, bytes); directory.push(central, name);
+    offset += 30 + name.length + bytes.length;
+  }
+  const central = Buffer.concat(directory), footer = Buffer.alloc(22);
+  footer.writeUInt32LE(0x06054b50); footer.writeUInt16LE(entries.length, 8); footer.writeUInt16LE(entries.length, 10);
+  footer.writeUInt32LE(central.length, 12); footer.writeUInt32LE(offset, 16);
+  return Buffer.concat([...bodies, central, footer]);
+}
+
+async function zipEntries(path) {
+  const { readFile } = await import('node:fs/promises');
+  const { inflateRawSync } = await import('node:zlib');
+  const zip = await readFile(path), entries = new Map();
+  let end = zip.length - 22;
+  while (zip.readUInt32LE(end) !== 0x06054b50) end--;
+  let cursor = zip.readUInt32LE(end + 16);
+  for (let index = 0; index < zip.readUInt16LE(end + 10); index++) {
+    const method = zip.readUInt16LE(cursor + 10), size = zip.readUInt32LE(cursor + 20), nameLength = zip.readUInt16LE(cursor + 28);
+    const name = zip.subarray(cursor + 46, cursor + 46 + nameLength).toString();
+    const local = zip.readUInt32LE(cursor + 42);
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const bytes = zip.subarray(start, start + size);
+    entries.set(name, (method === 8 ? inflateRawSync(bytes) : bytes).toString());
+    cursor += 46 + nameLength + zip.readUInt16LE(cursor + 30) + zip.readUInt16LE(cursor + 32);
+  }
+  return entries;
+}
+
+const runnerEvents = [
+  { type: 'before', callId: 'expect@1', method: 'expect', title: 'Expect "toHaveText"', params: { expected: 'Signed in' } },
+  { type: 'after', callId: 'expect@1', endTime: 2 },
+  { type: 'before', callId: 'pw:api@2', method: 'pw:api', title: 'Navigate to "/account"' },
+  { type: 'after', callId: 'pw:api@2', endTime: 3 },
+];
+
+function signedInRunnerZip() {
+  const network = {
+    type: 'resource-snapshot',
+    snapshot: {
+      request: { url: '/account', headers: [{ name: 'Authorization', value: `Bearer ${idToken}` }, { name: 'Cookie', value: `__session=${cookie}` }], cookies: [{ name: '__session', value: cookie }] },
+      response: { headers: [{ name: 'Set-Cookie', value: `__session=${cookie}; HttpOnly` }] },
+    },
+  };
+  const page = { type: 'before', callId: 'call@3', method: 'evaluate', params: { arg: JSON.stringify({ refreshToken, idToken }) } };
+  return storedZip([
+    ['test.trace', runnerEvents.map((event) => JSON.stringify(event)).join('\n')],
+    ['trace.trace', JSON.stringify(page)],
+    ['trace.network', JSON.stringify(network)],
+  ]);
+}
+
+test('a scrubbed runner trace keeps its assertions and drops every credential (cas-b10d)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qa-runner-trace-'));
+  try {
+    const raw = join(dir, 'raw.zip');
+    await writeFile(raw, signedInRunnerZip());
+    for (const [label, scrub] of [
+      ['module', (output) => qa.scrubQaTraceFile(raw, output)],
+      ['cli', (output) => {
+        const child = spawnSync(process.execPath, [new URL(moduleUrl).pathname, '--scrub-trace', raw, output], {
+          encoding: 'utf8', env: { ...process.env, QA_TRACE_SECRETS: cookie },
+        });
+        assert.equal(child.status, 0, child.stderr);
+        assert.match(child.stdout, /^SCRUBBED /);
+        assert.equal(forbidden.test(child.stdout + child.stderr), false, 'credential reached CLI output');
+      }],
+    ]) {
+      const output = join(dir, `${label}-trace.zip`);
+      await scrub(output);
+      const entries = await zipEntries(output);
+      assert.deepEqual([...entries.keys()], ['test.trace', 'trace.trace', 'trace.network'], label);
+      assert.deepEqual(entries.get('test.trace').split('\n').map((line) => JSON.parse(line)), runnerEvents,
+        `${label}: the runner's assertion events are unchanged`);
+      for (const [name, text] of entries) assert.equal(forbidden.test(text), false, `${label}: ${name} still carries a credential`);
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a failed runner-trace scrub publishes nothing (cas-b10d)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qa-runner-trace-bad-'));
+  try {
+    const raw = join(dir, 'raw.zip'), output = join(dir, 'trace.zip');
+    await writeFile(raw, `not a zip ${cookie}`);
+    await writeFile(output, 'stale');
+    await assert.rejects(qa.scrubQaTraceFile(raw, output), (error) => !forbidden.test(error.message));
+    const { existsSync } = await import('node:fs');
+    assert.equal(existsSync(output), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

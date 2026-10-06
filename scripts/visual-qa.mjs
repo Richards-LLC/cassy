@@ -124,6 +124,20 @@ export async function saveQaTrace(context, path, { secrets = [] } = {}) {
   }
 }
 
+/**
+ * Scrub a finished Playwright test-runner trace.zip. The runner's own
+ * test.trace keeps every assertion's outcome, which the close gate counts; only
+ * credentials are replaced. A failed scrub writes nothing at `output`.
+ */
+export async function scrubQaTraceFile(input, output, { secrets = [] } = {}) {
+  try {
+    await writeFile(output, scrubTraceZip(await readFile(input), secrets));
+  } catch (error) {
+    await rm(output, { force: true });
+    throw new Error(redactQaText(error, secrets));
+  }
+}
+
 const DEFAULT_VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'phone', width: 390, height: 800 },
@@ -1241,6 +1255,7 @@ function parseArgs(argv) {
     else if (arg === '--journey') options.journey = argv[++index];
     else if (arg === '--scheme') options.schemes = [argv[++index]];
     else if (arg === '--viewport') options.viewports = [argv[++index]];
+    else if (arg === '--scrub-trace') options.scrubTrace = [argv[++index], argv[++index]];
     else if (arg === '--help' || arg === '-h') options.help = true;
     else options.urls.push(arg);
   }
@@ -1249,9 +1264,21 @@ function parseArgs(argv) {
 
 if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const options = parseArgs(process.argv.slice(2));
-  if (options.help || (!options.urls.length && !options.journey)) {
+  if (options.scrubTrace) {
+    // Extra literal secrets come from the environment, never argv (process lists).
+    const secrets = (process.env.QA_TRACE_SECRETS ?? '').split('\n').filter(Boolean);
+    const [input, output] = options.scrubTrace;
+    try {
+      if (!input || !output) throw new Error('--scrub-trace needs an input and an output path');
+      await scrubQaTraceFile(input, output, { secrets });
+      console.log(`SCRUBBED ${output}`);
+    } catch (error) {
+      console.error(redactQaText(error, secrets));
+      process.exitCode = 2;
+    }
+  } else if (options.help || (!options.urls.length && !options.journey)) {
     if (!options.help) console.error('No captures requested: at least one URL or journey is required.');
-    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]');
+    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]\n       node scripts/visual-qa.mjs --scrub-trace RAW.zip trace.zip   (extra literal secrets: QA_TRACE_SECRETS, newline-separated)');
     process.exitCode = options.help ? 0 : 2;
   } else {
     try {

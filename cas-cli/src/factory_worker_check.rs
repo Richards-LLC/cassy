@@ -637,6 +637,62 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capped_check_then_test_excludes_compiler_cache_and_keeps_target_lease_cas_4b15() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        // A Cargo stand-in observes the effective wrapper settings and the
+        // real inherited lock. It can invoke a cache stand-in, but must not.
+        let cache = dir.path().join("cache with spaces/sccache");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fake_cargo(&cache, "touch target/cache-was-invoked");
+        env.set("CARGO_BUILD_RUSTC_WRAPPER", &cache);
+        env.set("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", &cache);
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, r#"python3 - <<'PY'
+import json, os, subprocess
+from pathlib import Path
+repo = Path.cwd()
+record, = [json.loads(p.read_text()) for p in (repo.parent.parent / 'worker-target-owners').glob('*.json')
+           if json.loads(p.read_text())['worktree'] == str(repo)]
+assert record['active'], 'Cargo must run under target ownership'
+fds = []
+for fd in os.listdir('/proc/self/fd'):
+    try:
+        stat = os.fstat(int(fd))
+        fds.append((stat.st_dev, stat.st_ino))
+    except OSError:
+        pass
+assert (record['lease_dev'], record['lease_ino']) in fds, 'real builders must still inherit the lease'
+for key in ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'):
+    wrapper = os.environ.get(key, os.environ.get('CARGO_BUILD_' + key, ''))
+    if wrapper:
+        subprocess.run([wrapper], check=True)
+(repo / 'target/observed').write_text('owned')
+PY
+if [ "$1" = nextest ]; then
+    printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'
+fi"#);
+        for direct in [true, false] {
+            let repo = root.join(format!("worktrees/worker-{direct}"));
+            fixture_commit(&repo);
+            for key in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
+                if direct { env.set(key, &cache); } else { env.remove(key); }
+            }
+            execute_at(&root, &["-p".into(), "cas".into(), "--tests".into()], &repo, &fake).unwrap();
+            let test_args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
+            execute_at(&root, &test_args, &repo, &fake).unwrap();
+            assert!(!repo.join("target/cache-was-invoked").exists(), "capped Cargo must not invoke a compiler cache (direct={direct})");
+            assert_eq!(std::fs::read_to_string(repo.join("target/observed")).unwrap(), "owned");
+            assert_eq!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).len(), 1);
+            assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
+            assert_eq!(std::env::var_os("CARGO_BUILD_RUSTC_WRAPPER").unwrap(), cache.as_os_str(), "parent cache configuration is unchanged");
+        }
+    }
+
     // Temporary real-tool proof: removed after RED/GREEN; durable regressions
     // below do not require an installed compiler-cache binary.
     #[cfg(target_os = "linux")]

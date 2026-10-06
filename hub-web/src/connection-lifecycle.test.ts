@@ -508,6 +508,48 @@ describe("Commander live connection lifecycle", () => {
     expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
   });
 
+  it("releases a held send when the machine becomes live after its session (cas-9dc6)", async () => {
+    const hub = transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const fetchNow = globalThis.fetch;
+    let releaseEvents!: () => void;
+    const eventsReady = new Promise<void>(resolve => { releaseEvents = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fetchNow(input, init);
+      if (new URL(String(input)).pathname === "/v1/events") await eventsReady;
+      return response;
+    }));
+    let written = false;
+    const connection: HubConnectionSupervisor = new HubConnectionSupervisor(await storedMachine("session-before-machine"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onAttachState: (session, state) => {
+        if (state.phase === "live" && !written) written = connection.send(session, {
+          SendMessage: { target: "supervisor", text: "Held in the first tab", client_ref: "held-before-live" },
+        });
+      },
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(hub.streams).toHaveLength(1));
+    const attached = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    socket.receive({ channel: "pty:session-a", message: { Welcome: {
+      state: { panes: [] }, protocol_version: 3, capabilities: [],
+    } } });
+    expect(connection.attachSnapshot("session-a")?.phase).toBe("live");
+    expect(connection.snapshot().phase).toBe("attaching");
+    expect(written).toBe(false);
+    releaseEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(written).toBe(true);
+    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.message?.SendMessage?.client_ref === "held-before-live")).toHaveLength(1);
+  });
+
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {
     const hub = transport(true);
     TransportSocket.instances = [];

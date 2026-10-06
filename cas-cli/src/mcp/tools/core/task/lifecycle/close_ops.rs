@@ -24837,6 +24837,215 @@ mod merge_state_gate_tests {
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
     }
 
+    /// A live worker is legitimately detached at another QA task's bound tip.
+    /// The supervisor receipt names the old delivery on its declared target;
+    /// closing it must not require a review-gate override.
+    async fn detached_assignee_close_cas_258f(supervisor: bool, self_close: bool, merged: bool) {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+            open_worktree_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget, Worktree};
+
+        let mut env = TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.md"), "seed\n").unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", "seed.md", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        let seed = rev_parse_local(p, "HEAD");
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-258f-fixture\"\n\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+
+        let worker = "active-raven-258f";
+        let branch = "factory/active-raven-258f";
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join(worker);
+        git(
+            p,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(wt.join("report.md"), "delivered report\n").unwrap();
+        git(&wt, &["add", "report.md"]);
+        git(
+            &wt,
+            &["commit", "-q", "-m", "docs(cas-258f): delivered report"],
+        );
+        let receipt = rev_parse_local(&wt, "HEAD");
+        if merged {
+            git(p, &["merge", "-q", "--ff-only", branch]);
+        }
+        git(
+            &wt,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "factory/active-raven-258f-cas-other",
+                &seed,
+            ],
+        );
+        std::fs::write(wt.join("other.md"), "another QA task\n").unwrap();
+        git(&wt, &["add", "other.md"]);
+        git(
+            &wt,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "docs(cas-other): unrelated QA bound tip",
+            ],
+        );
+        let qa_tip = rev_parse_local(&wt, "HEAD");
+        git(&wt, &["checkout", "-q", "--detach"]);
+        assert!(!git_commit_is_ancestor(&wt, &receipt, "HEAD"));
+        assert_eq!(git_commit_is_ancestor(p, &receipt, "main"), merged);
+
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        // A role string cannot authorize the receipt-only path for a worker.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let worktree_store = open_worktree_store(&cas_dir).unwrap();
+        worktree_store.init().unwrap();
+        worktree_store
+            .add(&Worktree::new(
+                "wt-258f".into(),
+                branch.into(),
+                "main".into(),
+                wt.clone(),
+            ))
+            .unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                worker.into(),
+                worker.into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        let actor = if self_close {
+            worker
+        } else {
+            "cas-258f-caller"
+        };
+        if !self_close {
+            agents
+                .register(&Agent::new_with_role(
+                    actor.into(),
+                    actor.into(),
+                    if supervisor {
+                        AgentRole::Supervisor
+                    } else {
+                        AgentRole::Worker
+                    },
+                ))
+                .unwrap();
+        }
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task(worker);
+        task.id = "cas-258f".into();
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.worktree_id = Some("wt-258f".into());
+        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-258f-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "close the target-bound delivery",
+            "commit_receipt": receipt,
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let is_error = response.is_error == Some(true);
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let after = store.get(&task.id).unwrap();
+        if supervisor && merged {
+            assert!(
+                !is_error,
+                "merged receipt must close without override: {text}"
+            );
+            assert_eq!(after.status, TaskStatus::Closed, "{text}");
+            let hook = after
+                .deliverables
+                .pre_close_hook
+                .as_ref()
+                .expect("target-bound hook evidence");
+            assert_eq!(hook.task_tip.as_deref(), Some(receipt.as_str()));
+            assert!(
+                hook.worktree_branch.is_none(),
+                "assignee checkout must not supply proof"
+            );
+        } else {
+            assert!(is_error, "unsafe receipt/actor must be refused: {text}");
+            assert_ne!(after.status, TaskStatus::Closed, "{text}");
+            assert!(text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
+            assert!(text.contains("expected task worktree branch"), "{text}");
+            assert!(
+                after.deliverables.pre_close_hook.is_none(),
+                "no hook may run on unrelated checkout"
+            );
+        }
+        assert_eq!(
+            rev_parse_local(&wt, "HEAD"),
+            qa_tip,
+            "close must leave QA checkout untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_merged_receipt_ignores_detached_assignee_without_override_cas_258f() {
+        detached_assignee_close_cas_258f(true, false, true).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_unmerged_receipt_cannot_skip_detached_assignee_cas_258f() {
+        detached_assignee_close_cas_258f(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn worker_self_close_still_validates_detached_checkout_cas_258f() {
+        detached_assignee_close_cas_258f(false, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn non_supervisor_close_cannot_skip_detached_assignee_cas_258f() {
+        detached_assignee_close_cas_258f(false, false, true).await;
+    }
     /// A reopened delivery remains on origin after its retired author's
     /// checkout switches to unrelated work. Exercise the public close entry,
     /// rather than manufacturing pre-close hook evidence directly.

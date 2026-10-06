@@ -131,6 +131,12 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     });
+    if (process.env.QA_ARTIFACTS) {
+      const { readFile, writeFile } = await import("node:fs/promises");
+      const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
+      const dialog = await inbox.evaluate((node) => node.outerHTML);
+      await writeFile(`${process.env.QA_ARTIFACTS}/presence.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Machine alerts</title><style>${css}</style></head><body>${dialog}</body></html>`);
+    }
     await journey.stage("The phone disables alerts while the hub is unreachable", async () => {
       await page.emulateMedia({ forcedColors: null, contrast: null, reducedMotion: null });
       const settings = row.locator("summary");

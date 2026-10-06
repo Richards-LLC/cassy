@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "presence_live_probe.rs"]
+mod live_probe;
+
 #[tokio::test(start_paused = true)]
 async fn presence_rate_limit_waits_from_response_without_changing_unanswered_body() {
     let mut r = activated();

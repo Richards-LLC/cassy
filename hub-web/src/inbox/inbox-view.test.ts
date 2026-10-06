@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InboxSnapshot, InboxState, OperatorInboxController } from "./controller";
 import { InboxView, browserLabel, unverifiedCount, withheldCopy } from "./inbox-view";
 import type { InboxEvent } from "./store";
+import type { PresenceSnapshot } from "./presence";
 
 function event(eventId: string, verification: InboxEvent["verification"]): InboxEvent {
   return {
@@ -26,8 +27,8 @@ function event(eventId: string, verification: InboxEvent["verification"]): Inbox
   };
 }
 
-function view(state: InboxState, events: InboxEvent[] = []) {
-  const snapshot: InboxSnapshot = { state, events, commands: [], machines: [], generationWarning: null, expiredThrough: null };
+function view(state: InboxState, events: InboxEvent[] = [], presence?: PresenceSnapshot, manage = false) {
+  const snapshot: InboxSnapshot = { state, events, commands: [], machines: presence ? [{ machineId: "machine", hubId: "hub-1", label: "Atlas", status: "active", projects: [] }] : [], generationWarning: null, expiredThrough: null, presence };
   const controller = {
     subscribe: () => () => undefined,
     current: () => state,
@@ -36,6 +37,9 @@ function view(state: InboxState, events: InboxEvent[] = []) {
     pollSignIn: vi.fn(async () => null),
     commandScopes: () => [],
     machines: async () => [],
+    refreshPresence: vi.fn(async () => undefined),
+    canManageMonitoring: () => manage,
+    setMonitoring: vi.fn(async () => undefined),
   };
   const inbox = new InboxView(controller as unknown as OperatorInboxController, { defaultLabel: "This browser" });
   (inbox as unknown as { snapshot: InboxSnapshot }).snapshot = snapshot;
@@ -48,6 +52,55 @@ afterEach(() => {
 });
 
 describe("operator inbox view (cas-9b7d QA round 1)", () => {
+  it("names an unavailable observer and separate component status without claiming power state", () => {
+    const presence: PresenceSnapshot = {
+      observerStatus: "unavailable", observerCheckedAt: null,
+      machines: [{ machineId: "machine", hubId: "hub-1", monitoring: "enabled", monitoringGeneration: "1", presence: "observed",
+        lastReportAt: "2026-10-06T11:00:00Z", leaseExpiresAt: null, deadlineAt: null, silence: null, openOutage: null,
+        components: [{ component: "serve", state: "degraded", observedAt: "2026-10-06T10:59:59Z" }],
+      }],
+    };
+    const { inbox } = view({ kind: "ready", accountHint: null, label: "Phone" }, [], presence);
+    const text = inbox.dialog.textContent!;
+    expect(text).toContain("Observer unavailable");
+    expect(text).toContain("Reporting to Cassy Cloud");
+    expect(text).toContain("Serve: degraded");
+    expect(text).toContain("Last report");
+    expect(text).not.toMatch(/powered off|sleeping/);
+    expect(inbox.dialog.querySelector('[id^="presence-toggle-"]')).toBeNull();
+  });
+
+  it("keeps keyboard focus and consent disclosure through a snapshot update, and names the account action", async () => {
+    const presence: PresenceSnapshot = {
+      observerStatus: "ok", observerCheckedAt: new Date().toISOString(),
+      machines: [{ machineId: "machine", hubId: "hub-1", monitoring: "disabled", monitoringGeneration: "0", presence: null,
+        lastReportAt: null, leaseExpiresAt: null, deadlineAt: null, silence: null, openOutage: null, components: [],
+      }],
+    };
+    const { inbox, controller } = view({ kind: "ready", accountHint: null, label: "Phone" }, [], presence, true);
+    const details = inbox.dialog.querySelector<HTMLDetailsElement>("#presence-consent-machine")!;
+    details.open = true;
+    const summary = inbox.dialog.querySelector<HTMLElement>("#presence-details-machine")!;
+    summary.tabIndex = 0;
+    summary.focus();
+    inbox.render();
+    expect(inbox.dialog.querySelector<HTMLDetailsElement>("#presence-consent-machine")!.open).toBe(true);
+    expect(document.activeElement?.id).toBe("presence-details-machine");
+    const enable = inbox.dialog.querySelector<HTMLButtonElement>("#presence-toggle-machine")!;
+    expect(enable.textContent).toBe("Enable alerts for Atlas");
+    expect(details.textContent).toContain("90 days");
+    enable.click();
+    await vi.waitFor(() => expect(controller.setMonitoring).toHaveBeenCalledWith("machine", true));
+  });
+
+  it("renders a verified machine notice outside conversation bubbles", () => {
+    const notice: InboxEvent = { ...event("1", "verified"), scope: "machine", producerKind: "cloud_observer", projectId: null, sessionId: null,
+      plaintext: { type: "psc.operator.machine_presence", v: 1, account_id: "acct", machine_id: "machine", hub_id: "hub-1", kind: "machine_unobserved", outage_epoch: "1", ref_event_id: null, detected_at: "2026-10-06T11:00:00Z" },
+    };
+    const { inbox } = view({ kind: "ready", accountHint: null, label: "Phone" }, [notice]);
+    expect(inbox.dialog.querySelector('[data-presence-event="1"]')?.textContent).toContain("Machine unreachable");
+    expect(inbox.dialog.querySelector(".operator-inbox-bubble")).toBeNull();
+  });
   it("F02: the browser name and Sign in are one form, so Enter in the field signs in", async () => {
     const { inbox, controller } = view({ kind: "signed_out" });
     const input = inbox.dialog.querySelector<HTMLInputElement>("#operator-inbox-label")!;

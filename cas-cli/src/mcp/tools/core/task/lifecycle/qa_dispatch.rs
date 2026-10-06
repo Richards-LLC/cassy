@@ -769,7 +769,37 @@ impl CasCore {
         // cas-ce39: a new tip retires the round open for the old one. Report
         // which, so its work item is cancelled and a reviewer who had claimed
         // it is told to stop, instead of reviewing a dead head.
-        let opened = cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
+        let mut opened = cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
+        // cas-54b0: the round open for this tip may be linked to a work item
+        // nobody will run: cancelled by a runtime that did not withdraw it
+        // (before cas-7877), closed without a verdict, or gone. Reporting it as
+        // PENDING left the merge gated on a review that could never be
+        // recorded. Withdraw it, saying why, and open a live round.
+        let mut orphan_note = String::new();
+        if let Ok((QaPassOpen::AlreadyOpen(pass), _)) = &opened
+            && let Some((qa_task_id, gone)) = self.dead_qa_work_item(pass)
+        {
+            let reason =
+                format!("its QA task {qa_task_id} was {gone} before the round was withdrawn");
+            match cas_store::withdraw_qa_pass_for_qa_task(&self.cas_root, &qa_task_id, &reason, now)
+            {
+                Ok(Some(retired)) => {
+                    orphan_note = format!(
+                        "\n\nOrphaned QA round {} (pass {}) for {} @{} withdrawn: {reason}.",
+                        retired.round,
+                        retired.id,
+                        retired.task_id,
+                        retired.head8()
+                    );
+                    opened =
+                        cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(pass_id = %pass.id, error = %error, "cas-54b0: orphaned QA round could not be withdrawn");
+                }
+            }
+        }
         let (outcome, superseded) = match opened {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -848,6 +878,7 @@ impl CasCore {
                 )
             }
         };
+        status.push_str(&orphan_note);
         if let Some(retired) = superseded {
             // Read the new round back after materialization so its QA task
             // id (linked just above) is known.
@@ -872,6 +903,50 @@ impl CasCore {
             satisfied,
             withdrawn: false,
         })
+    }
+
+    /// cas-54b0: the round's linked work item can no longer produce a
+    /// verdict: cancelled, closed (a verdict would have resolved the round),
+    /// or missing. Returns its id and what happened to it.
+    fn dead_qa_work_item(&self, pass: &QaPass) -> Option<(String, &'static str)> {
+        let qa_task_id = pass.qa_task_id.clone()?;
+        let store = self.open_task_store().ok()?;
+        let gone = match store.get(&qa_task_id) {
+            Ok(item) if item.status == TaskStatus::Cancelled => "cancelled",
+            Ok(item) if item.status == TaskStatus::Closed => "closed without a verdict",
+            Ok(_) => return None,
+            Err(_) => "missing",
+        };
+        Some((qa_task_id, gone))
+    }
+
+    /// cas-7877, cas-54b0: a cancelled QA work item's round will never be
+    /// reviewed. Withdraw it by the round's own link to the work item, not
+    /// by the item's label, and report what changed.
+    pub(crate) fn withdraw_round_of_cancelled_qa_task(
+        &self,
+        qa_task_id: &str,
+        reason: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        match cas_store::withdraw_qa_pass_for_qa_task(
+            &self.cas_root,
+            qa_task_id,
+            &format!("QA task {qa_task_id} cancelled: {reason}"),
+            now,
+        ) {
+            Ok(Some(pass)) => format!(
+                " Independent QA round {} (pass {}) for {} @{} withdrawn.",
+                pass.round,
+                pass.id,
+                pass.task_id,
+                pass.head8()
+            ),
+            Ok(None) => String::new(),
+            Err(error) => format!(
+                " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
+            ),
+        }
     }
 
     /// cas-7877: the re-parked tip is not user-facing and no earlier round

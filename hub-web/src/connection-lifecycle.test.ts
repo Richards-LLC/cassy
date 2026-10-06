@@ -566,15 +566,20 @@ describe("Commander live connection lifecycle", () => {
     await connection.attach("healthy");
     await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
     const socket = TransportSocket.instances[0]!;
+    const started = Date.now();
     const pulse = setInterval(() => {
       socket.receive({ StateUpdate: { state: { panes: [] } } });
       try { hub.endEvents(); } catch { /* no stream open during backoff */ }
     }, 1_000);
     for (let second = 0; second < 30; second++) {
       await vi.advanceTimersByTimeAsync(1_000);
-      await new Promise<void>(resolve => setImmediate(resolve));
+      // Let real signing/fetch work settle before the next protocol second;
+      // otherwise fake time can manufacture a signing deadline failure.
+      await vi.waitFor(() => expect(["live", "backoff"]).toContain(connection.snapshot().phase), { interval: 1 });
     }
     clearInterval(pulse);
+    console.info("cas-49cc flap proof", { elapsedMs: Date.now() - started, streams: hub.streams.length,
+      attaches: TransportSocket.instances.length, tickets: hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket").length, retries });
     expect(hub.streams.length).toBeLessThanOrEqual(6);
     expect(retries.slice(0, 4)).toEqual([1_000, 2_000, 4_000, 8_000]);
     expect(TransportSocket.instances).toHaveLength(1);

@@ -420,6 +420,7 @@ describe("held-send polish after cas-0653 (cas-a355)", () => {
     const machine = internals as unknown as Refusing;
     machine.desired = true;
     machine.machineSocketReady = false;
+    internals.lifecycle = { phase: "live", stage: "live" };
     const socket = fakeSocket();
     machine.sockets.set("factory-a", socket);
     for (const ref of ["send-1", "send-2", "send-3"]) {

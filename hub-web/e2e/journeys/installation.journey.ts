@@ -1,6 +1,7 @@
 import { test, expect, journeyPart } from "./journey";
 import type { Page } from "@playwright/test";
 import { ATLAS } from "./world";
+import { showConversationList } from "./responsive-goals";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -14,9 +15,21 @@ async function pair(page: Page, token: string): Promise<void> {
   await expect(dialog).toBeHidden();
 }
 async function inventory(page: Page): Promise<void> {
-  if (!await page.locator("#paired-machines-dialog").isVisible()) await page.locator("#paired-machines-toggle").click();
+  if (!await page.locator("#paired-machines-dialog").isVisible()) {
+    await showConversationList(page);
+    await page.locator("#paired-machines-toggle").click();
+  }
   await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
   await expect(page.locator(".installation-inventory").getByText("This browser's access.", { exact: false })).toBeVisible();
+}
+
+/** Protocol evidence remains available, but never leads the default sheet. */
+async function expectGeneration(page: Page, generation: number): Promise<void> {
+  const technical = page.locator(".installation-inventory-row details");
+  await technical.locator("summary").click();
+  await expect(technical.locator("div").filter({ has: page.getByText("Credential generation", { exact: true }) }).locator("dd")).toHaveText(String(generation));
+  await technical.locator("summary").click();
+  await expect(technical).not.toHaveAttribute("open", "");
 }
 
 test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and inventory (cas-5e53)", journeyPart, async ({ page, context, journey }) => {
@@ -32,7 +45,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     id = [...hub.installations.keys()][0]!;
     await inventory(page);
     await expect(page.locator(".installation-inventory-row")).toHaveCount(1);
-    await expect(page.locator(".installation-inventory-row")).toContainText("Generation 5");
+    await expectGeneration(page, 5);
     await expect(page.locator(".installation-inventory-row")).toContainText("Not in an operator inbox");
     await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
   });
@@ -47,7 +60,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
   await journey.stage("M02 another open tab adopts the accepted credential on refusal", async () => {
     await pair(page, "6".repeat(43));
     await inventory(peer);
-    await expect(peer.locator(".installation-inventory-row")).toContainText("Generation 6");
+    await expectGeneration(peer, 6);
     expect(hub.staleInstallationRefusals.length).toBeGreaterThan(0);
     expect(hub.installations.size).toBe(1);
     await peer.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
@@ -74,7 +87,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     expect(hub.installations.get(id!)!.credential_generation).toBe(6);
     await page.reload();
     await inventory(page);
-    await expect(page.locator(".installation-inventory-row")).toContainText("Generation 6");
+    await expectGeneration(page, 6);
     await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
   });
 
@@ -88,7 +101,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
       for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
         for (const colorScheme of ["light", "dark"] as const) {
           await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
-          await expect(page.locator(".installation-inventory-row code")).toHaveText(id!);
+          await expect(page.locator(".installation-inventory-row h3")).toContainText("This browser");
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
           await page.screenshot({ path: join(qa, `inventory-${colorScheme}-${size}.png`) });
         }
@@ -100,12 +113,16 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
         await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
         await page.emulateMedia(media);
         expect(await page.evaluate((query) => matchMedia(query).matches, query)).toBe(true);
-        await expect(page.locator(".installation-inventory-row code")).toHaveText(id!);
+        await expect(page.locator(".installation-inventory-row h3")).toContainText("This browser");
         await page.screenshot({ path: join(qa, `a11y-${name}.png`) });
       }
       await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
     }
-    await expect(page.locator(".installation-inventory-row code")).toHaveText(id!);
+    await expect(page.locator(".installation-inventory-row h3")).toContainText("This browser");
+    const technical = page.locator(".installation-inventory-row details");
+    await technical.locator("summary").click();
+    await expect(technical.locator("code")).toHaveText(id!);
+    await technical.locator("summary").click();
     const close = page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true });
     await close.focus();
     await expect(close).toBeFocused();
@@ -160,8 +177,8 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
   await journey.stage("M01 expired tabs serialize their refresh through real Web Locks and IndexedDB", async () => {
     await Promise.all([page.goto(url), peer.goto(url)]);
     await inventory(page); await inventory(peer);
-    await expect(page.locator(".installation-inventory-row")).toContainText("Generation 2");
-    await expect(peer.locator(".installation-inventory-row")).toContainText("Generation 2");
+    await expectGeneration(page, 2);
+    await expectGeneration(peer, 2);
     expect(hub.installationRefreshes).toBe(1);
     expect(hub.installations.size).toBe(1);
   });
@@ -171,7 +188,7 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
     expect((hub.exchanges.at(-1)!.installation as { expected_generation: number }).expected_generation).toBe(2);
     expect([...hub.installations.values()][0]!.credential_generation).toBe(3);
     await inventory(page);
-    await expect(page.locator(".installation-inventory-row")).toContainText("Generation 3");
+    await expectGeneration(page, 3);
   });
   await peer.close();
 });
@@ -248,7 +265,10 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
   });
 
   await journey.stage("The inventory lists the other installation and revokes it by exact ID", async () => {
-    if (!await page.locator("#paired-machines-dialog").isVisible()) await page.locator("#paired-machines-toggle").click();
+    if (!await page.locator("#paired-machines-dialog").isVisible()) {
+      await showConversationList(page);
+      await page.locator("#paired-machines-toggle").click();
+    }
     await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
     const inventory = page.locator(".installation-inventory");
     await expect(inventory.getByText("2 installations.", { exact: false })).toBeVisible();
@@ -257,7 +277,7 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
     page.once("dialog", async (dialog) => { expect(dialog.message()).toContain(oldId); await dialog.accept(); });
     await row.getByRole("button", { name: "Revoke this installation", exact: true }).click();
     await expect(row.getByRole("button", { name: "Revoked", exact: true })).toBeDisabled();
-    await expect(inventory.getByRole("status")).toHaveText(`Revoked ${oldId}. Its live connections are closing.`);
+    await expect(inventory.getByRole("status")).toHaveText("Revoked Old laptop. Its live connections are closing.");
     expect(hub.installations.get(oldId)!.revoked_at, "the other installation is revoked").not.toBeNull();
     const mine = [...hub.installations.values()].find((r) => r.device_id !== oldId)!;
     expect(mine.revoked_at, "this browser keeps its access").toBeNull();
@@ -294,8 +314,12 @@ test("HUB-J2 an installation the hub verified reads as in the operator inbox (ca
     const id = [...hub.installations.keys()][0]!;
     hub.accountEnrollments.set(id, { state: "enrolled", account_id: "acct-1", relay_device_id: "dev-relay-1", grant_generation: "2", feed_generation: "1", epoch: "4", verified_at: "2026-10-05T21:00:00Z" });
     await inventory(page);
-    await expect(row).toContainText("AccountOperator inbox (key epoch 4)");
+    await expect(row).toContainText("AccountIn your operator inbox");
     await expect(row, "no account or relay ID is shown as if it were a name").not.toContainText("acct-1");
+    const technical = row.locator("details");
+    await technical.locator("summary").click();
+    await expect(technical.locator("div").filter({ has: page.getByText("Account key epoch", { exact: true }) }).locator("dd")).toHaveText("4");
+    await technical.locator("summary").click();
   });
   for (const size of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
     for (const scheme of ["light", "dark"] as const) {
@@ -303,8 +327,8 @@ test("HUB-J2 an installation the hub verified reads as in the operator inbox (ca
         await page.setViewportSize(size);
         await page.emulateMedia({ colorScheme: scheme });
         await page.evaluate((value) => { document.documentElement.dataset.scheme = value; }, scheme);
-        const account = row.locator("dd").last();
-        await expect(account).toHaveText("Operator inbox (key epoch 4)");
+        const account = row.locator(".installation-summary dd").last();
+        await expect(account).toHaveText("In your operator inbox");
         await account.scrollIntoViewIfNeeded();
         await expect(account).toBeInViewport();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
@@ -327,7 +351,7 @@ test("HUB-J2 an installation the hub verified reads as in the operator inbox (ca
     for (const [name, query, media] of modes) {
       await page.emulateMedia(media);
       expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
-      await expect(row.locator("dd").last()).toHaveText("Operator inbox (key epoch 4)");
+      await expect(row.locator(".installation-summary dd").last()).toHaveText("In your operator inbox");
       await page.screenshot({ path: `${qa}/a11y-${name}.png` });
     }
   }

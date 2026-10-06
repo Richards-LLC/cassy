@@ -6185,6 +6185,18 @@ mod spawn_isolation_tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    /// Spawn admission reads the fixture's own config: lift the free-disk floor so
+    /// these tests never depend on how full the host's temp directory is.
+    fn without_spawn_disk_floor(repo: &std::path::Path) {
+        let cas_dir = repo.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[factory]\nspawn_min_free_gib = 0\n",
+        )
+        .unwrap();
+    }
+
     /// Initialise a bare git repo with one commit on `main`.
     fn init_repo(dir: &std::path::Path) {
         Command::new("git")
@@ -6239,6 +6251,7 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        without_spawn_disk_floor(&repo);
 
         // The shared checkout was left parked on the worker's own branch.
         Command::new("git")
@@ -6293,6 +6306,7 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        without_spawn_disk_floor(&repo);
 
         let cas_dir = repo.join(".cas");
         let sibling_path = cas_dir.join("worktrees").join("bright-dolphin-92");
@@ -6347,6 +6361,7 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        without_spawn_disk_floor(&repo);
 
         let cas_dir = repo.join(".cas");
         let worktree_path = cas_dir.join("worktrees").join("own-worker");
@@ -6450,6 +6465,7 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        without_spawn_disk_floor(&repo);
         std::fs::write(repo.join("package.json"), "{\"name\":\"fixture\"}\n").unwrap();
         std::fs::write(repo.join("package-lock.json"), "{\"lockfileVersion\":3}\n").unwrap();
         Command::new("git")
@@ -6497,6 +6513,7 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        without_spawn_disk_floor(&repo);
 
         let source_zig = repo.join(".context").join("zig");
         std::fs::create_dir_all(&source_zig).unwrap();
@@ -6966,6 +6983,7 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        without_spawn_disk_floor(&repo);
 
         // Use the fixture repo as the simulated supervisor checkout. Reading
         // the process cwd makes this test depend on unrelated tests that may
@@ -7026,6 +7044,7 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        without_spawn_disk_floor(&repo);
 
         let cas_dir = repo.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();

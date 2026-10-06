@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      main { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; }
+      h2 { font-size: 18px; margin: 16px 0 8px; }
+      /* A swipeable card carousel: the rail scrolls sideways and snaps; every
+         card is reachable by scrolling it (or by its legend buttons). */
+      .rail { display: flex; gap: 12px; margin: 0; padding: 0 0 8px; list-style: none; overflow-x: auto; scroll-snap-type: x mandatory; }
+      .rail > li { flex: 0 0 80%; scroll-snap-align: start; box-sizing: border-box; padding: 16px; border: 1px solid #172033; border-radius: 12px; overflow: hidden; background: #f4f7fb; }
+      .rail p { margin: 0; }
+      /* The same rail inside a section that hides its edge bleed. */
+      .bleed { overflow: hidden; border-radius: 12px; }
+      .rail.quiet { scrollbar-width: none; }
+      /* The audit page's shape: a narrow shell that hides overflow holds a
+         carousel whose scroller bleeds 4px past it; the cards themselves do
+         not clip. */
+      .shell { max-width: 480px; overflow: hidden; padding: 16px; box-sizing: border-box; }
+      .scroller { display: flex; gap: 12px; margin: 0 -4px; padding: 0 4px 4px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+      .scroller > article { flex: 0 0 calc(100% - 36px); max-width: 420px; box-sizing: border-box; padding: 16px; border: 1px solid #172033; border-radius: 18px; scroll-snap-align: start; }
+      .scroller h4 { margin: 0 0 8px; font-size: 20px; line-height: 1.2; }
+      .scroller p { margin: 0; }
+      /* Negative control: the same row of cards in a box that does not
+         scroll. The later cards are cut off and cannot be reached. */
+      .stuck { display: flex; gap: 12px; margin: 0; padding: 0; list-style: none; overflow: hidden; }
+      .stuck > li { flex: 0 0 80%; box-sizing: border-box; padding: 16px; border: 1px solid #172033; border-radius: 12px; background: #f4f7fb; }
+      .stuck p { margin: 0; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .rail > li, .stuck > li { background: #253452; border-color: #8aa4d6; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h2>Scores</h2>
+      <ul class="rail" id="rail" aria-label="Scores">
+        <li><p>Clarity: the answer names the decision in its first line</p></li>
+        <li><p>Evidence: two sources back the main claim</p></li>
+        <li><p>Tone: plain words, no filler</p></li>
+        <li><p>Length: under the two hundred word target</p></li>
+      </ul>
+      <h2>Highlights</h2>
+      <section class="bleed">
+        <ul class="rail quiet" id="bleed-rail" aria-label="Highlights">
+          <li><p>Opening: the hook lands in the first sentence</p></li>
+          <li><p>Middle: each paragraph carries one idea</p></li>
+          <li><p>Close: the call to action is specific</p></li>
+        </ul>
+      </section>
+      <h2>Screens</h2>
+      <div class="shell">
+        <div class="scroller" id="screens">
+          <article><h4>Hook</h4><p>The first second shows the payoff, so viewers stay for the rest.</p></article>
+          <article><h4>Retention</h4><p>Cuts land every two seconds through the middle third of the reel.</p></article>
+          <article><h4>Ending</h4><p>The last frame loops back to the opening shot for a clean replay.</p></article>
+        </div>
+      </div>
+      <h2>Stuck row</h2>
+      <ul class="stuck" id="stuck" aria-label="Stuck row">
+        <li><p>Visible: this card fits the row</p></li>
+        <li><p>Cut off: this card is hidden and cannot be scrolled to</p></li>
+        <li><p>Cut off: so is this one</p></li>
+      </ul>
+    </main>
+  </body>
+</html>

@@ -100,6 +100,14 @@ describe('the machine that is not connected comes first and the footer names it 
     expect([...footer.querySelector('#paired-machines-toggle')!.children].map((child) => child.className)).toEqual(['pairing-dot partial', '', 'machine-badge-state']);
   });
 
+  it('keeps a one-word footer state whole, so the label yields instead of "Conne…" (cas-97d58 F07)', () => {
+    const footer = document.createElement('div');
+    footer.innerHTML = machineFooterMarkup([live('atlas', 'Atlas · Linux')], 1, 'test-build');
+    expect(footer.querySelector('.machine-badge-state')?.className).toBe('machine-badge-state whole');
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'styles.css'), 'utf8');
+    expect(css).toContain('.conversation-sidebar #paired-machines-toggle .machine-badge-state.whole { flex: none; min-width: auto; }');
+  });
+
   it('counts several machines that are not connected', () => {
     expect(footerState([...fleet, { ...shed, id: 'attic', label: 'Attic · Linux', connection: 'Reconnecting' }])).toBe('2 not connected');
   });
@@ -107,6 +115,15 @@ describe('the machine that is not connected comes first and the footer names it 
   it('lists the machines that are not connected first, keeping each group in its order', () => {
     expect(orderPairedMachines(fleet).map((row) => row.id)).toEqual(['shed', 'atlas', 'studio', 'forge']);
     expect(orderPairedMachines([...fleet, { ...shed, id: 'attic' }]).map((row) => row.id)).toEqual(['shed', 'attic', 'atlas', 'studio', 'forge']);
+  });
+
+  it('names a browser-side cause on the row instead of a bare Unreachable (cas-97d58 F16)', () => {
+    const container = document.createElement('div');
+    const blocked = { ...shed, connection: 'Unreachable', cause: "This browser is blocking the connection. Allow Local network access for this site in the browser's settings." };
+    renderPairedMachines(container, [blocked], async () => undefined);
+    expect(container.querySelector('.paired-machine-state')?.textContent).toBe(blocked.cause);
+    renderPairedMachines(container, [{ ...shed, connection: 'Unreachable' }], async () => undefined);
+    expect(container.querySelector('.paired-machine-state')?.textContent).toBe('Unreachable');
   });
 
   it('moves rendered rows into that order only when asked, so an open list does not jump', () => {
@@ -175,7 +192,7 @@ describe('fleet permissions on a paired machine (cas-d382)', () => {
     expect(stop.getAttribute('aria-disabled')).toBe('true');
     expect(stop.disabled).toBe(false); // focusable, so its description is reachable
     expect(stop.getAttribute('aria-describedby')?.split(' ').map((id) => document.getElementById(id)?.textContent)).toEqual([
-      'Not allowed on this pairing', 'Needs the Stop and restart workers and sessions permission (factory:manage).',
+      'Not allowed on this pairing', 'Needs the Stop and restart workers and sessions permission.',
     ]);
     const command = 'cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage';
     expect(manage.querySelector('code')?.textContent).toBe(command);

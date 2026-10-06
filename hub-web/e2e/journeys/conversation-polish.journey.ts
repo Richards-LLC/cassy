@@ -45,7 +45,8 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
     await expect(page.getByRole("button", { name: "Hold", exact: true })).toHaveCount(0);
     await expect(page.locator(`.obj[data-notification-id="${ask}"]`)).toHaveCount(1);
     await expect(page.locator(".pinned-ask .obj")).toHaveCount(0);
-    await expect(page.locator(".context-text")).not.toContainText("**");
+    // cas-97d58 F09: the rail lists both open questions, each without markdown.
+    for (const entry of await page.locator(".context-text").all()) await expect(entry).not.toContainText("**");
     await expect(page.locator(".pinned-ask")).not.toContainText("**");
     await expect(page.locator("#status-view")).toContainText("Workers · 6");
     await expect(page.locator("#status-view")).not.toContainText("RAW INTERNAL");
@@ -78,7 +79,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
           - text: Choose the
           - strong: next step
           - text: .
-        - text: Send for review Stored on this device
+        - text: Send for review
     `);
     for (const [name, query, media] of [
       ["forced-colors", "(forced-colors: active)", { forcedColors: "active" }],

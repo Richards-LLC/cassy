@@ -928,39 +928,65 @@ pub(super) fn merge_tip_content_presence(
     let mut dropped_paths = Vec::new();
     let mut unknown_reason = None;
     let mut proven_resolutions = Vec::new();
+    let carries_source = std::cell::OnceCell::new();
+    // Mixed proofs list only evolved paths in Superseded.paths. Measure
+    // independently to preserve authorization for every Present path.
+    let mut plan = Vec::new();
     for (resolution, resolution_paths) in resolutions {
-        // Mixed proofs list only evolved paths in Superseded.paths. Measure
-        // independently to preserve authorization for every Present path.
         for path in resolution_paths {
-            let selected = vec![path];
-            match super::delivery_content_presence_in_parent_for_paths(
+            // cas-bdd2: as in the later-commit loop (cas-24d8), a regenerable
+            // artifact is left to cas-baf7's rule instead of walking a
+            // minified bundle through every rebuilt epic commit. In the
+            // cas-cee5 replay this loop spent 295 bundle diffs and 77 blames
+            // reaching the same "dropped" the rule decides on.
+            let artifact =
+                super::artifact_left_to_regeneration_rule(repo, merge_tip, &path, &carries_source);
+            plan.push((resolution.clone(), path, artifact));
+        }
+    }
+    // cas-bdd2: each path's proof is independent; measure them concurrently
+    // and decide in the original order.
+    let proofs = super::measure_in_parallel(&plan, |(resolution, path, artifact)| {
+        (!artifact).then(|| {
+            super::delivery_content_presence_in_parent_for_paths(
                 repo,
-                &resolution,
+                resolution,
                 target,
-                Some(&selected),
+                Some(std::slice::from_ref(path)),
                 true,
-            ) {
-                DeliveryContentPresence::Present { paths } => {
-                    proven_resolutions.push((resolution.clone(), paths.clone()));
-                    append_unique(&mut present_paths, paths);
-                }
-                DeliveryContentPresence::Superseded { paths, commits } => {
-                    proven_resolutions.push((resolution.clone(), paths.clone()));
-                    append_unique(&mut superseded_paths, paths);
-                    append_unique(&mut superseding_commits, commits);
-                }
-                DeliveryContentPresence::Dropped { paths } => {
-                    append_unique(&mut dropped_paths, paths)
-                }
-                DeliveryContentPresence::Unknown { reason } => {
-                    unknown_reason.get_or_insert(reason);
-                }
+            )
+        })
+    });
+    for ((resolution, path, _), proof) in plan.into_iter().zip(proofs) {
+        match proof {
+            None => append_unique(&mut dropped_paths, vec![path]),
+            Some(DeliveryContentPresence::Present { paths }) => {
+                proven_resolutions.push((resolution.clone(), paths.clone()));
+                append_unique(&mut present_paths, paths);
+            }
+            Some(DeliveryContentPresence::Superseded { paths, commits }) => {
+                proven_resolutions.push((resolution.clone(), paths.clone()));
+                append_unique(&mut superseded_paths, paths);
+                append_unique(&mut superseding_commits, commits);
+            }
+            Some(DeliveryContentPresence::Dropped { paths }) => {
+                append_unique(&mut dropped_paths, paths)
+            }
+            Some(DeliveryContentPresence::Unknown { reason }) => {
+                unknown_reason.get_or_insert(reason);
             }
         }
     }
-    let carries_source = std::cell::OnceCell::new();
     for commit in &commits {
-        match super::delivery_content_presence_in_parent(repo, commit, target) {
+        // cas-bdd2: the commit's rebuilt bundles are left to the regeneration
+        // rule below without first walking them through the epic history.
+        match super::delivery_content_presence_in_parent_leaving_artifacts(
+            repo,
+            commit,
+            target,
+            merge_tip,
+            &carries_source,
+        ) {
             DeliveryContentPresence::Present { paths } => append_unique(&mut present_paths, paths),
             DeliveryContentPresence::Superseded { paths, commits } => {
                 append_unique(&mut superseded_paths, paths);
@@ -1090,7 +1116,16 @@ pub(super) fn ordinary_anchor_content_presence(
     anchor: &str,
     identity: &TaskCommitIdentity,
 ) -> DeliveryContentPresence {
-    let original = super::delivery_content_presence_in_parent(repo, anchor, target);
+    // cas-bdd2: as in the per-path loop below, a regenerable artifact is left
+    // to cas-baf7's rule instead of being walked through the epic history.
+    let carries_source = std::cell::OnceCell::new();
+    let original = super::delivery_content_presence_in_parent_leaving_artifacts(
+        repo,
+        anchor,
+        target,
+        anchor,
+        &carries_source,
+    );
     let DeliveryContentPresence::Dropped { paths } = &original else {
         return original;
     };
@@ -1145,27 +1180,37 @@ pub(super) fn ordinary_anchor_content_presence(
         let mut dropped = Vec::new();
         let mut proven_paths = Vec::new();
         let mut commits = Vec::new();
-        let carries_source = std::cell::OnceCell::new();
+        let mut plan = Vec::new();
         for path in paths {
-            if super::artifact_left_to_regeneration_rule(repo, &anchor, path, &carries_source) {
-                dropped.push(path.clone());
-                continue;
-            }
+            let artifact =
+                super::artifact_left_to_regeneration_rule(repo, &anchor, path, &carries_source);
             let authorized: Vec<_> = resolutions
                 .iter()
                 .filter(|(_, resolved)| resolved == path)
                 .map(|(commit, _)| commit.clone())
                 .collect();
-            match delivery_evolution::line_content_presence_with_resolutions(
-                repo,
-                &parent,
-                &anchor,
-                &target_ref,
-                path,
-                &authorized,
-            )
-            .ok()?
-            {
+            plan.push((path.clone(), authorized, artifact));
+        }
+        // cas-bdd2: one ownership walk per path, each independent of the
+        // others; run them concurrently, then decide in the original order.
+        let walks = super::measure_in_parallel(&plan, |(path, authorized, artifact)| {
+            (!artifact).then(|| {
+                delivery_evolution::line_content_presence_with_resolutions(
+                    repo,
+                    &parent,
+                    &anchor,
+                    &target_ref,
+                    path,
+                    authorized,
+                )
+            })
+        });
+        for ((path, _, _), walk) in plan.into_iter().zip(walks) {
+            let Some(walk) = walk else {
+                dropped.push(path);
+                continue;
+            };
+            match walk.ok()? {
                 Some(DeliveryContentPresence::Superseded {
                     paths,
                     commits: authors,
@@ -1176,7 +1221,7 @@ pub(super) fn ordinary_anchor_content_presence(
                 Some(DeliveryContentPresence::Present { paths }) => {
                     append_unique(&mut proven_paths, paths)
                 }
-                _ => dropped.push(path.clone()),
+                _ => dropped.push(path),
             }
         }
         Some(if dropped.is_empty() {

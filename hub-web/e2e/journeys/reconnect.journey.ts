@@ -128,7 +128,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const rail = page.locator("#attention-panel");
     await expect(rail).toBeAttached();
     await expect(rail).not.toContainText(/transport/i);
-    await expect(rail.getByRole("button", { name: "View pane" })).toHaveCount(0);
+    await expect(rail.getByRole("button", { name: "Open conversation" })).toHaveCount(0);
     const railCounts = await rail.evaluate((element) => {
       const summary = element.querySelector<HTMLElement>(".attention-panel-summary");
       const stated = summary && !summary.hidden ? Number.parseInt(summary.textContent ?? "0", 10) : 0;
@@ -287,5 +287,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
       await expect(action).not.toHaveAttribute("aria-disabled", "true");
       await expect(action).toHaveAccessibleDescription("");
     }
+    // cas-97d58 F10: the outage's "return when it reconnects" toast ends with
+    // the outage, on screen and in the accessibility tree.
+    await expect(page.getByText(outage)).toHaveCount(0);
   });
 });

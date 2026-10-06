@@ -3,7 +3,7 @@ import type { FleetAgent, FleetTask } from "./fleet-ops";
 const LABELS: Readonly<Record<string, string>> = {
   inprogress: "In progress", awaitingmerge: "Awaiting merge", open: "Open", ready: "Ready",
   blocked: "Blocked", closed: "Closed", cancelled: "Cancelled", canceled: "Cancelled",
-  active: "Active", idle: "Idle", held: "Held", paused: "Paused", stopped: "Stopped",
+  active: "Active", idle: "Idle", held: "Paused", paused: "Paused", stopped: "Stopped",
   working: "Working", offline: "Offline", awaitingverification: "Awaiting verification",
 };
 

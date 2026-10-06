@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod socket_cleanup;
+
 /// Directory for factory session data
 const SESSIONS_DIR: &str = "sessions";
 /// Directory for factory logs (under ~/.cas)
@@ -85,6 +87,25 @@ pub fn gui_socket_path(session_name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".cas")
         .join(format!("factory-{session_name}.gui.sock"))
+}
+
+#[cfg(unix)]
+pub(super) fn bind_factory_socket(
+    path: &Path,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    let base = sessions_dir();
+    if path.parent() != base.parent()
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("factory-") && name.ends_with(".sock"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid factory socket path",
+        ));
+    }
+    socket_cleanup::bind(path, &base)
 }
 
 /// Get the metadata file path for a session
@@ -158,6 +179,7 @@ impl SessionManager {
     /// List all active sessions
     pub fn list_sessions(&self) -> std::io::Result<Vec<SessionInfo>> {
         self.ensure_dir()?;
+        self.cleanup_orphan_sockets()?;
         self.list_sessions_read_only()
     }
 
@@ -178,7 +200,7 @@ impl SessionManager {
             if path.extension().is_some_and(|ext| ext == "json") {
                 if let Ok(metadata) = self.load_metadata(&path) {
                     // Check if daemon is still running
-                    let is_running = is_process_running(metadata.daemon_pid);
+                    let is_running = daemon_identity_is_live(&metadata);
                     let socket_exists = Path::new(&metadata.socket_path).exists();
 
                     sessions.push(SessionInfo {
@@ -235,8 +257,14 @@ impl SessionManager {
 
     /// Save session metadata
     pub fn save_metadata(&self, metadata: &SessionMetadata) -> std::io::Result<()> {
+        if !valid_session_name(&metadata.name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid session name",
+            ));
+        }
         self.ensure_dir()?;
-        let path = metadata_path(&metadata.name);
+        let path = self.sessions_dir.join(format!("{}.json", metadata.name));
         let json = serde_json::to_string_pretty(metadata)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(path, json)
@@ -251,17 +279,28 @@ impl SessionManager {
 
     /// Remove session metadata (called on clean shutdown)
     pub fn remove_metadata(&self, session_name: &str) -> std::io::Result<()> {
-        let path = metadata_path(session_name);
+        if !valid_session_name(session_name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid session name",
+            ));
+        }
+        // Keep the receipt available while checking socket ownership. A live
+        // process, even one with a recycled PID, makes cleanup conservative.
+        let base = self
+            .sessions_dir
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing session base"))?;
+        for socket in [
+            format!("factory-{session_name}.sock"),
+            format!("factory-{session_name}.gui.sock"),
+        ] {
+            socket_cleanup::remove_if_unheld(&base.join(socket), &self.sessions_dir)?;
+        }
+        let path = self.sessions_dir.join(format!("{session_name}.json"));
         if path.exists() {
             fs::remove_file(path)?;
         }
-
-        // Also remove socket if it exists
-        let sock = socket_path(session_name);
-        if sock.exists() {
-            let _ = fs::remove_file(sock);
-        }
-
         Ok(())
     }
 
@@ -281,6 +320,25 @@ impl SessionManager {
         }
 
         Ok(cleaned)
+    }
+
+    /// Reclaim only owned, unheld factory socket entries. Dead records remain
+    /// visible as dead until explicitly cleaned; read-only discovery never GCs.
+    fn cleanup_orphan_sockets(&self) -> std::io::Result<()> {
+        let Some(base) = self.sessions_dir.parent() else {
+            return Ok(());
+        };
+        for entry in fs::read_dir(base)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(|name| name.starts_with("factory-") && name.ends_with(".sock"))
+            {
+                socket_cleanup::remove_if_unheld(&entry.path(), &self.sessions_dir)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -313,6 +371,18 @@ enum RootOverride {
 }
 
 impl SessionInfo {
+    /// The same lifecycle label drives both the terminal and JSON receipts.
+    pub(crate) fn status_label(&self) -> &'static str {
+        if !self.is_running {
+            "dead"
+        } else if self.can_attach() {
+            "running"
+        } else if !self.socket_exists {
+            "orphaned"
+        } else {
+            "starting"
+        }
+    }
     /// Check if this session can be attached to
     ///
     /// A session can be attached if the daemon is running AND either:
@@ -425,22 +495,34 @@ impl SessionInfo {
 }
 
 /// Check if a process is running by PID
-#[cfg(unix)]
 fn is_process_running(pid: u32) -> bool {
-    use std::process::Command;
-
-    // Use kill -0 to check if process exists (sends no signal, just checks)
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // Never let an invalid PID turn kill(0) into a process-group query.
+    if pid == 0 || pid > i32::MAX as u32 || !crate::mcp::daemon::pid_alive(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if stat
+            .rsplit_once(')')
+            .is_some_and(|(_, tail)| matches!(tail.trim_start().chars().next(), Some('Z' | 'X')))
+        {
+            return false;
+        }
+    }
+    true
 }
 
-#[cfg(not(unix))]
-fn is_process_running(_pid: u32) -> bool {
-    // On non-Unix, assume running if we have the PID
-    true
+pub(crate) fn daemon_identity_is_live(metadata: &SessionMetadata) -> bool {
+    is_process_running(metadata.daemon_pid)
+        && metadata.daemon_pid_starttime.is_none_or(|expected| {
+            // An unreadable identity is ambiguous, rather than evidence of death.
+            crate::mcp::daemon::read_pid_starttime(metadata.daemon_pid)
+                .is_none_or(|actual| actual == expected)
+        })
+}
+
+fn valid_session_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
 /// Create initial session metadata
@@ -541,6 +623,240 @@ pub fn create_metadata(
 mod tests {
     use crate::ui::factory::session::*;
 
+    #[cfg(target_os = "linux")]
+    fn stale_socket(path: &Path) {
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recorded_session(name: &str, pid: u32) -> SessionManager {
+        let manager = SessionManager::new();
+        manager
+            .save_metadata(&create_metadata(
+                name,
+                pid,
+                "supervisor",
+                &[],
+                None,
+                None,
+                None,
+            ))
+            .unwrap();
+        manager
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_cleanup_removes_both_sockets_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("dead", i32::MAX as u32);
+        stale_socket(&socket_path("dead"));
+        stale_socket(&gui_socket_path("dead"));
+        assert_eq!(manager.cleanup_stale().unwrap(), 1);
+        assert!(!metadata_path("dead").exists());
+        assert!(!socket_path("dead").exists());
+        assert!(!gui_socket_path("dead").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orphan_cleanup_preserves_live_listener_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        manager.ensure_dir().unwrap();
+        let live =
+            std::os::unix::net::UnixListener::bind(socket_path("unregistered-live")).unwrap();
+        stale_socket(&socket_path("unregistered-dead"));
+        stale_socket(&gui_socket_path("unregistered-dead"));
+        manager.cleanup_stale().unwrap();
+        assert!(socket_path("unregistered-live").exists());
+        assert!(!socket_path("unregistered-dead").exists());
+        assert!(!gui_socket_path("unregistered-dead").exists());
+        drop(live);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_record_cannot_unlink_live_listener_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("replaced", i32::MAX as u32);
+        let main = std::os::unix::net::UnixListener::bind(socket_path("replaced")).unwrap();
+        let gui = std::os::unix::net::UnixListener::bind(gui_socket_path("replaced")).unwrap();
+        manager.cleanup_stale().unwrap();
+        assert!(socket_path("replaced").exists());
+        assert!(gui_socket_path("replaced").exists());
+        drop((main, gui));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_pid_preserves_even_unheld_sockets_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("alive", std::process::id());
+        stale_socket(&socket_path("alive"));
+        stale_socket(&gui_socket_path("alive"));
+        assert_eq!(manager.cleanup_stale().unwrap(), 0);
+        assert!(metadata_path("alive").exists());
+        assert!(socket_path("alive").exists());
+        assert!(gui_socket_path("alive").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_stale_session_removes_gui_socket_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        recorded_session("killed", i32::MAX as u32);
+        stale_socket(&socket_path("killed"));
+        stale_socket(&gui_socket_path("killed"));
+        assert_eq!(
+            crate::cli::factory::end_session_by_name("killed").unwrap(),
+            crate::cli::factory::EndSessionOutcome::CleanedStale
+        );
+        assert!(!socket_path("killed").exists());
+        assert!(!gui_socket_path("killed").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_refuses_symlinks_regular_files_and_bad_receipts_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        manager.ensure_dir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("socket");
+        stale_socket(&target);
+        std::os::unix::fs::symlink(&target, socket_path("symlink")).unwrap();
+        fs::write(socket_path("regular"), "operator file").unwrap();
+        stale_socket(&socket_path("uncertain"));
+        fs::write(metadata_path("uncertain"), "incomplete receipt").unwrap();
+        manager.cleanup_stale().unwrap();
+        assert!(target.exists());
+        assert!(socket_path("symlink").is_symlink());
+        assert_eq!(
+            fs::read_to_string(socket_path("regular")).unwrap(),
+            "operator file"
+        );
+        assert!(socket_path("uncertain").exists());
+        assert!(manager.remove_metadata("../escape").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_waits_for_exit_and_removes_both_sockets_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        recorded_session("terminating", child.id());
+        stale_socket(&socket_path("terminating"));
+        stale_socket(&gui_socket_path("terminating"));
+        let outcome = crate::cli::factory::end_session_by_name("terminating");
+        // Always reap our child, even if the assertion fails.
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert_eq!(
+            outcome.unwrap(),
+            crate::cli::factory::EndSessionOutcome::Ended
+        );
+        assert!(!metadata_path("terminating").exists());
+        assert!(!socket_path("terminating").exists());
+        assert!(!gui_socket_path("terminating").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reused_pid_never_signalled_or_unlinked_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("recycled", std::process::id());
+        let mut metadata = manager
+            .find_session(Some("recycled"))
+            .unwrap()
+            .unwrap()
+            .metadata;
+        metadata.daemon_pid_starttime = Some(metadata.daemon_pid_starttime.unwrap() + 1);
+        manager.save_metadata(&metadata).unwrap();
+        stale_socket(&socket_path("recycled"));
+        stale_socket(&gui_socket_path("recycled"));
+        assert_eq!(
+            manager
+                .find_session(Some("recycled"))
+                .unwrap()
+                .unwrap()
+                .status_label(),
+            "dead"
+        );
+        assert_eq!(
+            crate::cli::factory::end_session_by_name("recycled").unwrap(),
+            crate::cli::factory::EndSessionOutcome::CleanedStale
+        );
+        assert!(socket_path("recycled").exists());
+        assert!(gui_socket_path("recycled").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readonly_discovery_retains_stale_sockets_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = recorded_session("inspect", i32::MAX as u32);
+        stale_socket(&socket_path("inspect"));
+        assert!(!manager.list_sessions_read_only().unwrap()[0].is_running);
+        assert!(socket_path("inspect").exists());
+        assert!(metadata_path("inspect").exists());
+        manager.list_sessions().unwrap();
+        assert!(!socket_path("inspect").exists());
+        assert!(metadata_path("inspect").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bind_and_cleanup_preserve_held_sockets_with_spaces_cas_c636() {
+        let home = tempfile::tempdir().unwrap();
+        let spaced_home = home.path().join("home with spaces");
+        fs::create_dir(&spaced_home).unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "HOME",
+            spaced_home.to_str().unwrap(),
+        )]);
+        let manager = SessionManager::new();
+        manager.ensure_dir().unwrap();
+        let path = socket_path("lease");
+        stale_socket(&path);
+        let live = bind_factory_socket(&path).unwrap();
+        assert_eq!(
+            bind_factory_socket(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        let datagram = std::os::unix::net::UnixDatagram::bind(gui_socket_path("lease")).unwrap();
+        manager.cleanup_stale().unwrap();
+        assert!(path.exists());
+        assert!(gui_socket_path("lease").exists());
+        drop((live, datagram));
+        manager.cleanup_stale().unwrap();
+        assert!(!path.exists());
+        assert!(!gui_socket_path("lease").exists());
+    }
+
+    #[test]
+    fn remove_absent_metadata_is_idempotent_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        SessionManager::new().remove_metadata("absent").unwrap();
+        assert!(!sessions_dir().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_kill_cleans_main_and_gui_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        recorded_session("cli-dead", i32::MAX as u32);
+        stale_socket(&socket_path("cli-dead"));
+        stale_socket(&gui_socket_path("cli-dead"));
+        crate::cli::factory::execute_kill(Some("cli-dead"), true).unwrap();
+        assert!(!metadata_path("cli-dead").exists());
+        assert!(!socket_path("cli-dead").exists());
+        assert!(!gui_socket_path("cli-dead").exists());
+    }
+
     #[test]
     fn create_metadata_preserves_only_same_session_roster_holds_cas_60dd() {
         let home = tempfile::tempdir().unwrap();
@@ -599,6 +915,7 @@ mod tests {
 
     #[test]
     fn test_generate_session_name_without_project() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let name = generate_session_name(None);
         // Should be adjective-noun-number format (e.g., "swift-falcon-42")
         let parts: Vec<&str> = name.split('-').collect();
@@ -607,6 +924,7 @@ mod tests {
 
     #[test]
     fn test_generate_session_name_with_project() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let name = generate_session_name(Some("/home/user/my-project"));
         // Should be project-adjective-noun-number (e.g., "my-project-swift-falcon-42")
         assert!(
@@ -617,6 +935,7 @@ mod tests {
 
     #[test]
     fn test_session_paths() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let name = "test-session";
         let sock = socket_path(name);
         let meta = metadata_path(name);
@@ -627,6 +946,7 @@ mod tests {
 
     #[test]
     fn test_create_metadata() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let meta = create_metadata(
             "test-session",
             12345,
@@ -649,6 +969,7 @@ mod tests {
 
     #[test]
     fn test_find_session_for_project() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let manager = SessionManager::new();
 
         // When no sessions exist, should return None

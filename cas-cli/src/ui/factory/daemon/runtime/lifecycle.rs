@@ -1569,26 +1569,18 @@ impl FactoryDaemon {
         // Create socket
         let sock_path = socket_path(&config.session_name);
 
-        // Remove stale socket if it exists
-        if sock_path.exists() {
-            std::fs::remove_file(&sock_path)?;
-        }
-
         // Ensure parent directory exists
         if let Some(parent) = sock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         // Create listener
-        let listener = UnixListener::bind(&sock_path)?;
+        let listener = bind_factory_socket(&sock_path)?;
         listener.set_nonblocking(true)?;
 
         // Create GUI socket (for desktop GUI clients using JSON protocol)
         let gui_sock_path = gui_socket_path(&config.session_name);
-        if gui_sock_path.exists() {
-            std::fs::remove_file(&gui_sock_path)?;
-        }
-        let gui_listener = UnixListener::bind(&gui_sock_path)?;
+        let gui_listener = bind_factory_socket(&gui_sock_path)?;
         gui_listener.set_nonblocking(true)?;
 
         // Bind WebSocket listener on localhost with OS-assigned port.
@@ -2909,10 +2901,8 @@ impl FactoryDaemon {
         // Remove session metadata
         self.session_manager.remove_metadata(&self.session_name)?;
 
-        // Clean up GUI socket
-        let gui_sock = gui_socket_path(&self.session_name);
-        let _ = std::fs::remove_file(&gui_sock);
-
+        // Listener fields still hold both sockets until this daemon is dropped.
+        // The kill caller (after exit), or subsequent discovery, reclaims them.
         // Drop WebSocket clients (connections will close on drop)
         self.ws_clients.clear();
 

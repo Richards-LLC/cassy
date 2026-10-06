@@ -55,22 +55,26 @@ export async function sessionRoutingId(sessionName: string): Promise<string> {
   return `s_${b64urlEncode(await crypto.subtle.digest("SHA-256", encoder.encode(sessionName)))}`;
 }
 
-export function commandStatusLabel(state: CommandState): string {
+/**
+ * The reply's state in the operator's words, naming the machine it waits on
+ * (cas-97d58 F21): "Waiting for soundwave", then "soundwave received it".
+ */
+export function commandStatusLabel(state: CommandState, machine = "the machine"): string {
   switch (state) {
     case "sealing":
     case "submitting":
       return "Queued on this device";
     case "pending_machine":
     case "reserved":
-      return "Pending machine";
+      return `Waiting for ${machine}`;
     case "accepted":
-      return "Accepted by machine";
+      return `${machine === "the machine" ? "The machine" : machine} received it`;
     case "rejected_by_machine":
-      return "Refused by machine";
+      return `${machine === "the machine" ? "The machine" : machine} refused it`;
     case "cancelled":
       return "Cancelled";
     case "expired":
-      return "Expired before the machine returned";
+      return `Expired before ${machine} came back`;
     case "refused":
       return "Not sent";
   }

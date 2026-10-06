@@ -257,3 +257,16 @@ describe("cleanup step live regions (F2)", () => {
     expect(root.querySelector<HTMLElement>("#pair-dialog .pair-status")!.hidden).toBe(false);
   });
 });
+
+describe("pairing feedback announcements (cas-2e77 QA F02)", () => {
+  it("returns a failure alert to a polite status before announcing an in-flight retry", () => {
+    const feedback = root.querySelector<HTMLElement>("#pair-dialog .pair-status")!;
+    feedback.setAttribute("role", "alert");
+    feedback.hidden = false;
+    feedback.textContent = "Pairing timed out after 10s. Pair again.";
+    applyLiveRegions(root, { pairing: { status: "Updating this browser installation…", exchangeInFlight: true, createInFlight: false } });
+    expect(feedback.getAttribute("role")).toBe("status");
+    expect(feedback.textContent).toBe("Updating this browser installation…");
+    expect(root.querySelector('#pair-form button[type="submit"]')?.textContent).toBe("Pairing…");
+  });
+});

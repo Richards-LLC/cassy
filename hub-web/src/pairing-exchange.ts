@@ -72,7 +72,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
   }
   const baseUrl = invitation.hubUrl ?? (options.legacyHubUrl ? new URL(options.legacyHubUrl).origin : undefined);
   if (!baseUrl) {
-    throw new PairingExchangeError("The pairing invitation does not identify a reachable hub. Enter the machine's hub URL and tap Pair again.", { recoverable: true });
+    throw new PairingExchangeError("The pairing invitation does not identify a reachable hub. Enter the machine's hub URL and press Pair again.", { recoverable: true });
   }
   // The invitation's declared scopes are a ceiling, not a suggestion. Requesting
   // above it is refused by the hub with an opaque 401, so the request is clamped
@@ -82,7 +82,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     ? (options.requestedScopes === undefined ? granted : options.requestedScopes.filter((scope) => granted.includes(scope)))
     : options.requestedScopes;
   if (!scopes?.length) {
-    throw new PairingExchangeError("Tick at least one scope this invitation grants, then tap Pair again.", { recoverable: true });
+    throw new PairingExchangeError("Tick at least one scope this invitation grants, then press Pair again.", { recoverable: true });
   }
   const { privateKey, publicKey, credential } = await withRequestDeadline(async signal => {
     const bounded = { ...options, signal };
@@ -134,7 +134,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       throw new PairingExchangeError("Pairing was cancelled before the credential could be installed.");
     }
     if (error instanceof DOMException && error.name === "TimeoutError") {
-      throw new PairingExchangeError("Pairing timed out after 10s. Allow Local network access for this page in your browser's site settings, check Tailscale, then tap Pair again. This invitation may already have been used; if retry is refused, ask the machine for a fresh invitation.", { recoverable: true });
+      throw new PairingExchangeError("Pairing timed out after 10s. Allow Local network access for this page in your browser's site settings, check Tailscale, then press Pair again. This invitation may already have been used; if retry is refused, ask the machine for a fresh invitation.", { recoverable: true });
     }
     throw error;
   });

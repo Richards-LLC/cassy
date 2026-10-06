@@ -5,6 +5,7 @@ import { applyScheme, setScheme } from "./scheme";
 afterEach(() => {
   localStorage.clear();
   delete document.documentElement.dataset.scheme;
+  delete document.documentElement.dataset.schemeSwitching;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -66,4 +67,24 @@ it("uses the system dark preference when no preference is stored", () => {
   vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {} }));
   expect(applyScheme()).toBe("dark");
   expect(document.documentElement.dataset.scheme).toBe("dark");
+});
+
+it("switches the scheme with colour transitions suspended for the flip (cas-97d58 F20)", () => {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  applyScheme();
+  const root = document.documentElement;
+  expect(root.dataset.scheme).toBe("light");
+  expect(root.hasAttribute("data-scheme-switching")).toBe(false);
+  setScheme("dark");
+  expect(root.dataset.scheme).toBe("dark");
+  expect(root.hasAttribute("data-scheme-switching")).toBe(true);
+  frames.shift()!(0);
+  expect(root.hasAttribute("data-scheme-switching")).toBe(true);
+  frames.shift()!(0);
+  expect(root.hasAttribute("data-scheme-switching")).toBe(false);
+  // Choosing the scheme already in effect does not suspend anything.
+  setScheme("dark");
+  expect(root.hasAttribute("data-scheme-switching")).toBe(false);
 });

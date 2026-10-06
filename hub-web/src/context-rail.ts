@@ -61,12 +61,17 @@ export function threadAttachments(history: ConversationHistory | undefined): Thr
  */
 export const BLOCKER_HINT = "Reply to unblock";
 
-/** Open asks and blockers the rail lists: everything waiting except the pinned ask. */
+/**
+ * Open asks and blockers the rail lists (cas-97d58 F09): every one that is
+ * waiting, from the same set the bookmark reads, so the two never disagree
+ * about what is open. The one the bookmark points at is marked, not dropped.
+ */
 export function railWaiting(history: ConversationHistory | undefined): OperatorReply[] {
-  if (!history) return [];
-  const pinned = history.pinnedAsk()?.notification_id;
-  return history.waiting().filter((reply) => reply.notification_id !== pinned);
+  return history?.waiting() ?? [];
 }
+
+/** The open question the bookmark above the composer points at. */
+export const PINNED_MARK = "Pinned above your reply";
 
 /**
  * How many things wait on the operator in a conversation (cas-0546): the
@@ -115,7 +120,7 @@ function jumpToTurn(document: Document, notificationId: number): void {
   turn.focus({ preventScroll: true });
 }
 
-function renderWaiting(document: Document, list: HTMLElement, waiting: readonly OperatorReply[]): void {
+function renderWaiting(document: Document, list: HTMLElement, waiting: readonly OperatorReply[], pinned?: number): void {
   list.replaceChildren(...[...waiting].reverse().map((reply) => {
     const item = document.createElement("li");
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "context-jump";
@@ -126,6 +131,7 @@ function renderWaiting(document: Document, list: HTMLElement, waiting: readonly 
     jump.append(kind, text);
     // A blocker says how it clears (journey F12); the jump alone did not.
     if (reply.kind === "blocker") { const hint = document.createElement("span"); hint.className = "context-hint"; hint.textContent = BLOCKER_HINT; jump.append(hint); }
+    if (reply.notification_id === pinned) { const mark = document.createElement("span"); mark.className = "context-hint context-pinned"; mark.textContent = PINNED_MARK; jump.append(mark); jump.dataset.pinned = "true"; }
     jump.onclick = () => jumpToTurn(document, reply.notification_id);
     item.append(jump);
     return item;
@@ -163,10 +169,11 @@ export function syncContextRail(root: ParentNode, input: ContextRailInput): bool
   const waiting = railWaiting(input.history);
   const attachments = threadAttachments(input.history);
   const waitingList = rail.querySelector<HTMLElement>(".context-waiting");
-  const waitingSignature = JSON.stringify(waiting.map((reply) => [reply.notification_id, reply.kind, reply.message]));
+  const pinned = input.history?.pinnedAsk()?.notification_id;
+  const waitingSignature = JSON.stringify([pinned, waiting.map((reply) => [reply.notification_id, reply.kind, reply.message])]);
   if (waitingList && waitingList.dataset.signature !== waitingSignature) {
     waitingList.dataset.signature = waitingSignature;
-    renderWaiting(document, waitingList, waiting);
+    renderWaiting(document, waitingList, waiting, pinned);
   }
   const attachmentList = rail.querySelector<HTMLElement>(".context-attachments");
   const attachmentSignature = JSON.stringify(attachments.map(({ attachment }) => [attachment.artifact_id, attachment.name, attachment.mime, attachment.size_bytes]));

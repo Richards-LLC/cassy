@@ -282,7 +282,7 @@ describe("a conversation opens behind one quiet line (cas-813a)", () => {
 describe("one outage, one vocabulary (journey F9)", () => {
   it("uses the actual unsupported-browser reason without an API name in the recovery sentence", () => {
     const reason = "This browser is missing AbortSignal.timeout, which Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer.";
-    expect(lostConnectionBanner("Atlas", true, reason)).toBe("Lost connection to Atlas. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
+    expect(lostConnectionBanner("Atlas", true, reason)).toBe("This browser can't connect to Atlas. This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.");
     expect(fatalConnectionRecovery()).toContain("Update your browser, then reload this page.");
     expect(lostConnectionBanner("Atlas", false, reason)).toBe("Lost connection to Atlas. Reconnecting…");
   });
@@ -293,7 +293,7 @@ describe("one outage, one vocabulary (journey F9)", () => {
   });
   it("words the refusal and the disabled controls the way the banner does", () => {
     expect(lostConnectionBanner("Atlas · Linux", false)).toBe("Lost connection to Atlas · Linux. Reconnecting…");
-    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
+    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("This browser can't connect to Atlas · Linux. This browser cannot make this connection. Update your browser, then reload this page.");
     // cas-d15c: one session's link, the machine still connected.
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", false)).toBe("Reconnecting to cas-src… Atlas · Linux is still connected.");
     expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", true)).toBe("Lost the link to cas-src. Not retrying. Atlas · Linux is still connected.");

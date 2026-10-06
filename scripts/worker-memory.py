@@ -136,9 +136,17 @@ def run(command, env=None, directory=None):
     wait = proof.positive_knob(env, 'CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS') or 600
     poll = proof.positive_knob(env, 'CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS') or 1
     command = constrained(command)
+    # A compiler-cache server first started inside the suite would inherit the
+    # suite's tree and outlive it (cas-7b7b9); start it outside admission.
+    host_memory.start_compiler_cache(env)
     with host_memory.admission('worker', env, proof.memory_budget, wait, poll, directory,
-                               estimate_bytes=estimate(command)) as (admitted_env, fds):
-        child = subprocess.Popen(command, env=admitted_env, pass_fds=fds, start_new_session=True)
+                               estimate_bytes=estimate(command)) as (admitted_env, fds), \
+         host_memory.LeaseHolder(fds) as holder:
+        # The command never receives the lease descriptors: a daemon or orphan
+        # it leaves behind cannot hold the budget. The holder covers a killed
+        # wrapper for as long as the command's process group runs.
+        child = subprocess.Popen(command, env=admitted_env, start_new_session=True)
+        holder.track(child.pid)
         handlers = {}
         def interrupted(sig, frame):
             raise InterruptedError('worker suite interrupted by ' + signal.Signals(sig).name)

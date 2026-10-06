@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
+import { CONFIRM_CUE_MS, ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
@@ -277,6 +277,22 @@ describe("ConversationView (Pebble thread)", () => {
       expect(view.pinned.querySelector(".pinned-bar-text")?.textContent).toBe("Pinned");
       expect(view.pinned.querySelector(".obj")).toBeNull();
     } finally { unregister(); }
+  });
+  it("says what a live send waits for once its receipt is a few seconds late (cas-97d58 F18)", () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(at(12, 0));
+    try {
+      const history = new ConversationHistory();
+      const view = new ConversationView(document, history, { supervisor: "sup", machine: "Atlas · Linux" }); document.body.replaceChildren(view.element);
+      history.submit("x", "sup", "Ship it", Date.now()); view.update();
+      const line = () => view.element.querySelector('.conversation-turn[data-state="sending"] .conversation-delivery')?.textContent;
+      expect(line()).toBe("Sending…");
+      vi.setSystemTime(Date.now() + CONFIRM_CUE_MS - 1); view.update();
+      expect(line()).toBe("Sending…");
+      vi.setSystemTime(Date.now() + 1); view.update();
+      expect(line()).toBe("Waiting for Atlas to confirm…");
+      // The repaint is scheduled for the cue, before the receipt deadline.
+      expect(history.nextConfirmCue(Date.now() - 2_000)).toBe(2_000);
+    } finally { vi.useRealTimers(); }
   });
   it("shows sending and refused states on the operator pebble with an edit affordance", () => {
     const history = new ConversationHistory();

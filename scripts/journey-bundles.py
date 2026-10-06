@@ -93,7 +93,7 @@ def main(argv: list[str]) -> int:
                 stage = dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
                 stages.append(stage)
                 files["cells"].append(stage["screenshot"])
-            folded.append({"title": part.get("title"), "verdict": part["status"], "label": part.get("label", "real-bundle, protocol-double"), **part_files})
+            folded.append({"title": part.get("title"), "project": part.get("project"), "title_path": part.get("title_path"), "verdict": part["status"], "label": part.get("label", "real-bundle, protocol-double"), **part_files})
         if folded:
             files["parts"] = folded
         if data is None:

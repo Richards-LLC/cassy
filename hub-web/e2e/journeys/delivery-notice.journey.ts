@@ -1,4 +1,5 @@
-import { test, expect, expectWholeFocusRing } from "./journey";
+import { test, expect, expectWholeFocusRing, RECEIPTS } from "./journey";
+import { join } from "node:path";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
 import { expectDetailsCopyRow } from "../details-copy-row";
@@ -80,6 +81,16 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
     await expect(badge).toBeVisible();
     await expect(badge).toHaveText("1");
+    // cas-97d58 F07: with the attention chip, Raw output and Interrupt on the
+    // row, the identity takes its own line; title and machine read whole.
+    const identity = page.locator(".conversation-identity");
+    const whole = await identity.evaluate((node) => {
+      const clipped = (selector: string) => { const element = node.querySelector<HTMLElement>(selector); return element ? element.scrollWidth > element.clientWidth + 1 : false; };
+      return { title: !clipped("h1 b"), machine: !clipped(".host-machine") && !clipped(".host-where"), row: getComputedStyle(node).gridRowStart };
+    });
+    expect(whole).toEqual({ title: true, machine: true, row: "2" });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
+    await page.screenshot({ path: join(RECEIPTS, "phone-header-attention-390.png") });
     await badge.click();
     const sheet = page.getByRole("dialog", { name: "Attention for this session" });
     await expect(sheet).toBeVisible();

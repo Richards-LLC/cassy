@@ -91,7 +91,8 @@ journey evaluation scores polish for it.
   network log. Close refuses such a bundle and names the file, never the
   value. Log in through a setup project that is not traced. Before listing
   the trace, replace each entire cookie or authorization value with exactly
-  `REDACTED`, `[REDACTED]`, `<redacted>`, `***`, or an empty value. These
+  `REDACTED`, `[REDACTED]`, `<redacted>`, `***`, or an empty value;
+  `visual-qa.mjs --scrub-trace` does this for the runner's trace. These
   placeholders pass in JSON headers, text headers and cookie arrays; a real
   value of 8 or more characters is refused. A placeholder embedded in a real
   value does not exempt it. Saved storage-state files, session JWTs, bearer
@@ -182,14 +183,29 @@ The `snapshots` keys do the following:
 The same object works in library code:
 `context.tracing.start({ snapshots: { dom: true, aria: true, screen: true }, sources: true })`.
 
-For authenticated runs, prepare `storageState` outside the traced context and pass it
-when creating the context. Start tracing after auth setup; evaluate arguments and
-network headers can contain Firebase credentials. A custom signed-in harness uses
-`cas-ui-craft/scripts/visual-qa.mjs`'s `saveQaTrace(context, path, { secrets })` to scrub
-auth headers and storage tokens, then `closeQaContext(context)` to ignore in-flight
-route errors before teardown. Use `redactQaText(error, secrets)` at logging boundaries.
-For test-runner-owned traces, disable automatic trace capture and save a manual,
-scrubbed trace with those helpers; raw traces and storage exports stay out of evidence.
+The evidence trace is always the test runner's own `trace.zip`. Close counts
+assertions from its `test.trace`, which records every assertion's outcome and
+test-level errors. A library `context.tracing` zip (including one saved with
+`saveQaTrace`) has no `test.trace`, so close refuses it.
+
+For an authenticated run, sign in through a setup project with `trace: 'off'` that
+saves `storageState`, and give the evidence project `dependencies: ['setup']`, that
+`storageState`, and the trace settings above. Evaluate arguments and network headers
+can still carry credentials, so scrub the runner's zip before listing it. The scrub
+replaces cookie, authorization and token values with `[REDACTED]` and leaves
+`test.trace` intact:
+
+```bash
+QA_TRACE_SECRETS="$SESSION_VALUE" node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs \
+  --scrub-trace "$QA"/test-results/<test>/trace.zip "$QA/trace.zip"
+```
+
+`QA_TRACE_SECRETS` holds extra literal values to remove, one per line; never pass
+them as arguments. A failed scrub writes nothing. Delete the raw `test-results`
+trace and the storage state after scrubbing: neither may be listed in the bundle.
+Use `redactQaText(error, secrets)` at logging boundaries. A library-only diagnostic
+harness may still use `saveQaTrace(context, path, { secrets })` and
+`closeQaContext(context)`, but its trace is not close evidence.
 
 ## Worked example
 

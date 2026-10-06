@@ -54,10 +54,16 @@ EOF
 
 release_train_announce_append_posted() {
     local draft="$1" temp
-    grep -q '^## POSTED$' "$draft" && return 0
+    # A POSTED section that already names message ids is a recorded receipt.
+    # One without ids is the runtime template's empty table: replace it, or
+    # the published ids never reach the committed draft.
+    if awk '/^## POSTED$/ { in_posted = 1; next } in_posted && /^## / { in_posted = 0 } in_posted && /message_id=/ { found = 1 } END { exit !found }' "$draft"; then
+        return 0
+    fi
     temp="$(mktemp "$worktree/.release-draft-posted.XXXXXX")"
     if ! {
-        cat "$draft"
+        awk '/^## POSTED$/ { skip = 1; next } skip && /^## / { skip = 0 } !skip { print }' "$draft" \
+            | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
         printf '\n'
         release_train_announce_posted_block
     } >"$temp"; then

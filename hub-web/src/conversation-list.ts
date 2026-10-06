@@ -20,6 +20,8 @@ export interface ConversationRow {
   whenSpoken?: string;
   /** Last turn in the thread, or the connection state when there is none. */
   preview?: string;
+  /** cas-97d58 F19: a half-written reply parked in this conversation. */
+  draft?: string;
   /**
    * The session's newest activity in plain words, from the catalog
    * ("Messaged bright-robin-85"). A grouped row shows it until the thread has
@@ -175,7 +177,7 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
 export function conversationRowSpokenName(row: ConversationRow): string {
   const project = projectTitle(row.projectDir);
   const fallback = row.group ? row.activityLine || row.connection : row.connection;
-  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || fallback));
+  const preview = truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, fallback)));
   const unread = row.unread ?? 0;
   return joinSpoken([
     `${project ?? row.supervisor} on ${machineName(row.host)}`,
@@ -192,13 +194,26 @@ export function conversationRowSpokenName(row: ConversationRow): string {
  * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
  * count pill). Users think in projects (journey F7): the project is the title,
  * the machine follows it, and the generated codename is tertiary text. */
+/**
+ * What the row's second line says. A connection problem leads, so the row
+ * agrees with the header (cas-a447); then a parked draft in another
+ * conversation (cas-97d58 F19), so the operator sees where they left a reply;
+ * then the last turn.
+ */
+function rowPreviewText(row: ConversationRow, fallback: string): string {
+  if (row.unreachable || row.interrupted) return row.connection;
+  const draft = row.draft?.trim();
+  if (draft && !row.selected) return `Draft: ${draft}`;
+  return row.preview || fallback;
+}
+
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
   // cas-5d2c: a grouped row with no turn of its own yet shows what its
   // session last did, so siblings differ before any of them is opened.
   const fallback = row.group ? row.activityLine || row.connection : row.connection;
-  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || fallback));
+  const preview = truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, fallback)));
   // The time always holds the headline end; an unread count sits beneath it
   // with the waiting dot, so the most active row never loses its time (P13).
   // cas-6acf: assistive tech hears the time in words ("20 minutes ago"), not "20m".
@@ -223,7 +238,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
     + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}</span>`
     + time
-    + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
+    + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks
     + spoken;
 }

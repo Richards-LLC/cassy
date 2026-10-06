@@ -70,8 +70,11 @@ impl OrphanRig {
             .open(&fifo)
             .expect("hold the FIFO write end open");
 
+        // `exec` makes the sleep the parent itself: killing the parent kills
+        // it, instead of orphaning a `sleep 600` under systemd --user that
+        // outlives the test with inherited descriptors (cas-7b7b9).
         let script = format!(
-            "{bin} serve < {fifo} > /dev/null 2> {log} & echo $! > {pid}; sleep 600",
+            "{bin} serve < {fifo} > /dev/null 2> {log} & echo $! > {pid}; exec sleep 600",
             bin = shell_quote(&support::cas_binary().to_string_lossy()),
             fifo = shell_quote(fifo.to_str().expect("utf-8 fifo path")),
             log = shell_quote(log_path.to_str().expect("utf-8 log path")),

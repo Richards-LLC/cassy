@@ -5,6 +5,13 @@ exclusive intent; a priority lock prevents new workers joining while they drain.
 The legacy budget lock is retained for compatibility with older checkouts.
 No browser is started merely to sample the budget. Only ancestry-validated
 nested commands may reuse a live admission; an environment flag is insufficient.
+
+Admitted commands never receive the lease descriptors (cas-7b7b9). A flock lives
+as long as any process holds its open description, so a daemon or orphan that
+inherited one (an sccache server, a test's `sleep 600`) held the budget after
+the suite ended. A LeaseHolder process keeps the descriptors instead: it runs
+no command, releases when its owner finishes, and if the owner is killed it
+holds only while the owner's tracked command process groups still have members.
 """
 from contextlib import contextmanager
 import fcntl
@@ -13,8 +20,11 @@ import os
 import re
 from pathlib import Path
 import secrets
+import select
+import signal
 import stat
 import subprocess
+import sys
 import time
 
 DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'
@@ -22,6 +32,8 @@ LEASE_ENV = 'CAS_HOST_MEMORY_LEASE'
 GIB = 1024**3
 HEADROOM_BYTES = 2 * GIB
 DEFAULT_ESTIMATE_BYTES = 4 * GIB
+HOLD_POLL_SECS = 0.2
+STALE_SCAN_SECS = 5
 
 
 def private_directory(directory):
@@ -83,6 +95,66 @@ def inherited(env, directory=None):
     return False
 
 
+def _process_name(pid):
+    try:
+        comm = Path(f'/proc/{pid}/comm').read_text().strip()
+        argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        command = ' '.join(part.decode(errors='replace') for part in argv if part)[:160]
+    except OSError:
+        return None
+    return f'{comm} (pid {pid}: {command})'
+
+
+def stale_holders(directory=None):
+    """Name processes holding an admission lock whose locking process has exited.
+
+    Each fdinfo "lock:" line names the PID that took that flock and appears only
+    on descriptors sharing the locked open description, so it identifies real
+    holders, not waiters that merely have the file open. A dead locking PID
+    means an inheritor keeps the lock: a lease holder whose wrapper was killed,
+    or a daemon/orphan that escaped an old suite. Returns [] without /proc.
+    """
+    directory = directory or DIRECTORY
+    try:
+        inodes = {}
+        for path in directory.glob('*.lock'):
+            info = path.stat()
+            inodes[(info.st_dev, info.st_ino)] = path.name
+        entries = [entry for entry in Path('/proc').iterdir() if entry.name.isdigit()]
+    except OSError:
+        return []
+    holders = []
+    for entry in entries:
+        if int(entry.name) == os.getpid():
+            continue
+        try:
+            descriptors = list((entry / 'fd').iterdir())
+        except OSError:
+            continue
+        locks_held = set()
+        for descriptor in descriptors:
+            try:
+                info = os.stat(descriptor)
+                name = inodes.get((info.st_dev, info.st_ino))
+                if not name:
+                    continue
+                details = (entry / 'fdinfo' / descriptor.name).read_text()
+            except OSError:
+                continue
+            for line in details.splitlines():
+                fields = line.split()
+                # "lock:  1: FLOCK  ADVISORY  WRITE 1582598 fd:01:123456 0 EOF"
+                if fields[:1] == ['lock:'] and len(fields) > 5 and fields[2] == 'FLOCK' \
+                        and fields[5].isdigit() and not Path(f'/proc/{fields[5]}').exists():
+                    locks_held.add(name)
+        label = locks_held and _process_name(int(entry.name))
+        if label:
+            role = ('lease holder of a killed wrapper; it ends when that suite does'
+                    if '--hold' in label and 'host_memory' in label else 'not an admitted suite')
+            holders.append(f"{label} holds {', '.join(sorted(locks_held))} ({role})")
+    return sorted(holders)
+
+
 def default_report(event):
     if event['reason'] != 'admitted':
         print(f"waiting for host memory ({event['reason']}), {event['elapsed_s']:g} s", flush=True)
@@ -132,6 +204,7 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
          private_file(directory / 'intent.lock') as intent, private_file(directory / 'budget.lock') as budget:
         priority_held = intent_held = False
         slot = None
+        next_scan, holders = time.monotonic(), []
         try:
             while True:
                 # Proof phases sample immediately after this lease; do not consume
@@ -185,6 +258,12 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
                 if role == 'worker' and priority_held:
                     fcntl.flock(priority, fcntl.LOCK_UN)
                     priority_held = False
+                if time.monotonic() >= next_scan:
+                    next_scan = time.monotonic() + STALE_SCAN_SECS
+                    holders = stale_holders(directory)
+                if holders:
+                    # Name the inheritor instead of blaming a suite that ended.
+                    reason = 'admission lock held after its suite exited by ' + '; '.join(holders)
                 emit(role, reason, started, report, memory)
                 elapsed = time.monotonic() - started
                 if elapsed >= wait_secs:
@@ -258,3 +337,126 @@ def counting_slot(directory):
         if candidate:
             candidate.close()
         raise
+
+
+class LeaseHolder:
+    """Keep admission descriptors alive in a process that runs no command.
+
+    The owner passes nothing to its commands. It tracks each command's process
+    group here. close() ends the hold at once; if the owner dies without
+    closing, or closes with release=False on an error path, the holder keeps
+    the lease only while a tracked group has members, so a killed wrapper
+    cannot admit a proof over its running suite.
+    """
+
+    def __init__(self, fds, poll_secs=HOLD_POLL_SECS):
+        self.process = self._write = None
+        if not fds:
+            return  # nested reuse: the live ancestor's holder already holds it
+        read, self._write = os.pipe()  # both ends close-on-exec in the owner
+        try:
+            self.process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), '--hold', str(read), str(poll_secs)],
+                pass_fds=(read, *fds), start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except BaseException:
+            os.close(self._write)
+            self._write = None
+            raise
+        finally:
+            os.close(read)
+
+    def track(self, pgid):
+        if self._write is None:
+            return
+        try:
+            os.write(self._write, f'pgid {int(pgid)}\n'.encode())
+        except OSError:
+            pass  # a dead holder only loses the killed-wrapper cover; the owner still holds
+
+    def close(self, release=True):
+        """release=False keeps the lease until tracked groups end (error paths)."""
+        if self._write is None:
+            return
+        try:
+            if release:
+                os.write(self._write, b'release\n')
+        except OSError:
+            pass
+        os.close(self._write)
+        self._write = None
+        if release:
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        self.close(release=kind is None)
+
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def hold(read_fd, poll_secs=HOLD_POLL_SECS):
+    """The LeaseHolder process: hold inherited descriptors until released."""
+    for sig in (signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+    groups, pending = set(), b''
+    while True:
+        select.select([read_fd], [], [])
+        chunk = os.read(read_fd, 4096)
+        if not chunk:
+            break  # owner exited without releasing
+        pending += chunk
+        while b'\n' in pending:
+            line, pending = pending.split(b'\n', 1)
+            if line == b'release':
+                return 0
+            if line.startswith(b'pgid '):
+                groups.add(int(line[5:]))
+    while any(_group_alive(group) for group in groups):
+        time.sleep(poll_secs)
+    return 0
+
+
+LEASE_ENV_KEYS = (LEASE_ENV, 'CAS_RELEASE_GATE_SCRATCH_LEASE_FDS')
+
+
+def start_compiler_cache(env):
+    """Start sccache's server outside every lease before admitted builds.
+
+    sccache's client daemonizes a server on first use, and that server would
+    otherwise be a child of the admitted build. Starting it here, with no lease
+    variables and no inherited descriptors, keeps it out of every admission.
+    "Address in use" means a server already runs; any failure is ignored and
+    the build still runs normally.
+    """
+    wrapper = env.get('RUSTC_WRAPPER') or env.get('CARGO_BUILD_RUSTC_WRAPPER')
+    if not wrapper or Path(wrapper).name != 'sccache':
+        return False
+    clean = {key: value for key, value in env.items() if key not in LEASE_ENV_KEYS}
+    try:
+        subprocess.run([wrapper, '--start-server'], env=clean, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       start_new_session=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+if __name__ == '__main__':
+    if sys.argv[1:2] == ['--hold'] and len(sys.argv) == 4:
+        sys.exit(hold(int(sys.argv[2]), float(sys.argv[3])))
+    sys.exit('usage: host_memory.py --hold <fd> <poll-secs>')

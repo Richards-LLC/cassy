@@ -338,11 +338,11 @@ describe("plain capability summary beside the exact scopes (cas-8051 F7)", () =>
   });
 
   it("names exactly the granted capabilities for a singleton (review 01:10)", () => {
-    expect(scopeSummary(["pane-interrupt"])).toEqual(["Interrupt panes"]);
+    expect(scopeSummary(["pane-interrupt"])).toEqual(["Interrupt supervisors"]);
     expect(scopeSummary(["message-send"])).toEqual(["Send messages to supervisors"]);
-    expect(scopeSummary(["pane-input"])).toEqual(["Type into terminals"]);
+    expect(scopeSummary(["pane-input"])).toEqual(["Type into its sessions"]);
     expect(scopeSummary(["machine-read"])).toEqual(["See this machine"]);
-    expect(scopeSummary(["pane-read"])).toEqual(["Read its terminals"]);
+    expect(scopeSummary(["pane-read"])).toEqual(["Read raw output"]);
     for (const single of ["pane-interrupt", "message-send", "pane-input", "machine-read", "session-read", "pane-read"] as const) {
       const words = scopeSummary([single]);
       expect(words).toHaveLength(1);
@@ -355,7 +355,7 @@ describe("plain capability summary beside the exact scopes (cas-8051 F7)", () =>
     expect(scopeSummary(["machine-read", "session-read"])).toEqual(["See this machine", "See its sessions"]);
     expect(scopeSummary(["machine-read", "session-read", "pane-read", "message-send"])).toEqual([READ_CAPABILITY, "Send messages to supervisors"]);
     expect(scopeSummary(["session-read", "pane-input", "message-send", "pane-interrupt"])).toEqual(["See its sessions", CONTROL_CAPABILITY]);
-    expect(scopeSummary(["pane-read", "pane-input"])).toEqual(["Read its terminals", "Type into terminals"]);
+    expect(scopeSummary(["pane-read", "pane-input"])).toEqual(["Read raw output", "Type into its sessions"]);
     // Never a capability the grant does not contain.
     expect(scopeSummary(["message-send"]).join(" ")).not.toMatch(/interrupt|Type/);
     expect(scopeSummary(["pane-read"]).join(" ")).not.toMatch(/sessions/);
@@ -409,7 +409,7 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
     expect(stop).toMatchObject({ allowed: false, scope: "factory-manage", state: NOT_ALLOWED_ON_PAIRING, grantable: false });
     if (stop.allowed) throw new Error("unreachable");
     expect(stop.state).toBe("Not allowed on this pairing");
-    expect(stop.reason).toBe("Needs the Stop and restart workers and sessions permission (factory:manage).");
+    expect(stop.reason).toBe("Needs the Stop and restart workers and sessions permission.");
     expect(stop.command).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage");
     expect(fleetControlGate([...CONTROL, "factory-manage"], "stop-worker", ORIGIN)).toEqual({ allowed: true, scope: "factory-manage" });
     expect(fleetControlGate([...CONTROL, "factory-manage"], "end-session", ORIGIN).allowed).toBe(true);

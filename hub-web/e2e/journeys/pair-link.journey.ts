@@ -21,6 +21,17 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     // drawing the standard focus ring whole rather than two bars (cas-b2e4 F03).
     await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeInViewport({ ratio: 1 });
+    // cas-b52d (journey F26): what the link withholds, in plain words, and the
+    // command that grants it, with its Copy, are on screen without scrolling
+    // inside the dialog, beside what this browser will be able to do. That is
+    // the dialog as it opens: once Technical details is opened, the operator
+    // keeps their place there rather than jumping back up (cas-207a).
+    await expect(dialog.getByRole("button", { name: "Copy command" })).toBeInViewport({ ratio: 1 });
+    const withheld = dialog.locator(".pair-withheld");
+    await expect(withheld).toContainText("This link does not let it: Type, send messages and interrupt");
+    await expect(withheld).toBeInViewport({ ratio: 1 });
+    await expect(dialog.locator(".pair-withheld-command code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
+    await expect(dialog.locator(".pair-withheld-command code")).toBeInViewport({ ratio: 1 });
     // A read-only invitation cannot offer a control grant in the real bundle.
     await dialog.getByText("Technical details").click();
     for (const scope of ["machine:read", "session:read", "pane:read"]) {
@@ -34,15 +45,6 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
       await expect(checkbox).not.toBeChecked();
     }
     await expect(dialog.locator("#pair-copy")).toHaveAttribute("data-pair-command", /--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
-    // cas-b52d (journey F26): what the link withholds, in plain words, and the
-    // command that grants it, with its Copy, are on screen without scrolling
-    // inside the dialog, beside what this browser will be able to do.
-    await expect(dialog.getByRole("button", { name: "Copy command" })).toBeInViewport({ ratio: 1 });
-    const withheld = dialog.locator(".pair-withheld");
-    await expect(withheld).toContainText("This link does not let it: Type, send messages and interrupt");
-    await expect(withheld).toBeInViewport({ ratio: 1 });
-    await expect(dialog.locator(".pair-withheld-command code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
-    await expect(dialog.locator(".pair-withheld-command code")).toBeInViewport({ ratio: 1 });
     await dialog.getByText("Technical details").click();
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     // The link carries the machine's hub address and name, as `cas hub pair`
@@ -126,7 +128,7 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await journey.open();
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${MANAGE_TOKEN}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas%20%C2%B7%20Linux&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage`);
     await expect(dialog.getByText("One-time invitation ready. Check the machine, then add your name.")).toBeVisible();
-    await expect(dialog.locator(".pair-lead").first()).toHaveText("This browser will be able to: Read sessions and terminals · Type, send messages and interrupt · Stop and restart workers and sessions");
+    await expect(dialog.locator(".pair-lead").first()).toHaveText("This browser will be able to: See its sessions and raw output · Type, send messages and interrupt · Stop and restart workers and sessions");
     // Native disclosure scrolling is tracked separately in cas-207a.
     // Desktop retains the raw checkbox; both layouts verify visible grants
     // and the exact requested scopes at exchange.
@@ -176,3 +178,46 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");
   });
 });
+
+// cas-207a: on a touch screen the finger lifts (pointerup) before the tap's
+// mousedown and click. A rebuild owed while the name field had focus used to
+// run between them, replacing the form under the finger: the disclosure
+// stayed shut and the form jumped back to its top, on the name field.
+for (const scheme of ["light", "dark"] as const) {
+  test.describe(`phone touch ${scheme}`, () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, colorScheme: scheme });
+
+    test(`HUB-J2 a tap opens Technical details on a scrolled invitation form, phone ${scheme} (cas-207a)`, journeyPart, async ({ page, journey }) => {
+      await journey.hub({ machines: [ATLAS, STUDIO] });
+      const dialog = page.locator("#pair-dialog");
+      const form = dialog.locator("#pair-form");
+      const name = dialog.getByRole("textbox", { name: "Your name (shown on the machine)" });
+      const summary = dialog.getByText("Technical details");
+
+      await journey.stage("Scroll the focused invitation form and tap Technical details", async () => {
+        await page.goto(`./#pair=${EARLIER_TOKEN}&hub=studio&hub_url=https%3A%2F%2Fstudio.test&machine=Studio%20Mac&scopes=machine:read,session:read,pane:read`);
+        await expect(dialog.getByRole("textbox", { name: /Machine name/ })).toHaveValue("Studio Mac");
+        await expect(name).toBeFocused();
+        await summary.scrollIntoViewIfNeeded();
+        const scrolled = await form.evaluate((element) => element.scrollTop);
+        expect(scrolled, "the disclosure sits below the form's first screen").toBeGreaterThan(0);
+
+        await summary.tap();
+
+        await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
+        // Let the tap's click task and the rebuild it released both run.
+        await page.evaluate(() => new Promise((resolve) => setTimeout(() => requestAnimationFrame(() => resolve(null)), 50)));
+        await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
+        for (const scope of ["machine:read", "session:read", "pane:read"]) {
+          await expect(dialog.getByRole("checkbox", { name: scope, exact: true })).toBeChecked();
+        }
+        await expect(dialog.getByRole("checkbox", { name: "message:send not granted by this invitation", exact: true })).toBeDisabled();
+        // The operator keeps their place: the form did not jump to its top.
+        expect(await form.evaluate((element) => element.scrollTop), "form scroll after the tap").toBeGreaterThanOrEqual(scrolled);
+        await expect(summary).toBeInViewport();
+        await expect(name).not.toBeFocused();
+        expect(new URL(page.url()).hash, "the secret leaves the address bar").toBe("");
+      });
+    });
+  });
+}

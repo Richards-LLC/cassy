@@ -1,6 +1,6 @@
 import { test, expect, journeyPart } from "./journey";
 import { HubDouble } from "./hub-double";
-import { ATLAS, PELICAN } from "./world";
+import { ATLAS, PELICAN, STUDIO } from "./world";
 import { journalRows } from "./commander-journal-storage";
 import { journeyNow } from "./clock";
 import type { Page } from "@playwright/test";
@@ -84,7 +84,9 @@ async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") 
   for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
     for (const colorScheme of ["light", "dark"] as const) {
       await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
-      await expect(page.getByRole("log")).toContainText(state === "stored" ? "Stored on this device" : "Forwarded · not stored on this device");
+      // cas-97d58 F05: a kept reply shows nothing; only an unkept one says so.
+      if (state === "stored") await expect(page.getByRole("log").locator('[data-stored="true"]').first()).toBeVisible();
+      else await expect(page.getByRole("log")).toContainText("Not kept on this device yet");
       await page.screenshot({ path: join(qa, `${state}-${colorScheme}-${size}.png`) });
     }
   }
@@ -251,8 +253,21 @@ test("HUB-J12 cancellation persists and cannot drain after reload", journeyPart,
     await journey.open(); await choose(page);
     hub.upstreamLost(PELICAN);
     await send(page, "Cancel this waiting instruction");
-    await page.getByRole("button", { name: "Cancel waiting message" }).click();
+    const cancel = page.getByRole("button", { name: "Cancel waiting message" });
+    // cas-97d58 F15: the label and outline take the bubble's own ink, so they
+    // read on the navy bubble instead of near-black on navy (about 1.8:1).
+    const ink = await cancel.evaluate((button) => {
+      const bubble = button.closest(".bub")!;
+      return { label: getComputedStyle(button).color, border: getComputedStyle(button).borderTopColor, bubble: getComputedStyle(bubble).color };
+    });
+    expect(ink.label).toBe(ink.bubble);
+    expect(ink.border).toBe(ink.bubble);
+    await cancel.click();
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    // A cancel is the operator's choice, not a failure: no red "unsent" chip.
+    await expect(page.getByText("Cancel this waiting instruction", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /unsent message/ })).toHaveCount(0);
+    await expect(page.locator("#message-status")).toHaveText("Waiting message cancelled. It was not sent.");
     expect((await journalRows(page, "sends")).some((row) => row.send?.text === "Cancel this waiting instruction")).toBe(false);
   });
   await journey.stage("Reload and reconnect do not resurrect the cancelled client reference", async () => {
@@ -300,7 +315,10 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(1);
     expect(await page.evaluate(() => (window as unknown as { __receiptOrder: string[] }).__receiptOrder.slice(0, 2))).toEqual(["reply-commit", "application-ack"]);
-    await expect(page.getByRole("log").getByText("Stored on this device", { exact: true })).toBeVisible();
+    // cas-97d58 F05 (supersedes cas-e6d2's always-visible receipt): kept is the
+    // quiet normal state, recorded on the bubble, never read out after every turn.
+    await expect(page.getByRole("log").locator('[data-stored="true"]').filter({ hasText: "A durable reply on this device" })).toHaveCount(1);
+    await expect(page.getByRole("log").getByText(/Stored on this device|Not kept on this device yet/)).toHaveCount(0);
     await expect(page.getByRole("log")).not.toContainText("Read by operator");
     await captureReceiptSurface(page, "stored");
   });
@@ -328,7 +346,8 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
     await journey.open(); await choose(page);
     await page.evaluate(() => { (window as unknown as { __failReplyStorage?: boolean }).__failReplyStorage = true; });
     id = hub.supervisorSays(PELICAN, "Replay this if the tab disappears");
-    await expect(page.getByRole("log").getByText("Forwarded · not stored on this device", { exact: true })).toBeVisible();
+    await expect(page.getByRole("log").getByText("Not kept on this device yet", { exact: true })).toBeVisible();
+    await expect(page.getByRole("log").locator('[data-stored="false"]').filter({ hasText: "Replay this if the tab disappears" })).toHaveCount(1);
     expect(hub.persistedReplies.filter((row) => row.notification_id === id)).toHaveLength(0);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(0);
     await captureReceiptSurface(page, "forwarded");
@@ -337,6 +356,28 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
     await page.reload(); await choose(page);
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);
     await expect(page.getByRole("log").getByText("Replay this if the tab disappears", { exact: true })).toHaveCount(1);
-    await expect(page.getByRole("log").getByText("Stored on this device", { exact: true })).toBeVisible();
+    await expect(page.getByRole("log").locator('[data-stored="true"]').filter({ hasText: "Replay this if the tab disappears" })).toHaveCount(1);
+    await expect(page.getByRole("log").getByText("Not kept on this device yet")).toHaveCount(0);
+  });
+});
+
+test("HUB-J3 replies read before a reload stay read after it (cas-97d58 F14)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const casSrc = list.getByRole("button", { name: /cas-src/ });
+  await journey.stage("Read a reply, then move to another conversation", async () => {
+    await journey.open();
+    await casSrc.click();
+    hub.supervisorSays(PELICAN, "Read before the reload.");
+    await expect(page.getByRole("log").getByText("Read before the reload.")).toBeVisible();
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
+    await expect(casSrc.getByLabel(/unread/)).toHaveCount(0);
+  });
+  await journey.stage("A reload replays the history; what was read is still read", async () => {
+    await page.reload();
+    await expect(casSrc).toBeVisible({ timeout: 15_000 });
+    await expect(casSrc).toContainText("Read before the reload.");
+    await expect(casSrc.getByLabel(/unread/)).toHaveCount(0);
   });
 });

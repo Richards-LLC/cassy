@@ -79,15 +79,7 @@ pub fn execute_list(cli: &Cli, args: &ListArgs) -> Result<()> {
             has_orphaned = true;
         }
 
-        let status_label = if session.can_attach() {
-            "running"
-        } else if is_orphaned {
-            "orphaned"
-        } else if session.is_running {
-            "starting"
-        } else {
-            "stopped"
-        };
+        let status_label = session.status_label();
 
         let summary = session.to_session_summary();
         let type_badge = session_type_badge_plain(summary.session_type);
@@ -942,6 +934,7 @@ impl SessionListJson {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct SessionJson {
+    status: &'static str,
     name: String,
     created_at: String,
     daemon_pid: u32,
@@ -965,6 +958,7 @@ impl SessionJson {
     fn from_session_info(session: &SessionInfo, include_metadata: bool) -> Self {
         let workers = session.worker_names();
         Self {
+            status: session.status_label(),
             name: session.name.clone(),
             created_at: session.metadata.created_at.clone(),
             daemon_pid: session.metadata.daemon_pid,
@@ -1091,6 +1085,27 @@ mod session_filter_tests {
     use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
     use crate::ui::factory::{SessionInfo, create_metadata};
     use cas_types::{AgentRole, AgentType, EventEntityType, EventType};
+
+    #[test]
+    fn dead_session_json_labels_dead_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        manager
+            .save_metadata(&create_metadata(
+                "dead",
+                i32::MAX as u32,
+                "supervisor",
+                &[],
+                None,
+                None,
+                None,
+            ))
+            .unwrap();
+        let session = manager.find_session(Some("dead")).unwrap().unwrap();
+        let json = serde_json::to_value(SessionJson::from_session_info(&session, false)).unwrap();
+        assert_eq!(json["status"], "dead");
+        assert_eq!(json["is_running"], false);
+    }
 
     #[test]
     fn factory_query_filters_include_live_registry_workers_missing_from_metadata() {

@@ -829,6 +829,9 @@ main {
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
 .fleet-ops-undo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); }
+/* cas-97d58 F12: a destructive action's result, where the Undo would be. */
+.fleet-ops-result { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); scroll-margin-block: var(--space-4); }
+.fleet-ops-result:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .fleet-ops-undo button { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: 999px; background: var(--bg-panel); color: var(--text-hi); cursor: pointer; }
 @media (forced-colors: active) {
   .fleet-ops-menu, .fleet-ops-confirm, .fleet-ops-preview { border-color: Highlight; }
@@ -1095,6 +1098,19 @@ main {
 }
 .connection-log header form { display: block; container-type: normal; overflow: visible; flex: 0 0 auto; padding: 0; margin: 0; }
 
+/* cas-97d58 F08: the raw diagnostics are one tap away, not the dialog's body. */
+.connection-log-technical { border-top: var(--line-width) solid var(--line-subtle); padding-top: var(--space-2); }
+.connection-log-technical > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; color: var(--text-hi); font-weight: var(--weight-medium); }
+.connection-log-technical > summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+/* cas-97d58 QA F01: the flex summary loses the native triangle, so it draws
+   its own expand affordance: a chevron of currentColor borders (kept in
+   forced colors), pointing right when closed and down when open. */
+.connection-log-technical > summary { gap: 10px; list-style: none; }
+.connection-log-technical > summary::-webkit-details-marker { display: none; }
+.connection-log-technical > summary::before { content: ""; flex: none; width: 7px; height: 7px; border-inline-end: 2px solid currentColor; border-block-end: 2px solid currentColor; transform: rotate(-45deg); transition: transform 120ms ease; }
+.connection-log-technical[open] > summary::before { transform: translateY(-2px) rotate(45deg); }
+@media (prefers-reduced-motion: reduce) { .connection-log-technical > summary::before { transition: none; } }
+.connection-log-evidence { margin: 0 0 var(--space-2); color: var(--text-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
 .connection-log pre {
   max-height: var(--connection-log-max-height);
   overflow: auto;
@@ -1554,7 +1570,8 @@ dialog form > *,
 }
 
 .pair-status {
-  padding: var(--space-3) 0;
+  /* Leave a text gutter inside the inset focus outline (cas-2e77 QA F01). */
+  padding: var(--space-3) var(--space-2);
   color: var(--text-hi);
   /* cas-0e14: the re-pair copy can carry a long `cas hub pair --scopes …`
      command; it wraps instead of running out of the dialog. */
@@ -1563,6 +1580,8 @@ dialog form > *,
   border-top: var(--line-width) solid var(--line-subtle);
   border-bottom: var(--line-width) solid var(--line-subtle);
 }
+
+.pair-status:focus { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
 
 /* Journey F12: toasts anchor at the top, never over the composer or the
    bottom rails where the operator is typing. */
@@ -1736,6 +1755,8 @@ dialog form > *,
 .conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
 .conversation-preview { grid-column: 2; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-height: calc(2 * 1.4em); overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); line-height: 1.4; color: var(--ink-soft); overflow-wrap: anywhere; }
 .conversation-preview.bold { color: var(--ink); font-weight: var(--weight-medium); }
+/* cas-97d58 F19: the operator's own parked reply, quieter than an unread turn. */
+.conversation-preview.draft { color: var(--ink-mid); font-style: italic; }
 .conversation-preview.unreachable { color: var(--warn-text); font-weight: var(--weight-medium); }
 .conversation-preview.interrupted { color: var(--warn-text); }
 /* P13: the time keeps the headline end; the unread count and waiting dot sit beneath it. */
@@ -1879,6 +1900,8 @@ dialog form > *,
 .thread .tick { width: 15px; height: 15px; margin-top: 4px; color: var(--state-ok); flex: none; display: block; }
 .thread .conversation-delivery { display: block; margin-top: 6px; font-size: 12px; opacity: 0.85; }
 .thread .reply-storage-receipt { display: block; margin-top: 6px; color: var(--ink); font-size: 12px; }
+/* cas-97d58 F05: on a question or blocker card the not-kept line sits in the card's own padding, not as a strip outside it. */
+.thread .obj > .reply-storage-receipt { margin: 0; padding: 0 23px 14px; background: inherit; border-radius: 0 0 28px 28px; }
 /* P8 (cas-b1ee): a refused send looks refused, not delivered. No fill, a
  * dashed critical outline (--crit-bg on --canvas ≥5.9:1 both schemes), body
  * in --ink, a 13px semibold "Not sent" lead with a warning glyph, and Edit /
@@ -1927,6 +1950,12 @@ dialog form > *,
 .thread .conversation-delivered .tick { width: 13px; height: 13px; margin: 0; color: currentColor; }
 .thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control, .thread .conversation-review { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+/* cas-97d58 F15: Cancel sits on the operator's own (navy) bubble, so it
+ * takes the bubble's ink for its label and outline (white on --you-bubble-bg
+ * is above 9:1), not the thread's --ink that read about 1.8:1 there. */
+.thread .turn.you .bub .conversation-cancel { color: inherit; border-color: currentColor; margin-top: 8px; }
+.thread .turn.you .bub .conversation-cancel:hover { border-color: currentColor; background: color-mix(in srgb, currentColor 14%, transparent); }
+.thread .turn.you .bub .conversation-cancel:focus-visible { outline-color: currentColor; }
 .thread .conversation-edit:hover, .thread .conversation-retry:hover, .thread .conversation-take-control:hover, .thread .conversation-review:hover { border-color: var(--ink); }
 /* cas-88d86 QA F02: "Waiting for <device>" is not pressable, so it does not look pressable. */
 .thread .conversation-take-control[aria-disabled="true"] { cursor: default; }
@@ -2251,6 +2280,8 @@ button.chip:disabled { cursor: default; }
 .conversation-context .context-jump[data-kind="blocker"] .context-kind { color: var(--warn-text); }
 .conversation-context .context-jump .context-text { color: var(--ink-mid); overflow-wrap: anywhere; }
 .conversation-context .context-jump .context-hint { color: var(--warn-text); font-size: 12px; font-weight: var(--weight-medium); }
+/* cas-97d58 F09: where the open question is, not a warning. */
+.conversation-context .context-jump .context-hint.context-pinned { color: var(--ink-mid); font-weight: var(--weight-regular); }
 .conversation-context .context-attachment { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "plate name" "plate meta"; column-gap: var(--space-2); align-items: center; }
 .conversation-context .context-plate { grid-area: plate; display: flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; padding: 0 4px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; }
 .conversation-context .context-attachment .context-text { grid-area: name; min-width: 0; overflow-wrap: anywhere; }
@@ -2293,6 +2324,10 @@ button.chip:disabled { cursor: default; }
      keeps a 4em stub ("Conne…", its full words in the title), so an
      overlong name never hides it entirely. */
   .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1000 auto; min-width: 4em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+  /* cas-97d58 F07: a one-word state ("Connected", "Reconnecting") is never
+     cut to "Conne…"; the machine label yields instead. A longer outage phrase
+     that names the machine keeps the rule above. */
+  .conversation-sidebar #paired-machines-toggle .machine-badge-state.whole { flex: none; min-width: auto; }
   .conversation-sidebar .hub-footer-badges > #paired-machines-toggle { flex: 1 1 auto; }
   .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
@@ -2332,6 +2367,11 @@ button.chip:disabled { cursor: default; }
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */
   .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
+  /* cas-97d58 F07: with the attention chip, Raw output and Interrupt sharing
+     the row, the identity was squeezed to "Accou…" over "A… · Live". Then it
+     takes its own full-width row, so the title and the machine line read
+     whole; the one-row header (cas-1776) stays whenever there is room. */
+  .conversation-heading:has(#conversation-attention:not([hidden])) .conversation-identity { grid-column: 1 / -1; grid-row: 2; padding: 2px var(--space-1) 2px 40px; }
 
   #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
@@ -2841,9 +2881,13 @@ button.chip:disabled { cursor: default; }
 .installation-inventory-body { display: grid; min-height: 0; overflow-y: auto; gap: var(--space-4); padding: var(--space-3); }
 .installation-inventory-list { display: grid; gap: 1.25rem; }
 .installation-inventory-row { display: grid; gap: .75rem; border-top: var(--line-width) solid var(--line-subtle); padding-top: 1rem; }
-.installation-inventory-row h3 { margin: 0; font-size: var(--fs-md); }
+.installation-inventory-row h3 { margin: 0; font-size: var(--fs-md); overflow-wrap: anywhere; }
 .installation-inventory-row code, .installation-inventory-row dd { overflow-wrap: anywhere; }
 .installation-inventory-row button { justify-self: start; }
+.installation-inventory-row .pair-details dt { text-transform: none; letter-spacing: normal; }
+.installation-technical summary { min-height: calc(var(--button-height) + var(--space-1)); padding: var(--space-2) 0; cursor: pointer; }
+.installation-technical summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
+.installation-technical[open] { display: grid; gap: var(--space-2); }
 /* Conversation progress is prose in a narrow rail, including unbroken IDs. */
 #status-view, .status-row { min-width: 0; max-width: 100%; }
 .status-row { box-sizing: border-box; overflow-wrap: anywhere; }
@@ -2909,3 +2953,6 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .conversation-welcome-inbox { margin-top: var(--space-3); }
 .link-button { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
 #inbox-toggle { white-space: nowrap; }
+
+/* cas-97d58 F20: no colour transition runs while the scheme flips (scheme.ts). */
+:root[data-scheme-switching], :root[data-scheme-switching] *, :root[data-scheme-switching] *::before, :root[data-scheme-switching] *::after { transition: none !important; }

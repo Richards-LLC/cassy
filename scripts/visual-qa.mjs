@@ -124,6 +124,20 @@ export async function saveQaTrace(context, path, { secrets = [] } = {}) {
   }
 }
 
+/**
+ * Scrub a finished Playwright test-runner trace.zip. The runner's own
+ * test.trace keeps every assertion's outcome, which the close gate counts; only
+ * credentials are replaced. A failed scrub writes nothing at `output`.
+ */
+export async function scrubQaTraceFile(input, output, { secrets = [] } = {}) {
+  try {
+    await writeFile(output, scrubTraceZip(await readFile(input), secrets));
+  } catch (error) {
+    await rm(output, { force: true });
+    throw new Error(redactQaText(error, secrets));
+  }
+}
+
 const DEFAULT_VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'phone', width: 390, height: 800 },
@@ -284,6 +298,25 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     // the engine's own answer; `content-visibility: auto` off-screen content
     // stays visible to it, because scrolling renders it.
     const skippedContent = (element) => typeof element.checkVisibility === 'function' && !element.checkVisibility();
+    const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'range', 'color', 'file', 'hidden', 'button', 'submit', 'reset', 'image']);
+    const editableField = (element) => (element.tagName === 'INPUT' && !NON_TEXT_INPUTS.has((element.getAttribute('type') || 'text').toLowerCase()))
+      || element.tagName === 'TEXTAREA'
+      || (element.hasAttribute('contenteditable') && element.isContentEditable === true);
+    // A multi-line clamp is the design, not lost text: it hides the later
+    // lines and draws its own ellipsis at the cut. The legacy form
+    // (-webkit-line-clamp) clamps only a vertical -webkit-box, which engines
+    // report as flow-root, and always draws that ellipsis whatever
+    // text-overflow says; on any other box the count does nothing and hidden
+    // lines are lost. The standard line-clamp clamps any block. Either way the
+    // box must clip vertically and not also overflow sideways.
+    const lineClampBox = (element, style = getComputedStyle(element)) => {
+      const count = (value) => Number.parseInt(value || '', 10);
+      const legacy = count(style.webkitLineClamp) > 0 && style.webkitBoxOrient === 'vertical';
+      const standard = count(style.getPropertyValue('line-clamp')) > 0;
+      return (legacy || standard) && style.display !== 'inline'
+        && (style.overflowY === 'hidden' || style.overflowY === 'clip')
+        && element.scrollWidth <= element.clientWidth + boxTolerance;
+    };
     const nonVisualReason = (element) => {
       if (!element) return null;
       if (ariaHidden(element)) return 'aria-hidden';
@@ -440,9 +473,15 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const overflowX = style.overflowX === 'hidden' || style.overflowX === 'clip';
       const overflowY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const contentExceedsBorder = element !== document.documentElement && element !== document.body && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance);
-      const clipped = (overflowX && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
+      // A long value scrolling sideways inside an editable field is how
+      // editing works, not clipped copy: the field's own horizontal scroll is
+      // not measured. A container that clips the field itself still is.
+      const editsInPlace = editableField(element);
+      const clipped = (overflowX && !editsInPlace && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
       // GH #1081: an explicit single-line ellipsis is the design, not lost text.
-      const intentionalEllipsis = overflowX && style.textOverflow === 'ellipsis' && element.scrollHeight <= element.clientHeight + boxTolerance;
+      const singleLineEllipsis = overflowX && style.textOverflow === 'ellipsis' && element.scrollHeight <= element.clientHeight + boxTolerance;
+      const intentionalClamp = lineClampBox(element, style);
+      const intentionalEllipsis = singleLineEllipsis || intentionalClamp;
       if (clipped && !intentionalEllipsis) {
         add('content-overflow', item, { reason: 'content-exceeds-clipped-border-box', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         add('clipped-content', item, { reason: 'scroll-size-exceeds-client-size', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
@@ -478,13 +517,17 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
           const ancestorBox = ancestor.getBoundingClientRect();
           const ellipsisX = clipsX && style.textOverflow === 'ellipsis' && ancestor.scrollHeight <= ancestor.clientHeight + boxTolerance;
           const outsideX = clipsX && !ellipsisX && (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance);
-          const outsideY = clipsY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
+          // A clamping box decides which lines are drawn; the hidden lines'
+          // range is not lost text, so the walk stops on Y there.
+          const clampY = clipsY && lineClampBox(ancestor, style);
+          const outsideY = clipsY && !clampY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
           if (outsideX || outsideY) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
           // An ellipsising box decides which part of its line is
           // drawn. The text range still measures the whole unellipsised line,
           // so a clipping ancestor further up (a title row with overflow-x:
           // clip) would see that phantom width; the walk stops on X here.
           if (ellipsisX) checkX = false;
+          if (clampY) checkY = false;
           if (scrollsY) {
             const contentTop = ancestorBox.y + ancestor.clientTop - ancestor.scrollTop;
             const contentBottom = contentTop + ancestor.scrollHeight;
@@ -771,6 +814,11 @@ function markdownReport(result) {
     `Schemes: ${result.schemes.join(', ')}  `,
     `Viewports: ${result.viewports.map((viewport) => `${viewport.name} (${viewport.width}×${viewport.height})`).join(', ')}`,
     '',
+    ...(result.pageDeclarations.length ? [
+      '## Page declarations', '',
+      ...result.pageDeclarations.map((page) => `- ${page.url}: JavaScript required — ${page.reason}`),
+      '',
+    ] : []),
     '## Findings',
     '',
   ];
@@ -1001,6 +1049,7 @@ async function inspectVisualQa(options) {
   const infoFindings = [];
   const suppressed = [];
   const screenshots = [];
+  const pageDeclarations = [];
   const journeyRuns = [];
   const seen = new Set();
   let warnedUnownedTrace = false;
@@ -1030,6 +1079,23 @@ async function inspectVisualQa(options) {
             for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
             for (const finding of inspection.findings) recordFinding(finding);
 
+            // A reviewed application declaration exempts only the no-JS
+            // comparison. All visual and print checks still apply. Undeclared
+            // pages, including reports, retain the default no-JS requirement.
+            const requirement = await page.evaluate(() => {
+              const declarations = document.querySelectorAll('head meta[name="visual-qa:requires-javascript"]');
+              if (!declarations.length) return null;
+              return { count: declarations.length, reason: declarations[0].getAttribute('content')?.trim() ?? '' };
+            });
+            const requiresJavaScript = requirement?.count === 1 && Boolean(requirement.reason);
+            if (requirement && !requiresJavaScript) {
+              recordFinding({ type: 'invalid-javascript-requirement', selector: 'meta[name="visual-qa:requires-javascript"]',
+                elementPath: 'head > meta', reason: 'declare-one-javascript-requirement-with-a-nonempty-reason' });
+            }
+            if (requiresJavaScript && !pageDeclarations.some((page) => page.url === source)) {
+              pageDeclarations.push({ url: source, requiresJavaScript: true, reason: requirement.reason });
+            }
+
             const screenText = await page.locator('body').innerText().catch(() => '');
             await page.emulateMedia({ media: 'print' });
             const printText = await page.locator('body').innerText().catch(() => '');
@@ -1045,16 +1111,18 @@ async function inspectVisualQa(options) {
               recordFinding({ ...info, sampledBackground, sampledRatio }, true);
             }
 
-            const noScriptContext = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
-            const noScriptPage = await noScriptContext.newPage();
-            try {
-              await noScriptPage.goto(url, { waitUntil: 'load' });
-              const noScriptText = await noScriptPage.locator('body').innerText().catch(() => '');
-              if (screenText.trim().length > 20 && noScriptText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
-                recordFinding({ type: 'javascript-disabled-loss', selector: 'body', elementPath: 'body', textSample: noScriptText.trim().slice(0, 96), reason: 'content-requires-javascript', screenCharacters: screenText.trim().length, javascriptDisabledCharacters: noScriptText.trim().length });
+            if (!requiresJavaScript) {
+              const noScriptContext = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
+              const noScriptPage = await noScriptContext.newPage();
+              try {
+                await noScriptPage.goto(url, { waitUntil: 'load' });
+                const noScriptText = await noScriptPage.locator('body').innerText().catch(() => '');
+                if (screenText.trim().length > 20 && noScriptText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
+                  recordFinding({ type: 'javascript-disabled-loss', selector: 'body', elementPath: 'body', textSample: noScriptText.trim().slice(0, 96), reason: 'content-requires-javascript', screenCharacters: screenText.trim().length, javascriptDisabledCharacters: noScriptText.trim().length });
+                }
+              } finally {
+                await closeQaContext(noScriptContext);
               }
-            } finally {
-              await closeQaContext(noScriptContext);
             }
 
             const filename = `${slug(source)}-${scheme}-${viewport.name}.png`;
@@ -1165,6 +1233,7 @@ async function inspectVisualQa(options) {
     schemes,
     viewports,
     urls: inputUrls,
+    pageDeclarations,
     ...(journey ? { journey: { name: journey.name, url: journey.url, states: journey.states.map((state) => state.name) }, journeyRuns } : {}),
     findings,
     infoFindings,
@@ -1190,6 +1259,7 @@ function parseArgs(argv) {
     else if (arg === '--journey') options.journey = argv[++index];
     else if (arg === '--scheme') options.schemes = [argv[++index]];
     else if (arg === '--viewport') options.viewports = [argv[++index]];
+    else if (arg === '--scrub-trace') options.scrubTrace = [argv[++index], argv[++index]];
     else if (arg === '--help' || arg === '-h') options.help = true;
     else options.urls.push(arg);
   }
@@ -1198,9 +1268,21 @@ function parseArgs(argv) {
 
 if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const options = parseArgs(process.argv.slice(2));
-  if (options.help || (!options.urls.length && !options.journey)) {
+  if (options.scrubTrace) {
+    // Extra literal secrets come from the environment, never argv (process lists).
+    const secrets = (process.env.QA_TRACE_SECRETS ?? '').split('\n').filter(Boolean);
+    const [input, output] = options.scrubTrace;
+    try {
+      if (!input || !output) throw new Error('--scrub-trace needs an input and an output path');
+      await scrubQaTraceFile(input, output, { secrets });
+      console.log(`SCRUBBED ${output}`);
+    } catch (error) {
+      console.error(redactQaText(error, secrets));
+      process.exitCode = 2;
+    }
+  } else if (options.help || (!options.urls.length && !options.journey)) {
     if (!options.help) console.error('No captures requested: at least one URL or journey is required.');
-    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]');
+    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]\n       node scripts/visual-qa.mjs --scrub-trace RAW.zip trace.zip   (extra literal secrets: QA_TRACE_SECRETS, newline-separated)');
     process.exitCode = options.help ? 0 : 2;
   } else {
     try {

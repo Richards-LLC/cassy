@@ -116,6 +116,9 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     hub.holdLease(PELICAN, "Studio iPad");
     await list.getByRole("button", { name: /gabber-studio/ }).click();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
+    // cas-97d58 F11: the cas-src toast belongs to cas-src; it does not stay up
+    // (or stay in the accessibility tree) under gabber-studio's own Interrupt.
+    await expect(page.getByText("Interrupted the cas-src supervisor.")).toHaveCount(0);
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     await expect(interrupt).not.toHaveAttribute("aria-disabled", "true");

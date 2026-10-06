@@ -1,3 +1,4 @@
+import { activate, phoneLayout, showConversationList } from "./responsive-goals";
 import type { Locator } from "@playwright/test";
 import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, PELICAN } from "./world";
@@ -12,15 +13,16 @@ async function everyFieldAboveTheFold(dialog: Locator): Promise<void> {
 test("HUB-J1 first open and pair a machine with a code", async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], relay: { machine: "atlas", claimAfter: 2, authorizeAfter: 4 } });
   const dialog = page.locator("#pair-dialog");
+  const phone = await phoneLayout(page);
 
   await journey.stage("Open Cassy Commander for the first time", async () => {
     await journey.open();
-    await expect(page.getByRole("heading", { name: "Stay close to the work." })).toBeVisible();
+    await expect(page.getByRole("heading", { name: phone ? "Conversations" : "Stay close to the work.", exact: true })).toBeVisible();
     await expect(page.getByText("Pair a machine to start your first conversation.")).toBeVisible();
   });
 
   await journey.stage("Ask for a pairing code", async () => {
-    await page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }).click();
+    await activate(page, page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeVisible();
     await expect(dialog.getByText("This browser will be able to:")).toBeVisible();
     await expect(dialog.getByText("Technical details")).toBeVisible();
@@ -39,7 +41,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
       };
       new MutationObserver(read).observe(document.body, { subtree: true, childList: true, characterData: true });
     });
-    await dialog.getByRole("button", { name: "Create pairing code" }).click();
+    await activate(page, dialog.getByRole("button", { name: "Create pairing code" }));
     await expect(dialog.getByText("cas hub authorize KQ7M-4XTR")).toBeVisible();
   });
 
@@ -62,17 +64,19 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
 
   await journey.stage("Confirm and pair this browser", async () => {
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
-    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await activate(page, dialog.getByRole("button", { name: "Pair", exact: true }));
     await expect(dialog).toBeHidden();
-    // cas-71af (dfb2 QA F02): focus goes back to Pair a machine, where the
-    // operator started, not to the page body.
-    await expect(page.locator("#pair-toggle")).toBeFocused();
+    // Desktop returns to Pair; phone focuses the reading region without
+    // opening the soft keyboard (cas-12c29).
+    await expect(page.locator(phone ? ".conversation-reading.thread" : "#pair-toggle")).toBeFocused();
+    if (phone) await expect(page.getByRole("textbox", { name: "Your message" })).not.toBeFocused();
     expect(hub.exchanges).toHaveLength(1);
     expect(hub.exchanges[0]).toMatchObject({ hub_id: "atlas", operator_label: "Daniel", token: "journey-invitation" });
   });
 
   await journey.stage("See the machine's supervisor ready to talk to", async () => {
     await expect(page.getByRole("status").filter({ hasText: "Atlas · Linux connected" })).toBeVisible({ timeout: 15_000 });
+    await showConversationList(page);
     const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
     await expect(row).toBeVisible();
     // cas-d8a5 (journey F32): the row's spoken name reads as words: no run-on
@@ -80,7 +84,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     const spoken = await row.getAttribute("aria-label");
     expect(spoken).toMatch(/^cas-src on Atlas/);
     expect(spoken).not.toMatch(/ , |,,|\.,/);
-    await row.click();
+    await activate(page, row);
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // cas-010f: a supervisor that has not written yet reads plainly. The
     // conversation is the only surface (cas-0546): the card offers no other

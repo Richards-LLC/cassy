@@ -1,3 +1,4 @@
+import { activate, phoneLayout, phonePairLink, showConversationList } from "./responsive-goals";
 import { test, expect, expectWholeFocusRing, journeyPart } from "./journey";
 import { ATLAS, PELICAN, STUDIO } from "./world";
 import { SCOPES } from "./hub-double";
@@ -8,6 +9,7 @@ const TOKEN = "q3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRaQ";
 const EARLIER_TOKEN = "Zq3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRa";
 
 test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey }) => {
+  if (await phoneLayout(page)) { await phonePairLink(page, journey, TOKEN, EARLIER_TOKEN); return; }
   const hub = await journey.hub({ machines: [ATLAS, STUDIO] });
   const dialog = page.locator("#pair-dialog");
 
@@ -116,6 +118,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
 // so in plain words and the pairing holds it; a control pairing without it
 // says so beside the command that adds it.
 test("HUB-J2 pair a link that grants factory:manage, and see a pairing without it named (cas-d382)", journeyPart, async ({ page, journey }) => {
+  const phone = await phoneLayout(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["studio"], scopes: { studio: SCOPES } });
   const dialog = page.locator("#pair-dialog");
   const MANAGE_TOKEN = "M3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRaQ";
@@ -124,18 +127,24 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${MANAGE_TOKEN}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas%20%C2%B7%20Linux&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage`);
     await expect(dialog.getByText("One-time invitation ready. Check the machine, then add your name.")).toBeVisible();
     await expect(dialog.locator(".pair-lead").first()).toHaveText("This browser will be able to: Read sessions and terminals · Type, send messages and interrupt · Stop and restart workers and sessions");
-    await dialog.getByText("Technical details").click();
-    await expect(dialog.getByRole("checkbox", { name: "factory:manage", exact: true })).toBeChecked();
+    // Native disclosure scrolling is tracked separately in cas-207a.
+    // Desktop retains the raw checkbox; both layouts verify visible grants
+    // and the exact requested scopes at exchange.
+    if (!phone) {
+      await dialog.getByText("Technical details").click();
+      await expect(dialog.getByRole("checkbox", { name: "factory:manage", exact: true })).toBeChecked();
+    }
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
   });
   await journey.stage("Pair, and the pairing holds factory:manage", async () => {
-    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await activate(page, dialog.getByRole("button", { name: "Pair", exact: true }));
     await expect(dialog).toBeHidden();
     expect(hub.exchanges).toHaveLength(1);
     expect(hub.exchanges[0]?.requested_scopes).toEqual(["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt", "factory-manage"]);
   });
   await journey.stage("Paired machines names each pairing's fleet permissions", async () => {
-    await page.locator("#paired-machines-toggle").click();
+    await showConversationList(page);
+    await activate(page, page.locator("#paired-machines-toggle"));
     const machines = page.locator("#paired-machines-dialog");
     await expect(machines).toBeVisible();
     const atlas = machines.locator('[data-machine-id="atlas"] .paired-machine-fleet');
@@ -150,15 +159,18 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     // The command is reachable by keyboard and copies exactly.
     const copy = manage.getByRole("button", { name: "Copy command" });
-    await copy.focus();
-    await page.keyboard.press("Enter");
+    if (phone) await activate(page, copy);
+    else {
+      await copy.focus();
+      await page.keyboard.press("Enter");
+    }
     expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     // A control pairing may allow managing workers itself, once: the first
     // press says what it allows, the second grants it.
     const allow = studio.locator('[data-permission="operate"]').getByRole("button", { name: "Allow managing workers" });
-    await allow.click();
+    await activate(page, allow);
     await expect(studio.locator('[data-permission="operate"] .fleet-permission-allow')).toHaveText("Confirm: allow managing workers on Studio Mac · macOS");
-    await studio.locator('[data-permission="operate"] .fleet-permission-allow').click();
+    await activate(page, studio.locator('[data-permission="operate"] .fleet-permission-allow'));
     await expect(studio.locator('[data-permission="operate"] .fleet-permission-state')).toHaveText("Allowed");
     // Stop and restart still is not: it is never allowed from this browser.
     await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");

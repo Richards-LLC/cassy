@@ -23,15 +23,22 @@ def constrained(command):
         '--maxWorkers' if 'vitest' in words or 'vitest.mjs' in words else None)
     if not flag:
         return command
-    result, skip = [], False
+    result, skip, requested = [], False, None
     for word in command:
         if skip:
-            skip = False
+            skip, requested = False, word
         elif word == flag:
             skip = True
-        elif not word.startswith(flag + '='):
+        elif word.startswith(flag + '='):
+            requested = word[len(flag) + 1:]
+        else:
             result.append(word)
-    return result + [flag + ('=1' if flag == '--workers' else '=2')]
+    if flag == '--maxWorkers':
+        return result + ['--maxWorkers=2']
+    # Playwright keeps one browser worker unless the caller (journey-eval.sh)
+    # asks for more; the explicit request is honoured up to four (cas-3ae7).
+    workers = int(requested) if requested and requested.isdigit() else 1
+    return result + [f'--workers={min(max(workers, 1), 4)}']
 
 
 def run(command, env=None, directory=None):

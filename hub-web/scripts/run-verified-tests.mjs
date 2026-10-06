@@ -26,8 +26,16 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
     // Own the reporters/output so caller arguments cannot silently select a
     // console-only run or reuse a report from a previous command.
     if (args.some(arg => /^--(?:reporter|outputFile)/.test(arg))) throw new Error('runner owns reporter/outputFile options');
+    // Playwright honours the caller's last explicit --workers (journey-eval.sh
+    // passes 1..4) up to four; vitest stays at two (cas-3ae7).
+    let requested;
+    args.forEach((arg, index) => {
+      if (arg.startsWith('--workers=')) requested = arg.slice('--workers='.length);
+      else if (arg === '--workers') requested = args[index + 1];
+    });
     args = args.filter((arg, index) => !/^--(?:maxWorkers|workers)(?:=|$)/.test(arg) && !/^--(?:maxWorkers|workers)$/.test(args[index - 1] ?? ''));
-    args.push(runner === 'vitest' ? '--maxWorkers=2' : '--workers=1');
+    const workers = /^\d+$/.test(requested ?? '') ? Math.min(Math.max(Number(requested), 1), 4) : 1;
+    args.push(runner === 'vitest' ? '--maxWorkers=2' : `--workers=${workers}`);
     const nativeArgs = runner === 'vitest'
       ? ['run', ...args, '--reporter=default', '--reporter=json', `--outputFile=${report}`]
       : ['test', ...args, '--reporter=list,json'];

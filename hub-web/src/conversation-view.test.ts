@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
@@ -527,6 +527,11 @@ describe("ConversationView (Pebble thread)", () => {
     expect(history.events.at(-1)).toMatchObject({ kind: "reply", value: { notification_id: 53 } });
   });
   it("marks a turn from a machine clock ahead quietly, at its arrival time, with no future day (cas-1f13)", () => {
+    // Pin local noon: a real clock within three minutes of midnight would
+    // put "now - 3 min" on yesterday.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 0, 15, 12, 0, 0));
+    onTestFinished(() => { vi.useRealTimers(); });
     const history = new ConversationHistory();
     const now = Date.now() - 180_000;
     history.hydrateReply({ notification_id: 61, reply_to: null, message: "Mac build is queued.", summary: "", device_id: "d", kind: "answer", attachments: [], at: new Date(now + 86_400_000).toISOString() }, now);

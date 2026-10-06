@@ -33,6 +33,7 @@ function transport(multiplex = false) {
   const requests: { path: string; authorization: string | null }[] = [];
   const streams: { signal: AbortSignal; credential: string | null }[] = [];
   let blocked = false;
+  let refused = false;
   let stalledRefresh = false;
   let catalogRevision: number | undefined;
   let eventController: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -42,7 +43,7 @@ function transport(multiplex = false) {
     requests.push({ path, authorization });
     if (path === "/v1/health") return new Response("{}");
     if (blocked) throw new TypeError("Failed to fetch");
-    if (authorization?.includes("opaque-needs-pairing")) {
+    if (refused || authorization?.includes("opaque-needs-pairing")) {
       // Only an explicit refusal can end a pairing.
       return Response.json({ reason: "revoked", retryable: false }, { status: 401 });
     }
@@ -74,6 +75,7 @@ function transport(multiplex = false) {
   return {
     requests, streams, block: (value: boolean) => { blocked = value; }, elapse: (ms: number) => { clock += ms; },
     stallRefresh: (value: boolean) => { stalledRefresh = value; },
+    refusePairing: (value: boolean) => { refused = value; },
     catalogRevision: (value: number) => { catalogRevision = value; },
     event: (event: Record<string, unknown> = { kind: "session_added" }) => eventController!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)),
   };
@@ -289,7 +291,7 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.snapshot().missedHeartbeats).toBe(4);
   });
 
-  it("bounds an unanswered event catalog refresh to the probe deadline (cas-b85a)", async () => {
+  it("bounds an unanswered event catalog refresh to the probe deadline without tearing down the live stream (cas-b85a, cas-eefe)", async () => {
     const hub = transport();
     const connection = supervisor(await storedMachine("refresh-deadline"));
     vi.spyOn(Math, "random").mockReturnValue(0.5);
@@ -301,16 +303,59 @@ describe("Commander live connection lifecycle", () => {
     });
     connection.start();
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    const before = hub.requests.length;
+    const sessionReads = () => hub.requests.filter(request => request.path === "/v1/sessions").length;
+    const before = sessionReads();
     hub.stallRefresh(true);
     hub.event();
-    await vi.waitFor(() => expect(hub.requests.length).toBeGreaterThan(before));
+    await vi.waitFor(() => expect(sessionReads()).toBe(before + 1));
     await vi.advanceTimersByTimeAsync(3_000);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    // The stalled read ended at its deadline: the next event starts a new one.
     hub.stallRefresh(false);
-    await vi.advanceTimersByTimeAsync(1_000);
+    hub.event();
+    await vi.waitFor(() => expect(sessionReads()).toBe(before + 2));
+    // Events kept flowing on the same stream; the heartbeat, not this read, judges the machine.
+    expect(connection.snapshot().phase).toBe("live");
+    expect(connection.snapshot().missedHeartbeats).toBe(0);
+    expect(hub.streams).toHaveLength(1);
+  });
+  it("keeps a failed event catalog read from bypassing four failed heartbeats on a half-open machine (cas-eefe)", async () => {
+    const hub = transport();
+    const connection = supervisor(await storedMachine("half-open-catalog"));
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    expect(hub.streams).toHaveLength(2);
+    // Half-open: HTTP stops answering while the event stream stays open.
+    hub.block(true);
+    const sessionReads = () => hub.requests.filter(request => request.path === "/v1/sessions").length;
+    for (let beat = 1; beat <= 3; beat++) {
+      // An event lands with every beat, so its catalog read races (and
+      // shares) the heartbeat's own read, as in the HUB-J12 trace.
+      const reads = sessionReads();
+      hub.event();
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(beat));
+      expect(sessionReads()).toBeGreaterThan(reads);
+      expect(connection.snapshot().phase).toBe("live");
+      if (beat >= 2) expect(connection.snapshot().degraded).toBe(true);
+      expect(hub.streams).toHaveLength(1);
+    }
+    hub.event();
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+  });
+  it("still ends the stream when the event catalog read finds the pairing refused (cas-eefe)", async () => {
+    const hub = transport();
+    const states: ConnectionState[] = [];
+    const connection = supervisor(await storedMachine("catalog-refusal"), state => states.push(state));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    hub.refusePairing(false);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.refusePairing(true);
+    hub.event();
+    await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
+    expect(connection.snapshot().phase).toBe("failed");
   });
   it("aborts a pending event catalog refresh when the network goes offline (cas-b85a)", async () => {
     const hub = transport();

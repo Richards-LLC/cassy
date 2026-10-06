@@ -267,6 +267,43 @@ describe("Commander live connection lifecycle", () => {
     expect(state).toHaveBeenCalledTimes(stateCount);
     expect(error).toHaveBeenCalledTimes(errorCount);
   });
+  it.each(["deadline", "stop", "authentication refusal"])("closes an undrained retired writer on %s (cas-547a)", async (end) => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const queued = vi.fn();
+    const connection = new HubConnectionSupervisor(await storedMachine("drain-lifetime"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onMessageQueued: queued,
+    });
+    supervisors.push(connection);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const writer = TransportSocket.instances[0]!;
+    const welcome = { Welcome: { state: { panes: [] }, protocol_version: 3 } };
+    writer.open(); writer.receive(welcome);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Waiting for its receipt", client_ref: "draining" } })).toBe(true);
+    hub.event({ kind: "viewer_lagged" });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    connection.retry();
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    const replacement = TransportSocket.instances[1]!;
+    replacement.open(); replacement.receive(welcome);
+    expect(writer.readyState).toBe(TransportSocket.OPEN);
+    if (end === "stop") connection.stop();
+    else if (end === "authentication refusal") {
+      hub.refusePairing(true);
+      connection.retry();
+      await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
+    } else await vi.advanceTimersByTimeAsync(5_000);
+    expect(writer.readyState).toBe(3);
+    expect(writer.onmessage).toBeNull();
+    writer.receive({ MessageQueued: { client_ref: "draining", notification_id: 99, target: "supervisor", stamped: true } });
+    expect(queued).not.toHaveBeenCalled();
+  });
   it("delivers a stalled catalog's entire burst and joins manual refreshes to its flight (cas-b55b)", async () => {
     const hub = transport();
     const events: Record<string, unknown>[] = [];

@@ -1500,12 +1500,11 @@ async fn heal_local_task_dependency_enqueues_team_upsert() {
 
     assert_eq!(result.healed_task_dependencies_to_cloud, 1);
     assert_eq!(result.healed_task_dependencies_from_cloud, 0);
-    let pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
-    assert_eq!(
-        pending.len(),
-        1,
-        "a local-only edge must be queued for team push"
-    );
+    let all_pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
+    assert_eq!(all_pending.iter().filter(|row|row.entity_type==crate::cloud::EntityType::Task).count(),2,
+        "both remote-missing endpoint tasks precede the edge");
+    let pending=all_pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
+    assert_eq!(pending.len(),1,"a local-only edge must be queued for team push");
     assert_eq!(
         pending[0].entity_id,
         "cas-heal-local-from:cas-heal-local-to:blocks"
@@ -1540,6 +1539,9 @@ async fn dependency_healer_skips_foreign_endpoint() {
             .unwrap()
             .is_empty()
     );
+    let parks=queue.intentional_park_counts(Some("team-cas-2125"),5).unwrap();
+    assert_eq!(parks.get("dependency_endpoint_foreign"),Some(&1));
+    assert_eq!(queue.failed_count_for_team("team-cas-2125",5).unwrap(),0);
 }
 
 #[tokio::test]
@@ -1675,8 +1677,8 @@ async fn heal_local_task_dependency_is_idempotent_across_pulls() {
     let pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
     assert_eq!(
         pending.len(),
-        1,
-        "repeated pulls must not duplicate the queue row"
+        3,
+        "repeated pulls must not duplicate endpoint or dependency rows"
     );
 }
 
@@ -2345,6 +2347,13 @@ async fn pull_team_dependency_scenario(
         .mount(&server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TOMBSTONE_TEAM}/sync/pull")))
+        .and(query_param("types", "tasks"))
+        .and(query_param_is_missing("since"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"tasks":[]})))
+        .mount(&server).await;
+
     let temp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
@@ -2553,7 +2562,9 @@ async fn heal_pushes_an_edge_recreated_after_its_tombstone() {
         .queue
         .pending_for_team(TOMBSTONE_TEAM, 10, 5)
         .unwrap();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 3, "missing endpoint tasks accompany the edge");
+    let pending=pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
+    assert_eq!(pending.len(),1);
     assert_eq!(pending[0].entity_id, entity_id);
     assert!(
         fixture
@@ -2631,7 +2642,9 @@ async fn incremental_pull_reconciles_against_the_full_snapshot_when_due() {
         .queue
         .pending_for_team(TOMBSTONE_TEAM, 10, 5)
         .unwrap();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 3, "missing endpoint tasks accompany the edge");
+    let pending=pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
+    assert_eq!(pending.len(),1);
     assert_eq!(
         pending[0].entity_id,
         "cas-cf1f-due-from:cas-cf1f-due-to:blocks"
@@ -3510,18 +3523,38 @@ async fn cas_fd42_healing_stages_missing_historical_endpoint_tasks() {
     child.status = TaskStatus::Closed;
     let mut parent = Task::new("fd42-parent".into(), "old parent".into());
     parent.status = TaskStatus::Closed;
-    let edge = Dependency::new(child.id.clone(), parent.id.clone(), DependencyType::ParentChild);
+    let edge = Dependency::new(
+        child.id.clone(),
+        parent.id.clone(),
+        DependencyType::ParentChild,
+    );
     let (_temp, result, _tasks, queue) = pull_team_task_and_dependency_fixtures(
-        project, Vec::new(), vec![child, parent], vec![edge], Vec::new(),
-    ).await;
+        project,
+        Vec::new(),
+        vec![child, parent],
+        vec![edge],
+        Vec::new(),
+    )
+    .await;
     assert_eq!(result.healed_task_dependencies_to_cloud, 1);
     let pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
-    let task_ids: std::collections::BTreeSet<_> = pending.iter()
+    let task_ids: std::collections::BTreeSet<_> = pending
+        .iter()
         .filter(|row| row.entity_type == crate::cloud::EntityType::Task)
-        .map(|row| row.entity_id.as_str()).collect();
-    assert_eq!(task_ids, std::collections::BTreeSet::from(["fd42-child", "fd42-parent"]),
-        "unchanged historical endpoints must be staged ahead of the healed edge");
-    assert_eq!(pending.iter().filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency).count(), 1);
+        .map(|row| row.entity_id.as_str())
+        .collect();
+    assert_eq!(
+        task_ids,
+        std::collections::BTreeSet::from(["fd42-child", "fd42-parent"]),
+        "unchanged historical endpoints must be staged ahead of the healed edge"
+    );
+    assert_eq!(
+        pending
+            .iter()
+            .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -3529,22 +3562,385 @@ async fn cas_fd42_team_push_names_origin_null_memory_park() {
     use crate::cloud::{CloudConfig, CloudSyncerConfig, EntityType, SyncOperation};
     use cas_store::{SqliteStore, Store};
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"fd42-project\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"fd42-project\"\n",
+    )
+    .unwrap();
     let store = SqliteStore::open(temp.path()).unwrap();
     store.init().unwrap();
     let entry = crate::types::Entry::new("fd42-legacy-memory".into(), "legacy local memory".into());
     store.add(&entry).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
-    queue.enqueue_for_team(EntityType::Entry, &entry.id, SyncOperation::Upsert,
-        Some(&serde_json::to_string(&entry).unwrap()), "fd42-team").unwrap();
-    let syncer = CloudSyncer::new_for_project(queue.clone(), CloudConfig {
-        token: Some("test-token".into()), ..Default::default()
-    }, CloudSyncerConfig::default(), "fd42-project".into(), temp.path());
+    queue
+        .enqueue_for_team(
+            EntityType::Entry,
+            &entry.id,
+            SyncOperation::Upsert,
+            Some(&serde_json::to_string(&entry).unwrap()),
+            "fd42-team",
+        )
+        .unwrap();
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "fd42-project".into(),
+        temp.path(),
+    );
     syncer.push_team("fd42-team").unwrap();
     let row = queue.list_all(10).unwrap().pop().unwrap();
     assert_eq!(row.last_outcome.as_deref(), Some("parked"));
     assert_eq!(row.last_reason.as_deref(), Some("unattributed_origin"));
-    assert_eq!(store.get(&entry.id).unwrap().origin_project, None,
-        "the pushing project must never invent legacy provenance");
+    assert_eq!(
+        store.get(&entry.id).unwrap().origin_project,
+        None,
+        "the pushing project must never invent legacy provenance"
+    );
+    // The original three rows are already terminal, so no pending iteration
+    // runs. Their old client-only diagnostic still gets a named safety park.
+    queue.record_row_outcome(row.id, "", None).unwrap();
+    queue
+        .park_failed(row.id, "row has no attributable origin_project", 5)
+        .unwrap();
+    syncer.push_team("fd42-team").unwrap();
+    assert_eq!(
+        queue
+            .intentional_park_counts(Some("fd42-team"), 5)
+            .unwrap()
+            .get("unattributed_origin"),
+        Some(&1)
+    );
+    assert_eq!(queue.failed_count_for_team("fd42-team", 5).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cas_fd42_existing_remote_endpoints_are_not_republished() {
+    use crate::types::{Dependency, DependencyType};
+    let project = "fd42-project";
+    let remote = vec![
+        team_task_fixture(
+            "fd42-child",
+            TaskStatus::Closed,
+            project,
+            project,
+            chrono::Utc::now(),
+        ),
+        team_task_fixture(
+            "fd42-parent",
+            TaskStatus::Closed,
+            project,
+            project,
+            chrono::Utc::now(),
+        ),
+    ];
+    let locals = vec![
+        Task::new("fd42-child".into(), "child".into()),
+        Task::new("fd42-parent".into(), "parent".into()),
+    ];
+    let edge = Dependency::new(
+        "fd42-child".into(),
+        "fd42-parent".into(),
+        DependencyType::ParentChild,
+    );
+    let (_temp, result, _tasks, queue) =
+        pull_team_task_and_dependency_fixtures(project, remote, locals, vec![edge], Vec::new())
+            .await;
+    assert_eq!(result.healed_task_dependencies_to_cloud, 1);
+    let rows = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].entity_type,
+        crate::cloud::EntityType::TaskDependency
+    );
+}
+
+/// Full and watermarked pulls use separate inventory requests. Seed the exact
+/// terminal orphan shape, including a recent reconcile watermark.
+async fn fd42_repair_fixture(
+    incremental: bool,
+    inventory: serde_json::Value,
+    delete_parent: bool,
+) -> (
+    tempfile::TempDir,
+    Arc<SyncQueue>,
+    SyncResult,
+    CloudSyncer,
+    wiremock::MockServer,
+) {
+    use crate::cloud::{CloudConfig, CloudSyncerConfig, EntityType, SyncOperation};
+    use crate::store::{
+        open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
+    };
+    use crate::types::{Dependency, DependencyType};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id=\"fd42-project\"\n",
+    )
+    .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let store = open_store_local(temp.path()).unwrap();
+    let tasks = open_task_store_local(temp.path()).unwrap();
+    for id in ["fd42-child", "fd42-parent"] {
+        let mut task = Task::new(id.into(), id.into());
+        task.origin_project = Some("fd42-project".into());
+        task.status = TaskStatus::Closed;
+        tasks.add(&task).unwrap();
+    }
+    let edge = Dependency::new(
+        "fd42-child".into(),
+        "fd42-parent".into(),
+        DependencyType::ParentChild,
+    );
+    tasks.add_dependency(&edge).unwrap();
+    let payload=serde_json::to_string(&serde_json::json!({"from_id":edge.from_id,"to_id":edge.to_id,"dep_type":"parent-child","created_at":edge.created_at,"origin_project":"fd42-project"})).unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::TaskDependency,
+            "fd42-child:fd42-parent:parent-child",
+            SyncOperation::Upsert,
+            Some(&payload),
+            "fd42-team",
+        )
+        .unwrap();
+    let row = queue.list_all(10).unwrap().pop().unwrap();
+    queue
+        .record_row_outcome(row.id, "rejected", Some("orphan_dependency"))
+        .unwrap();
+    queue.park_failed(row.id, "orphan_dependency", 5).unwrap();
+    if delete_parent {
+        queue
+            .enqueue_for_team(
+                EntityType::Task,
+                "fd42-parent",
+                SyncOperation::Delete,
+                None,
+                "fd42-team",
+            )
+            .unwrap();
+    }
+    if incremental {
+        queue
+            .set_metadata(
+                "last_team_pull_at_fd42-team_fd42-project",
+                "2026-09-30T00:00:00Z",
+            )
+            .unwrap();
+        queue
+            .set_metadata(
+                "last_dependency_reconcile_at_fd42-team_fd42-project",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
+    }
+    let envelope = if incremental {
+        serde_json::json!({"tasks":[],"task_dependencies":[]})
+    } else {
+        let mut value = inventory.clone();
+        value["task_dependencies"] = serde_json::json!([]);
+        value
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/teams/fd42-team/sync/pull"))
+        .and(query_param_is_missing("types"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/teams/fd42-team/sync/pull"))
+        .and(query_param("types", "task_dependencies"))
+        .and(query_param_is_missing("since"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"task_dependencies":[]})),
+        )
+        .expect(if incremental { 1 } else { 0 })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/teams/fd42-team/sync/pull"))
+        .and(query_param("types", "tasks"))
+        .and(query_param_is_missing("since"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(inventory))
+        .expect(if incremental { 1 } else { 0 })
+        .mount(&server)
+        .await;
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "fd42-project".into(),
+        temp.path(),
+    );
+    let result = syncer
+        .pull_team(
+            "fd42-team",
+            "fd42-project",
+            store.as_ref(),
+            tasks.as_ref(),
+            open_rule_store_local(temp.path()).unwrap().as_ref(),
+            open_skill_store_local(temp.path()).unwrap().as_ref(),
+        )
+        .unwrap();
+    (temp, queue, result, syncer, server)
+}
+
+#[tokio::test]
+async fn cas_fd42_watermarked_pull_repairs_terminal_orphan_backlog() {
+    let (_temp, queue, result, _syncer, _server) =
+        fd42_repair_fixture(true, serde_json::json!({"tasks":[]}), false).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.healed_task_dependencies_to_cloud, 1);
+    let rows = queue.pending_for_team("fd42-team", 10, 5).unwrap();
+    assert_eq!(rows.len(), 3);
+    let edge = rows
+        .iter()
+        .find(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+        .unwrap();
+    assert_eq!(edge.retry_count, 0);
+    assert_eq!(edge.last_reason, None);
+}
+
+#[tokio::test]
+async fn cas_fd42_incomplete_task_inventory_cannot_resurrect_endpoints() {
+    let (_temp, queue, result, _syncer, _server) =
+        fd42_repair_fixture(true, serde_json::json!({"status":"ok"}), false).await;
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.contains("missing tasks inventory"))
+    );
+    assert!(
+        queue
+            .pending_for_team("fd42-team", 10, 5)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        queue.list_all(10).unwrap()[0].last_reason.as_deref(),
+        Some("orphan_dependency")
+    );
+}
+
+#[tokio::test]
+async fn cas_fd42_pending_endpoint_delete_keeps_edge_intentionally_parked() {
+    let (_temp, queue, result, _syncer, _server) =
+        fd42_repair_fixture(false, serde_json::json!({"tasks":[]}), true).await;
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    let rows = queue.list_all(10).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        queue
+            .intentional_park_counts(Some("fd42-team"), 5)
+            .unwrap()
+            .get("dependency_endpoint_deleted"),
+        Some(&1)
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.entity_type == crate::cloud::EntityType::Task)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cas_fd42_remote_task_tombstone_keeps_edge_intentionally_parked() {
+    let (_temp,queue,result,_syncer,_server)=fd42_repair_fixture(true,serde_json::json!({"tasks":[{"id":"fd42-parent","project_id":"fd42-project","deleted":true}]}),false).await;
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        queue
+            .pending_for_team("fd42-team", 10, 5)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        queue
+            .intentional_park_counts(Some("fd42-team"), 5)
+            .unwrap()
+            .get("dependency_endpoint_deleted"),
+        Some(&1)
+    );
+}
+
+#[tokio::test]
+async fn cas_fd42_failed_task_push_withholds_dependent_edge() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let (_temp, queue, _result, syncer, server) =
+        fd42_repair_fixture(false, serde_json::json!({"tasks":[]}), false).await;
+    Mock::given(method("POST")).and(path("/api/teams/fd42-team/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{"tasks":{"inserted":1,"updated":0,"skipped":1}},"rows":[
+            {"entity_type":"tasks","id":"fd42-child","outcome":"rejected","reason":"scope_mismatch"},
+            {"entity_type":"tasks","id":"fd42-parent","outcome":"inserted"}]})))
+        .expect(1).mount(&server).await;
+    let result = syncer.push_team("fd42-team").unwrap();
+    assert_eq!(result.pushed_task_dependencies, 0);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.contains("scope_mismatch"))
+    );
+    let edge = queue
+        .list_all(10)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+        .unwrap();
+    assert_eq!(edge.retry_count, 0);
+    assert!(
+        edge.last_error
+            .unwrap()
+            .contains("waiting for endpoint task")
+    );
+}
+
+#[tokio::test]
+async fn cas_fd42_repaired_backlog_pushes_tasks_before_dependency() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let (_temp, queue, _result, syncer, server) =
+        fd42_repair_fixture(false, serde_json::json!({"tasks":[]}), false).await;
+    Mock::given(method("POST")).and(path("/api/teams/fd42-team/sync/push"))
+        .respond_with(|request:&wiremock::Request| {
+            let body=decode_push_body(request);
+            if body.get("tasks").is_some() {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{"tasks":{"inserted":2,"updated":0,"skipped":0}}}))
+            } else {
+                assert!(body.get("task_dependencies").is_some(),"{body}");
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{"task_dependencies":{"inserted":1,"updated":0,"skipped":0}}}))
+            }
+        }).expect(2).mount(&server).await;
+    let result = syncer.push_team("fd42-team").unwrap();
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pushed_tasks, 2);
+    assert_eq!(result.pushed_task_dependencies, 1);
+    assert!(queue.list_all(10).unwrap().is_empty());
+    let requests = server.received_requests().await.unwrap();
+    let writes = requests
+        .iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .collect::<Vec<_>>();
+    assert!(decode_push_body(writes[0]).get("tasks").is_some());
+    assert!(
+        decode_push_body(writes[1])
+            .get("task_dependencies")
+            .is_some()
+    );
 }

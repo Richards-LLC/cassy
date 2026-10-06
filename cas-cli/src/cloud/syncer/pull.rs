@@ -532,6 +532,7 @@ impl CloudSyncer {
     fn apply_and_heal_task_dependencies(
         &self,
         raw_dependencies: Vec<serde_json::Value>,
+        endpoint_tasks: Option<Vec<serde_json::Value>>,
         task_store: &dyn TaskStore,
         current_project_id: &str,
         team_id: Option<&str>,
@@ -552,6 +553,20 @@ impl CloudSyncer {
 
         let local_after = local_dependency_map(task_store)?;
 
+        // Existing queue state is authoritative for idempotency: a pending
+        // local delete must never be overwritten by this repair pass.
+        let pending = match team_id {
+            Some(team_id) => self.queue.pending_for_team(team_id, usize::MAX, i32::MAX)?,
+            None => self.queue.pending_for_entity_type(
+                Some(EntityType::TaskDependency),
+                usize::MAX,
+                i32::MAX,
+            )?,
+        };
+        let pending_operations = pending
+            .into_iter()
+            .map(|item| (item.entity_id.clone(), item))
+            .collect::<BTreeMap<_, _>>();
         // A `since=`-filtered envelope says which edges CHANGED, not which
         // edges the cloud holds. Diffing the full local set against it made
         // every untouched local edge look cloud-missing and re-queued it on
@@ -560,7 +575,11 @@ impl CloudSyncer {
         // envelope itself when no watermark was sent, otherwise one extra
         // `types=task_dependencies` request, taken on an interval.
         let snapshot = if incremental {
-            match self.due_dependency_reconcile(team_id, current_project_id)? {
+            match self.due_dependency_reconcile(team_id, current_project_id)?
+                || pending_operations
+                    .values()
+                    .any(|row| row.last_reason.as_deref() == Some("orphan_dependency"))
+            {
                 false => None,
                 true => match self.fetch_dependency_snapshot(team_id, current_project_id) {
                     Ok(raw_snapshot) => {
@@ -606,45 +625,27 @@ impl CloudSyncer {
         let local_after = local_dependency_map(task_store)?;
         let from_cloud = materialized_from_cloud(&local_before, &local_after);
 
-        // Existing queue state is authoritative for idempotency: a pending
-        // local delete must never be overwritten by this repair pass.
-        let pending = match team_id {
-            Some(team_id) => self.queue.pending_for_team(team_id, usize::MAX, i32::MAX)?,
-            None => self.queue.pending_for_entity_type(
-                Some(EntityType::TaskDependency),
-                usize::MAX,
-                i32::MAX,
-            )?,
-        };
-        let pending_operations = pending
-            .into_iter()
-            .map(|item| (item.entity_id, item.operation))
-            .collect::<BTreeMap<_, _>>();
         let tombstones = self.queue.dependency_tombstones()?;
 
+        // A watermarked task envelope is not a remote inventory. Read one
+        // complete task snapshot lazily, only if an edge actually needs repair.
+        let mut remote_endpoint_tasks = if incremental { None } else { endpoint_tasks };
+        let quarantined = self.queue.quarantined_ids(EntityType::Task.as_str())?;
         let mut to_cloud = 0;
         let mut skipped_by_tombstone = 0;
         for (entity_id, dependency) in local_after {
+            let prior = pending_operations.get(&entity_id);
+            let orphan = prior.is_some_and(|row| {
+                row.operation == SyncOperation::Upsert
+                    && row.last_reason.as_deref() == Some("orphan_dependency")
+            });
             if snapshot.live.contains_key(&entity_id) {
+                if orphan {
+                    self.queue.mark_synced(prior.unwrap().id)?;
+                }
                 continue;
             }
-            if pending_operations.contains_key(&entity_id) {
-                continue;
-            }
-
-            let endpoints_authored_here =
-                [&dependency.from_id, &dependency.to_id]
-                    .into_iter()
-                    .all(|id| {
-                        task_store
-                            .get(id)
-                            .ok()
-                            .and_then(|task| task.origin_project)
-                            .is_some_and(|origin| {
-                                crate::cloud::project_ids_match(&origin, current_project_id)
-                            })
-                    });
-            if !endpoints_authored_here {
+            if prior.is_some() && !orphan {
                 continue;
             }
 
@@ -697,22 +698,80 @@ impl CloudSyncer {
                     "Could not serialize healed task dependency: {error}"
                 ))
             })?;
-            match team_id {
-                Some(team_id) => self.queue.enqueue_for_team(
-                    EntityType::TaskDependency,
-                    &entity_id,
-                    SyncOperation::Upsert,
-                    Some(&payload),
-                    team_id,
-                )?,
-                None => self.queue.enqueue(
-                    EntityType::TaskDependency,
-                    &entity_id,
-                    SyncOperation::Upsert,
-                    Some(&payload),
-                )?,
+            if remote_endpoint_tasks.is_none() {
+                match self.fetch_task_snapshot(team_id, current_project_id) {
+                    Ok(tasks) => remote_endpoint_tasks = Some(tasks),
+                    Err(error) => {
+                        result.errors.push(format!(
+                            "Dependency endpoint inventory unavailable: {error}"
+                        ));
+                        return Ok(DependencyHealReport {
+                            to_cloud,
+                            from_cloud,
+                            skipped_by_tombstone,
+                        });
+                    }
+                }
             }
-            to_cloud += 1;
+            let remote_tasks = remote_endpoint_tasks.as_ref().unwrap();
+            let _mutation_guard = self.queue.lock_task_sync_mutations()?;
+            let mut endpoints = Vec::new();
+            let mut missing = Vec::new();
+            let mut refusal = None;
+            for id in [&dependency.from_id, &dependency.to_id] {
+                let task = match task_store.get(id) {
+                    Ok(task) => task,
+                    Err(cas_store::StoreError::TaskNotFound(_)) => {
+                        refusal = Some("dependency_endpoint_unavailable");
+                        continue;
+                    }
+                    Err(error) => return Err(CasError::Other(format!("Cannot read dependency endpoint {id}: {error}"))),
+                };
+                if task.scope != crate::types::Scope::Project
+                    || quarantined.contains(id)
+                    || !task.origin_project.as_deref().is_some_and(|origin| {
+                        origin != "unknown"
+                            && canonical_project_ids_match(origin, current_project_id)
+                    })
+                {
+                    refusal = Some("dependency_endpoint_foreign");
+                }
+                let remote_rows = remote_tasks
+                    .iter()
+                    .filter(|row| pull_wire_id(row) == id.as_str())
+                    .collect::<Vec<_>>();
+                if remote_rows.iter().any(|row| {
+                    row.get("deleted").and_then(|v| v.as_bool()) == Some(true)
+                        || row
+                            .get("operation")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|op| op.eq_ignore_ascii_case("delete"))
+                        || row.get("deleted_at").is_some_and(|v| !v.is_null())
+                }) {
+                    refusal = Some("dependency_endpoint_deleted");
+                } else if !remote_rows.is_empty()
+                    && !remote_rows
+                        .iter()
+                        .any(|row| entity_matches_project(row, current_project_id, "task"))
+                {
+                    refusal = Some("dependency_endpoint_foreign");
+                } else if remote_rows.is_empty() {
+                    missing.push(task.clone());
+                }
+                endpoints.push(task);
+            }
+            if self.queue.stage_healed_dependency(
+                &entity_id,
+                &payload,
+                &endpoints,
+                &missing,
+                team_id,
+                current_project_id,
+                refusal,
+                self.config.max_retries,
+            )? {
+                to_cloud += 1;
+            }
         }
 
         self.queue.set_metadata(
@@ -757,6 +816,22 @@ impl CloudSyncer {
         team_id: Option<&str>,
         project_id: &str,
     ) -> Result<Vec<serde_json::Value>, CasError> {
+        self.fetch_collection_snapshot(team_id, project_id, "task_dependencies")
+    }
+    fn fetch_task_snapshot(
+        &self,
+        team_id: Option<&str>,
+        project_id: &str,
+    ) -> Result<Vec<serde_json::Value>, CasError> {
+        self.fetch_collection_snapshot(team_id, project_id, "tasks")
+    }
+
+    fn fetch_collection_snapshot(
+        &self,
+        team_id: Option<&str>,
+        project_id: &str,
+        collection: &str,
+    ) -> Result<Vec<serde_json::Value>, CasError> {
         let body = match team_id {
             Some(team_id) => {
                 let token = self
@@ -765,7 +840,7 @@ impl CloudSyncer {
                     .as_ref()
                     .ok_or_else(|| CasError::Other("Not logged in".to_string()))?;
                 let url = format!(
-                    "{}/api/teams/{}/sync/pull?project_id={}&types=task_dependencies",
+                    "{}/api/teams/{}/sync/pull?project_id={}&types={collection}",
                     self.cloud_config.endpoint,
                     team_id,
                     project_id.replace('/', "%2F")
@@ -790,15 +865,14 @@ impl CloudSyncer {
                 }
             }
             None => {
-                self.fetch_pull_json(Some(project_id), &["types=task_dependencies".to_string()])?
+                self.fetch_pull_json(Some(project_id), &[format!("types={collection}")])?
                     .0
             }
         };
-        Ok(body
-            .get("task_dependencies")
+        body.get(collection)
             .and_then(|value| value.as_array())
             .cloned()
-            .unwrap_or_default())
+            .ok_or_else(|| CasError::Other(format!("Full snapshot missing {collection} inventory")))
     }
 
     fn record_dependency_heal(result: &mut SyncResult, report: DependencyHealReport) {
@@ -2045,6 +2119,8 @@ impl CloudSyncer {
             }
         }
 
+        // Preserve the inventory before consuming/merging task rows.
+        let endpoint_tasks = body.tasks.clone();
         // Process tasks
         let task_sync_id = uuid::Uuid::new_v4().to_string();
         let quarantined_task_ids = self.queue.quarantined_ids(EntityType::Task.as_str())?;
@@ -2157,6 +2233,7 @@ impl CloudSyncer {
         if let Some(raw_dependencies) = body.task_dependencies {
             let report = self.apply_and_heal_task_dependencies(
                 raw_dependencies,
+                endpoint_tasks,
                 task_store,
                 current_project_id,
                 None,
@@ -3166,6 +3243,8 @@ impl CloudSyncer {
             }
         }
 
+        // Preserve the inventory before consuming/merging task rows.
+        let endpoint_tasks = body.tasks.clone();
         // Process tasks
         let task_sync_id = uuid::Uuid::new_v4().to_string();
         // Group duplicate IDs before filtering so an owner row can win over a
@@ -3278,6 +3357,7 @@ impl CloudSyncer {
         if let Some(raw_dependencies) = body.task_dependencies {
             let report = self.apply_and_heal_task_dependencies(
                 raw_dependencies,
+                endpoint_tasks,
                 task_store,
                 current_project_id,
                 Some(team_id),

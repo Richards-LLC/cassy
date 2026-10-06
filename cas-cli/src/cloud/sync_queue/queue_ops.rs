@@ -538,15 +538,15 @@ impl SyncQueue {
     ) -> Result<Vec<QueuedSync>, CasError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            r#"
+            &format!(r#"
             SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error, last_outcome, last_reason, failed_client_version
             FROM sync_queue
-            WHERE retry_count >= ?1 AND (team_id IS NULL OR team_id = '')
+            WHERE retry_count >= ?1 AND NOT {intentional} AND (team_id IS NULL OR team_id = '')
               AND entity_type != 'knowledge_page'
               AND (?3 IS NULL OR entity_type = ?3)
             ORDER BY id DESC
             LIMIT ?2
-            "#,
+            "#,intentional=super::dependency_repair::INTENTIONAL_PARK),
         )?;
 
         let items = stmt

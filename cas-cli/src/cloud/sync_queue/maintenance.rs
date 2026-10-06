@@ -225,12 +225,13 @@ impl SyncQueue {
     ) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            r#"
+            &format!(r#"
             SELECT COUNT(*) FROM sync_queue
-            WHERE retry_count >= ?1 AND (team_id IS NULL OR team_id = '')
+            WHERE retry_count >= ?1 AND NOT {intentional}
+              AND (team_id IS NULL OR team_id = '')
               AND entity_type != 'knowledge_page'
               AND (?2 IS NULL OR entity_type = ?2)
-            "#,
+            "#, intentional = super::dependency_repair::INTENTIONAL_PARK),
             params![max_retries, entity_type.map(|kind| kind.as_str())],
             |row| row.get(0),
         )?;
@@ -276,7 +277,7 @@ impl SyncQueue {
     ) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sync_queue WHERE retry_count >= ?1 AND team_id = ?2",
+            &format!("SELECT COUNT(*) FROM sync_queue WHERE retry_count >= ?1 AND team_id = ?2 AND NOT {}", super::dependency_repair::INTENTIONAL_PARK),
             params![max_retries, team_id],
             |row| row.get(0),
         )?;

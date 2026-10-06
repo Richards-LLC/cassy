@@ -1053,6 +1053,9 @@ impl PushRowResult {
 /// and no move; an unknown reason is named honestly rather than guessed at.
 pub fn push_reason_hint(reason: &str) -> &'static str {
     match reason.trim().to_ascii_lowercase().as_str() {
+        "unattributed_origin" => "retained locally: authoring project is unknown; supply creation provenance before requeueing",
+        "dependency_endpoint_unavailable" | "dependency_endpoint_deleted" | "dependency_endpoint_moved" | "dependency_endpoint_foreign" => "retained locally: an endpoint is deleted, unavailable, moved or foreign; repair endpoint ownership before requeueing",
+        "orphan_dependency" => "endpoint tasks are absent in this cloud project; pull repairs eligible local endpoints before retrying the edge",
         "team_owned_project" => {
             "this project belongs to a team; configure its active team, run `cas config set cloud.team_only true`, then `cas cloud queue --purge-team-owned` and `cas cloud sync`"
         }

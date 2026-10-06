@@ -200,7 +200,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("deferredRender.defer();");
     expect(main).toContain('app.addEventListener("focusout"');
     expect(main).toContain('app.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);');
-    expect(main).toContain('app.addEventListener("pointerup", () => deferredRender.gestureEnded(), true);');
+    // A touch's click follows its pointerup in a later task (cas-207a).
+    expect(main).toContain('app.addEventListener("pointerup", (event) => { if (event.pointerType === "touch") deferredRender.touchEnded(); else deferredRender.gestureEnded(); }, true);');
+    expect(main).toContain('app.addEventListener("click", () => deferredRender.clicked(), true);');
+    expect(main).toContain("touchWindow: (run) => window.setTimeout(run, 600),");
     expect(main).toContain('app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);');
     expect(main).toContain("afterGesture: (run) => window.setTimeout(run, 0),");
   });

@@ -176,3 +176,46 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");
   });
 });
+
+// cas-207a: on a touch screen the finger lifts (pointerup) before the tap's
+// mousedown and click. A rebuild owed while the name field had focus used to
+// run between them, replacing the form under the finger: the disclosure
+// stayed shut and the form jumped back to its top, on the name field.
+for (const scheme of ["light", "dark"] as const) {
+  test.describe(`phone touch ${scheme}`, () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, colorScheme: scheme });
+
+    test(`HUB-J2 a tap opens Technical details on a scrolled invitation form, phone ${scheme} (cas-207a)`, journeyPart, async ({ page, journey }) => {
+      await journey.hub({ machines: [ATLAS, STUDIO] });
+      const dialog = page.locator("#pair-dialog");
+      const form = dialog.locator("#pair-form");
+      const name = dialog.getByRole("textbox", { name: "Your name (shown on the machine)" });
+      const summary = dialog.getByText("Technical details");
+
+      await journey.stage("Scroll the focused invitation form and tap Technical details", async () => {
+        await page.goto(`./#pair=${EARLIER_TOKEN}&hub=studio&hub_url=https%3A%2F%2Fstudio.test&machine=Studio%20Mac&scopes=machine:read,session:read,pane:read`);
+        await expect(dialog.getByRole("textbox", { name: /Machine name/ })).toHaveValue("Studio Mac");
+        await expect(name).toBeFocused();
+        await summary.scrollIntoViewIfNeeded();
+        const scrolled = await form.evaluate((element) => element.scrollTop);
+        expect(scrolled, "the disclosure sits below the form's first screen").toBeGreaterThan(0);
+
+        await summary.tap();
+
+        await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
+        // Let the tap's click task and the rebuild it released both run.
+        await page.evaluate(() => new Promise((resolve) => setTimeout(() => requestAnimationFrame(() => resolve(null)), 50)));
+        await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
+        for (const scope of ["machine:read", "session:read", "pane:read"]) {
+          await expect(dialog.getByRole("checkbox", { name: scope, exact: true })).toBeChecked();
+        }
+        await expect(dialog.getByRole("checkbox", { name: "message:send not granted by this invitation", exact: true })).toBeDisabled();
+        // The operator keeps their place: the form did not jump to its top.
+        expect(await form.evaluate((element) => element.scrollTop), "form scroll after the tap").toBeGreaterThanOrEqual(scrolled);
+        await expect(summary).toBeInViewport();
+        await expect(name).not.toBeFocused();
+        expect(new URL(page.url()).hash, "the secret leaves the address bar").toBe("");
+      });
+    });
+  });
+}

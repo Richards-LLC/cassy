@@ -234,6 +234,9 @@ let lastPairingView: string | undefined;
 const deferredRender = new DeferredRenderScheduler({
   render: () => render(),
   afterGesture: (run) => window.setTimeout(run, 0),
+  // A tap's click follows its lifted finger at once; a long press or a lift
+  // that produces none releases the rebuild after this.
+  touchWindow: (run) => window.setTimeout(run, 600),
 });
 const sessionStates = new Map<string, SessionState>();
 // Shared data source for session drawers, status rows, pane tooltips, and the
@@ -3465,6 +3468,26 @@ function capturePairingDraft(): void {
   if (form) pairingDraft = updatePairingDraft(pairingDraft, new FormData(form).entries(), pendingPairing?.kind === "invitation" && !pendingPairing.hubUrl);
 }
 
+interface PairDialogPlace { readonly scroll: readonly number[]; readonly focus?: { readonly index: number; readonly tag: string } }
+/** Where the operator is in the open pairing dialog: its scroll and the control they are on. */
+function pairDialogPlace(): PairDialogPlace | undefined {
+  const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  const form = dialog?.querySelector<HTMLFormElement>("#pair-form");
+  if (!dialog || !form) return undefined;
+  const active = document.activeElement;
+  const index = active && dialog.contains(active) ? [...dialog.querySelectorAll("*")].indexOf(active) : -1;
+  return { scroll: [dialog.scrollTop, form.scrollTop], ...(active && index >= 0 ? { focus: { index, tag: active.tagName } } : {}) };
+}
+/** The same step's markup is rebuilt node for node, so the control at the same place is the one the operator was on. */
+function restorePairDialogPlace(place: PairDialogPlace): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  const form = dialog?.querySelector<HTMLFormElement>("#pair-form");
+  if (!dialog || !form) return;
+  const target = place.focus ? dialog.querySelectorAll("*")[place.focus.index] : undefined;
+  if (target instanceof HTMLElement && target.tagName === place.focus?.tag) target.focus({ preventScroll: true });
+  [dialog.scrollTop, form.scrollTop] = place.scroll;
+}
+
 /** Each machine's accent, recorded when it first pairs so later pairings never re-colour it (cas-50a7). */
 const machineAccentStore = storageAccentStore((() => { try { return window.localStorage; } catch { return undefined; } })());
 
@@ -3621,6 +3644,10 @@ function render(captureDraft = true): void {
   if (pairedDialogWasOpen) machineDialog!.remove();
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const pairingFeedbackWasFocused = pairDialogWasOpen && document.activeElement?.matches("#pair-dialog .pair-status") === true;
+  // A rebuild for something else (a machine connecting) redraws the same
+  // pairing step; the operator keeps their place in it rather than the
+  // dialog's autofocus pulling them back to the top (cas-207a).
+  const pairPlace = pairDialogWasOpen && pairingView === lastPairingView ? pairDialogPlace() : undefined;
   // The open conversation's grid (its thread, connection card and hidden pane
   // host) survives a rebuild, so a heartbeat never remounts the thread.
   const preservedGrid = selectedThreadKey && currentGrid?.dataset.sessionKey === selectedThreadKey ? currentGrid : undefined;
@@ -3689,6 +3716,7 @@ function render(captureDraft = true): void {
   if (pairDialogWasOpen) {
     const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
     dialog?.showModal();
+    if (pairPlace) restorePairDialogPlace(pairPlace);
     if (pairingFeedbackWasFocused) focusPairingFeedback(dialog);
   }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
@@ -4904,7 +4932,9 @@ function escapeAttr(value: string): string { return escapeHtml(value).replaceAll
 // on focusout alone deleted the button under the finger before the browser
 // dispatched the click, so the tap did nothing at all (cas-c142).
 app.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);
-app.addEventListener("pointerup", () => deferredRender.gestureEnded(), true);
+// A lifted finger's click comes in a later task, after its focus change.
+app.addEventListener("pointerup", (event) => { if (event.pointerType === "touch") deferredRender.touchEnded(); else deferredRender.gestureEnded(); }, true);
+app.addEventListener("click", () => deferredRender.clicked(), true);
 app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);
 app.addEventListener("focusout", () => {
   queueMicrotask(() => {

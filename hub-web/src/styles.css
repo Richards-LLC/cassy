@@ -2370,7 +2370,10 @@ button.chip:disabled { cursor: default; }
    often. The OS word goes at any width once the line is short of room
    (cas-766c, fitMachineLine). After the phone block so it wins the cascade. */
 @media (max-width: 500px) {
-  .conversation-identity .conversation-host { font-size: 11.5px; }
+  /* cas-9412: the inherited 1.25 line was 14.375px tall and clipped the
+     15px mono glyphs. Reserve leading above and below the machine name;
+     horizontal ellipsis and the full spoken identity still apply. */
+  .conversation-identity .conversation-host { font-size: 11.5px; line-height: 1.5; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }

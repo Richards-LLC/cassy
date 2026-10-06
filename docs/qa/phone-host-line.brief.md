@@ -17,3 +17,6 @@ No additional header row, smaller font, or new control: the defect is vertical c
 
 ## Critique
 NOT EXERCISED on the treatment build. The supervisor owns native browser validation and rendered critique; no score is claimed before those captures.
+
+## Treatment and proof owner
+Only the <=500px metadata rule gains 1.5 leading: at 11.5px the line box becomes 17.25px. The retained native F02 bounds were 15px glyphs inside a 14.375px box, with their top 1px above the clipping edge. Increasing vertical leading is the prediction under test, rather than a verified browser result. The eight HUB-J3 host-glyph parts record fresh glyph and clipping-ancestor bounds; the supervisor runs them against rebuilt baseline and treatment bundles. Desktop typography, horizontal fitting, and short-landscape metadata hiding retain their existing rules.

@@ -32,6 +32,8 @@ struct IntegrationReceipt {
     already_integrated: Vec<EpicTip>,
     tip: Option<String>,
     status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    no_build: Option<NoBuildReceipt>,
     detail: String,
     affected: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -42,6 +44,89 @@ struct IntegrationReceipt {
     /// Kept across a RUNNING receipt, so an interrupted run still reports.
     #[serde(default, skip_serializing_if = "is_zero")]
     deferrals: u32,
+}
+
+/// Named no-build release rows, tied to the integration commit they ran on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NoBuildReceipt {
+    tip: String,
+    rows: std::collections::BTreeMap<String, String>,
+}
+
+/// The repository owns its release row inventory and environment scrub. The
+/// coordinator owns timeout/cancellation and persists evidence before assembly.
+fn run_no_build_rows(
+    worktree: &Path,
+    base: &str,
+    output: &Path,
+    settings: &SweepSettings,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Option<NoBuildReceipt>, String> {
+    // Generic projects retain their configured runner. Cassy's gate must never
+    // silently skip these rows because a helper was missing from its tip.
+    if !worktree.join("scripts/release-gate.sh").is_file()
+        || !worktree.join("cas-cli/Cargo.toml").is_file()
+    {
+        return Ok(None);
+    }
+    fs::create_dir_all(output.parent().ok_or("no-build log parent missing")?)
+        .map_err(|error| error.to_string())?;
+    let log = File::create(output.with_extension("log")).map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(output);
+    let mut command = Command::new("python3");
+    command
+        .arg(worktree.join("scripts/release-integration-gates.py"))
+        .arg("--run")
+        .arg(worktree)
+        .arg(base)
+        .arg(output)
+        .current_dir(worktree)
+        .envs(settings.env.iter())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            log.try_clone().map_err(|error| error.to_string())?,
+        ))
+        .stderr(Stdio::from(log));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid and signal are async-signal-safe before exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    loop {
+        if cancel.load(Ordering::Relaxed) || started.elapsed() >= settings.timeout {
+            terminate_child(&mut child);
+            return Err("integration-no-build interrupted or timed out".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let proof: NoBuildReceipt = serde_json::from_slice(
+                    &fs::read(output)
+                        .map_err(|error| format!("integration-no-build-receipt: {error}"))?,
+                )
+                .map_err(|error| format!("integration-no-build-receipt: {error}"))?;
+                if !status.success() && proof.rows.values().all(|value| value == "PASS") {
+                    return Err(format!("integration-no-build child exited {status}"));
+                }
+                return Ok(Some(proof));
+            }
+            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Err(error) => {
+                terminate_child(&mut child);
+                return Err(error.to_string());
+            }
+        }
+    }
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -427,6 +512,7 @@ fn integrate(
         already_integrated: Vec::new(),
         tip: None,
         status: "RUNNING".to_owned(),
+        no_build: None,
         detail: format!(
             "Triggered by {} at {}; {}",
             request.epic_id,
@@ -537,6 +623,48 @@ fn integrate(
     )?;
     receipt.tip = Some(tip.clone());
     write_receipt(&receipt_path, &receipt)?;
+    let no_build_output = shared_cas
+        .join(LOG_DIR)
+        .join(format!("no-build-{tip}.json"));
+    let no_build_error =
+        match run_no_build_rows(&worktree, &base, &no_build_output, settings, cancel) {
+            Ok(proof) => {
+                receipt.no_build = proof;
+                receipt.no_build.as_ref().and_then(|proof| {
+                    let failed: Vec<_> = proof
+                        .rows
+                        .iter()
+                        .filter(|(_, value)| value.as_str() != "PASS")
+                        .map(|(row, _)| row.as_str())
+                        .collect();
+                    if proof.tip != tip || proof.rows.is_empty() {
+                        Some("integration-no-build-tip: missing rows or wrong commit".to_owned())
+                    } else if !failed.is_empty() {
+                        Some(format!("integration no-build FAIL: {}", failed.join(", ")))
+                    } else {
+                        None
+                    }
+                })
+            }
+            Err(error) => Some(error),
+        };
+    write_receipt(&receipt_path, &receipt)?;
+    if let Some(detail) = no_build_error {
+        receipt.status = "FAILED".to_owned();
+        receipt.detail = detail.clone();
+        receipt.deferrals = 0;
+        write_receipt(&receipt_path, &receipt)?;
+        return Ok(SweepResult {
+            request: request.clone(),
+            status: SweepStatus::Failed,
+            log_path: receipt_path,
+            summary: detail,
+            failures: Vec::new(),
+            integration_epics: receipt.affected.clone(),
+            base_failure: None,
+            after_deferrals: prior_deferrals,
+        });
+    }
     // No builder is needed to report missing assembly configuration. Do not
     // hide that actionable state behind a capacity deferral/retry loop.
     let not_configured = settings.release_gate_home_dir.is_none()
@@ -1393,6 +1521,144 @@ mod tests {
             tip: git(path, &["rev-parse", "HEAD"]),
             owner: None,
         }
+    }
+
+    /// Exercise the production coordinator (also used by integration-recover)
+    /// with real Git/make/process boundaries and no Cargo build.
+    fn no_build_integration_fixture(failure: Option<&str>) -> (tempfile::TempDir, SweepResult) {
+        let repo = fixture();
+        fs::create_dir_all(repo.path().join("cas-cli")).unwrap();
+        fs::write(
+            repo.path().join("cas-cli/Cargo.toml"),
+            "version = \"9.99.7\"\n",
+        )
+        .unwrap();
+        let sources = crate::test_paths::workspace_root().join("scripts");
+        for name in ["release-integration-gates.py", "release-test-env.sh"] {
+            fs::copy(sources.join(name), repo.path().join("scripts").join(name)).unwrap();
+        }
+        // Fake only expensive row implementations; the no-build producer,
+        // train controls, shared scrub and real make are production code.
+        fs::write(
+            repo.path().join("scripts/release-gate.sh"),
+            r#"#!/usr/bin/env bash
+set -eu
+source scripts/release-test-env.sh
+mkdir -p "$CAS_RELEASE_GATE_LOG_DIR"
+printf 'row\tstatus\n' >"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"
+if [[ "$1" == --fast-rows ]]; then
+  IFS=, read -r -a rows <<< "$(python3 scripts/release-integration-gates.py --fast-rows)"
+else
+  rows=(ci-script-tests)
+fi
+failed=0
+for row in "${rows[@]}"; do
+  status=0
+  if [[ "$row" == markdown-lint && -f bad-markdown ]]; then status=1; fi
+  if [[ "$row" == ci-script-tests ]]; then
+    release_test_child make -C cas-cli test-ci-tiers || status=1
+  fi
+  printf '%s\t%s\n' "$row" "$status" >>"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"
+  [[ "$status" == 0 ]] || failed=1
+done
+exit "$failed"
+"#,
+        )
+        .unwrap();
+        fs::write(repo.path().join("cas-cli/Makefile"),
+            "test-ci-tiers:\n\tpython3 -c 'import os; assert not [k for k in os.environ if k.startswith(\"CAS_RELEASE_TRAIN_\")]; print(\"1 test passed\")'\n").unwrap();
+        if failure == Some("ci-script-tests") {
+            let path = repo.path().join("scripts/release-test-env.sh");
+            let contents = fs::read_to_string(&path).unwrap();
+            fs::write(path, contents.replace("CAS_RELEASE_TRAIN_*|", "")).unwrap();
+        }
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "no-build fixture"]);
+        let only = epic(
+            repo.path(),
+            "cas-09f25",
+            if failure == Some("markdown-lint") {
+                "bad-markdown"
+            } else {
+                "feature"
+            },
+            "one",
+        );
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(only.id.clone(), only.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(only.branch.clone());
+        tasks.add(&task).unwrap();
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.nice_cargo = false;
+        settings.command = Some("printf 'Summary: 1 passed\\n'".to_owned());
+        let result = execute(
+            repo.path(),
+            &cas_dir,
+            SweepRequest {
+                epic_id: only.id,
+                target_branch: only.branch,
+                commit: only.tip,
+            },
+            settings,
+            Arc::new(AtomicBool::new(false)),
+            false,
+        );
+        (repo, result)
+    }
+
+    #[test]
+    fn cas_09f25_integration_records_named_no_build_passes() {
+        let (repo, result) = no_build_integration_fixture(None);
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(repo.path().join(".cas/merge-sweeps/integration.json")).unwrap(),
+        )
+        .unwrap();
+        let proof = receipt.no_build.unwrap();
+        assert_eq!(Some(proof.tip), receipt.tip);
+        assert_eq!(proof.rows.len(), 12);
+        assert!(proof.rows.values().all(|value| value == "PASS"));
+    }
+
+    #[test]
+    fn cas_09f25_integration_records_markdown_failure_before_assembly() {
+        let (repo, result) = no_build_integration_fixture(Some("markdown-lint"));
+        assert_eq!(result.status, SweepStatus::Failed, "{}", result.summary);
+        assert!(
+            result.summary.contains("markdown-lint"),
+            "{}",
+            result.summary
+        );
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(repo.path().join(".cas/merge-sweeps/integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.no_build.unwrap().rows["markdown-lint"], "FAIL");
+    }
+
+    #[test]
+    fn cas_09f25_integration_records_train_env_only_script_failure() {
+        let (repo, result) = no_build_integration_fixture(Some("ci-script-tests"));
+        assert_eq!(result.status, SweepStatus::Failed, "{}", result.summary);
+        assert!(
+            result.summary.contains("ci-script-tests"),
+            "{}",
+            result.summary
+        );
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(repo.path().join(".cas/merge-sweeps/integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.no_build.unwrap().rows["ci-script-tests"], "FAIL");
     }
 
     #[test]

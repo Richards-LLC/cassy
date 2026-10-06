@@ -115,6 +115,18 @@ for (const width of [390, 1280]) {
             await expect(time).toHaveText("Just now");
           }
           await expect(row.getByRole("heading")).toMatchAriaSnapshot('- heading "Work laptop · This browser" [level=3]');
+          // cas-205e QA F01: in the sheet's default view (no scrolling) Revoke
+          // shows whole, above the Close bar, which is the sheet's footer and
+          // never inside the scroller over its last row.
+          const clearance = await page.locator(".installation-inventory").evaluate((sheet) => {
+            const bar = sheet.querySelector(":scope > .dialog-actions")!;
+            const body = sheet.querySelector(".installation-inventory-body")!;
+            const button = [...sheet.querySelectorAll("button")].find((b) => b.textContent === "Revoke this browser's access")!;
+            return { insideScroller: body.contains(bar), revokeBottom: button.getBoundingClientRect().bottom, barTop: bar.getBoundingClientRect().top, bodyBottom: body.getBoundingClientRect().bottom };
+          });
+          expect(clearance.insideScroller).toBe(false);
+          expect(clearance.revokeBottom).toBeLessThanOrEqual(clearance.bodyBottom);
+          expect(clearance.revokeBottom).toBeLessThanOrEqual(clearance.barTop);
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
           await captureRendered(page, info, "inventory");
         });

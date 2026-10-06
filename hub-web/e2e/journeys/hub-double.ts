@@ -306,6 +306,16 @@ export class HubDouble {
       const w = window as unknown as {
         __journeyOutage: (host: string, isDown: boolean, reset: boolean) => void;
         __journeyMachineEvent: (host: string, data: string) => number;
+        __journeyResetEvents: (host: string) => void;
+        __journeyEventStreamOpens: Record<string, number>;
+      };
+      w.__journeyEventStreamOpens = {};
+      // Event delivery can flap while HTTP and terminal transports keep working.
+      w.__journeyResetEvents = (host) => {
+        for (const controller of streams.get(host) ?? []) {
+          try { controller.close(); } catch { /* already closed */ }
+        }
+        streams.delete(host);
       };
       // cas-9772: a machine event on the open streams, as the hub announces
       // a session list change. Returns how many streams carried it.
@@ -328,6 +338,7 @@ export class HubDouble {
         if (url.hostname.endsWith(".test") && url.pathname === "/v1/events") {
           if (down.has(url.hostname) || !navigator.onLine) return Promise.reject(new TypeError("Failed to fetch"));
           if (init?.signal?.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+          w.__journeyEventStreamOpens[url.hostname] = (w.__journeyEventStreamOpens[url.hostname] ?? 0) + 1;
           let registered: ReadableStreamDefaultController<Uint8Array> | undefined;
           const body = new ReadableStream<Uint8Array>({
             start(c) {

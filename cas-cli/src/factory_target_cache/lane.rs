@@ -10,6 +10,8 @@ struct Provenance {
     version: u32,
     git_common_dir: PathBuf,
     head: String,
+    #[serde(default)]
+    worktree: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,27 +26,40 @@ pub struct LanePreviewRecord {
     head: Option<String>,
 }
 
+// Legacy previews are metadata/preview; new previews are metadata's sibling.
+// Derive metadata from the checkout name, never from an untrusted marker path.
+fn metadata_dir(worktree: &Path) -> Option<PathBuf> {
+    let name = worktree.file_name()?.to_str()?;
+    if name == "preview" {
+        let parent = worktree.parent()?;
+        return parent
+            .file_name()?
+            .to_str()?
+            .starts_with("lane-compile-")
+            .then(|| parent.to_path_buf());
+    }
+    let metadata = name.strip_suffix("-preview")?;
+    (!metadata.strip_prefix("lane-compile-")?.is_empty()).then(|| worktree.with_file_name(metadata))
+}
+
 pub(super) fn is_preview_path(cas_root: &Path, worktree: &Path) -> bool {
-    worktree.file_name().is_some_and(|name| name == "preview")
-        && worktree.parent().is_some_and(|parent| {
-            parent
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("lane-compile-"))
-                && parent.parent().and_then(|path| path.canonicalize().ok())
-                    == cas_root.join("worktrees").canonicalize().ok()
-        })
+    let Some(metadata) = metadata_dir(worktree) else {
+        return false;
+    };
+    let Some(parent) = metadata.parent().and_then(|path| path.canonicalize().ok()) else {
+        return false;
+    };
+    Some(parent) == cas_root.join("worktrees").canonicalize().ok()
 }
 
 fn owned(cas_root: &Path, worktree: &Path) -> Option<GitWorktreeCandidate> {
-    let parent = worktree.parent()?;
-    if worktree.file_name()? != "preview"
-        || !parent
-            .file_name()?
-            .to_string_lossy()
-            .starts_with("lane-compile-")
-        || parent.parent()?.canonicalize().ok()?
-            != cas_root.join("worktrees").canonicalize().ok()?
-        || fs::symlink_metadata(parent).ok()?.file_type().is_symlink()
+    let parent = metadata_dir(worktree)?;
+    if !is_preview_path(cas_root, worktree)
+        || fs::symlink_metadata(worktree)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        || fs::symlink_metadata(&parent).ok()?.file_type().is_symlink()
         || fs::symlink_metadata(parent.join(MARKER))
             .ok()?
             .file_type()
@@ -56,6 +71,10 @@ fn owned(cas_root: &Path, worktree: &Path) -> Option<GitWorktreeCandidate> {
         serde_json::from_slice(&fs::read(parent.join(MARKER)).ok()?).ok()?;
     if provenance.version != 1
         || Some(provenance.git_common_dir) != git_common_dir(cas_root.parent()?)
+        || match provenance.worktree {
+            Some(bound) => bound != worktree,
+            None => worktree.file_name()? != "preview",
+        }
     {
         return None;
     }
@@ -70,7 +89,9 @@ fn owned(cas_root: &Path, worktree: &Path) -> Option<GitWorktreeCandidate> {
 }
 
 fn owner_lock(worktree: &Path) -> io::Result<Option<fs::File>> {
-    let path = worktree.parent().unwrap().join(LOCK);
+    let path = metadata_dir(worktree)
+        .ok_or_else(|| io::Error::other("invalid lane preview layout"))?
+        .join(LOCK);
     if fs::symlink_metadata(&path)?.file_type().is_symlink() {
         return Ok(None);
     }
@@ -109,7 +130,12 @@ pub(super) fn inspect(
     entries
         .flatten()
         .filter_map(|entry| {
-            let worktree = entry.path().join("preview");
+            let path = entry.path();
+            let worktree = if is_preview_path(cas_root, &path) {
+                path
+            } else {
+                path.join("preview")
+            };
             let candidate = owned(cas_root, &worktree)?;
             let bytes = scan_cache(&worktree, &worktree.join("target"), false)
                 .map(|scan| scan.bytes)
@@ -203,7 +229,7 @@ pub(super) fn cleanup(
             Ok(output) if output.status.success() => {
                 record.disposition = CacheDisposition::Reclaimed;
                 record.reason = "removed stale lane checkout and Git registration".into();
-                let parent = record.worktree.parent().unwrap();
+                let parent = metadata_dir(&record.worktree).unwrap();
                 let _ = fs::remove_file(parent.join(MARKER));
                 let _ = fs::remove_file(parent.join(LOCK));
                 let _ = fs::remove_dir(parent); // Preserve any parent-level evidence.
@@ -223,6 +249,10 @@ mod tests {
     use super::*;
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        fixture_layout(false)
+    }
+
+    fn fixture_layout(flat: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().canonicalize().unwrap().join("repo");
         fs::create_dir_all(&repo).unwrap();
@@ -237,7 +267,11 @@ mod tests {
         let root = repo.join(".cas");
         let parent = root.join("worktrees/lane-compile-fixture");
         fs::create_dir_all(&parent).unwrap();
-        let preview = parent.join("preview");
+        let preview = if flat {
+            parent.with_file_name("lane-compile-fixture-preview")
+        } else {
+            parent.join("preview")
+        };
         git(
             &repo,
             &[
@@ -253,9 +287,17 @@ mod tests {
             .into_iter()
             .find(|candidate| candidate.path == preview)
             .unwrap();
-        fs::write(parent.join(MARKER), serde_json::to_vec(&serde_json::json!({
+        let mut provenance = serde_json::json!({
             "version": 1, "git_common_dir": git_common_dir(&repo).unwrap(), "head": candidate.commit.unwrap()
-        })).unwrap()).unwrap();
+        });
+        if flat {
+            provenance["worktree"] = serde_json::json!(preview);
+        }
+        fs::write(
+            parent.join(MARKER),
+            serde_json::to_vec(&provenance).unwrap(),
+        )
+        .unwrap();
         fs::write(parent.join(LOCK), "").unwrap();
         fs::create_dir_all(preview.join("target/debug")).unwrap();
         fs::write(preview.join("target/debug/output"), "cache").unwrap();
@@ -269,6 +311,133 @@ mod tests {
             high_watermark_percent: 100,
             low_watermark_percent: 99,
         }
+    }
+
+    #[test]
+    fn flat_preview_owned_locked_and_reclaimed_cas_9dd1() {
+        let (_temp, root, preview) = fixture_layout(true);
+        let metadata = root.join("worktrees/lane-compile-fixture");
+        assert!(is_preview_path(&root, &preview));
+        assert!(owned(&root, &preview).is_some());
+        // Exercise the unchanged production target ownership guard too.
+        fs::remove_dir_all(preview.join("target")).unwrap();
+        let target_owner = owner::acquire(&root, &preview).unwrap().unwrap();
+        drop(target_owner);
+        let held = owner_lock(&preview).unwrap().unwrap();
+        assert_eq!(
+            inspect(&root, policy(), &[])[0].disposition,
+            CacheDisposition::LiveProcess
+        );
+        FileExt::unlock(&held).unwrap();
+        drop(held);
+        let reclaim = super::super::tests::reclamation_available();
+        assert_eq!(
+            inspect(
+                &root,
+                TargetCachePolicy {
+                    min_idle_secs: u64::MAX,
+                    ..policy()
+                },
+                &[]
+            )[0]
+            .disposition,
+            if reclaim {
+                CacheDisposition::RecentWrite
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
+        let mut records = inspect(&root, policy(), &[]);
+        fs::write(metadata.join("proof.log"), "durable proof").unwrap();
+        cleanup(&root, &mut records, policy(), &[]);
+        assert_eq!(
+            records[0].disposition,
+            if reclaim {
+                CacheDisposition::Reclaimed
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
+        assert_eq!(preview.exists(), !reclaim);
+        assert!(root.join("worktrees").is_dir());
+        assert_eq!(
+            fs::read_to_string(metadata.join("proof.log")).unwrap(),
+            "durable proof"
+        );
+    }
+
+    #[test]
+    fn flat_preview_requires_bound_provenance_cas_9dd1() {
+        let (_temp, root, preview) = fixture_layout(true);
+        let marker = root.join("worktrees/lane-compile-fixture").join(MARKER);
+        assert!(owned(&root, &preview).is_some());
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        for field in ["worktree", "head", "git_common_dir"] {
+            let mut bad = original.clone();
+            bad[field] = serde_json::json!("incorrect");
+            fs::write(&marker, serde_json::to_vec(&bad).unwrap()).unwrap();
+            assert!(owned(&root, &preview).is_none());
+            assert!(inspect(&root, policy(), &[]).is_empty());
+        }
+        let mut missing = original.clone();
+        missing.as_object_mut().unwrap().remove("worktree");
+        fs::write(&marker, serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert!(owned(&root, &preview).is_none());
+        fs::remove_file(&marker).unwrap();
+        let external = root.join("external-provenance");
+        fs::write(&external, serde_json::to_vec(&original).unwrap()).unwrap();
+        std::os::unix::fs::symlink(&external, &marker).unwrap();
+        assert!(owned(&root, &preview).is_none());
+        assert!(preview.exists());
+    }
+
+    #[test]
+    fn flat_preview_revalidates_builder_and_dirty_source_cas_9dd1() {
+        let (_temp, root, preview) = fixture_layout(true);
+        let mut records = inspect(&root, policy(), &[]);
+        assert_eq!(records.len(), 1);
+        records[0].disposition = CacheDisposition::Selected;
+        let held = crate::factory_worker_check::try_lock_lane(&root, &preview)
+            .unwrap()
+            .unwrap();
+        cleanup(&root, &mut records, policy(), &[]);
+        assert_eq!(records[0].disposition, CacheDisposition::LiveProcess);
+        drop(held);
+        records[0].disposition = CacheDisposition::Selected;
+        let mut untrusted: Vec<LanePreviewRecord> =
+            serde_json::from_str(&serde_json::to_string(&records).unwrap()).unwrap();
+        cleanup(&root, &mut untrusted, policy(), &[]);
+        assert_eq!(untrusted[0].disposition, CacheDisposition::OwnershipChanged);
+        fs::write(preview.join("source.rs"), "reader edits must survive").unwrap();
+        // Preserve the reader's pending Git diff across the attempted cleanup.
+        let pending_edit = || {
+            let output = std::process::Command::new("git")
+                .current_dir(&preview)
+                .args(["diff", "--exit-code"])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert!(!output.stdout.is_empty());
+            output.stdout
+        };
+        let before = pending_edit();
+        let mut records = inspect(&root, policy(), &[]);
+        cleanup(&root, &mut records, policy(), &[]);
+        assert_eq!(
+            records[0].disposition,
+            if super::super::tests::reclamation_available() {
+                CacheDisposition::CleanupError
+            } else {
+                CacheDisposition::LiveProcess
+            }
+        );
+        assert_eq!(pending_edit(), before);
+        assert!(
+            list_validated_git_worktrees(root.parent().unwrap())
+                .iter()
+                .any(|candidate| candidate.path == preview)
+        );
     }
 
     #[test]

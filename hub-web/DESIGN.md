@@ -59,6 +59,23 @@ pebble:
   lift-strong: "--lift-strong 0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10) / 0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46)"
   lift-edge: "--lift-edge 10px 0 30px -18px rgba(18,20,26,0.22) / 10px 0 30px -18px rgba(0,0,0,0.60)"
   lift-head: "--lift-head 0 8px 20px -14px rgba(18,20,26,0.30) / 0 8px 20px -14px rgba(0,0,0,0.70)"
+glass:
+  source: "hub-web/src/glass.css overrides these generated roles; values are light, dark"
+  root: "light #EFECFB, dark #0E0C20 (role --bg-root)"
+  raised: "light #F7F5FF, dark #23203E (role --bg-raised)"
+  material: "light rgba(255,255,255,0.6), dark rgba(22,20,44,0.54) (role --look-glass)"
+  material-strong: "light rgba(255,255,255,0.78), dark rgba(26,23,52,0.74) (role --look-glass-strong)"
+  row-open: "light rgba(91,63,224,0.14), dark rgba(168,151,255,0.16) with a 2px --color-action inset edge (role --look-row-open)"
+  blur: "blur(16px) saturate(160%) for the four chrome panels and dialogs only, never per message; 26px and stacked shadows measurably slowed timing-sensitive journeys (role --look-blur)"
+  ink: "light #1A1830, dark #EEEBFF (role --ink)"
+  ink-mid: "light #4A4762, dark #B8B3D9 (role --ink-mid)"
+  action: "light #5B3FE0, dark #A897FF (role --color-action)"
+  send: "#7656FA to #5B3FE0 to #3E5BEA with white text (role --look-send); hover #6847F2 to #4E33D2 to #3550DC (role --look-send-hover)"
+  you-bubble: "light #6C4DF5 to #3651D8, dark #7656FA to #4766E6, white text (role --look-you)"
+  ask: "light #FFD983 to #FFA184, dark #FFCF73 to #FF8F6E, text #2A1A05 (role --look-ask)"
+  ask-tray: "light #A8471D to #9B3A2C, dark #7A3410 to #6E2A22 (role --look-ask-tray); hovered answer pill #F3EEFF (role --tray-chip-hover)"
+  aurora: "violet, teal, pink and blue corners over a pale (light) or near-black (dark) field; source gradients --look-aurora-source, painted as a rendered 320x200 image (role --look-aurora)"
+  rail: "382px on desktop, so the 8px-inset floating list keeps 374px of content; 374px on a phone (role --conversation-rail-width)"
 typography:
   families:
     display: "--font-display \"Iowan Old Style\", \"Palatino Linotype\", Palatino, \"Book Antiqua\", Georgia, \"Times New Roman\", serif"
@@ -98,8 +115,8 @@ breakpoints:
 ---
 ## Overview
 
-Cassy Commander is a plain TypeScript client whose only surface is Conversations: a Petrastella light/dark list, thread and context rail. The supervisor's raw terminal output is available read-only, on request, in a dark Raw output drawer.
-`hub-web/src/tokens.css` is generated from `docs/design/design-tokens.json` by `hub-web/scripts/generate-tokens.mjs`; `docs/design/hub-web/token-map.md` records each mapping and retained console measurement.
+Cassy Commander is a plain TypeScript client whose only surface is Conversations: a list, thread and context rail in the **Glass** look (light and dark). The supervisor's raw terminal output is available read-only, on request, in a dark Raw output drawer.
+Glass (`hub-web/src/glass.css`, imported after `styles.css`) is the only look; there is no look switch. It re-colours the generated roles and adds depth to existing surfaces; it changes no markup. `hub-web/src/tokens.css` is generated from `docs/design/design-tokens.json` by `hub-web/scripts/generate-tokens.mjs`; `docs/design/hub-web/token-map.md` records each mapping and retained console measurement.
 The scheme follows the OS with light as the fallback; `commander.scheme` stores `system`, `light` or `dark`, and `hub-web/src/scheme.ts` applies `html[data-scheme]`.
 This document records the token foundation and the conversation surface built on it; Conversations is the only surface.
 Ghostty's ANSI palette stays in `hub-web/src/terminal/ghostty-adapter.ts`; it is independent of the application palette. Ghostty now runs only as the hidden emulator behind the Raw output drawer.
@@ -129,7 +146,7 @@ product: use `--bg-active` and `--color-action`, 15px semibold, allow wrapping,
 and derive its name from catalog `project_dir` with an honest missing state.
 
 Conversations are the default presentation at every width. Desktop places a
-320px list and 240px context rail around a flexible reading column. Phone and
+floating 382px glass list and the glass context rail around a flexible reading column. Phone and
 short-axis touch layouts use list → full-width thread with an always addressed
 composer. `conversation-shell.ts`, `conversation-list.ts`, `conversation-view.ts`
 and `conversation-history.ts` separate layout, catalog rows, the real pane,
@@ -159,8 +176,8 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 
 ## Colors
 
-- `--bg-root` inherits house `bg` (warm paper / warm graphite); `--bg-panel` inherits `surface` for the rail, header, drawer and context panel.
-- `--bg-raised` mixes 92% `bg` (the page, same value as `--canvas`) with `ink`; `--bg-hover` mixes 88%. Deriving from the page rather than `surface` keeps chips warm on paper instead of a cool #F6F6F6 seam (P15). Header controls (‹ Conversations, Raw output, Pair a machine in the list header) are text buttons: transparent, `--ink`, `--bg-hover` on hover. These are the console's two derived overrides; selection uses house `verdict-soft` through `--bg-active`.
+- Glass overrides `--bg-root` with its own field (light #EFECFB, dark #0E0C20) under the aurora; `--bg-panel` is opaque white (light) or #1A1830 (dark) and is the opaque fallback for every glass panel under more contrast, reduced transparency or forced colours.
+- The house `--bg-raised`/`--bg-hover` derivations are overridden by Glass: `--bg-raised` is an opaque lavender-white (#F7F5FF) or deep indigo (#23203E) card, so worker cards, the paired-machines row and dialog footers never read as grey slabs on glass; `--bg-hover`/`--bg-active` are violet washes. Header controls (‹ Conversations, Raw output, Pair a machine in the list header) are text buttons: transparent, `--ink`, `--bg-hover` on hover. These are the console's two derived overrides; selection uses house `verdict-soft` through `--bg-active`.
 - `--text-hi` inherits `ink`; `--text-mid` inherits `ink-muted`. There is no tertiary text token; timestamps and pane roles use the readable muted value.
 - `--color-action` is for controls and links; `--color-verdict` is for the decisive figure mark. Both inherit the house accent; neither is a running-status colour.
 - `--color-focus` supplies the sole focus outline. `--state-ok`, `--state-warn` and `--state-crit` inherit `good`, `warning` and `danger`; info text is muted evidence.
@@ -186,14 +203,19 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 ## Layout
 
 - Spacing inherits the house 4px grid: 4/8/12/16/24/32/48/64px. Retired 20px gaps move to 24px; retired 40px control dimensions use `--button-height` so touch geometry stays 40px.
-- Desktop is the conversation shell: the 320px list, a flexible reading column and the context rail (collapsing to its 48px track).
+- Desktop is the conversation shell: the floating 382px glass list, a flexible reading column open to the aurora, and the glass context rail (collapsing to its 48px track).
 - The phone query is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` in both CSS and `hub-web/src/viewport.ts`; landscape uses the same short-axis query so rotation keeps the phone layout.
 - A phone shows list → full-width thread; every touch target uses `--rail-item-min` 44px. Tasks & progress and Waiting on you open as sheets; Raw output is a bottom sheet.
 - Interior regions scroll within the shell's `100dvh`; the Raw output transcript scrolls inside its sheet.
 
 ## Elevation & Depth
 
-- Root, panel and raised surfaces separate regions by colour and the 8px shell gutter. The `dialog` and `#toast` declarations in `hub-web/src/styles.css` consume house `elevation.overlay` through `--shadow-overlay`, identical in both schemes. Phone drawer and attention sheets stay shadowless.
+- **Glass materials.** One aurora (`--look-aurora`) sits behind the whole shell on a fixed layer and never moves: any animation behind glass makes every frosted panel re-blur each frame, which measured 30 fps instead of 59 and timed out journeys. Its colours are defined once as gradients (`--look-aurora-source`), but it is painted from a 320×200 JPEG that `hub-web/scripts/render-glass-aurora.mjs` renders from them into `--look-aurora`. Live gradients behind see-through panels repainted on every update inside a panel and timed out the event-flood and session journeys; the stretched image is indistinguishable and cheap. Rerun the script after changing a source gradient. The conversation list, conversation heading, context panel and composer float over it as frosted panels: `--look-glass` with `--look-blur`, a 1px `--look-glass-edge` drawn as an inset shadow (never a border, so geometry matches the panels underneath), `--look-shadow-float`, 20–26px radii and an 8px inset from the window edge (the desktop rail is 382px so its content keeps 374px). On a phone the list is full-bleed glass and the conversation heading hangs from the top edge with rounded lower corners, keeping the 56px phone header. The middle column is open to the aurora. Reading surfaces stay nearly opaque: supervisor bubbles are `--sup-bg` (0.9) with no blur of their own (a blur per bubble cost a quarter of a long thread's frame rate), the operator's bubble is the `--look-you` gradient (a refused or unconfirmed message never takes it: it keeps the base's dashed, unfilled record in `--ink` on `--look-glass-strong`), and dialogs are `--look-glass-strong` over a blurred `--look-scrim`. The open conversation's row carries a violet `--look-row-open` wash and a 2px `--color-action` edge all round (5.7:1 light, 7.5:1 dark against the list), never a left bar; a hovered row gets only the faint `--bg-hover` wash with no edge, so hover can never look open. `glass.test.ts` pins the edge contrast and that hover draws no edge.
+- **Colour, used sparingly.** Violet is the one action colour: Send, the compose button and every `.primary` action carry the `--look-send` gradient and its glow; on hover they deepen to `--look-send-hover` and are never brightened (a `brightness(1.08)` filter put white under 4.5:1). An open question is the warmest object on screen, an amber-to-coral `--look-ask` card over an ember `--look-ask-tray`; its answers are opaque pills that stay opaque on hover (`--tray-chip-hover`), because the translucent `--bg-hover` wash lets the ember through. Every interaction state of a control on a gradient or the tray is measured in `glass.test.ts`, which resolves the winning background, colour and filter from both stylesheets. Machine accents keep each avatar's hue but no longer tint bubbles or the selected row.
+- **Sheets, actions and confirmations.** A dialog's sticky action bar is a light frost (`--look-glass-bar`) with a hairline above and a 12px gap before it; the installations sheet keeps its bar as a footer outside the scroller (transparent, hairline only), so its last Revoke shows whole in the default view at 390; its plain buttons (Close, Back) are outlined pills. Full-screen phone sheets (the launch sheet and the Attention sheet) are opaque `--bg-panel` and square, so the page never ghosts through. In Paired machines, Browser installations and Remove sit 8px apart and Remove is a `--crit-bg` outlined pill. The toast is a solid `--bg-panel` card that appears at once (it still slides, but never fades through the page). The operator's delivery line (Sending…, ✓ Delivered) is full white on the violet bubble, and under more contrast the bubble is the flat `--you-bubble-bg`.
+- **Text on glass.** Text sits on a known colour: opaque cards, ≥ 0.6-alpha panels, or (timestamps and meta lines only) the aurora's pale middle in light and its near-black field in dark. The vivid corners lie under the panels. `glass.test.ts` measures every token pair, composited over the aurora's stops, at ≥ 4.5:1; each delivery also measures real rendered pixels.
+- **Accessibility.** Forced colours: all Glass decoration sits inside `@media (forced-colors: none)`, so the system palette and the forced-colours rules in `styles.css` apply untouched. `prefers-contrast: more`, `prefers-reduced-transparency: reduce` or forced colours: panels, bubbles and sheets become opaque `--bg-panel` with no blur and `--line-strong` edges. More contrast also darkens `--ink-mid` toward `--ink`, makes subtle lines strong, and replaces the aurora with flat `--bg-root`. Motion: Glass adds none, so `prefers-reduced-motion` needs no Glass override; the house motion rules apply.
+- `#toast` in `hub-web/src/styles.css` consumes house `elevation.overlay` through `--shadow-overlay`, identical in both schemes; Glass dialogs use `--look-shadow-float` instead. Phone drawer and attention sheets stay shadowless.
 - The Pebble conversation surface (EPIC cas-cac1, `docs/design/hub-messaging/round-3/`) uses elevation instead of hairlines: the rail edge is `--lift-edge`, the selected row and calm bubbles are `--lift`, attention objects and the compose FAB are `--lift-strong`, the thread header is `--lift-head`. All four are generated per scheme (ink-cast in light, black-cast in dark); `invariants.test.ts` pins every `box-shadow` to a token.
 - Pebble tokens live under `pebble:` above and are the contract every Pebble child consumes: `--canvas`/`--panel`/`--sheet-bg` surfaces, the `--ink` ramp, the constant operator pair `--you-bg`/`--you-fg`, the ask and blocker pairs, and the per-machine set `--accent`, `--accent-soft`, `--accent-fg`, `--sup-bg`, `--sup-fg`. The machine set is generated as `.machine-accent-N` (indigo, green, violet) and assigned by `hub-web/src/machine-accent.ts` from the machine id — FNV-1a into a jump consistent hash, so a fourth accent appended to `generate-tokens.mjs` recolours no existing machine. `machine-accent.test.ts` measures every rendered pair at ≥ 4.5:1 in both schemes.
 - Dark tints, never floods (P9): in dark an in-thread ask is `--ask-tint` #3A3020 in ink with a 4px `--ask-edge` gold edge and outlined tray chips; a blocker is `--crit-tint` #3A1F1E in ink with a 4px salmon `--crit-edge`; the operator's bubble is `--you-bubble-bg` #3A46B0 with white text. A compact waiting bookmark points to the single in-thread question; it has no duplicate gold card or reply chips. Send keeps the bright accent. `--you-bg` stays the operator's action colour (FAB, focus fallbacks); the bubble has its own pair. In light every tint token resolves to the flood it replaced, and the edges are transparent, so paper is unchanged. `machine-accent.test.ts` pins the pairs (text ≥ 4.5:1, edges and chip outlines ≥ 3:1).
@@ -228,6 +250,8 @@ The context progress rail uses human labels such as “In progress” and “Awa
 
 - ✅ Change house values in `docs/design/design-tokens.json`, update the mapping in `hub-web/scripts/generate-tokens.mjs`, and run `npm run tokens`; commit the generated CSS.
 - ❌ Never hand-edit `tokens.css`, add a handwritten `:root` palette to `styles.css`, or restore the retired token aliases; `tokens.test.ts` checks drift and every CSS/TypeScript consumer.
+- ✅ Glass values live only in `glass.css`'s token blocks (`:root, html[data-scheme="light"]` plus the dark media block and `html[data-scheme="dark"]`, which must stay identical). Glass surface rules consume those tokens; `glass.test.ts` pins the pairs and the accessibility media rules.
+- ❌ Never put a gradient, blur or animation outside `@media (forced-colors: none)` in `glass.css`, animate anything behind glass (the aurora included), or reintroduce a look switch (`data-look`, `?look=`).
 - ✅ Add a generated dark-well scope when retaining a dark background beneath a light shell; source foregrounds from `color.dark.*`.
 - ❌ Never combine light-scheme ink with `--bg-terminal` or wire Ghostty ANSI entries to application state tokens.
 - ✅ Use `applyScheme()` at boot and `setScheme(system|light|dark)` for Appearance; storage denial still permits a page-local choice.

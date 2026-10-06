@@ -2153,6 +2153,18 @@ fi
 # the real detached train action so this proves the cut waits for, and resumes
 # from, its durable gate receipt rather than merely calling a stub in-process.
 # ===========================================================================
+seed_no_build_receipt() {
+    python3 - "$script_dir/release-integration-gates.py" "$1/.cas/merge-sweeps/integration.json" <<'PYROWS'
+import json, runpy, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+path = Path(sys.argv[2])
+receipt = json.loads(path.read_text())
+receipt['no_build'] = {'tip': receipt['tip'], 'rows': {row: 'PASS' for row in module['REQUIRED_ROWS']}}
+path.write_text(json.dumps(receipt) + '\n')
+PYROWS
+}
+
 new_cut_fixture() {
     local name="$1" version="$2" include_heading="${3:-1}"
     local dir="$tmp/$name" remote="$tmp/$name-remote.git" base
@@ -2202,6 +2214,7 @@ EOF
       git branch -m "release/$version"
       base="$(git rev-parse HEAD)"
       printf '{"status":"PASSED","base":"%s","tip":"%s","epics":[]}\n' "$base" "$base" > .cas/merge-sweeps/integration.json
+      seed_no_build_receipt "$dir"
       git add .cas/merge-sweeps/integration.json
       git -c commit.gpgsign=false commit -q -m 'record integration receipt'
       git push -q origin "HEAD:refs/heads/release/$version"
@@ -2276,6 +2289,7 @@ EOF
       git checkout -q "release/$version"
       printf '{"status":"PASSED","base":"%s","tip":"%s","epics":[]}\n' \
           "$base" "$base" > .cas/merge-sweeps/integration.json
+      seed_no_build_receipt "$dir"
       cat > .cas/fake-cas <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -2290,6 +2304,7 @@ path = Path('.cas/merge-sweeps/integration.json')
 data = json.loads(path.read_text())
 data['base'] = sys.argv[1]
 data['tip'] = sys.argv[1]
+data['no_build']['tip'] = sys.argv[1]
 path.write_text(json.dumps(data))
 Path('.cas/healed').write_text('yes\\n')
 PY
@@ -2533,6 +2548,38 @@ if python3 "$script_dir/test-release-train-resume.py"; then
 else
     bad 'resume output guard tests failed'
 fi
+
+# Both incidents must refuse before assemble, as must legacy/missing evidence.
+for blocked_row in markdown-lint ci-script-tests missing stale-tip; do
+    no_build_wt="$(new_cut_fixture "cut-no-build-$blocked_row" 9.99.30)"
+    python3 - "$no_build_wt/.cas/merge-sweeps/integration.json" "$blocked_row" <<'PYROWS'
+import json, sys
+from pathlib import Path
+path, row = Path(sys.argv[1]), sys.argv[2]
+data = json.loads(path.read_text())
+if row == 'missing':
+    del data['no_build']
+elif row == 'stale-tip':
+    data['no_build']['tip'] = '1' * 40
+else:
+    data['no_build']['rows'][row] = 'FAIL'
+path.write_text(json.dumps(data))
+PYROWS
+    git -C "$no_build_wt" add .cas/merge-sweeps/integration.json
+    git -C "$no_build_wt" commit -qm 'seed no-build failure'
+    no_build_stage_log="$tmp/no-build-$blocked_row-stage.log"
+    out="$(CAS_RELEASE_ENV_FILE="$no_build_wt/release.env" \
+        CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
+        CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CUT_LOG="$no_build_stage_log" \
+        "$train" 9.99.30 "$no_build_wt" --cut 2>&1 || true)"
+    blocker="integration-$blocked_row"
+    [[ "$blocked_row" != missing && "$blocked_row" != stale-tip ]] || blocker=integration-no-build-tip
+    if [[ "$out" == *"BLOCKER $blocker"* && ! -e "$no_build_stage_log" ]]; then
+        ok "integration $blocked_row refuses before assemble with its named blocker"
+    else
+        bad "integration $blocked_row reached assemble or lacked named blocker: $out"
+    fi
+done
 
 missing_wt="$(new_cut_fixture cut-missing-heading 9.99.11 0)"
 missing_log="$tmp/missing-stage.log"
@@ -2808,6 +2855,7 @@ import sys
 path, tip = Path(sys.argv[1]), sys.argv[2]
 data = json.loads(path.read_text())
 data.update(status='PASSED', tip=tip, epics=[{'branch': 'epic/gate-fix', 'tip': tip}])
+data['no_build']['tip'] = tip
 path.write_text(json.dumps(data))
 PYFIX
 git -C "$refresh_wt" checkout -q "release/$refresh_version"

@@ -4,7 +4,8 @@ import { replaceMachineConnection } from "./connection-lifecycle";
 import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
 import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
-import type { StoredMachine } from "./types";
+import { ConversationHistory } from "./conversation-history";
+import type { MessageQueued, StoredMachine } from "./types";
 
 const supervisors: HubConnectionSupervisor[] = [];
 afterEach(() => {
@@ -78,6 +79,8 @@ function transport(multiplex = false) {
     refusePairing: (value: boolean) => { refused = value; },
     catalogRevision: (value: number) => { catalogRevision = value; },
     event: (event: Record<string, unknown> = { kind: "session_added" }) => eventController!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)),
+    endEvents: () => eventController!.close(),
+    replay: (events: Record<string, unknown>[]) => eventController!.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""))),
   };
 }
 
@@ -94,7 +97,12 @@ class TransportSocket {
   onerror: (() => void) | null = null;
   constructor(readonly url: URL) { TransportSocket.instances.push(this); }
   open(): void { this.readyState = TransportSocket.OPEN; this.onopen?.(); }
-  receive(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
+  receive(message: unknown): void {
+    // Native WebSocket discards incoming frames once close() starts. Keeping
+    // onmessage installed cannot make a closed transport deliver a receipt.
+    if (this.readyState !== TransportSocket.OPEN) return;
+    this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent);
+  }
   close(code = 1000): void { this.readyState = 3; this.onclose?.({ code } as CloseEvent); }
   send(value: string): void { this.sent.push(value); }
 }
@@ -108,7 +116,213 @@ function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = (
   return connection;
 }
 
+function networkHints(): EventTarget {
+  const hints = new EventTarget();
+  vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+  vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+  vi.stubGlobal("document", new EventTarget());
+  return hints;
+}
+
 describe("Commander live connection lifecycle", () => {
+  it("settles a resend receipt when an overlapping legacy attach's ticket finishes later (cas-547a)", async () => {
+    transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const fetchNow = globalThis.fetch;
+    const tickets: Array<() => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/auth/websocket-ticket") {
+        await new Promise<void>(resolve => tickets.push(resolve));
+      }
+      return fetchNow(input, init);
+    }));
+    const history = new ConversationHistory();
+    const connection = new HubConnectionSupervisor(await storedMachine("overlapping-attach"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onMessageQueued: (_session, receipt) => { history.acknowledge(receipt); },
+      onConversationHistory: (_session, page) => { page.messages.forEach(message => history.hydrateSend(message)); },
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const first = connection.attach("session-a");
+    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    const second = connection.attach("session-a");
+    await vi.waitFor(() => expect(tickets).toHaveLength(2));
+    tickets[0]!();
+    await first;
+    const writer = TransportSocket.instances[0]!;
+    writer.open();
+    writer.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    const text = "Did the Mac tests start?", clientRef = "resend";
+    const message = { SendMessage: { target: "supervisor", text, client_ref: clientRef } };
+    history.submit(clientRef, "supervisor", text, 1_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.unconfirmSilent(16_000);
+    history.reply({ notification_id: 98, reply_to: null, message: "Tests are running on the Mac.", summary: "", device_id: "phone" }, 17_000);
+    expect(history.discardRefused(clientRef)).toBe(true);
+    history.hold(clientRef, "supervisor", text, 18_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.release(clientRef, 18_000);
+    // A second caller passed the pre-ticket socket check while the first was
+    // still authenticating. It must not retire the socket that wrote Retry.
+    tickets[1]!();
+    await second;
+    writer.receive({ MessageQueued: { client_ref: clientRef, notification_id: 99, target: "supervisor", stamped: true } });
+    const send = history.events.find(event => event.kind === "send");
+    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(true);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
+    expect(writer.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === clientRef)).toHaveLength(2);
+  });
+  it.each(["recovery", "stop"])("rejects a legacy ticket completed after %s (cas-547a)", async (change) => {
+    const hub = transport();
+    const hints = networkHints();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const fetchNow = globalThis.fetch;
+    const tickets: Array<() => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/auth/websocket-ticket") {
+        await new Promise<void>(resolve => tickets.push(resolve));
+      }
+      return fetchNow(input, init);
+    }));
+    const connection = supervisor(await storedMachine("stale-legacy-ticket"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const oldAttach = connection.attach("session-a");
+    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    if (change === "stop") connection.stop();
+    else {
+      hints.dispatchEvent(new Event("offline"));
+      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+      connection.retry();
+      // Recovery has abandoned the old generation and started a fresh
+      // ticket, which stays pending while the retired ticket finishes.
+      await vi.waitFor(() => expect(tickets).toHaveLength(2));
+    }
+    tickets[0]!();
+    await oldAttach;
+    expect(TransportSocket.instances).toHaveLength(0);
+    if (change === "recovery") {
+      tickets[1]!();
+      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+      const socket = TransportSocket.instances[0]!;
+      socket.open();
+      socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3 } });
+      expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Kept across recovery", client_ref: "kept" } })).toBe(true);
+    }
+  });
+  it.each(["same pairing", "stale attach", "already confirmed", "replaced pairing", "new generation", "stopped"])("fences a resend receipt queued on a retired legacy socket: %s (cas-547a)", async (change) => {
+    const hub = transport();
+    const hints = networkHints();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const machine = await storedMachine("retired-resend");
+    const history = new ConversationHistory(), queued = vi.fn((_session: string, receipt: MessageQueued) => history.acknowledge(receipt));
+    const state = vi.fn(), error = vi.fn();
+    const connection = new HubConnectionSupervisor(machine, {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: state, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: error,
+      onMessageQueued: queued,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const writer = TransportSocket.instances[0]!;
+    const welcome = { Welcome: { state: { panes: [] }, protocol_version: 3 } };
+    writer.open(); writer.receive(welcome);
+    const message = { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "resend" } };
+    history.submit("resend", "supervisor", message.SendMessage.text, 1_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.unconfirmSilent(16_000);
+    history.reply({ notification_id: 98, reply_to: null, message: "Tests are running on the Mac.", summary: "", device_id: "phone" }, 17_000);
+    history.discardRefused("resend");
+    history.hold("resend", "supervisor", message.SendMessage.text, 18_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.release("resend", 18_000);
+    const receipt = { MessageQueued: { client_ref: "resend", notification_id: 99, target: "supervisor", stamped: true } };
+    if (change === "already confirmed") {
+      writer.receive(receipt);
+      expect(queued).toHaveBeenCalledTimes(1);
+      queued.mockClear();
+    }
+    if (change === "stale attach") {
+      // Event-only recovery preserves speaking sockets, but a stale writer
+      // is retired per session and must keep the same bounded receipt drain.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 20_000);
+      hub.event({ kind: "viewer_lagged" });
+    } else hints.dispatchEvent(new Event("offline"));
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    connection.retry();
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    if (change === "replaced pairing") machine.credentialId = "new-pairing";
+    if (change === "new generation") machine.credentialGeneration = 2;
+    if (change === "stopped") connection.stop();
+    const phase = connection.attachSnapshot("session-a")?.phase;
+    const stateCount = state.mock.calls.length, errorCount = error.mock.calls.length;
+    // Retired traffic cannot re-open an attach, fail a newer send, or
+    // manufacture confirmation for a ref that socket never wrote.
+    writer.receive(welcome);
+    writer.receive({ Error: { code: "upstream_unavailable", client_ref: "resend" } });
+    writer.receive({ MessageQueued: { client_ref: "unknown", notification_id: 99, target: "supervisor", stamped: true } });
+    writer.receive({ MessageQueued: { client_ref: "resend", notification_id: 99, target: "other-supervisor", stamped: true } });
+    expect(queued).not.toHaveBeenCalled();
+    writer.receive(receipt);
+    writer.receive({ MessageQueued: { ...receipt.MessageQueued, notification_id: 100 } });
+    const accepted = change === "same pairing" || change === "stale attach";
+    expect(queued).toHaveBeenCalledTimes(accepted ? 1 : 0);
+    const send = history.events.find(event => event.kind === "send");
+    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(accepted || change === "already confirmed");
+    if (accepted || change === "already confirmed") expect(send?.kind === "send" && send.value.notificationId).toBe(99);
+    expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
+    expect(connection.attachSnapshot("session-a")?.phase).toBe(phase);
+    expect(state).toHaveBeenCalledTimes(stateCount);
+    expect(error).toHaveBeenCalledTimes(errorCount);
+  });
+  it.each(["deadline", "stop", "authentication refusal"])("closes an undrained retired writer on %s (cas-547a)", async (end) => {
+    const hub = transport();
+    const hints = networkHints();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const queued = vi.fn();
+    const connection = new HubConnectionSupervisor(await storedMachine("drain-lifetime"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onMessageQueued: queued,
+    });
+    supervisors.push(connection);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const writer = TransportSocket.instances[0]!;
+    const welcome = { Welcome: { state: { panes: [] }, protocol_version: 3 } };
+    writer.open(); writer.receive(welcome);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Waiting for its receipt", client_ref: "draining" } })).toBe(true);
+    hints.dispatchEvent(new Event("offline"));
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    connection.retry();
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    const replacement = TransportSocket.instances[1]!;
+    replacement.open(); replacement.receive(welcome);
+    expect(writer.readyState).toBe(TransportSocket.OPEN);
+    if (end === "stop") connection.stop();
+    else if (end === "authentication refusal") {
+      hub.refusePairing(true);
+      connection.retry();
+      await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
+    } else await vi.advanceTimersByTimeAsync(5_000);
+    expect(writer.readyState).toBe(3);
+    expect(writer.onmessage).toBeNull();
+    writer.receive({ MessageQueued: { client_ref: "draining", notification_id: 99, target: "supervisor", stamped: true } });
+    expect(queued).not.toHaveBeenCalled();
+  });
   it("delivers a stalled catalog's entire burst and joins manual refreshes to its flight (cas-b55b)", async () => {
     const hub = transport();
     const events: Record<string, unknown>[] = [];
@@ -477,6 +691,223 @@ describe("Commander live connection lifecycle", () => {
     expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
   });
 
+  it.each([false, true])("keeps a healthy legacy attach through a peer exit (replay=%s, cas-49cc)", async (replay) => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("peer-clean-exit"), () => {}, event => events.push(event));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    for (const session of ["healthy", "removed-peer"]) {
+      await connection.attach(session);
+      const socket = TransportSocket.instances.at(-1)!;
+      socket.open();
+      socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    }
+    const healthy = TransportSocket.instances[0]!;
+    const peer = TransportSocket.instances[1]!;
+    const window = Array.from({ length: 1021 }, (_, index) => ({ kind: "pane_added", sequence: 4180 + index, session: "removed-peer" }));
+    const tail = [
+      { kind: "pane_exited", sequence: 5201, session: "removed-peer", pane_id: "worker" },
+      { kind: "daemon_disconnected", sequence: 5202, session: "removed-peer", diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata; do not infer a cause from a closed socket alone." } },
+      { kind: "session_removed", sequence: 5203, session: "removed-peer" },
+    ];
+    const metadata = { kind: "stream_metadata", epoch: "stable-hub", oldest_sequence: 4180, latest_sequence: 5203 };
+    hub.replay([metadata, ...window, { kind: "replay_complete" }, ...tail]);
+    peer.close(1000);
+    await vi.waitFor(() => expect(events).toHaveLength(1024));
+    expect(healthy.readyState).toBe(TransportSocket.OPEN);
+    if (replay) {
+      hub.endEvents();
+      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(hub.streams).toHaveLength(2));
+      hub.replay([metadata, ...window, ...tail, { kind: "replay_complete" }]);
+    }
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(events).toHaveLength(1024);
+    expect(healthy.readyState).toBe(TransportSocket.OPEN);
+    expect(TransportSocket.instances.filter(socket => socket.url.pathname.includes("/healthy/"))).toHaveLength(1);
+    expect(connection.attachSnapshot("healthy")?.phase).toBe("live");
+  });
+
+  it("refreshes the session catalog on event recovery without replacing its speaking attach (cas-49cc)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    let listed: string | undefined;
+    hub.catalogRevision(1);
+    const connection = supervisor(await storedMachine("event-catalog"), () => {}, () => {}, sessions => { listed = sessions[0]?.name; });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(listed).toBe("catalog-1");
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ Welcome: { state: { panes: [] } } });
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    hub.catalogRevision(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(listed).toBe("catalog-2");
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+  });
+
+  it.each([false, true])("measures current ready transport reads without relaxing the send fence (multiplex=%s, cas-49cc)", async (multiplex) => {
+    const hub = transport(multiplex);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("read-health"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const pending = connection.attach("healthy");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    if (multiplex) socket.receive({ proto: 2 });
+    await pending;
+    const receive = (message: unknown) => socket.receive(multiplex ? { channel: "pty:healthy", message } : message);
+    receive({ Welcome: { state: { panes: [] } } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    expect(connection.hasLiveAttach("missing")).toBe(false);
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Still fenced during event recovery" } })).toBe(false);
+    // Move the read clock without running retry timers or heartbeat signing.
+    vi.setSystemTime(Date.now() + 20_000);
+    expect(connection.hasLiveAttach("healthy")).toBe(false);
+    receive({ StateUpdate: { state: { panes: [] } } });
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    socket.close(1000);
+    expect(connection.hasLiveAttach("healthy")).toBe(false);
+  });
+
+  it("keeps a speaking legacy attach after a successful network hint (cas-49cc)", async () => {
+    const hub = transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("healthy-hint"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] } } });
+    const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+    hints.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket")).toHaveLength(1);
+  });
+
+  it("bounds 30 seconds of 1Hz SSE flaps without redialing a speaking attach (cas-49cc)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    class SpeakingSocket extends TransportSocket {
+      constructor(url: URL) {
+        super(url);
+        queueMicrotask(() => { this.open(); this.receive({ Welcome: { state: { panes: [] } } }); });
+      }
+    }
+    vi.stubGlobal("WebSocket", SpeakingSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const retries: number[] = [];
+    const connection = supervisor(await storedMachine("flapping-events"), state => {
+      if (state.phase === "backoff") retries.push(state.retryInMs!);
+    });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    const socket = TransportSocket.instances[0]!;
+    const started = Date.now();
+    const pulse = setInterval(() => {
+      socket.receive({ StateUpdate: { state: { panes: [] } } });
+      try { hub.endEvents(); } catch { /* no stream open during backoff */ }
+    }, 1_000);
+    for (let second = 0; second < 30; second++) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      // Let real signing/fetch work settle before the next protocol second;
+      // otherwise fake time can manufacture a signing deadline failure.
+      await vi.waitFor(() => expect(["live", "backoff"]).toContain(connection.snapshot().phase), { interval: 1 });
+    }
+    clearInterval(pulse);
+    console.info("cas-49cc flap proof", { elapsedMs: Date.now() - started, streams: hub.streams.length,
+      attaches: TransportSocket.instances.length, tickets: hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket").length, retries });
+    expect(hub.streams.length).toBeLessThanOrEqual(6);
+    expect(retries.slice(0, 4)).toEqual([1_000, 2_000, 4_000, 8_000]);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket")).toHaveLength(1);
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+  });
+
+  it.each([false, true])("still replaces a stale or proved-offline legacy attach (offline=%s, cas-49cc)", async (offline) => {
+    transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("untrusted-attach"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] } } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    if (!offline) await vi.advanceTimersByTimeAsync(20_000);
+    hints.dispatchEvent(new Event(offline ? "offline" : "online"));
+    await vi.waitFor(() => expect(socket.readyState).toBe(3));
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Never into a dead socket" } })).toBe(false);
+    if (!offline) {
+      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+      expect(TransportSocket.instances[1]!.readyState).toBe(TransportSocket.CONNECTING);
+    }
+  });
+
+  it("resets event retry backoff only after a stream survives ten seconds (cas-49cc)", async () => {
+    const hub = transport();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("event-settle"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(2_000));
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    for (let beat = 0; beat < 2; beat++) {
+      const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+    }
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+  });
+
   it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
     const hub = transport();
     TransportSocket.instances = [];
@@ -492,19 +923,19 @@ describe("Commander live connection lifecycle", () => {
     hub.event({ kind: "viewer_lagged" });
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     // A dispatch's IndexedDB/credential await can finish after this transition.
-    // The old socket is physically open, but recovery will replace it.
+    // Event recovery still fences sends, while recent daemon frames keep
+    // the healthy terminal available for its in-flight receipts (cas-49cc).
     expect(socket.readyState).toBe(TransportSocket.OPEN);
     const before = socket.sent.length;
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
     expect(socket.sent).toHaveLength(before);
     connection.retry();
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
-    const recovered = TransportSocket.instances[1]!;
-    recovered.open();
-    recovered.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(TransportSocket.instances).toHaveLength(1);
+    const recovered = socket;
     await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(true);
-    expect(socket.sent).toHaveLength(before);
+    expect(socket.sent).toHaveLength(before + 1);
     expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
   });
 

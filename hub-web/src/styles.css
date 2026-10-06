@@ -2879,6 +2879,8 @@ button.chip:disabled { cursor: default; }
   .conversation-topline .conversation-action:focus-visible { outline-color: Highlight; }
 }
 .installation-inventory-body { display: grid; min-height: 0; overflow-y: auto; gap: var(--space-4); padding: var(--space-3); }
+/* The Close bar is the sheet's footer, outside the scroller (cas-205e). */
+.installation-inventory > .dialog-actions { padding-inline: var(--space-3); }
 .installation-inventory-list { display: grid; gap: 1.25rem; }
 .installation-inventory-row { display: grid; gap: .75rem; border-top: var(--line-width) solid var(--line-subtle); padding-top: 1rem; }
 .installation-inventory-row h3 { margin: 0; font-size: var(--fs-md); overflow-wrap: anywhere; }

@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -227,7 +228,9 @@ class TokenPreflight(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/main", head)
         integration = self.worktree / ".cas/merge-sweeps/integration.json"
         integration.parent.mkdir(parents=True)
-        integration.write_text(json.dumps({"status": "PASSED", "base": head}))
+        integration.write_text(json.dumps({"status": "PASSED", "base": head, "tip": head, "epics": [],
+            "no_build": {"tip": head, "rows": {row: "PASS" for row in
+                runpy.run_path(str(Path(__file__).with_name("release-integration-gates.py")))["REQUIRED_ROWS"]}}}))
         self.git("add", ".")
         self.git("-c", "commit.gpgsign=false", "commit", "-qm", "receipt")
 

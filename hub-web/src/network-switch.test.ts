@@ -62,7 +62,7 @@ describe("abandoning half-open sockets (cas-0978)", () => {
 });
 
 describe("network hints (cas-0978)", () => {
-  it("retries at once, from a fresh schedule, when the network comes back during a backoff", () => {
+  it("wakes a network backoff immediately without resetting its failure streak (cas-49cc)", () => {
     vi.stubGlobal("window", globalThis);
     const { internals } = supervisor();
     (internals as unknown as { desired: boolean }).desired = true;
@@ -74,7 +74,7 @@ describe("network hints (cas-0978)", () => {
     internals.networkChanged();
 
     expect(connect).toHaveBeenCalledTimes(1);
-    expect(internals.attempt).toBe(0);
+    expect(internals.attempt).toBe(5);
     expect(internals.retryTimer).toBeUndefined();
   });
 

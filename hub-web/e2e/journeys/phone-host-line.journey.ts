@@ -50,7 +50,10 @@ for (const cell of cells) {
           await search.focus();
           await search.fill("cas-src");
           await page.keyboard.press("Enter");
-          await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
+          // Phone navigation lands on the reading region, so reopening the
+          // conversation does not raise the soft keyboard (cas-12c29).
+          await expect(page.locator(".conversation-reading.thread")).toBeFocused();
+          await expect(page.getByRole("textbox", { name: "Your message" })).not.toBeFocused();
         });
       }
 

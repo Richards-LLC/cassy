@@ -1105,9 +1105,15 @@ export class HubConnectionSupervisor {
   private async openLegacyAttach(session: string): Promise<void> {
     const existing = this.sockets.get(session);
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
+    const generation = this.machineSocketGeneration;
     this.transitionAttach(session, "auth", "auth");
     const ticket = await this.request<{ ticket: string }>("POST", "/v1/auth/websocket-ticket", { session });
-    if (!this.desired) return;
+    if (!this.desired || !this.desiredSessions.has(session) || generation !== this.machineSocketGeneration) return;
+    // A heartbeat/recovery or another caller can attach while the ticket
+    // awaits HTTP. Never replace its live/connecting socket: receipts for
+    // sends on that socket would fail the current-socket check below.
+    const current = this.sockets.get(session);
+    if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)) return;
     const endpoint = new URL(`/v1/sessions/${encodeURIComponent(session)}/attach`, this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);

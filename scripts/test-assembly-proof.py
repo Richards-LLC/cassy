@@ -546,9 +546,15 @@ p.prove(root)
         self.commit()
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
+            # Keep the fixture's scratch sweep off the host's real scratch
+            # bases: a live gate's clones there can take longer to scan than
+            # the start-up deadline below.
+            fixture_env = dict(os.environ, CAS_RELEASE_GATE_HOME_DIR=str(scratch / "home-base"),
+                               CAS_RELEASE_SCRATCH_EXTRA_BASES="")
             child = subprocess.Popen([sys.executable, "-c", script,
                                       str(Path(proof.__file__).resolve()), str(self.root), str(scratch)],
-                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     env=fixture_env)
             try:
                 deadline = time.monotonic() + 10
                 while not (scratch / "ready").exists() and child.poll() is None:

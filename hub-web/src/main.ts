@@ -18,6 +18,7 @@ import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./co
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
+import { HeldSendFlushes } from "./held-send-flush";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -2934,7 +2935,7 @@ function scheduleReceiptCheck(key: string): void {
  */
 type HeldSend = { clientRef: string; supervisor: string; text: string; replyTo?: number; expiry: ReturnType<typeof setTimeout> };
 const heldSends = new Map<string, HeldSend[]>();
-const flushingHeldSends = new Set<string>();
+const flushingHeldSends = new HeldSendFlushes();
 const HELD_SEND_MS = 120_000;
 
 /** The machine is reconnecting on its own, as opposed to refused (pairing gone, unsupported browser). */
@@ -3287,41 +3288,41 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
   const key = sessionKey(machine.id, session);
   await restoredMachines.get(machine.id);
   await persistPendingSends();
-  if (flushingHeldSends.has(key) || !heldSends.get(key)?.length) return;
-  flushingHeldSends.add(key);
-  try {
-    const history = conversationHistory(key);
-    // The lease lapsed while the machine was away; the hub refuses a message
-    // from an observer, so control is taken back first, as a send does.
-    if (leases.get(key)?.held_by_me !== true && !await takeControlForMessage(machine, session)) {
-      for (const held of heldSends.get(key) ?? []) {
-        clearTimeout(held.expiry);
-        history.reject(held.clientRef, `Could not take control of ${session} after reconnecting. Retry to send it.`);
+  await flushingHeldSends.run(key, async () => {
+    if (!heldSends.get(key)?.length) return;
+    try {
+      const history = conversationHistory(key);
+      // The lease lapsed while the machine was away; the hub refuses a message
+      // from an observer, so control is taken back first, as a send does.
+      if (leases.get(key)?.held_by_me !== true && !await takeControlForMessage(machine, session)) {
+        for (const held of heldSends.get(key) ?? []) {
+          clearTimeout(held.expiry);
+          history.reject(held.clientRef, `Could not take control of ${session} after reconnecting. Retry to send it.`);
+        }
+        heldSends.delete(key);
+        return;
       }
-      heldSends.delete(key);
-      return;
+      const queue = heldSends.get(key) ?? [];
+      while (queue.length) {
+        const held = queue[0]!;
+        const accepted = machines.get(machine.id);
+        if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
+        const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
+          () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
+        if (result === "waiting" || result === "not-saved") break;
+        queue.shift();
+        clearTimeout(held.expiry);
+        history.release(held.clientRef);
+        if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
+        else if (result !== "written") history.unconfirmInFlight(Date.now());
+      }
+      if (queue.length === 0) heldSends.delete(key);
+      scheduleReceiptCheck(key);
+    } finally {
+      settleHeldComposerStatus(machine.id, session);
+      updateConversationViews(); renderConversationList();
     }
-    const queue = heldSends.get(key) ?? [];
-    while (queue.length) {
-      const held = queue[0]!;
-      const accepted = machines.get(machine.id);
-      if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
-      const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
-        () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
-      if (result === "waiting" || result === "not-saved") break;
-      queue.shift();
-      clearTimeout(held.expiry);
-      history.release(held.clientRef);
-      if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
-      else if (result !== "written") history.unconfirmInFlight(Date.now());
-    }
-    if (queue.length === 0) heldSends.delete(key);
-    scheduleReceiptCheck(key);
-  } finally {
-    flushingHeldSends.delete(key);
-    settleHeldComposerStatus(machine.id, session);
-    updateConversationViews(); renderConversationList();
-  }
+  });
 }
 
 /** "the cas-src supervisor", never the generated codename (cas-71f4, journey F20). */

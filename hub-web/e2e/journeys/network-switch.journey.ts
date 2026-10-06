@@ -1025,5 +1025,32 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
       await expect(header).toHaveText(" · Live");
       expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
     }
+    // A route hint and repeated event-only loss must not condemn either
+    // recently speaking terminal. Empty output preserves the visible frame.
+    hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });
+    hub.send(OTTER, { Output: { pane_id: "supervisor", data: [] } });
+    await clock.advance(1);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await clock.advance(1_000);
+    expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
+    for (let second = 0; second < 30; second++) {
+      hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });
+      hub.send(OTTER, { Output: { pane_id: "supervisor", data: [] } });
+      await page.evaluate(() => {
+        const wire = window as unknown as { __journeyResetEvents: (host: string) => void };
+        wire.__journeyResetEvents("atlas.test");
+        wire.__journeyResetEvents("studio.test");
+      });
+      await clock.advance(1_000);
+      await expect(header).toHaveText(" · Live");
+      expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
+    }
+    const streams = await page.evaluate(() => (window as unknown as {
+      __journeyEventStreamOpens: Record<string, number>;
+    }).__journeyEventStreamOpens);
+    expect(streams["atlas.test"]).toBeLessThanOrEqual(6);
+    expect(streams["studio.test"]).toBeLessThanOrEqual(6);
+    await nav.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(header).toHaveText(" · Live");
   });
 });

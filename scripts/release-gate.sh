@@ -1164,6 +1164,7 @@ check_archive_mode() {
         printf 'archive-mode: cannot create remap worktree at %s\n' "$remap"
         return 1
     }
+    python3 "$repo_root/scripts/release_scratch.py" --repo "$repo_root" --path "$archive_dir" register-remap || return 1
     archive_path="$(make_archive_path)" || {
         status=$?
         return "$status"

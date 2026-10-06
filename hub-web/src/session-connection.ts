@@ -6,8 +6,9 @@ import type { AttachSnapshot, ConnectionSnapshot } from "./connection-state";
  * The machine's control connection can stay live while a session's own socket
  * is down. The header, the list row and the footer used to read only the
  * machine and kept saying "Live" / "Connected" beside a "Connection
- * interrupted" banner. They all read this instead: the machine's state while it
- * is not live, else the session's attach lifecycle while that is not live.
+ * interrupted" banner. They all read this instead: a responding session can
+ * remain live during event recovery; otherwise the machine's state wins while
+ * it is not live, then the session's attach lifecycle while that is not live.
  *
  * A session that has been live and dropped is reconnecting, whatever stage its
  * retry is in (dialing, attaching, a transient failure), so it reads as
@@ -18,8 +19,17 @@ export function sessionConnection(
   machine: ConnectionSnapshot | undefined,
   attach: AttachSnapshot | undefined,
   wasLive: boolean,
+  responding = false,
 ): ConnectionSnapshot | undefined {
-  if (!machine || machine.phase !== "live") return machine;
+  if (!machine) return machine;
+  if (machine.phase !== "live") {
+    // Event delivery retries independently of a current, speaking daemon.
+    // Cached attach.phase alone is insufficient: the owner must prove its
+    // OPEN/ready socket has received a frame inside the liveness window.
+    if (responding && attach?.phase === "live" && machine.phase !== "idle"
+      && !machine.fatal && !machine.authFailure && !machine.networkAccessHelp && !machine.degraded) return attach;
+    return machine;
+  }
   if (!attach || attach.phase === "live" || attach.phase === "idle") return machine;
   if (attach.fatal === true || attach.authFailure) return attach;
   if (wasLive) return { ...attach, phase: "backoff" };
@@ -70,9 +80,15 @@ function openingPhase(attach: AttachSnapshot): ConnectionSnapshot["phase"] {
  */
 export function machineConnection(
   machine: ConnectionSnapshot | undefined,
-  sessions: ReadonlyArray<{ attach: AttachSnapshot | undefined; wasLive: boolean }>,
+  sessions: ReadonlyArray<{ attach: AttachSnapshot | undefined; wasLive: boolean; responding?: boolean }>,
 ): ConnectionSnapshot | undefined {
-  if (!machine || machine.phase !== "live") return machine;
+  if (!machine) return machine;
+  if (machine.phase !== "live") {
+    const speaking = sessions.find(({ attach, responding }) => responding && attach?.phase === "live");
+    const effective = speaking && sessionConnection(machine, speaking.attach, speaking.wasLive, speaking.responding);
+    if (effective?.phase !== "live") return machine;
+    machine = effective;
+  }
   for (const { attach, wasLive } of sessions) {
     if (!wasLive && attach && (firstAttachInProgress(attach) || firstAttachRetry(attach, wasLive))) continue;
     if (wasLive && attach && sessionOnlyReconnect(attach)) continue;

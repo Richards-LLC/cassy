@@ -78,6 +78,8 @@ function transport(multiplex = false) {
     refusePairing: (value: boolean) => { refused = value; },
     catalogRevision: (value: number) => { catalogRevision = value; },
     event: (event: Record<string, unknown> = { kind: "session_added" }) => eventController!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)),
+    endEvents: () => eventController!.close(),
+    replay: (events: Record<string, unknown>[]) => eventController!.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""))),
   };
 }
 
@@ -94,7 +96,7 @@ class TransportSocket {
   onerror: (() => void) | null = null;
   constructor(readonly url: URL) { TransportSocket.instances.push(this); }
   open(): void { this.readyState = TransportSocket.OPEN; this.onopen?.(); }
-  receive(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
+  receive(message: unknown): void { if (this.readyState === TransportSocket.OPEN) this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
   close(code = 1000): void { this.readyState = 3; this.onclose?.({ code } as CloseEvent); }
   send(value: string): void { this.sent.push(value); }
 }
@@ -477,6 +479,223 @@ describe("Commander live connection lifecycle", () => {
     expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
   });
 
+  it.each([false, true])("keeps a healthy legacy attach through a peer exit (replay=%s, cas-49cc)", async (replay) => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("peer-clean-exit"), () => {}, event => events.push(event));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    for (const session of ["healthy", "removed-peer"]) {
+      await connection.attach(session);
+      const socket = TransportSocket.instances.at(-1)!;
+      socket.open();
+      socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    }
+    const healthy = TransportSocket.instances[0]!;
+    const peer = TransportSocket.instances[1]!;
+    const window = Array.from({ length: 1021 }, (_, index) => ({ kind: "pane_added", sequence: 4180 + index, session: "removed-peer" }));
+    const tail = [
+      { kind: "pane_exited", sequence: 5201, session: "removed-peer", pane_id: "worker" },
+      { kind: "daemon_disconnected", sequence: 5202, session: "removed-peer", diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata; do not infer a cause from a closed socket alone." } },
+      { kind: "session_removed", sequence: 5203, session: "removed-peer" },
+    ];
+    const metadata = { kind: "stream_metadata", epoch: "stable-hub", oldest_sequence: 4180, latest_sequence: 5203 };
+    hub.replay([metadata, ...window, { kind: "replay_complete" }, ...tail]);
+    peer.close(1000);
+    await vi.waitFor(() => expect(events).toHaveLength(1024));
+    expect(healthy.readyState).toBe(TransportSocket.OPEN);
+    if (replay) {
+      hub.endEvents();
+      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(hub.streams).toHaveLength(2));
+      hub.replay([metadata, ...window, ...tail, { kind: "replay_complete" }]);
+    }
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(events).toHaveLength(1024);
+    expect(healthy.readyState).toBe(TransportSocket.OPEN);
+    expect(TransportSocket.instances.filter(socket => socket.url.pathname.includes("/healthy/"))).toHaveLength(1);
+    expect(connection.attachSnapshot("healthy")?.phase).toBe("live");
+  });
+
+  it("refreshes the session catalog on event recovery without replacing its speaking attach (cas-49cc)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    let listed: string | undefined;
+    hub.catalogRevision(1);
+    const connection = supervisor(await storedMachine("event-catalog"), () => {}, () => {}, sessions => { listed = sessions[0]?.name; });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(listed).toBe("catalog-1");
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ Welcome: { state: { panes: [] } } });
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    hub.catalogRevision(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(listed).toBe("catalog-2");
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+  });
+
+  it.each([false, true])("measures current ready transport reads without relaxing the send fence (multiplex=%s, cas-49cc)", async (multiplex) => {
+    const hub = transport(multiplex);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("read-health"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const pending = connection.attach("healthy");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    if (multiplex) socket.receive({ proto: 2 });
+    await pending;
+    const receive = (message: unknown) => socket.receive(multiplex ? { channel: "pty:healthy", message } : message);
+    receive({ Welcome: { state: { panes: [] } } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    expect(connection.hasLiveAttach("missing")).toBe(false);
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Still fenced during event recovery" } })).toBe(false);
+    // Move the read clock without running retry timers or heartbeat signing.
+    vi.setSystemTime(Date.now() + 20_000);
+    expect(connection.hasLiveAttach("healthy")).toBe(false);
+    receive({ StateUpdate: { state: { panes: [] } } });
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    socket.close(1000);
+    expect(connection.hasLiveAttach("healthy")).toBe(false);
+  });
+
+  it("keeps a speaking legacy attach after a successful network hint (cas-49cc)", async () => {
+    const hub = transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("healthy-hint"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] } } });
+    const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+    hints.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket")).toHaveLength(1);
+  });
+
+  it("bounds 30 seconds of 1Hz SSE flaps without redialing a speaking attach (cas-49cc)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    class SpeakingSocket extends TransportSocket {
+      constructor(url: URL) {
+        super(url);
+        queueMicrotask(() => { this.open(); this.receive({ Welcome: { state: { panes: [] } } }); });
+      }
+    }
+    vi.stubGlobal("WebSocket", SpeakingSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const retries: number[] = [];
+    const connection = supervisor(await storedMachine("flapping-events"), state => {
+      if (state.phase === "backoff") retries.push(state.retryInMs!);
+    });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    const socket = TransportSocket.instances[0]!;
+    const started = Date.now();
+    const pulse = setInterval(() => {
+      socket.receive({ StateUpdate: { state: { panes: [] } } });
+      try { hub.endEvents(); } catch { /* no stream open during backoff */ }
+    }, 1_000);
+    for (let second = 0; second < 30; second++) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      // Let real signing/fetch work settle before the next protocol second;
+      // otherwise fake time can manufacture a signing deadline failure.
+      await vi.waitFor(() => expect(["live", "backoff"]).toContain(connection.snapshot().phase), { interval: 1 });
+    }
+    clearInterval(pulse);
+    console.info("cas-49cc flap proof", { elapsedMs: Date.now() - started, streams: hub.streams.length,
+      attaches: TransportSocket.instances.length, tickets: hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket").length, retries });
+    expect(hub.streams.length).toBeLessThanOrEqual(6);
+    expect(retries.slice(0, 4)).toEqual([1_000, 2_000, 4_000, 8_000]);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket")).toHaveLength(1);
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+  });
+
+  it.each([false, true])("still replaces a stale or proved-offline legacy attach (offline=%s, cas-49cc)", async (offline) => {
+    transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("untrusted-attach"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] } } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    if (!offline) await vi.advanceTimersByTimeAsync(20_000);
+    hints.dispatchEvent(new Event(offline ? "offline" : "online"));
+    await vi.waitFor(() => expect(socket.readyState).toBe(3));
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Never into a dead socket" } })).toBe(false);
+    if (!offline) {
+      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+      expect(TransportSocket.instances[1]!.readyState).toBe(TransportSocket.CONNECTING);
+    }
+  });
+
+  it("resets event retry backoff only after a stream survives ten seconds (cas-49cc)", async () => {
+    const hub = transport();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("event-settle"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(2_000));
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    for (let beat = 0; beat < 2; beat++) {
+      const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+    }
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+  });
+
   it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
     const hub = transport();
     TransportSocket.instances = [];
@@ -492,19 +711,19 @@ describe("Commander live connection lifecycle", () => {
     hub.event({ kind: "viewer_lagged" });
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     // A dispatch's IndexedDB/credential await can finish after this transition.
-    // The old socket is physically open, but recovery will replace it.
+    // Event recovery still fences sends, while recent daemon frames keep
+    // the healthy terminal available for its in-flight receipts (cas-49cc).
     expect(socket.readyState).toBe(TransportSocket.OPEN);
     const before = socket.sent.length;
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
     expect(socket.sent).toHaveLength(before);
     connection.retry();
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
-    const recovered = TransportSocket.instances[1]!;
-    recovered.open();
-    recovered.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(TransportSocket.instances).toHaveLength(1);
+    const recovered = socket;
     await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(true);
-    expect(socket.sent).toHaveLength(before);
+    expect(socket.sent).toHaveLength(before + 1);
     expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
   });
 

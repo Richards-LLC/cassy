@@ -20,6 +20,7 @@ warning and the task stays stuck in `pending_verification=true`.
 ## 1. File:line references
 
 ### Warning emission (the `⚠️ VERIFICATION REQUIRED` text)
+
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs:261-287`
   — `Self::tool_error(format!("⚠️ VERIFICATION REQUIRED …"))` inside the
   `Ok(None) | Ok(Some(_))` arm (no approved verification found).
@@ -28,6 +29,7 @@ warning and the task stays stuck in `pending_verification=true`.
   `close_ops.rs:151-182` (`⚠️ VERIFICATION FAILED`).
 
 ### Verifier spawn site (there isn't one)
+
 - **None in `close_ops.rs`.** Grep for `"task-verifier"` across
   `cas-cli/src` returns only:
   - String literals used to format instructions to the human/agent
@@ -50,6 +52,7 @@ warning and the task stays stuck in `pending_verification=true`.
   "spawn verifier, await result, return" path.
 
 ### Close handler
+
 - Entry: `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs:8`
   — `CasCore::cas_task_close`.
 - Verification gate begins at `close_ops.rs:94`
@@ -57,9 +60,8 @@ warning and the task stays stuck in `pending_verification=true`.
 - Worktree-merge jail (unrelated but adjacent): `close_ops.rs:296-349`.
 - Actual mutation path (after gate passes): `close_ops.rs:351-574`.
 
-### Jail enforcement (the path that WAS the `VERIFICATION_JAIL_BLOCKED`
+### Jail enforcement (the path that WAS the `VERIFICATION_JAIL_BLOCKED` signal)
 
-signal)
 - `cas-cli/src/mcp/server/mod.rs:617-676`
   `CasCore::authorize_agent_action`.
 - Error string at `server/mod.rs:667-671`

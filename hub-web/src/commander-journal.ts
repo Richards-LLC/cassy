@@ -51,7 +51,9 @@ function validReceipt(value: unknown): value is JournalReceipt {
     && finiteTime(value.sentAt) && (value.device_label === undefined || boundedText(value.device_label, 2_000));
 }
 function normalizedReply(value: unknown): OperatorReply | undefined {
-  if (!object(value) || !Number.isSafeInteger(value.notification_id) || (value.notification_id as number) <= 0
+  // Notices have their own durable attention/resolution store. Never ACK or
+  // restore them as supervisor turns; this also prunes pre-fix journal rows.
+  if (!object(value) || (value.notice !== undefined && value.notice !== null) || !Number.isSafeInteger(value.notification_id) || (value.notification_id as number) <= 0
     || !(value.reply_to === null || (Number.isSafeInteger(value.reply_to) && (value.reply_to as number) > 0))
     || !boundedText(value.message) || !boundedText(value.summary) || !boundedText(value.device_id, 2_000)) return undefined;
   const kind = value.kind ?? "answer";
@@ -63,9 +65,6 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
   if (value.options !== undefined && (!Array.isArray(value.options) || value.options.some(option => !boundedText(option)))) return undefined;
   if (value.operator_label !== undefined && !boundedText(value.operator_label, 2_000)) return undefined;
   if (value.reply_to_session !== undefined && value.reply_to_session !== null && !boundedText(value.reply_to_session, 2_000)) return undefined;
-  if (value.notice !== undefined && value.notice !== null && (!object(value.notice) || !boundedText(value.notice.source, 2_000)
-    || (value.notice.subject !== undefined && !Number.isSafeInteger(value.notice.subject))
-    || (value.notice.resolved !== undefined && typeof value.notice.resolved !== "boolean"))) return undefined;
   const reply: OperatorReply = {
     notification_id: value.notification_id as number, reply_to: value.reply_to as number | null,
     message: value.message, summary: value.summary, device_id: value.device_id, kind: kind as OperatorReply["kind"],
@@ -73,11 +72,6 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
     ...(value.operator_label === undefined ? {} : { operator_label: value.operator_label as string }),
     ...(value.options === undefined || !(value.options as string[]).length ? {} : { options: value.options as string[] }),
     ...(value.reply_to_session === undefined || value.reply_to_session === null ? {} : { reply_to_session: value.reply_to_session as string }),
-    ...(value.notice === undefined || value.notice === null ? {} : { notice: {
-      source: (value.notice as Record<string, unknown>).source as string,
-      ...((value.notice as Record<string, unknown>).subject === undefined ? {} : { subject: (value.notice as Record<string, unknown>).subject as number }),
-      resolved: (value.notice as Record<string, unknown>).resolved === true,
-    } }),
   };
   return JSON.stringify(reply).length <= 64_000 ? reply : undefined;
 }

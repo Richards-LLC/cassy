@@ -842,9 +842,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onOperatorReply: (session, reply, frameFence) => {
-      void persistDeviceReply(machine, session, reply, frameFence);
-      // cas-e829: a system notice goes to the attention lane, never the thread.
+      // A notice belongs only to attention, including its durable resolution.
       if (isOperatorNotice(reply)) { applyOperatorNotice(machine, session, reply); return; }
+      void persistDeviceReply(machine, session, reply, frameFence);
       conversationHistory(sessionKey(machine.id, session), session).receive({ ...reply, device_persisted: false }, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
       scheduleReceiptCheck(sessionKey(machine.id, session));
@@ -878,13 +878,13 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // older daemon) are filed beside it by session, never into it.
       for (const message of [...page.messages, ...(page.earlier_messages ?? [])]) history.hydrateSend(message);
       for (const reply of [...page.replies, ...(page.earlier_replies ?? [])]) {
-        if (reply.session === undefined || reply.session === session) void persistDeviceReply(machine, session, reply, frameFence);
         // cas-e829: this session's notices raise or retire attention; another
         // session's are its own business.
         if (isOperatorNotice(reply)) {
           if (reply.session === undefined || reply.session === session) applyOperatorNotice(machine, session, reply);
           continue;
         }
+        if (reply.session === undefined || reply.session === session) void persistDeviceReply(machine, session, reply, frameFence);
         // History has reached this device, but the asynchronous journal commit
         // has not proved storage yet. Render its forwarded receipt immediately,
         // as for live replies, so committing it does not insert a new line above
@@ -2985,7 +2985,10 @@ sendJournal.onChange = () => {
           if (remaining <= 0) expireHeldSend(machine, key, held.id);
           else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
         }
-        for (const row of snapshot.replies) history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+        for (const row of snapshot.replies) {
+          if (isOperatorNotice(row.reply)) continue;
+          history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+        }
         if (sessionIsUp(machine.id, scope.session)) void flushHeldSends(machine, scope.session);
       }
     }
@@ -3046,7 +3049,10 @@ function restoreStoredSends(machine: StoredMachine): void {
       pendingThreadScopes.set(key, scopeKey(scope));
       persistedSends.set(key, snapshot.sends);
       const history = conversationHistory(key, scope.session);
-      for (const row of snapshot.replies) history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+      for (const row of snapshot.replies) {
+        if (isOperatorNotice(row.reply)) continue;
+        history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+      }
       for (const held of history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts)) {
         const since = held.heldAt ?? held.at;
         heldSince.set(held.id, since);
@@ -3064,6 +3070,8 @@ function restoreStoredSends(machine: StoredMachine): void {
 }
 
 async function persistDeviceReply(machine: StoredMachine, session: string, reply: OperatorReply, frameFence?: CredentialFence): Promise<void> {
+  // Never authorize a conversation reply ACK for an attention-only notice.
+  if (isOperatorNotice(reply)) return;
   try {
   const fence = frameFence ?? credentialFence(machine);
   const scope = deliveryScope(machine, session);

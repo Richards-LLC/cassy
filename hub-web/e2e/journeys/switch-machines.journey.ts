@@ -1,3 +1,4 @@
+import { phoneLayout, phoneSwitch } from "./responsive-goals";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -38,6 +39,7 @@ const ALPHA: Machine = {
 };
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
+  if (await phoneLayout(page)) { await phoneSwitch(page, journey); return; }
   // Nine stages including a pairing and two reloads. cas-9772: this is a hang
   // guard, not a budget for the work — every wait below is bounded by the
   // page's own requests, so a loaded CI host is no longer a failure.

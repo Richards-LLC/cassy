@@ -1,3 +1,4 @@
+import { activate, phoneLayout, phoneFind, showConversationList } from "./responsive-goals";
 import { join } from "node:path";
 import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { journeyStamp } from "./clock";
@@ -55,6 +56,7 @@ for (const width of [1280, 390]) for (const long of [true, false]) {
 }
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
+  if (await phoneLayout(page)) { await phoneFind(page, journey); return; }
   // Fourteen stages, two searches, three page loads and the palette. On a
   // quiet host the test takes about 72 s (50 s of stages); on the loaded
   // merge-queue host its passing runs took up to 2.2 min and 6 of 10 at
@@ -652,19 +654,25 @@ test.describe("on a Mac", () => {
     await journey.stage("On a Mac, the search and the Appearance & commands control say ⌘K, and ⌘K opens them", async () => {
       await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
       await journey.open();
+      const phone = await phoneLayout(page);
       const search = page.getByRole("searchbox", { name: "Search conversations" });
-      await expect(search).toHaveAttribute("placeholder", "Search conversations (⌘K)");
-      await page.keyboard.press("Meta+k");
-      await expect(search).toBeFocused();
-      await page.keyboard.press("Meta+k");
+      await expect(search).toHaveAttribute("placeholder", phone ? "Search conversations" : "Search conversations (⌘K)");
+      if (phone) await activate(page, page.getByRole("button", { name: "Appearance & commands", exact: true }));
+      else {
+        await page.keyboard.press("Meta+k");
+        await expect(search).toBeFocused();
+        await page.keyboard.press("Meta+k");
+      }
       await expect(page.getByRole("searchbox", { name: "Filter commands" })).toBeFocused();
-      await page.keyboard.press("Escape");
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      if (phone) await activate(page, page.getByRole("button", { name: "Close command palette", exact: true }));
+      else await page.keyboard.press("Escape");
+      await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }));
       await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
-      // With a conversation open the list stays beside it, and its
+      await showConversationList(page);
+      // The list returns through Back on phone; its
       // Appearance & commands control names the same chord in its tooltip.
       await expect(page.getByRole("button", { name: "Appearance & commands", exact: true })).toHaveAttribute("title", "Appearance & commands (⌘K twice)");
-      await expect(search).toHaveAttribute("placeholder", "Search conversations (⌘K)");
+      await expect(search).toHaveAttribute("placeholder", phone ? "Search conversations" : "Search conversations (⌘K)");
       await expect(page.locator("body")).not.toContainText("Ctrl K");
       expect(await page.evaluate(() => [...document.querySelectorAll("[title], [placeholder], [aria-label]")].map((node) => `${node.getAttribute("title") ?? ""} ${node.getAttribute("placeholder") ?? ""} ${node.getAttribute("aria-label") ?? ""}`).filter((text) => text.includes("Ctrl K")))).toEqual([]);
     });

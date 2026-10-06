@@ -630,7 +630,11 @@ describe("Commander live connection lifecycle", () => {
     await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(2_000));
     await vi.advanceTimersByTimeAsync(2_000);
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    await vi.advanceTimersByTimeAsync(10_000);
+    for (let beat = 0; beat < 2; beat++) {
+      const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+    }
     hub.endEvents();
     await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
   });

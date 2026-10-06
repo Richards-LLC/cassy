@@ -480,6 +480,11 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
           const outsideX = clipsX && !ellipsisX && (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance);
           const outsideY = clipsY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
           if (outsideX || outsideY) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
+          // An ellipsising box decides which part of its line is
+          // drawn. The text range still measures the whole unellipsised line,
+          // so a clipping ancestor further up (a title row with overflow-x:
+          // clip) would see that phantom width; the walk stops on X here.
+          if (ellipsisX) checkX = false;
           if (scrollsY) {
             const contentTop = ancestorBox.y + ancestor.clientTop - ancestor.scrollTop;
             const contentBottom = contentTop + ancestor.scrollHeight;

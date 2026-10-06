@@ -198,6 +198,11 @@ main {
    paint, no focus or pointer — and the thread is never inside it. */
 .pane-host, .pane-host[hidden] { display: none !important; }
 
+/* cas-861c (fixture QA, 844×390): the connection verdict card is taller than a
+   landscape phone's pane, and the clipped pane hid Retry and Diagnose. While it
+   shows, the pane scrolls vertically; it still never scrolls sideways. */
+.pane-grid:has(> .terminal-state) { overflow-y: auto; overscroll-behavior: contain; }
+
 /* == Raw output transcript == */
 /* The supervisor pane's emulator lines reflowed at UI text size, read-only,
    in the Raw output drawer (cas-0546). */

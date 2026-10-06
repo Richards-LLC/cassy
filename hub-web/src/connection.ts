@@ -1789,8 +1789,12 @@ export class HubConnectionSupervisor {
       const queued = messageQueuedFromDaemon(message);
       // A send reached the daemon: the upstream is back, so the next
       // retryable refusal starts the backoff afresh (cas-a355).
-      if (queued) this.clearUpstreamStreak(session);
-      if (queued) this.callbacks.onMessageQueued?.(session, queued, frameFence);
+      if (queued) {
+        this.clearUpstreamStreak(session);
+        const socket = this.sockets.get(session);
+        if (socket) this.legacySends.set(socket, (this.legacySends.get(socket) ?? []).filter(send => send.clientRef !== queued.client_ref || send.target !== queued.target));
+        this.callbacks.onMessageQueued?.(session, queued, frameFence);
+      }
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply, frameFence);
     } else if (message.OperatorNoticeResolved) {

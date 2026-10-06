@@ -1050,6 +1050,10 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     }).__journeyEventStreamOpens);
     expect(streams["atlas.test"]).toBeLessThanOrEqual(6);
     expect(streams["studio.test"]).toBeLessThanOrEqual(6);
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("2 connected");
+    await expect(page.locator(".status-stale").filter({ visible: true })).toHaveCount(0);
+    console.info("cas-49cc native flap proof", { seconds: 30, streams,
+      healthyAttaches: [hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)] });
     await nav.getByRole("button", { name: /gabber-studio/ }).click();
     await expect(header).toHaveText(" · Live");
   });

@@ -1100,7 +1100,10 @@ function conversationConnection(machineId: string, session: string | undefined):
 
 function machineFooterConnection(machineId: string): ConnectionState | undefined {
   const prefix = `${machineId}:`;
-  const attached = [...attachStates].filter(([key]) => key.startsWith(prefix)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key), responding: connections.get(machineId)?.hasLiveAttach(attach.session) }));
+  // The catalog removes ended peers; their cached retry lifecycle must not
+  // keep a machine with a responding conversation labelled Reconnecting.
+  const listed = new Set((sessions.get(machineId) ?? []).map(session => session.name));
+  const attached = [...attachStates].filter(([key, attach]) => key.startsWith(prefix) && listed.has(attach.session)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key), responding: connections.get(machineId)?.hasLiveAttach(attach.session) }));
   return machineConnection(connectionStates.get(machineId), attached);
 }
 

@@ -451,6 +451,10 @@ export class HubConnectionSupervisor {
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
       const recovering = this.connectionLost;
+      // Short event streams can repeatedly stop the heartbeat before its
+      // catalog read. Refresh on the backed-off recovery so live daemon
+      // traffic is not left beside an expired, empty conversation list.
+      if (recovering) await this.withStageTimeout("auth", signal => this.refreshSessions(signal));
       this.connectionLost = false;
       this.transition("live", "live");
       this.startHeartbeat();

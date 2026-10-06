@@ -95,7 +95,12 @@ class TransportSocket {
   onerror: (() => void) | null = null;
   constructor(readonly url: URL) { TransportSocket.instances.push(this); }
   open(): void { this.readyState = TransportSocket.OPEN; this.onopen?.(); }
-  receive(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
+  receive(message: unknown): void {
+    // Native WebSocket discards incoming frames once close() starts. Keeping
+    // onmessage installed cannot make a closed transport deliver a receipt.
+    if (this.readyState !== TransportSocket.OPEN) return;
+    this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent);
+  }
   close(code = 1000): void { this.readyState = 3; this.onclose?.({ code } as CloseEvent); }
   send(value: string): void { this.sent.push(value); }
 }

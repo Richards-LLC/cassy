@@ -367,7 +367,6 @@ export class HubConnectionSupervisor {
       networkAccessHelp: phase === "live" || phase === "idle" || update.authFailure ? undefined : this.lifecycle.networkAccessHelp,
       ...update,
     };
-    console.debug("[DEBUG-9dc6-r6b] machine", phase, stage, this.connectionGeneration);
     this.diagnostics.record(this.lifecycle, this.connectionGeneration);
     this.callbacks.onState(this.lifecycle);
   }
@@ -399,7 +398,6 @@ export class HubConnectionSupervisor {
       networkAccessHelp: phase === "live" || phase === "idle" || update.authFailure ? undefined : prior?.networkAccessHelp,
       ...update,
     };
-    console.debug("[DEBUG-9dc6-r6b] attach", phase, this.lifecycle.phase, this.machineSocketGeneration, this.machineSocketReady);
     this.attachLifecycles.set(session, snapshot);
     this.diagnostics.record(snapshot, this.machineSocketGeneration, session);
     this.callbacks.onAttachState?.(session, snapshot);

@@ -3279,7 +3279,6 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
   const key = sessionKey(machine.id, session);
   await restoredMachines.get(machine.id);
   await persistPendingSends();
-  console.debug("[DEBUG-9dc6-r6b] flush-check", flushingHeldSends.has(key), heldSends.get(key)?.length, connections.get(machine.id)?.snapshot().phase, connections.get(machine.id)?.attachSnapshot(session)?.phase);
   if (flushingHeldSends.has(key) || !heldSends.get(key)?.length) return;
   flushingHeldSends.add(key);
   try {
@@ -3301,7 +3300,6 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
       if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
       const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
         () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
-      console.debug("[DEBUG-9dc6-r6b] dispatch", result, connections.get(machine.id)?.snapshot().phase, connections.get(machine.id)?.attachSnapshot(session)?.phase);
       if (result === "waiting" || result === "not-saved") break;
       queue.shift();
       clearTimeout(held.expiry);
@@ -3312,7 +3310,6 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     if (queue.length === 0) heldSends.delete(key);
     scheduleReceiptCheck(key);
   } finally {
-    console.debug("[DEBUG-9dc6-r6b] flush-done", heldSends.get(key)?.length);
     flushingHeldSends.delete(key);
     settleHeldComposerStatus(machine.id, session);
     updateConversationViews(); renderConversationList();

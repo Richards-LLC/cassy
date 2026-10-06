@@ -288,15 +288,19 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const editableField = (element) => (element.tagName === 'INPUT' && !NON_TEXT_INPUTS.has((element.getAttribute('type') || 'text').toLowerCase()))
       || element.tagName === 'TEXTAREA'
       || (element.hasAttribute('contenteditable') && element.isContentEditable === true);
-    // A multi-line clamp is the design, not lost text: a computed line count
-    // (-webkit-line-clamp, or line-clamp) hides the later lines behind an
-    // ellipsis. Engines report the -webkit-box host as flow-root, so the count
-    // is the signal. It must clip vertically and not also overflow sideways.
+    // A multi-line clamp is the design, not lost text: it hides the later
+    // lines and draws its own ellipsis at the cut. The legacy form
+    // (-webkit-line-clamp) clamps only a vertical -webkit-box, which engines
+    // report as flow-root, and always draws that ellipsis whatever
+    // text-overflow says; on any other box the count does nothing and hidden
+    // lines are lost. The standard line-clamp clamps any block. Either way the
+    // box must clip vertically and not also overflow sideways.
     const lineClampBox = (element, style = getComputedStyle(element)) => {
-      const lines = Math.max(...[style.webkitLineClamp, style.getPropertyValue('line-clamp')].map((value) => Number.parseInt(value || '', 10)).filter(Number.isFinite), 0);
-      return lines > 0 && style.display !== 'inline'
+      const count = (value) => Number.parseInt(value || '', 10);
+      const legacy = count(style.webkitLineClamp) > 0 && style.webkitBoxOrient === 'vertical';
+      const standard = count(style.getPropertyValue('line-clamp')) > 0;
+      return (legacy || standard) && style.display !== 'inline'
         && (style.overflowY === 'hidden' || style.overflowY === 'clip')
-        && style.textOverflow === 'ellipsis'
         && element.scrollWidth <= element.clientWidth + boxTolerance;
     };
     const nonVisualReason = (element) => {

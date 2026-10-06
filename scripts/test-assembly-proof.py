@@ -149,7 +149,11 @@ class ReceiptTests(unittest.TestCase):
                                     proof.receipt_path(self.root, actual))
 
     def test_scrubbed_train_reuses_factory_receipt_without_running_rows(self):
-        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        # Keep scratch inventory inside the fixture: the real legacy bases may
+        # hold a live proof's clone that churns while this test runs.
+        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin",
+                "CAS_RELEASE_GATE_HOME_DIR": str(self.root / "scratch-base"),
+                "CAS_RELEASE_SCRATCH_EXTRA_BASES": ""}
         expected, _ = self.inputs_for_environment(self.harness_environment(base))
         self.record["inputs"] = expected
         self.path = proof.receipt_path(self.root, expected)
@@ -542,9 +546,15 @@ p.prove(root)
         self.commit()
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
+            # Keep the fixture's scratch sweep off the host's real scratch
+            # bases: a live gate's clones there can take longer to scan than
+            # the start-up deadline below.
+            fixture_env = dict(os.environ, CAS_RELEASE_GATE_HOME_DIR=str(scratch / "home-base"),
+                               CAS_RELEASE_SCRATCH_EXTRA_BASES="")
             child = subprocess.Popen([sys.executable, "-c", script,
                                       str(Path(proof.__file__).resolve()), str(self.root), str(scratch)],
-                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     env=fixture_env)
             try:
                 deadline = time.monotonic() + 10
                 while not (scratch / "ready").exists() and child.poll() is None:

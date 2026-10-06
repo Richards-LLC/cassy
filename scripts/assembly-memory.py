@@ -341,9 +341,12 @@ def stable_wrapper(root, env):
                   str(Path(proof.common_dir(root)).parent / ".cas/merge-sweeps/linker-guards"))
     files = {name: Path(__file__).with_name(name).read_bytes()
              for name in ("assembly-memory.py", "assembly-proof.py")}
-    scratch_helper = Path(__file__).with_name("release_scratch.py")
-    if scratch_helper.is_file():
-        files[scratch_helper.name] = scratch_helper.read_bytes()
+    # Every helper assembly-proof.py loads from its own directory must sit
+    # beside the staged copy, or the guard fails to import inside rustc.
+    for helper in ("release_scratch.py", "proof_target.py", "host_memory.py"):
+        helper_path = Path(__file__).with_name(helper)
+        if helper_path.is_file():
+            files[helper_path.name] = helper_path.read_bytes()
     key = hashlib.sha256(b"".join(files.values())).hexdigest()
     directory = parent / key
     directory.mkdir(parents=True, exist_ok=True)

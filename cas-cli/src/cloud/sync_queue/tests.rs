@@ -1596,7 +1596,12 @@ fn cas_fd42_endpoint_delete_is_not_overwritten_by_repair() {
 
 #[test]
 fn cas_fd42_repair_preserves_newer_endpoint_write_and_other_failures() {
-    let (_temp, queue) = create_test_queue();
+    let (temp, queue) = create_test_queue();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id=\"p\"\n",
+    )
+    .unwrap();
     let tasks = [
         crate::types::Task::new("child".into(), "old child".into()),
         crate::types::Task::new("parent".into(), "parent".into()),
@@ -1611,6 +1616,14 @@ fn cas_fd42_repair_preserves_newer_endpoint_write_and_other_failures() {
             "fd42-team",
         )
         .unwrap();
+    let before = queue.list_all(10).unwrap();
+    assert_eq!(
+        before.len(),
+        1,
+        "the newer edit must actually be queued before repair"
+    );
+    assert_eq!(before[0].payload.as_deref(), Some(newer));
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 0);
     assert!(
         queue
             .stage_healed_dependency(
@@ -1780,4 +1793,74 @@ fn cas_fd42_concurrent_dependency_edit_with_stale_verdict_wins() {
     queue.enqueue_for_team(EntityType::TaskDependency,"child:parent:blocks",SyncOperation::Upsert,Some("newer edit"),"fd42-team").unwrap();
     assert!(!queue.stage_healed_dependency("child:parent:blocks","old",&tasks,&tasks,Some("fd42-team"),"p",None,5).unwrap());
     let rows=queue.list_all(10).unwrap();assert_eq!(rows.len(),1);assert_eq!(rows[0].payload.as_deref(),Some("newer edit"));
+}
+#[test]
+fn cas_fd42_repair_preserves_existing_endpoint_routes_and_retry_metadata() {
+    for project_route in [None, Some("p")] {
+        let (temp, queue) = create_test_queue();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[project]\ncanonical_id=\"p\"\n",
+        )
+        .unwrap();
+        let mut tasks = [
+            crate::types::Task::new("child".into(), "old child".into()),
+            crate::types::Task::new("parent".into(), "parent".into()),
+        ];
+        for task in &mut tasks {
+            task.origin_project = Some("p".into());
+        }
+        let newer = r#"{"id":"child","title":"newer edit","origin_project":"p"}"#;
+        queue
+            .enqueue_for_team_project(
+                EntityType::Task,
+                "child",
+                SyncOperation::Upsert,
+                Some(newer),
+                "fd42-team",
+                project_route,
+            )
+            .unwrap();
+        let before = queue.list_all(10).unwrap();
+        assert_eq!(before.len(), 1, "setup must queue the edit");
+        queue
+            .record_row_outcome(before[0].id, "rejected", Some("scope_mismatch"))
+            .unwrap();
+        queue
+            .park_failed(before[0].id, "scope_mismatch", 5)
+            .unwrap();
+        let before = queue.list_all(10).unwrap().pop().unwrap();
+        assert!(
+            queue
+                .stage_healed_dependency(
+                    "child:parent:blocks",
+                    "{}",
+                    &tasks,
+                    &tasks,
+                    Some("fd42-team"),
+                    "p",
+                    None,
+                    5
+                )
+                .unwrap()
+        );
+        let rows = queue.list_all(10).unwrap();
+        assert_eq!(rows.len(), 3);
+        let after = rows.iter().find(|row| row.entity_id == "child").unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.payload, before.payload);
+        assert_eq!(after.project_id, before.project_id);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.retry_count, before.retry_count);
+        assert_eq!(after.last_error, before.last_error);
+        assert_eq!(after.last_outcome, before.last_outcome);
+        assert_eq!(after.last_reason, before.last_reason);
+        assert_eq!(after.failed_client_version, before.failed_client_version);
+        assert!(
+            queue
+                .dependency_endpoint_queued("child", "parent", "fd42-team")
+                .unwrap(),
+            "failed endpoint still withholds the edge"
+        );
+    }
 }

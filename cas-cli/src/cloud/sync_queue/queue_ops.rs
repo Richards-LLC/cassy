@@ -39,6 +39,36 @@ pub(super) fn upsert_queue_row(
     Ok(())
 }
 
+/// Repair adds prerequisites without acting as a local task edit. Preserve
+/// any existing task write in this team, including legacy unrouted rows and
+/// explicit project routes. The caller owns the queue transaction.
+pub(super) fn insert_task_upsert_if_absent(
+    conn: &Connection,
+    entity_id: &str,
+    payload: &str,
+    team_id: &str,
+    project_id: &str,
+) -> Result<(), CasError> {
+    conn.execute(
+        r#"INSERT INTO sync_queue
+            (entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count)
+           SELECT 'task', ?1, 'upsert', ?2, ?3, ?4, ?5, 0
+           WHERE NOT EXISTS (
+               SELECT 1 FROM sync_queue
+               WHERE entity_type='task' AND entity_id=?1 AND team_id=?3
+           )
+           ON CONFLICT DO NOTHING"#,
+        params![
+            entity_id,
+            payload,
+            team_id,
+            project_id,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
 pub(super) fn enqueue_team_move_rows(
     conn: &Connection,
     entity_type: EntityType,

@@ -1,5 +1,5 @@
 //! Atomic outbox repair for historical edges whose endpoint tasks never synced.
-use crate::cloud::sync_queue::queue_ops::upsert_queue_row;
+use crate::cloud::sync_queue::queue_ops::{insert_task_upsert_if_absent, upsert_queue_row};
 use crate::cloud::{EntityType, SyncOperation, SyncQueue};
 use crate::error::CasError;
 use crate::types::Task;
@@ -126,24 +126,20 @@ impl SyncQueue {
         }
         if refusal.is_none() {
             for task in missing {
-                let exists: bool = tx.query_row(
+                let body =
+                    serde_json::to_string(task).map_err(|e| CasError::Other(e.to_string()))?;
+                insert_task_upsert_if_absent(&tx, &task.id, &body, team.unwrap_or(""), project)?;
+                let present: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM sync_queue WHERE entity_type='task'
-                    AND entity_id=?1 AND team_id=?2)",
+                    AND entity_id=?1 AND team_id=?2 AND operation='upsert')",
                     params![task.id, team.unwrap_or("")],
-                    |r| r.get(0),
+                    |row| row.get(0),
                 )?;
-                if !exists {
-                    let body =
-                        serde_json::to_string(task).map_err(|e| CasError::Other(e.to_string()))?;
-                    upsert_queue_row(
-                        &tx,
-                        EntityType::Task,
-                        &task.id,
-                        SyncOperation::Upsert,
-                        Some(&body),
-                        team.unwrap_or(""),
-                        Some(project),
-                    )?;
+                if !present {
+                    return Err(CasError::Other(format!(
+                        "Could not stage dependency endpoint {}",
+                        task.id
+                    )));
                 }
             }
         }

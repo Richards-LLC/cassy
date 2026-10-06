@@ -108,7 +108,7 @@ def open_lock(path, create=False):
 @contextlib.contextmanager
 def admitted(path, owner, clean):
     lease = Path(owner["lease"]) if owner else path / LOCK
-    if owner and lease != path / LOCK:
+    if owner and not (lease.name == LOCK and lease.parent.resolve() == path.resolve()):
         # Registered children refer only to a real guardian's lease, with a
         # matching owner identity. Never follow an arbitrary JSON lease path.
         guardian = lease.parent

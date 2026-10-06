@@ -278,7 +278,7 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         self.assertTrue(report['entries'][0]['retained_base'])
         self.assertFalse(any((base / name).exists() for name in scratch.REGENERABLE))
 
-    def generated_remap(self, dead=True):
+    def generated_remap(self, dead=True, parent=None):
         program = r'''
 import importlib.util,json,pathlib,subprocess,sys
 spec=importlib.util.spec_from_file_location('scratch',sys.argv[1])
@@ -290,7 +290,7 @@ s.register_remap(base,repo)
 print(json.dumps(str(base)),flush=True)
 sys.stdin.read()
 '''
-        child = self.spawn([sys.executable, '-c', program, str(Path(scratch.__file__)), str(self.parent), str(self.repo)],
+        child = self.spawn([sys.executable, '-c', program, str(Path(scratch.__file__)), str(parent or self.parent), str(self.repo)],
                            stdout=subprocess.PIPE, stdin=subprocess.PIPE)
         ready = child.stdout.readline()
         if not ready:
@@ -473,9 +473,9 @@ sys.stdin.read()
         self.assertTrue((self.repo / 'source').exists())
 
     def test_alias_scratch_parent_uses_physical_receipt_identity_cas_638d(self):
-        base, _ = self.generated_remap()
         alias = self.root / 'scratch-alias'
         alias.symlink_to(self.parent, target_is_directory=True)
+        base, _ = self.generated_remap(parent=alias)
         report = scratch.sweep(self.repo, alias / 'base', clean=True, env=dict(self.env, TMPDIR=str(alias)))
         self.assertFalse(base.exists(), report)
 

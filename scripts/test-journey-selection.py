@@ -172,6 +172,52 @@ class SelectionTests(unittest.TestCase):
         self.assertIn('catalog OK (3 journeys)', self.run_selector('--check', head=head).stdout)
         self.assertNotEqual(self.run_selector('--paths', 'hub-web/src/reply.ts', head='missing-sha', check=False).returncode, 0)
 
+    def test_responsive_goals_real_diff_parses_regex_apostrophe(self):
+        path = 'hub-web/e2e/journeys/responsive-goals.ts'
+        source = (REPO / path).read_text()
+        self.write(path, source)
+        spec = self.root / 'hub-web/e2e/reply.journey.ts'
+        spec.write_text(spec.read_text() + '\nimport { phonePairLink } from "./journeys/responsive-goals";\nphonePairLink(page, journey, token, earlier);\n')
+        base = self.commit()
+        self.write(path, source.replace("/Machine's hub address/", "/Machine's address/"))
+        head = self.commit()
+        result = json.loads(self.run_selector(base, head).stdout)
+        self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1'})
+
+    def test_regex_quotes_and_braces_do_not_hide_fixture_ownership(self):
+        path = 'hub-web/e2e/fixture.ts'
+        source = "export function replyOnly() { return /[}']+\\/[{]/.test(value); }\nexport function fleetOnly() { return value / 2 / 3; }\n"
+        self.write(path, source)
+        spec = self.root / 'hub-web/e2e/reply.journey.ts'
+        spec.write_text(spec.read_text() + 'replyOnly();')
+        base = self.commit()
+        self.write(path, source.replace('.test(value)', '.test(other)'))
+        self.assertEqual(self.ids(path, base=base), {'HUB-J1'})
+
+    def test_uncertain_fixture_parser_selects_all_with_reason(self):
+        path = 'hub-web/e2e/fixture.ts'
+        self.write(path, 'export function replyOnly() { return 1; }\n')
+        base = self.commit()
+        self.write(path, 'export function replyOnly() { return 2;\n')
+        head = self.commit()
+        for args, kwargs in [((base, head), {}), (('--paths', path), {'base': base, 'head': head})]:
+            with self.subTest(args=args):
+                result = json.loads(self.run_selector(*args, **kwargs).stdout)
+                self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J2', 'HUB-J3'})
+                self.assertTrue(all('uncertain-source-parser' in j['reason'] for j in result['journeys']))
+
+    def test_unterminated_regex_cannot_yield_empty_or_narrow_selection(self):
+        path = 'hub-web/e2e/fixture.ts'
+        self.write(path, 'export function replyOnly() { return /ready/.test(value); }\n')
+        base = self.commit()
+        self.write(path, 'export function replyOnly() { return /unterminated\n}\n')
+        head = self.commit()
+        for args, kwargs in [((base, head), {}), (('--paths', path), {'base': base, 'head': head}), (('--paths', path), {'head': head})]:
+            with self.subTest(args=args, kwargs=kwargs):
+                result = json.loads(self.run_selector(*args, **kwargs).stdout)
+                self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J2', 'HUB-J3'})
+                self.assertTrue(all('uncertain-source-parser:Unterminated regex literal' in j['reason'] for j in result['journeys']))
+
     def test_shared_fixture_option_method_narrows_to_users(self):
         self.write('hub-web/e2e/fixture.ts', 'export class Double {\n private operation(route: unknown): void {\n const fleet = this.options.fleet;\n if (!fleet) return;\n fleet.count = 1;\n }\n}\n')
         spec = self.root / 'hub-web/e2e/fleet.journey.ts'

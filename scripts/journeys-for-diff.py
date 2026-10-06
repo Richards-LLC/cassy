@@ -17,8 +17,9 @@ unattributed changes select the surface with an explanatory reason.
 Diff mode retains base...head semantics and reads the catalog/graph at head.
 For --paths/--check/--all from another checkout, set CAS_JOURNEYS_HEAD to the
 reviewed revision; CAS_JOURNEYS_BASE supplies CSS/main/fixture hunk context.
-Without that context those files select the surface safely. Errors exit nonzero;
-an unrelated/derived-only diff produces an empty list and exit 0.
+Without that context those files select the surface safely. Uncertain source
+parsing selects every catalog journey with a reason; Git/catalog errors exit
+nonzero. An unrelated/derived-only diff produces an empty list and exit 0.
 
 The catalog contract is described in docs/qa/journey-evaluation.md.
 """
@@ -190,15 +191,84 @@ class SourceTree:
 # These are source import statements, not strings passed to page.goto. The
 # catalog Touches fields provide the explicit bridge to browser-owned modules.
 IMPORT_RE = re.compile(r"\b(?:import|export)\s+(?:[^;]*?\s+from\s*)?[\"'](\.[^\"']+)[\"']", re.MULTILINE)
-COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*|([\"'`])(?:\\.|(?!\1).)*\1", re.DOTALL)
-
-
 def mask_comments(text: str, strings: bool = False) -> str:
-    def replace(match: re.Match) -> str:
-        if match.group(1) and not strings:
-            return match.group()
-        return re.sub(r"[^\n]", " ", match.group())
-    return COMMENT_RE.sub(replace, text)
+    """Mask lexical literals without mistaking regex quotes/braces for code.
+
+    Preserve offsets/newlines for hunk ownership. A slash after an operand is
+    division; expression-start punctuation/keywords can introduce a regex.
+    This remains a conservative source scanner, not a TypeScript parser.
+    """
+    output = list(text)
+    previous = ""
+    index = 0
+    word_token = re.compile(r"[\w$]+")
+
+    def mask(start: int, end: int):
+        for pos in range(start, end):
+            if output[pos] != "\n":
+                output[pos] = " "
+
+    while index < len(text):
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        start = index
+        if text.startswith("//", index) or text.startswith("/*", index):
+            if text.startswith("//", index):
+                end = text.find("\n", index)
+                index = len(text) if end < 0 else end
+            else:
+                end = text.find("*/", index + 2)
+                index = len(text) if end < 0 else end + 2
+            mask(start, index)
+            continue
+        if char in "\"'`":
+            index += 1
+            while index < len(text):
+                if text[index] == "\\":
+                    index += 2
+                elif text[index] == char:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            index = min(index, len(text))
+            if strings:
+                mask(start, index)
+            previous = "literal"
+            continue
+        if char == "/" and (previous in ("", "(", "[", "{", "=", ":", ",", ";", "!", "?", "&", "|", ">")
+                            or previous in ("return", "throw", "case", "yield", "void", "typeof", "delete", "await")):
+            index += 1
+            in_class = False
+            while index < len(text) and text[index] != "\n":
+                if text[index] == "\\":
+                    index += 2
+                    continue
+                if text[index] == "[":
+                    in_class = True
+                elif text[index] == "]":
+                    in_class = False
+                elif text[index] == "/" and not in_class:
+                    index += 1
+                    while index < len(text) and text[index].isalpha():
+                        index += 1
+                    break
+                index += 1
+            else:
+                raise ValueError("Unterminated regex literal")
+            mask(start, index)
+            previous = "literal"
+            continue
+        word = word_token.match(text, index)
+        if word:
+            previous = word.group()
+            index += len(previous)
+        else:
+            previous = char
+            index += 1
+    return "".join(output)
 
 
 def imported_modules(tree: SourceTree, path: str) -> set[str]:
@@ -483,8 +553,11 @@ class Impact:
         users = self.users(path)
         ids: set[str] = set()
         owners: set[str] = set()
-        for tree, other in ((self.before, self.after), (self.after, self.before)):
-            model = MainModel(tree, path)
+        # Parse both revisions before an early wide/narrow return can bypass
+        # an uncertain boundary in the other revision.
+        models = [MainModel(tree, path) for tree in (self.before, self.after)]
+        for model, other in ((models[0], self.after), (models[1], self.before)):
+            tree = self.before if model is models[0] else self.after
             # Class methods form additional ownership boundaries in hub doubles.
             regions = list(model.regions)
             for match in re.finditer(r"^\s*(?:(?:private|public|protected|async|static)\s+)*([\w$]+)\s*\([^;{}]*\)[^;{}]*\{", model.clean, re.MULTILINE):
@@ -730,13 +803,18 @@ def main(argv: list[str]) -> int:
         if revision:
             comparison_base = subprocess.run(["git", "-C", str(root), "merge-base", base, revision], capture_output=True, text=True, check=True).stdout.strip()
         before = SourceTree(root, comparison_base)
-    selected_impact = Impact(root, journeys, before, tree) if argv[0] != "--all" else None
-    if argv[0] == "--all":
-        selected = [row(j, "all") for j in journeys]
-    elif argv[0] == "--paths":
-        selected = select(argv[1:], surfaces, journeys, selected_impact)
-    else:
-        selected = select(changed_paths(root, base, revision), surfaces, journeys, selected_impact)
+    try:
+        selected_impact = Impact(root, journeys, before, tree) if argv[0] != "--all" else None
+        if argv[0] == "--all":
+            selected = [row(j, "all") for j in journeys]
+        elif argv[0] == "--paths":
+            selected = select(argv[1:], surfaces, journeys, selected_impact)
+        else:
+            selected = select(changed_paths(root, base, revision), surfaces, journeys, selected_impact)
+    except ValueError as error:
+        # An uncertain lexical/brace boundary cannot justify a narrow or empty
+        # selection. Git/catalog failures still refuse outside this boundary.
+        selected = [row(j, f"surface-wide:uncertain-source-parser:{error}") for j in journeys]
     print(json.dumps({"catalog": CATALOG, "journeys": selected}, indent=2))
     return 0
 

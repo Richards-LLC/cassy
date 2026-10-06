@@ -714,7 +714,10 @@ record in `.cas/worker-target-owners`, binding checkout and target device/inode,
 plus a unique generation marker inside the target to defeat inode reuse,
 lease inode, creator/builder PID start time and Linux boot identity. This record
 precedes seeding or build data. The capped runner holds the target lifetime
-lease and passes it to descendants; lane and slot locks remain private to the
+lease. Checkout directories may use ordinary group-writable Git permissions;
+the target and ownership directory are created privately, and the marker,
+record and lease files reject group or world writes. The runner passes the
+lease to descendants; lane and slot locks remain private to the
 runner. A held lease or matching live owner prevents retirement, including after
 the runner dies. Retirement holds the same lease through evidence copying and
 quarantine, revalidating ownership before deletion. On Linux only, verified

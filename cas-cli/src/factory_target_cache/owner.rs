@@ -3,7 +3,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 pub(crate) const MARKER: &str = ".cas-worker-target-owner";
 
@@ -32,15 +32,32 @@ pub(crate) struct Lease {
     builder: bool,
 }
 
-fn private_metadata(path: &Path) -> io::Result<fs::Metadata> {
+fn owned_metadata(path: &Path) -> io::Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)?;
     // SAFETY: geteuid has no pointer arguments or side effects.
     if metadata.uid() != unsafe { libc::geteuid() }
         || metadata.file_type().is_symlink()
-        || metadata.mode() & 0o022 != 0
         || (metadata.is_file() && metadata.nlink() != 1)
     {
         return Err(io::Error::other("unverifiable target ownership path"));
+    }
+    Ok(metadata)
+}
+
+fn private_metadata(path: &Path) -> io::Result<fs::Metadata> {
+    let metadata = owned_metadata(path)?;
+    if metadata.mode() & 0o022 != 0 {
+        return Err(io::Error::other("unverifiable target ownership path"));
+    }
+    Ok(metadata)
+}
+
+fn worktree_metadata(path: &Path) -> io::Result<fs::Metadata> {
+    let metadata = owned_metadata(path)?;
+    // Git checkouts follow the host umask and may be group writable. Only
+    // CAS-created target and provenance paths require private permissions.
+    if !metadata.is_dir() || metadata.mode() & 0o002 != 0 {
+        return Err(io::Error::other("unverifiable worker checkout"));
     }
     Ok(metadata)
 }
@@ -130,8 +147,8 @@ fn paths(cas_root: &Path, worktree: &Path) -> io::Result<(PathBuf, PathBuf)> {
         ));
     }
     let directory = cas_root.join("worker-target-owners");
-    match fs::create_dir(&directory) {
-        Ok(()) => fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?,
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
@@ -187,11 +204,8 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
     }
     file.try_lock_exclusive()?;
     let fresh = if create {
-        match fs::create_dir(&target) {
-            Ok(()) => {
-                fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
-                true
-            }
+        match fs::DirBuilder::new().mode(0o700).create(&target) {
+            Ok(()) => true,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
             Err(error) => return Err(error),
         }
@@ -199,7 +213,7 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
         false
     };
     if fresh {
-        let tree = private_metadata(&worktree)?;
+        let tree = worktree_metadata(&worktree)?;
         let data = private_metadata(&target)?;
         let record = Record {
             version: 1,
@@ -272,7 +286,7 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
 
 impl Lease {
     pub(crate) fn revalidate(&self, actual_target: &Path) -> io::Result<bool> {
-        let tree = private_metadata(&self.record.worktree)?;
+        let tree = worktree_metadata(&self.record.worktree)?;
         let target = private_metadata(actual_target)?;
         let lock = self.file.metadata()?;
         let current_lock = private_metadata(&self.lock_path)?;
@@ -332,12 +346,16 @@ impl Drop for Lease {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
         let worker = root.join("worktrees/worker");
         fs::create_dir_all(&worker).unwrap();
+        // Reproduce ordinary Git checkout permissions under umask 0002,
+        // without changing the process-wide umask in parallel tests.
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o775)).unwrap();
         (temp, root, worker)
     }
 
@@ -397,7 +415,53 @@ mod tests {
         assert!(dead.revalidate(&renamed).unwrap());
         fs::remove_file(&lock).unwrap();
         fs::write(&lock, b"").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(!dead.revalidate(&renamed).unwrap());
+    }
+
+    #[test]
+    fn group_writable_checkout_keeps_provenance_private_cas_f96d() {
+        let (_temp, root, worker) = fixture();
+        let lease = acquire(&root, &worker).unwrap().unwrap();
+        let record = lease.record_path.clone();
+        let lock = lease.lock_path.clone();
+        let target = worker.join("target");
+        let marker = target.join(MARKER);
+        let owners = record.parent().unwrap().to_path_buf();
+        assert_eq!(fs::metadata(&worker).unwrap().mode() & 0o777, 0o775);
+        for (path, mode) in [
+            (&target, 0o700),
+            (&owners, 0o700),
+            (&record, 0o600),
+            (&lock, 0o600),
+            (&marker, 0o600),
+        ] {
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, mode);
+        }
+        drop(lease);
+        // Group write is allowed only on the checkout, never on target or
+        // provenance files. Each independent mutation must retain output.
+        for (path, private_mode) in [
+            (&target, 0o700),
+            (&owners, 0o700),
+            (&record, 0o600),
+            (&lock, 0o600),
+            (&marker, 0o600),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(private_mode | 0o020)).unwrap();
+            assert!(
+                for_retirement(&root, &worker).is_err(),
+                "{} must remain private",
+                path.display()
+            );
+            fs::set_permissions(path, fs::Permissions::from_mode(private_mode)).unwrap();
+            assert!(for_retirement(&root, &worker).unwrap().is_some());
+        }
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            for_retirement(&root, &worker).is_err(),
+            "world-writable checkout remains unverifiable"
+        );
     }
 
     #[test]

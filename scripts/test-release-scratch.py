@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -59,7 +60,8 @@ class ScratchTests(unittest.TestCase):
             time.sleep(.01)
 
     def spawn(self, command, **kwargs):
-        process = subprocess.Popen(command, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **kwargs)
+        kwargs.setdefault("stdout", subprocess.DEVNULL)
+        process = subprocess.Popen(command, env=self.env, stderr=subprocess.PIPE, **kwargs)
         if self.proc.is_dir():
             (self.proc / str(process.pid)).symlink_to(Path('/proc') / str(process.pid), target_is_directory=True)
         def reap():
@@ -289,6 +291,242 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         self.assertGreater(report['retained_bytes'], 0)
         self.assertTrue(report['entries'][0]['retained_base'])
         self.assertFalse(any((base / name).exists() for name in scratch.REGENERABLE))
+
+    def generated_remap(self, dead=True, parent=None):
+        program = r'''
+import importlib.util,json,pathlib,subprocess,sys
+spec=importlib.util.spec_from_file_location('scratch',sys.argv[1])
+s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+resource=s.OwnedDirectory('base.generated-',sys.argv[2])
+base=resource.path; remap=base/'workspace-remap'; repo=pathlib.Path(sys.argv[3])
+subprocess.run(['git','-C',str(repo),'worktree','add','--detach',str(remap),'HEAD'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+s.register_remap(base,repo)
+print(json.dumps(str(base)),flush=True)
+sys.stdin.read()
+'''
+        child = self.spawn([sys.executable, '-c', program, str(Path(scratch.__file__)), str(parent or self.parent), str(self.repo)],
+                           stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+        ready = child.stdout.readline()
+        if not ready:
+            _, errors = child.communicate(timeout=5)
+            self.fail('generated remap registration failed: ' + errors.decode())
+        base = Path(json.loads(ready))
+        if dead:
+            child.kill()
+            child.communicate(timeout=5)
+        return base, child
+
+    def test_dead_generated_remap_unregisters_exact_admin_and_reclaims_base_cas_638d(self):
+        base, _ = self.generated_remap()
+        remap = base / 'workspace-remap'
+        admin = Path(subprocess.check_output(['git','-C',str(remap),'rev-parse','--absolute-git-dir'], text=True).strip())
+        # A different absent parked checkout must keep its metadata: no global prune.
+        parked = self.root / 'parked'
+        self.git('worktree','add','-q','-b','factory/parked',str(parked))
+        parked_admin = Path(subprocess.check_output(['git','-C',str(parked),'rev-parse','--absolute-git-dir'], text=True).strip())
+        shutil.rmtree(parked)
+        report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        self.assertFalse(base.exists(), report)
+        self.assertFalse(admin.exists())
+        self.assertTrue(parked_admin.exists())
+        self.assertNotIn(remap,scratch.worktrees(self.repo))
+
+    def test_remap_live_lease_branch_dirty_and_locked_are_preserved_cas_638d(self):
+        live, child = self.generated_remap(dead=False)
+        report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        self.assertTrue((live/'workspace-remap/source').exists(), report)
+        child.kill();child.communicate(timeout=5)
+        scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        for mutation in ('branch','dirty','locked'):
+            base, _ = self.generated_remap()
+            remap = base/'workspace-remap'
+            if mutation == 'branch':
+                subprocess.run(['git','-C',str(remap),'checkout','-qb','factory/parked-'+base.name], check=True)
+            elif mutation == 'dirty':
+                (remap/'source').write_text('delivery evidence')
+            else:
+                self.git('worktree','lock',str(remap))
+            before = scratch.worktrees(self.repo)
+            report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+            self.assertTrue((remap/'source').exists(), (mutation, report))
+            self.assertEqual(before,scratch.worktrees(self.repo))
+
+    def test_generated_receipt_cannot_unregister_replaced_or_missing_unknown_checkout_cas_638d(self):
+        base, _ = self.generated_remap()
+        remap = base/'workspace-remap'
+        admin = Path(subprocess.check_output(['git','-C',str(remap),'rev-parse','--absolute-git-dir'],text=True).strip())
+        self.git('worktree','remove',str(remap))
+        self.git('worktree','add','-q','-b','factory/new-delivery',str(remap))
+        replacement = scratch.worktrees(self.repo)
+        report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        self.assertTrue((remap/'source').exists(),report)
+        self.assertEqual(replacement,scratch.worktrees(self.repo))
+
+    def test_missing_generated_checkout_prunes_only_receipted_admin_cas_638d(self):
+        base, _ = self.generated_remap()
+        remap = base/'workspace-remap'
+        admin = Path(subprocess.check_output(['git','-C',str(remap),'rev-parse','--absolute-git-dir'],text=True).strip())
+        shutil.rmtree(remap)
+        report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        self.assertFalse(admin.exists(),report)
+        self.assertFalse(base.exists(),report)
+
+    def test_generated_report_is_read_only_and_cassy_checkout_is_retained_cas_638d(self):
+        base, _ = self.generated_remap()
+        before = {str(path):path.read_bytes() for path in base.rglob('*') if path.is_file()}
+        protected = scratch.worktrees(self.repo)
+        report = scratch.sweep(self.repo,self.base,env=self.env)
+        self.assertTrue(report['entries'][0]['reclaimable'],report)
+        self.assertEqual(protected,scratch.worktrees(self.repo))
+        self.assertEqual(before,{str(path):path.read_bytes() for path in base.rglob('*') if path.is_file()})
+        # Even an ignored .cas in a detached checkout is delivery provenance.
+        remap = base/'workspace-remap'
+        with (self.repo / '.git/info/exclude').open('a') as stream:
+            stream.write('\n.cas/\n')
+        (remap/'.cas').mkdir()
+        (remap/'.cas/parked-task').write_text('preserve')
+        self.assertFalse(scratch.git_output(remap, 'status', '--porcelain', '--untracked-files=all'))
+        report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        self.assertTrue((remap/'.cas/parked-task').exists(),report)
+
+    def test_malformed_receipt_after_interrupted_removal_is_retained_cas_638d(self):
+        for field, value in (('head', None), ('admin', None), ('admin_identity', [True, 0])):
+            with self.subTest(field=field):
+                base, _ = self.generated_remap()
+                self.git('worktree', 'remove', str(base / 'workspace-remap'))
+                receipt_path = base / scratch.REMAP_RECEIPT
+                receipt = json.loads(receipt_path.read_text())
+                receipt[field] = value
+                receipt_path.write_text(json.dumps(receipt))
+                report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+                self.assertTrue(base.exists(), report)
+                self.assertIn('protected:', next(row['reason'] for row in report['entries'] if row['path'] == str(base)))
+
+    def test_symlink_admin_files_are_retained_without_following_cas_638d(self):
+        for name in ('HEAD', 'gitdir', 'commondir', 'index'):
+            with self.subTest(name=name):
+                base, _ = self.generated_remap()
+                remap = base / 'workspace-remap'
+                admin = Path(subprocess.check_output(['git', '-C', str(remap), 'rev-parse', '--absolute-git-dir'], text=True).strip())
+                metadata = admin / name
+                outside = self.root / ('outside-' + name)
+                outside.write_bytes(metadata.read_bytes())
+                metadata.unlink()
+                metadata.symlink_to(outside)
+                before = outside.read_bytes()
+                report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+                self.assertTrue((remap / 'source').exists(), report)
+                self.assertTrue(admin.exists(), report)
+                self.assertEqual(outside.read_bytes(), before)
+
+    def test_dangling_receipt_is_unknown_provenance_cas_638d(self):
+        base, _ = self.generated_remap()
+        self.git('worktree', 'remove', str(base / 'workspace-remap'))
+        receipt = base / scratch.REMAP_RECEIPT
+        receipt.unlink()
+        receipt.symlink_to(self.root / 'missing-receipt')
+        report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertTrue(base.exists(), report)
+
+    def test_unknown_owner_or_receipt_preserves_generated_registration_cas_638d(self):
+        for mutation in ('owner', 'owner-array', 'receipt'):
+            with self.subTest(mutation=mutation):
+                base, _ = self.generated_remap()
+                if mutation == 'owner':
+                    (base / scratch.OWNER).unlink()
+                    self.old(base)
+                elif mutation == 'owner-array':
+                    (base / scratch.OWNER).write_text('[1]')
+                    self.old(base)
+                else:
+                    (base / scratch.REMAP_RECEIPT).unlink()
+                before = scratch.worktrees(self.repo)
+                report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+                self.assertTrue((base / 'workspace-remap/source').exists(), report)
+                self.assertEqual(before, scratch.worktrees(self.repo))
+                self.assertTrue((self.repo / 'source').exists())
+
+    def test_registry_and_admin_symlinks_preserve_all_checkouts_cas_638d(self):
+        for component in ('registry', 'admin', 'checkout', 'git-file', 'receipt'):
+            with self.subTest(component=component):
+                base, _ = self.generated_remap()
+                remap = base / 'workspace-remap'
+                admin = Path(subprocess.check_output(['git', '-C', str(remap), 'rev-parse', '--absolute-git-dir'], text=True).strip())
+                path = {'registry': admin.parent, 'admin': admin, 'checkout': remap,
+                        'git-file': remap / '.git', 'receipt': base / scratch.REMAP_RECEIPT}[component]
+                outside = self.root / ('moved-' + component)
+                path.rename(outside)
+                path.symlink_to(outside, target_is_directory=outside.is_dir())
+                try:
+                    report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+                    self.assertTrue((remap / 'source').exists(), report)
+                    self.assertTrue(admin.exists(), report)
+                    self.assertTrue((self.repo / 'source').exists(), report)
+                finally:
+                    path.unlink()
+                    outside.rename(path)
+
+    def test_completed_targeted_removal_can_resume_base_cleanup_cas_638d(self):
+        base, _ = self.generated_remap()
+        self.git('worktree', 'remove', str(base / 'workspace-remap'))
+        report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertFalse(base.exists(), report)
+        self.assertTrue((self.repo / 'source').exists())
+
+    def test_generated_remap_removal_never_removes_registered_sibling_cas_638d(self):
+        base, _ = self.generated_remap()
+        worker = base / 'worker'
+        self.git('worktree', 'add', '-q', '-b', 'factory/worker', str(worker))
+        worker_admin = scratch.git_output(worker, 'rev-parse', '--absolute-git-dir').decode().strip()
+        report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertFalse((base / 'workspace-remap').exists(), report)
+        self.assertTrue((worker / 'source').exists(), report)
+        self.assertTrue(Path(worker_admin).exists())
+        self.assertIn(worker, scratch.worktrees(self.repo))
+        self.assertTrue(base.exists(), report)
+        self.assertTrue((self.repo / 'source').exists())
+
+    def test_alias_scratch_parent_uses_physical_receipt_identity_cas_638d(self):
+        alias = self.root / 'scratch-alias'
+        alias.symlink_to(self.parent, target_is_directory=True)
+        base, _ = self.generated_remap(parent=alias)
+        report = scratch.sweep(self.repo, alias / 'base', clean=True, env=dict(self.env, TMPDIR=str(alias)))
+        self.assertFalse(base.exists(), report)
+
+    def test_guard_preserves_unrelated_live_remap_user_before_unregister_cas_638d(self):
+        ready, release, reader_ready = (self.root / name for name in ('guard-ready', 'guard-release', 'reader-ready'))
+        program = r'''
+import importlib.util,os,pathlib,subprocess,sys,tempfile,time
+spec=importlib.util.spec_from_file_location('scratch',sys.argv[1])
+s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+base=pathlib.Path(tempfile.mkdtemp(prefix='base.guard-',dir=sys.argv[2]))
+s.register(base,pathlib.Path(os.environ['CAS_RELEASE_GATE_SCRATCH_RUN_DIR']))
+repo=pathlib.Path(sys.argv[3]); remap=base/'workspace-remap'
+subprocess.run(['git','-C',str(repo),'worktree','add','--detach',str(remap),'HEAD'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+s.register_remap(base,repo)
+pathlib.Path(sys.argv[4]).write_text(str(base))
+while not pathlib.Path(sys.argv[5]).exists(): time.sleep(.01)
+'''
+        env = dict(self.env, CAS_RELEASE_GATE_HOME_DIR=str(self.base))
+        guardian = subprocess.Popen([sys.executable, scratch.__file__, '--repo', str(self.repo), '--base', str(self.base),
+            'guard', '--', sys.executable, '-c', program, scratch.__file__, str(self.parent), str(self.repo), str(ready), str(release)],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: guardian.poll() is None and guardian.kill())
+        self.wait_until(ready.exists)
+        base = Path(ready.read_text())
+        reader = self.spawn([sys.executable, '-c',
+            'import pathlib,sys,time;f=open(sys.argv[1]);pathlib.Path(sys.argv[2]).touch();time.sleep(60)',
+            str(base / 'workspace-remap/source'), str(reader_ready)])
+        self.wait_until(reader_ready.exists)
+        release.touch()
+        _, errors = guardian.communicate(timeout=10)
+        self.assertEqual(guardian.returncode, 0, errors.decode())
+        self.assertTrue((base / 'workspace-remap/source').exists(), errors.decode())
+        self.assertIn(base / 'workspace-remap', scratch.worktrees(self.repo))
+        reader.kill()
+        reader.communicate(timeout=5)
+        report = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
+        self.assertFalse(base.exists(), report)
 
     def test_start_time_mismatch_is_dead_but_matching_owner_is_live(self):
         old = self.parent / 'base.reused-pid'

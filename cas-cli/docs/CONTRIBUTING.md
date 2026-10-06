@@ -756,9 +756,25 @@ Assembly and release scratch uses an owner record, PID start-time identity and
 an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before
 cleanup; the parent allows 20 seconds for a nested guard's 5-second escalation.
 A dead lease-managed owner may be swept despite opaque unrelated processes.
-Unknown-provenance paths remain fail-closed. Registered remaps and their bases
-stay intact; only dead owned bases' `suite.tar.zst`, `extract`, `tmp`,
-`cargo-home` and `bin` siblings may be reclaimed (unregistration: cas-638d).
+Unknown-provenance paths remain fail-closed. Fresh archive remaps record a
+`cas-release-remap-v1` receipt binding the scratch owner's PID/start identity
+and base inode to the detached HEAD, checkout/Git-pointer inodes and exact Git
+common/admin/registry directory identities. After the owner dies and its
+inherited lifetime lease is exclusively acquired, cleanup revalidates this
+receipt and removes only the clean, unlocked generated remap with
+`git worktree remove` (without force). The same targeted operation removes a
+receipted missing checkout's stale admin entry; cleanup never runs a global
+`git worktree prune` that could discard missing parked deliveries.
+Normal guard teardown uses the same checks after children are reaped and the
+inherited lease is released; live output handles preserve the remap first.
+Malformed receipts, symlinked Git metadata, changed identities, branches,
+dirty checkouts and Cassy worker/parked provenance preserve the base. A report
+validates identities without changing the checkout or registry. Whole-base
+reclamation follows only after the exact remap is unregistered and remaining
+registrations are rechecked. Other registered remaps and their bases stay
+intact; only dead owned bases' `suite.tar.zst`, `extract`, `tmp`, `cargo-home`
+and `bin` siblings may be reclaimed. The operator's main checkout stays
+registered and intact.
 `gc_report` includes paths, reclaimed/reclaimable and retained bytes in
 `RELEASE_SCRATCH_STATUS_JSON`; scratch `gc_cleanup` requires both `force=true`
 and `dry_run=false`. Reports never create locks or owner records.

@@ -40,7 +40,7 @@ Self-review, 2026-10-06, on the Commander build at `8c92afe2e`:
 | Craft | 4 | Strict visual QA passes the actual dialog snapshot in light/dark at 1280×800 and 390×844 with no findings. |
 | Accessibility | 4 | The native J19 control passes keyboard opt-in/disable, phone wrapping and forced colors, reduced motion and increased contrast; settings remain a labeled native disclosure. |
 
-Evidence: task artifacts `cas-e3dd/qa-control/visual-qa/` and
+Evidence: task artifacts `cas-e3dd/qa-control/visual-qa-four/` and
 `cas-e3dd/j19-control/`. This reviews the real Commander bundle against the
 protocol double. The deployed watchdog and physical outage/recovery remain
 unexercised pending the disposable test account; this is no live acceptance

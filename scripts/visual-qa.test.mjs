@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 
 import { runVisualQa } from './visual-qa.mjs';
+import { runVisualQa as runBuiltinVisualQa } from '../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const fixture = (name) => join(here, 'visual-qa-fixtures', name);
@@ -255,6 +256,33 @@ test('reports content lost when JavaScript is disabled or print media applies', 
   assert.ok(result.findings.some((finding) => finding.type === 'javascript-disabled-loss'));
   assert.ok(result.findings.some((finding) => finding.type === 'print-loss'));
 });
+
+for (const [name, inspect] of [['repository', runVisualQa], ['builtin', runBuiltinVisualQa]]) {
+  test(`${name} honours a reasoned JavaScript requirement while undeclared pages still fail`, async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-js-required-'));
+    const reason = 'This application needs JavaScript to reach machines and pair devices.';
+    const html = (declaration) => `<!doctype html><html lang="en"><head>
+      <meta charset="utf-8">${declaration}
+      <style>body { margin: 24px; color: #172033; background: #fff; font: 16px/1.4 Arial, sans-serif; }</style>
+      </head><body><noscript>Enable JavaScript to reach your machines.</noscript><main></main>
+      <script>document.querySelector('main').textContent = ${JSON.stringify('This application shows live machine status, pairs devices and lets operators respond to their workers. '.repeat(4))};</script>
+      </body></html>`;
+    const declared = join(artifactDir, 'declared.html');
+    const undeclared = join(artifactDir, 'undeclared.html');
+    await writeFile(declared, html(`<meta name="visual-qa:requires-javascript" content="${reason}">`));
+    await writeFile(undeclared, html(''));
+    const options = { strict: true, schemes: ['light'], viewports: [{ name: 'phone', width: 390, height: 800 }] };
+    const accepted = await inspect({ ...options, urls: [declared], artifactDir: join(artifactDir, 'accepted') });
+    assert.equal(accepted.status, 'PASS', JSON.stringify(accepted.findings));
+    assert.equal(accepted.exitCode, 0);
+    assert.equal(accepted.findings.some(({ type }) => type === 'javascript-disabled-loss'), false);
+    assert.deepEqual(accepted.pageDeclarations, [{ url: declared, requiresJavaScript: true, reason }]);
+    const rejected = await inspect({ ...options, urls: [undeclared], artifactDir: join(artifactDir, 'rejected') });
+    assert.equal(rejected.status, 'FAIL');
+    assert.equal(rejected.exitCode, 1);
+    assert.ok(rejected.findings.some(({ type }) => type === 'javascript-disabled-loss'));
+  });
+}
 
 test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
   const artifactDir = await acceptanceDir('visual-qa-acceptance-');

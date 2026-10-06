@@ -514,6 +514,11 @@ def admit_phase(env, execution, phase, compile_phase=False):
         time.sleep(min(poll_secs, wait_secs - elapsed))
 
 
+# None selects the real host/user admission directory. In-process tests point
+# it at a private directory so they never contend with live worker suites.
+HOST_MEMORY_DIRECTORY = None
+
+
 def run_contexts(root, clone, env, log_dir, clone_target, execution):
     # Worker suites and proofs use one host/user budget across worktrees and
     # clones. This is independent of the link-specific admission pool.
@@ -522,7 +527,7 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
     spec.loader.exec_module(host)
     wait = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS") or 600
     poll = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 1
-    with host.admission("proof", env, memory_budget, wait, poll) as (admitted_env, _):
+    with host.admission("proof", env, memory_budget, wait, poll, HOST_MEMORY_DIRECTORY) as (admitted_env, _):
         return _run_contexts(root, clone, admitted_env, log_dir, clone_target, execution)
 
 

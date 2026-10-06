@@ -102,6 +102,7 @@ path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
     "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
+    [[ ! -f "$script_dir/release-test-env.sh" ]] || cp "$script_dir/release-test-env.sh" "$repo/scripts/"
     for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
     done
@@ -140,6 +141,9 @@ class ScriptTier(unittest.TestCase):
                        if key.startswith("CAS_RELEASE_GATE_") or key in
                        ("CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR",
                         "VERIFIED_TEST_COUNT_FILE", "VERIFIED_TEST_LOG")}, stream)
+
+    def test_train_controls_absent(self):
+        self.assertFalse([key for key in os.environ if key.startswith(("CAS_RELEASE_TRAIN_", "CAS_RELEASE_GATE_"))])
 
     def test_seeded_ci_script_failure(self):
         for key in ("CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
@@ -255,6 +259,9 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${GATE_FIXTURE_CARGO_LOG:?}"
+if [[ "${GATE_FIXTURE_EXPECT_CLEAN:-}" == 1 ]]; then
+  python3 -c 'import os; assert not [k for k in os.environ if k.startswith(("CAS_RELEASE_TRAIN_", "CAS_RELEASE_GATE_"))]'
+fi
 if [[ "$*" == *'--no-run'* ]]; then printf 'fixture compile stderr\n' >&2; fi
 # cas-c0411: every gate child must see the raised `cas init` watchdog budget,
 # because the child that hit the 300s default was a test's `cas init`, several
@@ -448,6 +455,38 @@ run_gate() {
     fi
 }
 
+# Export every train control named by production, including future names.
+# Fake Cargo/npm run at the real suite boundaries and reject leaked controls.
+test_child_environment() (
+    local key repo output row
+    while IFS= read -r key; do
+        export "$key=fixture-control"
+    done < <(rg -o --no-filename 'CAS_RELEASE_TRAIN_[A-Z_0-9]+' "$script_dir/release-train.sh" "$script_dir/release-train.d" | sort -u)
+    export CAS_RELEASE_TRAIN_FUTURE_CONTROL=fixture CAS_RELEASE_GATE_FUTURE_CONTROL=fixture
+    repo="$(new_fixture train-child-env)"
+    printf '%s\n' '{"name":"env-fixture","private":true}' >"$repo/hub-web/package.json"
+    cat >"$repo/scripts/npm-env-stub" <<'EOF'
+#!/usr/bin/env bash
+python3 -c 'import os; assert not [k for k in os.environ if k.startswith(("CAS_RELEASE_TRAIN_", "CAS_RELEASE_GATE_"))]'
+EOF
+    chmod +x "$repo/scripts/npm-env-stub"
+    output="$(GATE_FIXTURE_EXPECT_CLEAN=1 NPM="$repo/scripts/npm-env-stub" \
+        run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 \
+        --only ci-script-tests,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,hub-web-tests 2>&1 || true)"
+    for row in ci-script-tests nextest doctests archive-mode snapshot-portability builtin-projections hub-web-tests; do
+        if grep -qF "PASS $row" <<<"$output"; then
+            printf 'ok   %s child environment has no train/gate controls\n' "$row"
+        else
+            printf 'FAIL %s child environment: %s\n' "$row" "$output"
+            return 1
+        fi
+    done
+)
+if [[ "${1:-}" == --test-child-env-only ]]; then
+    test_child_environment
+    exit $?
+fi
+
 assert_named_failure() {
     local name="$1" output="$2"
     if grep -qF "FAIL $name" <<<"$output" && grep -qF "RELEASE GATE FAILED" <<<"$output"; then
@@ -638,6 +677,12 @@ if grep -qF 'PASS version-literals' <<<"$output"; then
     ok 'version-literals ignores gitignored caches in a git checkout'
 else
     bad "version-literals scanned a gitignored cache (output: $output)"
+fi
+
+if test_child_environment; then
+    ok 'every suite child scrubs all declared and future train/gate control variables'
+else
+    bad 'suite child environment contains train/gate control variables'
 fi
 
 # Real make must retain a failing Python test name and stop before Cargo.

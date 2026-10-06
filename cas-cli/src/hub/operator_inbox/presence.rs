@@ -86,6 +86,7 @@ struct Reporter {
     instance_id: String,
     previous_epoch: String,
     phase: Phase,
+    activated_once: bool,
     activation_conflict_retried: bool,
     seq: u64,
     pending: Option<Prepared>,
@@ -116,6 +117,7 @@ impl Reporter {
             instance_id,
             previous_epoch,
             phase: Phase::Activate,
+            activated_once: false,
             activation_conflict_retried: false,
             seq: 0,
             pending: None,
@@ -202,6 +204,7 @@ impl Reporter {
                         self.seq = 0;
                     }
                     self.previous_epoch = epoch.clone();
+                    self.activated_once = true;
                     self.phase = Phase::Reporting {
                         epoch: epoch.clone(),
                         generation,
@@ -224,8 +227,10 @@ impl Reporter {
         }
         match (status, value["error"].as_str()) {
             (409, Some("reporter_epoch_conflict"))
-                if activation && !self.activation_conflict_retried =>
+                if activation && !self.activated_once && !self.activation_conflict_retried =>
             {
+                // Only a fresh process may supersede its dead predecessor.
+                // Generation refresh must never steal a newer live epoch.
                 if let Some(epoch) = position(&value["current_reporter_epoch"]) {
                     self.previous_epoch = epoch;
                     self.activation_conflict_retried = true;
@@ -236,7 +241,6 @@ impl Reporter {
             }
             (409, Some("monitoring_generation_conflict")) if !activation => {
                 self.phase = Phase::Activate;
-                self.activation_conflict_retried = false;
                 self.pending = None;
             }
             (409, Some("presence_report_stale")) if !activation => {

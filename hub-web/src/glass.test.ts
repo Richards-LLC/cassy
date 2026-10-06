@@ -30,6 +30,34 @@ function house(selector: string): Record<string, string> {
 const houseLight = house('html[data-scheme="light"]');
 const houseDark = house('html[data-scheme="dark"]');
 
+/** glass.css rules with comments stripped (media wrappers flattened): [selector list, declarations]. */
+const glassRules = [...glass.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => [m[1].trim().split("\n").at(-1)!.trim(), m[2]] as const);
+const BUBBLE = ".turn.you .bub";
+/**
+ * The background glass.css paints on an operator bubble in a data-state
+ * (null: no state), or undefined when no Glass rule reaches it and the base
+ * applies. glass.css loads after styles.css at equal specificity, so the last
+ * matching Glass rule wins.
+ */
+function bubbleBackground(state: string | null): string | undefined {
+  let painted: string | undefined;
+  for (const [list, body] of glassRules) {
+    const background = body.match(/(?:^|;)\s*background:\s*([^;]+)/)?.[1]?.trim();
+    if (!background) continue;
+    for (const selector of list.split(/,(?![^(]*\))/).map((x) => x.trim())) {
+      const at = selector.indexOf(BUBBLE);
+      if (at < 0) continue;
+      const tail = selector.slice(at + BUBBLE.length);
+      if (/\s|\[data-(?!state)/.test(tail.replace(/\([^)]*\)/g, ""))) continue; // a descendant or another attribute
+      const names = (tail.match(/data-state="([\w-]+)"/g) ?? []).map((x) => x.slice(12, -1));
+      const negated = /^:not\(/.test(tail);
+      const applies = names.length === 0 ? true : negated ? !(state && names.includes(state)) : Boolean(state && names.includes(state));
+      if (applies) painted = background;
+    }
+  }
+  return painted;
+}
+
 type Rgba = [number, number, number, number];
 function parse(colour: string): Rgba {
   const hex = colour.match(/^#([0-9a-f]{6})$/i);
@@ -86,13 +114,28 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     for (const stop of stops(t["--look-ask"])) expect(ratio(parse(t["--ask-fg"]), parse(stop)), `${scheme}: ask ${stop}`).toBeGreaterThanOrEqual(FLOOR);
   });
 
-  it("keeps a refused or unconfirmed message's text readable on its strong-glass record", () => {
-    // QA cas-675e F03: the violet gradient once reached these bubbles, putting
-    // --ink on violet at 1.2–2.8:1 in light. They sit on --look-glass-strong.
-    const house = scheme === "light" ? houseLight : houseDark;
-    const tokens = { ...house, ...t };
-    for (const text of ["--ink", "--ink-mid", "--crit-bg", "--warn-text"]) {
-      expect(worst(tokens[text], aurora, t["--look-glass-strong"]), `${scheme}: ${text} on a refused/unconfirmed bubble`).toBeGreaterThanOrEqual(FLOOR);
+  it.each([
+    // [operator bubble state, the texts styles.css draws in it]
+    ["sent", null, ["--you-bubble-fg"]],
+    ["refused", "error", ["--ink", "--ink-mid", "--crit-bg"]],
+    ["unconfirmed", "unconfirmed", ["--ink", "--ink-mid", "--warn-text"]],
+  ] as const)("keeps every text of a %s operator bubble at 4.5:1 on the background Glass actually paints", (_label, state, texts) => {
+    // QA cas-675e F03: an unscoped gradient rule reached refused and
+    // unconfirmed bubbles and put --ink on violet at 1.2–2.8:1 in light.
+    // Strict visual QA cannot see text over a background-image, so this
+    // resolves the cascade from glass.css and measures every backdrop.
+    const tokens = { ...(scheme === "light" ? houseLight : houseDark), ...t };
+    const painted = bubbleBackground(state);
+    const value = painted?.match(/^var\((--[\w-]+)\)$/)?.[1];
+    const resolved = value ? tokens[value] : painted;
+    let backdrops: Rgba[];
+    if (resolved === undefined) backdrops = state ? aurora : [parse(tokens["--you-bubble-bg"])]; // base: unfilled record or solid bubble
+    else if (/gradient\(/.test(resolved)) backdrops = stops(resolved).map(parse);
+    else backdrops = aurora.map((b) => over(parse(resolved), b));
+    for (const text of texts) {
+      const fg = parse(tokens[text]);
+      const low = Math.min(...backdrops.map((b) => ratio(over(fg, b), b)));
+      expect(low, `${scheme}: ${text} on a ${_label} bubble painted ${painted ?? "by the base"}`).toBeGreaterThanOrEqual(FLOOR);
     }
   });
 
@@ -143,6 +186,16 @@ describe("Glass structure", () => {
     // Blur is for the four chrome panels and dialogs only, never per message:
     // a blur per bubble dropped a long thread's scroll from 56 fps to 43.
     expect(rules).not.toMatch(/\.bub[^{]*\{[^}]*backdrop-filter/);
+  });
+
+  it("measures text on every gradient Glass paints", () => {
+    // Each gradient surface has a contrast pair above: Send and primaries
+    // (white on --look-send), the operator bubble (--look-you, by state), the
+    // question card (--ask-fg on --look-ask), its tray (opaque chips on
+    // --look-ask-tray) and the aurora (reading field). A new one needs a pair.
+    const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
+    const painted = new Set([...rules.matchAll(/background:\s*var\((--look-[\w-]+)\)/g)].map((m) => m[1]).filter((name) => /gradient\(|url\(/.test(light[name] ?? "")));
+    expect([...painted].sort()).toEqual(["--look-ask", "--look-ask-tray", "--look-aurora", "--look-send", "--look-you"]);
   });
 
   it("never paints the violet gradient under a refused or unconfirmed message", () => {

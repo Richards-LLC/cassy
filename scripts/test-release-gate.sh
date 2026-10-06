@@ -375,6 +375,8 @@ PY_ARCHIVE_EXTRACT
 fi
 EOF
     chmod +x "$repo/scripts/cargo-stub"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-zigbuild-1.0' >"$repo/scripts/cargo-zigbuild"
+    chmod +x "$repo/scripts/cargo-zigbuild"
     cat >"$repo/scripts/rustup-stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -413,6 +415,7 @@ run_gate() {
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           "$failure_variable=1" \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          PATH="$repo/scripts:$PATH" \
           GATE_FIXTURE_ISA_ORIGINAL_ENCODED="${CARGO_ENCODED_RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS="${RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
@@ -427,6 +430,7 @@ run_gate() {
         (cd "$repo" && \
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          PATH="$repo/scripts:$PATH" \
           GATE_FIXTURE_ISA_ORIGINAL_ENCODED="${CARGO_ENCODED_RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS="${RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
@@ -1478,6 +1482,16 @@ if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_L
 else
     bad "release prose reran unchanged code rows: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"
 fi
+# Tool updates at the same selected path invalidate the artifact PASS too.
+printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-zig-2.0' >"$repo/.context/zig/zig"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-isa-zig.log" 2>&1
+if awk -F '\t' '$1 == "release-binary-isa" && $7 == "0" {found=1} END {exit !found}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+    ok 'selected Zig version change invalidates the release artifact PASS'
+else
+    bad 'updated Zig reused stale release artifact evidence'
+fi
+printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-zig-1.0' >"$repo/.context/zig/zig"
+
 # A graph change must invalidate an earlier artifact PASS without relying on
 # environment changes. Fake Cargo emits the incident EVEX when aes is locked.
 printf '\n[[package]]\nname = "aes"\nversion = "0.9.3"\n' >>"$repo/Cargo.lock"

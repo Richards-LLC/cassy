@@ -863,7 +863,8 @@ check_workspace_tests() {
 # from check/test profiles. No tags, uploads or remote mutation occur here.
 release_binary_isa_toolchain() {
     local zigbuild_version zig_version objdump_bin objdump_version
-    zigbuild_version="$("$cargo_bin" zigbuild --version)" || return 1
+    # Version belongs to the plugin's top-level CLI, not its zigbuild subcommand.
+    zigbuild_version="$(cargo-zigbuild --version)" || return 1
     [[ -x "${ZIG:-}" ]] || return 1
     zig_version="$("$ZIG" version)" || return 1
     objdump_bin="$(release_portable_gnu_objdump)" || return 1

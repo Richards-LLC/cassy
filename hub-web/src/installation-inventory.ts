@@ -28,7 +28,9 @@ function installationTime(doc: Document, value: string): HTMLElement {
   }
   const time = doc.createElement("time"); time.dateTime = value;
   time.title = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(timestamp);
-  const seconds = (timestamp - Date.now()) / 1_000;
+  // A machine clock can lead this browser's. Activity cannot be in the
+  // future; retain the exact timestamp in the title and Technical details.
+  const seconds = Math.min(0, (timestamp - Date.now()) / 1_000);
   const unit = Math.abs(seconds) >= 86_400 ? "day" : Math.abs(seconds) >= 3_600 ? "hour" : "minute";
   const size = unit === "day" ? 86_400 : unit === "hour" ? 3_600 : 60;
   time.textContent = Math.abs(seconds) < 60 ? "Just now" : new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(Math.trunc(seconds / size), unit);

@@ -45,22 +45,33 @@ for (const width of [390, 1280]) {
           await expect(feedback).toBeFocused();
           await expect(feedback).toMatchAriaSnapshot('- alert: /Pairing timed out after 10s/');
           const geometry = await dialog.evaluate(el => {
-            const feedback = el.querySelector(".pair-status")!.getBoundingClientRect();
+            const advice = el.querySelector(".pair-status")!;
+            const feedback = advice.getBoundingClientRect();
+            const text = document.createRange(); text.selectNodeContents(advice);
+            const glyphLeft = Math.min(...Array.from(text.getClientRects(), rect => rect.left));
+            const outlineInset = Math.max(0, -parseFloat(getComputedStyle(advice).outlineOffset));
             const form = el.querySelector("form")!.getBoundingClientRect();
             const actions = el.querySelector(".dialog-actions")!.getBoundingClientRect();
-            return { top: feedback.top, bottom: feedback.bottom, formTop: form.top, actionsTop: actions.top };
+            return { top: feedback.top, bottom: feedback.bottom, formTop: form.top, actionsTop: actions.top, glyphClearance: glyphLeft - feedback.left - outlineInset };
           });
           writeFileSync(info.outputPath("feedback-bounds.json"), JSON.stringify(geometry, null, 2) + "\n");
           expect(geometry.top).toBeGreaterThanOrEqual(geometry.formTop - 0.5);
           expect(geometry.bottom, "the sticky actions do not cover the advice").toBeLessThanOrEqual(geometry.actionsTop + 0.5);
+          expect(geometry.glyphClearance, "the inset focus ring clears the advice's first glyphs").toBeGreaterThanOrEqual(2);
           await expect(dialog.getByRole("button", { name: "Pair", exact: true })).toBeEnabled();
           expect(hub.exchanges).toHaveLength(0);
           await captureRendered(page, info, "timeout");
         });
         await journey.stage("Retry uses the retained invitation and completes once", async () => {
-          blocked = false;
           await held!.abort("failed").catch(() => {});
+          held = undefined;
           await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+          await expect.poll(() => Boolean(held)).toBe(true);
+          const feedback = dialog.locator(".pair-status");
+          await expect(feedback).toHaveAttribute("role", "status");
+          await expect(feedback).toContainText("Updating this browser installation");
+          blocked = false;
+          await held!.fallback();
           await expect(dialog).toBeHidden();
           expect(hub.exchanges).toHaveLength(1);
         });
@@ -91,6 +102,7 @@ for (const width of [390, 1280]) {
           for (const time of await row.locator("time").all()) {
             await expect(time).toHaveAttribute("title", /.+/);
             await expect(time).not.toHaveText(/\d{4}-\d{2}-\d{2}T/);
+            await expect(time).toHaveText("Just now");
           }
           await expect(row.getByRole("heading")).toMatchAriaSnapshot('- heading "Work laptop · This browser" [level=3]');
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

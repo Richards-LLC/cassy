@@ -1570,7 +1570,8 @@ dialog form > *,
 }
 
 .pair-status {
-  padding: var(--space-3) 0;
+  /* Leave a text gutter inside the inset focus outline (cas-2e77 QA F01). */
+  padding: var(--space-3) var(--space-2);
   color: var(--text-hi);
   /* cas-0e14: the re-pair copy can carry a long `cas hub pair --scopes …`
      command; it wraps instead of running out of the dialog. */

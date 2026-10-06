@@ -50,6 +50,17 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(os.access(first, os.X_OK))
 
+    def test_staged_wrapper_imports_from_its_own_directory(self):
+        # The guard runs as rustc's linker from the staged copy only, so every
+        # helper assembly-proof.py loads beside itself must be staged too.
+        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_LINK_GUARD_DIR=str(self.root / "staged"))
+        wrapper = guard.stable_wrapper(self.root, env)
+        probe = ("import importlib.util,sys; s=importlib.util.spec_from_file_location('g', sys.argv[1]); "
+                 "m=importlib.util.module_from_spec(s); s.loader.exec_module(m)")
+        result = subprocess.run([sys.executable, "-c", probe, str(wrapper)], capture_output=True, text=True,
+                                cwd=str(self.root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_compile_pauses_actual_group_then_resumes(self):
         low = dict(self.high, available_bytes=17 * guard.proof.GIB)
         pidfile = self.root / "pid"

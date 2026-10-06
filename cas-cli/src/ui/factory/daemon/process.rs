@@ -93,18 +93,13 @@ pub fn fork_into_daemon(app: FactoryApp, session_name: String) -> anyhow::Result
     // Create socket BEFORE fork so both processes know the path
     let sock_path = socket_path(&session_name);
 
-    // Remove stale socket if it exists
-    if sock_path.exists() {
-        std::fs::remove_file(&sock_path)?;
-    }
-
     // Ensure parent directory exists
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     // Create listener
-    let listener = UnixListener::bind(&sock_path)?;
+    let listener = bind_factory_socket(&sock_path)?;
     listener.set_nonblocking(true)?;
 
     // Save session metadata before fork (no ws_port for Unix socket daemon)
@@ -235,10 +230,7 @@ pub async fn run_daemon_after_fork(
 
     // Create GUI socket for desktop clients
     let gui_sock_path = gui_socket_path(&session_name);
-    if gui_sock_path.exists() {
-        let _ = std::fs::remove_file(&gui_sock_path);
-    }
-    let gui_listener = UnixListener::bind(&gui_sock_path)?;
+    let gui_listener = bind_factory_socket(&gui_sock_path)?;
     gui_listener.set_nonblocking(true)?;
 
     // Remove orphaned team directories from previous crashed sessions

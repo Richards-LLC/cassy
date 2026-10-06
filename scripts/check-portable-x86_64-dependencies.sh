@@ -14,13 +14,14 @@ tree_file="$tmpdir/cargo-tree.txt"
 
 case "$#" in
   0)
-    for tool in cargo grep; do
+    cargo_bin="${CARGO:-cargo}"
+    for tool in "$cargo_bin" grep; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         echo "error: required portable dependency audit tool is unavailable: $tool" >&2
         exit 2
       fi
     done
-    if ! cargo tree --locked -p cas \
+    if ! "$cargo_bin" tree --locked -p cas \
       --target x86_64-unknown-linux-gnu \
       --edges normal,build,features >"$tree_file"; then
       echo "error: could not resolve the locked Linux x86_64 release dependency graph" >&2

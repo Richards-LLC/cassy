@@ -334,7 +334,11 @@ html[data-scheme="dark"] {
 
   /* Bubbles stay nearly opaque and unblurred (a blur per bubble cost a quarter
      of the frame rate in a long thread); yours carries the violet gradient. */
-  :root .thread .turn.you .bub { background: var(--look-you); box-shadow: var(--look-you-glow); }
+  :root .thread .turn.you .bub:not(:is([data-state="error"], [data-state="unconfirmed"])) { background: var(--look-you); box-shadow: var(--look-you-glow); }
+  /* A refused or unconfirmed message keeps the base's unfilled, dashed record
+     in --ink, never the violet gradient (that put near-black text on violet in
+     light, 1.2–2.8:1). It sits on strong glass, so its text has a known backdrop. */
+  :root .thread .turn.you .bub:is([data-state="error"], [data-state="unconfirmed"]) { background: var(--look-glass-strong); }
   :root .obj { box-shadow: var(--lift-strong); }
 
   /* An open question is the warmest thing on screen: amber to coral, over an ember tray. */

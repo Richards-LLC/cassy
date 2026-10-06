@@ -19,6 +19,16 @@ function block(selector: string): Record<string, string> {
 const light = block(':root, html[data-scheme="light"]');
 const dark = block('html[data-scheme="dark"]');
 const darkMedia = block(':root:not([data-scheme="light"])');
+/** House roles Glass does not override, from the generated tokens.css explicit-scheme blocks. */
+function house(selector: string): Record<string, string> {
+  const css = read("./tokens.css");
+  const at = css.indexOf(`${selector} {`);
+  if (at < 0) throw new Error(`tokens.css has no ${selector} block`);
+  const body = css.slice(at, css.indexOf("}", at));
+  return Object.fromEntries([...body.matchAll(/(--[\w-]+):\s*([^;]+);/g)].map((decl) => [decl[1], decl[2].trim()]));
+}
+const houseLight = house('html[data-scheme="light"]');
+const houseDark = house('html[data-scheme="dark"]');
 
 type Rgba = [number, number, number, number];
 function parse(colour: string): Rgba {
@@ -76,6 +86,16 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     for (const stop of stops(t["--look-ask"])) expect(ratio(parse(t["--ask-fg"]), parse(stop)), `${scheme}: ask ${stop}`).toBeGreaterThanOrEqual(FLOOR);
   });
 
+  it("keeps a refused or unconfirmed message's text readable on its strong-glass record", () => {
+    // QA cas-675e F03: the violet gradient once reached these bubbles, putting
+    // --ink on violet at 1.2–2.8:1 in light. They sit on --look-glass-strong.
+    const house = scheme === "light" ? houseLight : houseDark;
+    const tokens = { ...house, ...t };
+    for (const text of ["--ink", "--ink-mid", "--crit-bg", "--warn-text"]) {
+      expect(worst(tokens[text], aurora, t["--look-glass-strong"]), `${scheme}: ${text} on a refused/unconfirmed bubble`).toBeGreaterThanOrEqual(FLOOR);
+    }
+  });
+
   it("keeps timestamps that sit straight on the aurora readable in its reading field", () => {
     // The vivid corners lie under the frosted panels; the middle column is the reading field.
     const field = readingField(t);
@@ -123,5 +143,15 @@ describe("Glass structure", () => {
     // Blur is for the four chrome panels and dialogs only, never per message:
     // a blur per bubble dropped a long thread's scroll from 56 fps to 43.
     expect(rules).not.toMatch(/\.bub[^{]*\{[^}]*backdrop-filter/);
+  });
+
+  it("never paints the violet gradient under a refused or unconfirmed message", () => {
+    // QA cas-675e F03: an unscoped .turn.you .bub gradient overrode the base's
+    // unfilled record (styles.css) and left near-black text on violet in light.
+    const rules = glass.replace(/\/\*[\s\S]*?\*\//g, "");
+    const youGradient = [...rules.matchAll(/([^{}]+)\{[^{}]*background:\s*var\(--look-you\)/g)].map((m) => m[1].trim());
+    expect(youGradient.length).toBeGreaterThan(0);
+    for (const selector of youGradient) expect(selector).toContain(':not(:is([data-state="error"], [data-state="unconfirmed"]))');
+    expect(rules).toContain(':root .thread .turn.you .bub:is([data-state="error"], [data-state="unconfirmed"]) { background: var(--look-glass-strong); }');
   });
 });

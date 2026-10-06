@@ -6202,6 +6202,7 @@ mod spawn_isolation_tests {
             .output()
             .unwrap();
         std::fs::write(dir.join("README.md"), "# test").unwrap();
+        std::fs::write(dir.join(".gitignore"), "/target/\n").unwrap();
         Command::new("git")
             .args(["add", "."])
             .current_dir(dir)

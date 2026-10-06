@@ -354,6 +354,7 @@ mod tests {
         super::super::tests::git(&repo, &["config", "user.email", "fixture@example.invalid"]);
         super::super::tests::git(&repo, &["config", "user.name", "Fixture"]);
         fs::write(repo.join("source"), "keep").unwrap();
+        fs::write(repo.join(".gitignore"), "/target/\n").unwrap();
         super::super::tests::git(&repo, &["add", "."]);
         super::super::tests::git(&repo, &["commit", "-qm", "fixture"]);
         let root = repo.join(".cas");

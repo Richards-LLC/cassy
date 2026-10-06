@@ -134,11 +134,19 @@ def admitted(path, owner, clean):
             lock.close()
 
 
+def _file_size(item):
+    # A live run may remove a file between enumeration and stat; a vanished
+    # file occupies no space, so it counts as zero rather than aborting.
+    try:
+        return 0 if item.is_symlink() else item.stat(follow_symlinks=False).st_size
+    except FileNotFoundError:
+        return 0
+
+
 def size(path):
-    return sum(item.stat(follow_symlinks=False).st_size
+    return sum(_file_size(Path(parent) / name)
                for parent, dirs, files in os.walk(path, followlinks=False)
-               for item in (Path(parent) / name for name in files)
-               if not item.is_symlink())
+               for name in files)
 
 
 def worktrees(repo):
@@ -499,7 +507,7 @@ def sweep(repo, base, clean=False, env=None):
                             for candidate in candidates:
                                 if any(contains(candidate.resolve(), tree) for tree in protected):
                                     continue
-                                used = size(candidate) if candidate.is_dir() else candidate.stat().st_size
+                                used = size(candidate) if candidate.is_dir() else _file_size(candidate)
                                 row["reclaimable_bytes"] += used
                                 if clean:
                                     # Git identity is re-read immediately before mutation.

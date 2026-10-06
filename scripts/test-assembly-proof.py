@@ -149,7 +149,11 @@ class ReceiptTests(unittest.TestCase):
                                     proof.receipt_path(self.root, actual))
 
     def test_scrubbed_train_reuses_factory_receipt_without_running_rows(self):
-        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        # Keep scratch inventory inside the fixture: the real legacy bases may
+        # hold a live proof's clone that churns while this test runs.
+        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin",
+                "CAS_RELEASE_GATE_HOME_DIR": str(self.root / "scratch-base"),
+                "CAS_RELEASE_SCRATCH_EXTRA_BASES": ""}
         expected, _ = self.inputs_for_environment(self.harness_environment(base))
         self.record["inputs"] = expected
         self.path = proof.receipt_path(self.root, expected)

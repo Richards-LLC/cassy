@@ -207,6 +207,20 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         owner.update(pid=0, start='idle')
         (path / scratch.OWNER).write_text(json.dumps(owner))
 
+    def test_size_counts_a_file_removed_mid_scan_as_zero(self):
+        # A live run deletes build output while inventory is measuring it.
+        root = self.parent / 'churn'
+        root.mkdir()
+        (root / 'kept').write_bytes(b'x' * 10)
+        (root / 'gone').write_bytes(b'y' * 20)
+        real_stat = Path.stat
+        def flaky_stat(path, *args, **kwargs):
+            if path.name == 'gone':
+                raise FileNotFoundError(str(path))
+            return real_stat(path, *args, **kwargs)
+        with unittest.mock.patch.object(Path, 'stat', flaky_stat):
+            self.assertEqual(scratch.size(root), 10)
+
     def test_cache_size_and_age_bounds_evict_before_and_after_use(self):
         target = self.parent / 'assembly-target'
         env = dict(self.env, CAS_ASSEMBLY_TARGET_MAX_GIB='0.000001')

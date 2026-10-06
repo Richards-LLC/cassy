@@ -126,7 +126,7 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await journey.open();
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${MANAGE_TOKEN}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas%20%C2%B7%20Linux&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage`);
     await expect(dialog.getByText("One-time invitation ready. Check the machine, then add your name.")).toBeVisible();
-    await expect(dialog.locator(".pair-lead").first()).toHaveText("This browser will be able to: Read sessions and terminals · Type, send messages and interrupt · Stop and restart workers and sessions");
+    await expect(dialog.locator(".pair-lead").first()).toHaveText("This browser will be able to: See its sessions and raw output · Type, send messages and interrupt · Stop and restart workers and sessions");
     // Native disclosure scrolling is tracked separately in cas-207a.
     // Desktop retains the raw checkbox; both layouts verify visible grants
     // and the exact requested scopes at exchange.

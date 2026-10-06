@@ -30,7 +30,7 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await expect(page.locator("#conversation-connection")).toHaveText(" · Reconnecting");
     await page.getByRole("button", { name: "Connection details", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Connection log" })).toBeVisible();
-    await expect(page.locator(".connection-log-summary")).toContainText("Network or browser policy blocked the request (browser)");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Network or browser policy blocked the request.");
     await expect(page.locator(".connection-log-summary")).toContainText("Next retry in");
     await expect(page.locator(".connection-log-summary")).toContainText("Last successful connection:");
     await expect(page.getByRole("button", { name: "Export safe diagnostics" })).toBeEnabled();
@@ -42,8 +42,12 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
   - heading "Connection log" [level=2]
   - button "Close connection log": ×
   - paragraph: /Network or browser policy blocked the request.*/
-  - button "Export safe diagnostics"
-  - text: /.*schema_version.*/`);
+  - button "Export safe diagnostics"`);
+    await expect(page.locator(".connection-log-technical > summary")).toHaveText("Technical details");
+    // cas-97d58 F08: the lead is one plain sentence; the layer and the raw JSON wait behind Technical details.
+    await expect(page.locator(".connection-log-summary")).not.toContainText("(browser)");
+    await expect(page.locator(".connection-log-summary")).not.toContainText("indistinguishable");
+    await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export safe diagnostics" }).click();
     const download = await downloadPromise;
@@ -79,7 +83,7 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await page.getByRole("button", { name: "Connection details", exact: true }).click();
     await expect(page.locator("#connection-log pre")).toContainText('"recovered": "network_or_browser_policy_unknown"');
     blocked = false; await clock.advance(10_000);
-    await expect(page.locator(".connection-log-summary")).toContainText("No active failure measured");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: nothing is failing now.");
   });
   for (const setting of ["reducedMotion", "forcedColors", "contrast"] as const) {
     await journey.stage(`Accessible log with ${setting}`, async () => {
@@ -127,8 +131,10 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
     // The log's periodic projection is a one-second protocol timer, independent
     // of the five-second heartbeat. Let that tick observe the settled failure.
     await clock.advance(1_000);
-    await expect(page.locator(".connection-log-summary")).toContainText("Network or browser policy blocked the request (browser)");
-    await expect(page.locator(".connection-log-summary")).not.toContainText("No active failure measured");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Network or browser policy blocked the request.");
+    await expect(page.locator(".connection-log-summary")).not.toContainText("nothing is failing now");
+    // Unsteady: the log agrees with the rail's "checking…" (F08), never "No retry scheduled".
+    await expect(page.locator(".connection-log-summary")).not.toContainText("No retry scheduled");
     await expect(page.locator(".connection-log-summary")).toContainText("Last successful connection:");
   });
 });

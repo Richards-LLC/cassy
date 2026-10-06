@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { applyHistoryCursor, ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking, type HistoryCursor } from "./conversation-history";
-import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
+import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow, conversationRowSpokenName } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
@@ -430,6 +430,16 @@ describe('conversation evidence', () => {
     // A dropped connection names itself in place of the last turn, so the row agrees with the header (cas-a447).
     expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
     expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');
+  });
+  it('marks a parked draft in another conversation, under any connection problem (cas-97d58 F19)', () => {
+    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: 'Gate run 3 of 3 is going.', selected: false, draft: 'Please keep the release notes short' };
+    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview draft">Draft: Please keep the release notes short</span>');
+    expect(conversationRowSpokenName(row)).toContain('Draft: Please keep the release notes short');
+    // The open conversation shows its draft in the composer, not the row.
+    expect(conversationRowMarkup({ ...row, selected: true })).toContain('>Gate run 3 of 3 is going.</span>');
+    // A connection problem still leads, so the row agrees with the header.
+    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
+    expect(conversationRowMarkup({ ...row, draft: '   ' })).toContain('<span class="conversation-preview">Gate run 3 of 3 is going.</span>');
   });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {
     const app = document.createElement('div'); document.body.replaceChildren(app);

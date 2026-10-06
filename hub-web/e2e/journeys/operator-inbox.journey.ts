@@ -42,7 +42,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     // QA F02 (round 1): Enter in the name field signs in.
     await inbox.getByLabel("Name this browser").press("Enter");
     await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
-    await expect(inbox.getByRole("link", { name: "Approve on Petra Stella Cloud" })).toHaveAttribute("href", /\/operator\/approve\?code=/);
+    await expect(inbox.getByRole("link", { name: "Approve on Cassy Cloud" })).toHaveAttribute("href", /\/operator\/approve\?code=/);
   });
 
   await journey.stage("Approve it from the account; the weeks of messages are there", async () => {
@@ -59,10 +59,10 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await expect.poll(() => cloud.acks.get(phone.id)?.size ?? 0).toBe(3);
   });
 
-  await journey.stage("Reply while soundwave is off: it waits as Pending machine", async () => {
+  await journey.stage("Reply while soundwave is off: it waits for soundwave", async () => {
     await inbox.getByLabel(/Reply — soundwave gets it when it’s back/).fill("Go. Cut the release.");
     await inbox.getByRole("button", { name: "Queue reply" }).click();
-    await expect(inbox.getByText("Pending machine")).toBeVisible();
+    await expect(inbox.getByText("Waiting for soundwave")).toBeVisible();
     // QA F01 (round 1): bodies read as messages in the thread's bubble inks,
     // metadata stays quieter, and the reply's machine state is a state line.
     const look = await inbox.evaluate((dialog) => {
@@ -108,7 +108,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await expect(otherInbox.getByText("Cloud half shipped. Ready for your go.")).toBeVisible();
     await expect(otherInbox.getByText("Go. Cut the release.")).toBeVisible();
     // This profile cannot queue replies: it was approved for reading only.
-    await expect(otherInbox.getByText(/can read this conversation but not leave replies/)).toBeVisible();
+    await expect(otherInbox.getByText(/can read this conversation but not reply/)).toBeVisible();
     const desk = [...cloud.devices.values()].find((device) => device.label === "Desk")!;
     expect(cloud.acks.get(desk.id)?.size).toBe(4);
     await desktop.close();
@@ -125,7 +125,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
         await page.setViewportSize(size);
         await page.emulateMedia({ colorScheme: scheme });
         await page.evaluate((value) => { document.documentElement.dataset.scheme = value; }, scheme);
-        await expect(inbox.getByText("Pending machine")).toBeVisible();
+        await expect(inbox.getByText("Waiting for soundwave")).toBeVisible();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
         await page.screenshot({ path: `${qa}/inbox-${scheme}-${size.name}.png` });
       }
@@ -144,7 +144,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     for (const [name, query, media] of modes) {
       await page.emulateMedia(media);
       expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
-      await expect(inbox.getByText("Pending machine")).toBeVisible();
+      await expect(inbox.getByText("Waiting for soundwave")).toBeVisible();
       await page.screenshot({ path: `${qa}/a11y-${name}.png` });
     }
     await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
@@ -153,12 +153,12 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
   await journey.stage("soundwave returns and accepts the reply; a reload keeps everything", async () => {
     const [command] = cloud.commands.keys();
     cloud.acceptCommand(command);
-    await expect(inbox.getByText("Accepted by machine")).toBeVisible({ timeout: 15_000 });
+    await expect(inbox.getByText("soundwave received it")).toBeVisible({ timeout: 15_000 });
     await page.reload();
     await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByText("Started the release epic. Three lanes.")).toBeVisible();
-    await expect(inbox.getByText("Accepted by machine")).toBeVisible();
+    await expect(inbox.getByText("soundwave received it")).toBeVisible();
     // Signed in once: the reload neither asked again nor replayed history twice.
     expect(cloud.enrollments.size).toBe(2);
   });

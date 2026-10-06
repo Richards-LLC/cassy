@@ -80,7 +80,9 @@ export function fleetControlGate(scopes: readonly Scope[], operation: FleetOpera
     allowed: false,
     scope,
     state: NOT_ALLOWED_ON_PAIRING,
-    reason: `Needs the ${PERMISSION_NAME[scope] ?? scopeLabel(scope)} permission (${scopeLabel(scope)}).`,
+    // cas-97d58 F06: name the permission by what it allows; the scope id
+    // stays in the grant command, never in visible copy.
+    reason: `Needs the ${PERMISSION_NAME[scope] ?? scopeLabel(scope)} permission.`,
     grantable,
     command: scopeGrantCommand(controllerOrigin, scopes, scope),
   };

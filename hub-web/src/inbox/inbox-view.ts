@@ -50,8 +50,29 @@ export function withheldCopy(count: number): string {
 }
 
 /** QA F01: the reply's trust state is a state line, not metadata. */
-function commandStateMarkup(state: CommandState): HTMLElement {
-  return el("span", { class: "operator-inbox-command-state", "data-state": state }, commandStatusLabel(state));
+function commandStateMarkup(state: CommandState, machine?: string): HTMLElement {
+  return el("span", { class: "operator-inbox-command-state", "data-state": state }, commandStatusLabel(state, machine));
+}
+
+/**
+ * cas-97d58 F21: the name a person would give this browser ("Chrome on
+ * Linux", "Safari on iPhone"), not "Commander on Linux x86_64".
+ */
+export function browserLabel(userAgent: string): string {
+  const browser = /Edg\//.test(userAgent) ? "Edge"
+    : /Firefox\//.test(userAgent) ? "Firefox"
+      : /Chrome\/|CriOS\//.test(userAgent) ? "Chrome"
+        : /Safari\//.test(userAgent) ? "Safari"
+          : "Browser";
+  const device = /iPhone/.test(userAgent) ? "iPhone"
+    : /iPad/.test(userAgent) ? "iPad"
+      : /Android/.test(userAgent) ? "Android"
+        : /Mac OS X|Macintosh/.test(userAgent) ? "Mac"
+          : /Windows/.test(userAgent) ? "Windows"
+            : /CrOS/.test(userAgent) ? "ChromeOS"
+              : /Linux/.test(userAgent) ? "Linux"
+                : "this device";
+  return `${browser} on ${device}`;
 }
 
 function codename(session: string): string {
@@ -118,7 +139,7 @@ export class InboxView {
       try {
         delay = await this.controller.pollSignIn();
       } catch {
-        this.status = "Can't reach Petra Stella Cloud. Still waiting…";
+        this.status = "Can't reach Cassy Cloud. Still waiting…";
         this.render();
       }
       if (delay === null) {
@@ -187,7 +208,8 @@ export class InboxView {
     if (state.kind === "revoked" || state.kind === "unavailable") section.append(el("p", { class: "operator-inbox-warning" }, state.reason));
     section.append(
       el("p", { class: "operator-inbox-lead" }, "Read your supervisors’ messages here even when their machines are off, and leave a reply for when they’re back."),
-      el("p", {}, "Your Petra Stella Cloud account approves this browser. The cloud keeps messages for 90 days, encrypted when stored and sent, and holds the keys, so this isn’t end-to-end encryption."),
+      // cas-97d58 F21: one brand, and plainly who can read the messages.
+      el("p", {}, "Your Cassy Cloud account approves this browser. Cassy Cloud keeps messages for 90 days, encrypted when stored and sent. It holds the keys, so Cassy Cloud can read them as well as you: this isn’t end-to-end encryption."),
     );
     const label = el("label", {}, "Name this browser");
     const input = el("input", { id: "operator-inbox-label", type: "text", maxlength: "80", value: this.deps.defaultLabel });
@@ -209,11 +231,15 @@ export class InboxView {
     const section = el("div", { class: "operator-inbox-approval" });
     section.append(el("p", { class: "operator-inbox-lead" }, "Approve this browser from your Petra Stella account. Check that the code matches."));
     section.append(el("div", { class: "pair-code operator-inbox-code", "aria-label": "Sign-in code" }, state.userCode));
-    const link = el("a", { href: state.approvalUrl, target: "_blank", rel: "noopener noreferrer", class: "button primary", id: "operator-inbox-approve-link" }, "Approve on Petra Stella Cloud");
+    const link = el("a", { href: state.approvalUrl, target: "_blank", rel: "noopener noreferrer", class: "button primary", id: "operator-inbox-approve-link" }, "Approve on Cassy Cloud");
     section.append(link);
-    const command = el("p", {}, "Or, on a machine already enrolled: ");
+    // cas-97d58 F21: the command-line route is for engineers; it stays one tap away.
+    const other = el("details", { class: "operator-inbox-cli" });
+    other.append(el("summary", {}, "Approve from an enrolled machine instead"));
+    const command = el("p", {}, "On a machine already enrolled, run ");
     command.append(el("code", {}, `cas hub operator approve ${state.userCode}`));
-    section.append(command);
+    other.append(command);
+    section.append(other);
     const minutes = Math.max(0, Math.round((Date.parse(state.expiresAt) - Date.now()) / 60_000));
     section.append(el("p", { role: "status", class: "operator-inbox-waiting" }, `Waiting for approval · the code expires in ${minutes < 1 ? "under a minute" : `${minutes} min`}`));
     const cancel = el("button", { type: "button", id: "operator-inbox-cancel" }, "Cancel");
@@ -290,7 +316,7 @@ export class InboxView {
         item.append(...author("You"), el("p", { class: "operator-inbox-bubble" }, turn.text));
         if (turn.kind === "command") {
           const command = commands.get(turn.commandId);
-          item.append(commandStateMarkup(command?.state ?? "pending_machine"));
+          item.append(commandStateMarkup(command?.state ?? "pending_machine", thread.machineLabel));
         }
       }
       item.append(el("time", { datetime: turn.at }, relativeTimestamp(turn.at)));
@@ -301,7 +327,7 @@ export class InboxView {
       if (command.hubId !== thread.hubId || command.sessionName !== thread.session) continue;
       if (thread.turns.some((turn) => turn.kind === "command" && turn.commandId === command.commandId)) continue;
       const item = el("li", { class: "operator-inbox-turn operator-inbox-command" });
-      item.append(...author("You"), el("p", { class: "operator-inbox-bubble" }, command.body), commandStateMarkup(command.state));
+      item.append(...author("You"), el("p", { class: "operator-inbox-bubble" }, command.body), commandStateMarkup(command.state, thread.machineLabel));
       log.append(item);
     }
     section.append(log);
@@ -322,7 +348,7 @@ export class InboxView {
     if (!machine || !granted) {
       form.append(el("p", { class: "operator-inbox-hint" }, !machine
         ? "This machine is not enrolled for offline replies."
-        : "This browser can read this conversation but not leave replies. Approve it with a command scope to reply while the machine is off."));
+        : "This browser can read this conversation but not reply. To reply from it, sign out of the inbox, sign in again and allow replies when you approve it."));
       return form;
     }
     const label = el("label", { for: "operator-inbox-reply" }, `Reply — ${machine.label ?? "the machine"} gets it when it’s back`);

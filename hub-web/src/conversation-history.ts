@@ -16,6 +16,12 @@ export const RECEIPT_TIMEOUT_MS = 15_000;
  * a Retry tapped then sent the message twice (cas-1185).
  */
 export const RECEIPT_REPLY_GRACE_MS = 5_000;
+/**
+ * cas-97d58 F18: after this long without a receipt, a live send stops saying
+ * a bare "Sending…" and says what it is waiting for ("Waiting for Atlas to
+ * confirm…"), long before the receipt deadline turns it Not confirmed.
+ */
+export const CONFIRM_CUE_MS = 4_000;
 
 export interface ConversationSend {
   id: string;
@@ -329,7 +335,12 @@ export class ConversationHistory {
   }
 
   markReplyPersisted(notificationId: number): void {
-    for (const event of this.events) if (event.kind === "reply" && event.value.notification_id === notificationId) event.value.device_persisted = true;
+    for (const event of this.events) if (event.kind === "reply" && event.value.notification_id === notificationId) { event.value.device_persisted = true; delete event.value.device_store_failed; }
+  }
+
+  /** cas-97d58 F05: this device could not keep the reply; only then does the thread say so. */
+  markReplyStoreFailed(notificationId: number): void {
+    for (const event of this.events) if (event.kind === "reply" && event.value.notification_id === notificationId && !event.value.device_persisted) event.value.device_store_failed = true;
   }
 
   /** Reconcile another tab's committed journal, without making a claim replayable. */
@@ -663,6 +674,24 @@ export class ConversationHistory {
       if (deadline !== undefined && (next === undefined || deadline < next)) next = deadline;
     });
     return next === undefined ? undefined : Math.max(0, next - now);
+  }
+  /** cas-97d58 F18: when the next live send's confirmation cue is due, for a repaint. */
+  nextConfirmCue(now: number): number | undefined {
+    let next: number | undefined;
+    this.events.forEach((event, index) => {
+      if (this.receiptDeadline(index) === undefined || event.kind !== "send" || event.value.sentAt === undefined) return;
+      const cue = event.value.sentAt + CONFIRM_CUE_MS;
+      if (cue > now && (next === undefined || cue < next)) next = cue;
+    });
+    return next === undefined ? undefined : next - now;
+  }
+  /** Whether a live send has waited long enough for its receipt to say so (F18). */
+  awaitsConfirmation(send: ConversationSend, now: number = Date.now()): boolean {
+    // Only inside the receipt window: past it the receipt check turns the
+    // send Not confirmed, and the cue is not a substitute for that.
+    if (send.state !== "sending" || send.held || send.notificationId !== undefined || send.sentAt === undefined) return false;
+    const waited = now - send.sentAt;
+    return waited >= CONFIRM_CUE_MS && waited < RECEIPT_TIMEOUT_MS;
   }
   private receiptDeadline(index: number): number | undefined {
     const event = this.events[index];

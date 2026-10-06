@@ -60,6 +60,11 @@ describe("cold-load list states (journey F14)", () => {
     expect(empty.kind === "text" && empty.text).toMatch(/^No live supervisors listed/);
     const unreachable = conversationListState(true, [{ catalogReceived: false, phase: "backoff" }]);
     expect(unreachable.kind === "text" && unreachable.text).toMatch(/^Can't reach your paired machines yet/);
+    // cas-97d58 F16: a browser that blocks every machine is named as the cause.
+    const blocked = conversationListState(true, [{ catalogReceived: false, phase: "backoff", browserBlocked: true }]);
+    expect(blocked.kind === "text" && blocked.text).toBe("This browser is blocking its connection to your paired machines.");
+    const mixed = conversationListState(true, [{ catalogReceived: false, phase: "backoff", browserBlocked: true }, { catalogReceived: false, phase: "backoff" }]);
+    expect(mixed.kind === "text" && mixed.text).toMatch(/^Can't reach your paired machines yet/);
     const skeleton = document.createElement("div");
     skeleton.innerHTML = conversationSkeletonMarkup();
     expect(skeleton.querySelector('[role="status"]')?.textContent).toBe("Loading your conversations…");

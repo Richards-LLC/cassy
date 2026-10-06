@@ -89,8 +89,10 @@ test("HUB-J12 denied Local network access explains site settings without re-pair
     await expect(page.locator("#network-access-help")).toHaveText("To reach soundwave, allow Local network access for this page in your browser's site settings.");
     await expect(page.getByText(/needs pairing|was revoked/i).filter({ visible: true })).toHaveCount(0);
     // cas-7c37f: one owner for the outage sentence; the notice carries only the remedy.
-    await expect(page.locator("#conversation-empty")).toHaveText(/^Can't reach your paired machines yet\./);
-    expect(await page.locator(".conversation-sidebar").evaluate(aside => ((aside as HTMLElement).innerText.match(/Can't reach [^·\n]*?\./g) ?? []).length)).toBe(1);
+    // cas-97d58 F16: the cause is the browser; nothing says to check that the machines are awake.
+    await expect(page.locator("#conversation-empty")).toHaveText("This browser is blocking its connection to your paired machines.");
+    await expect(page.getByText(/keeps retrying|machines are awake/).filter({ visible: true })).toHaveCount(0);
+    expect(await page.locator(".conversation-sidebar").evaluate(aside => ((aside as HTMLElement).innerText.match(/allow Local network access/gi) ?? []).length), "one remedy").toBe(1);
   });
   for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     for (const scheme of ["light", "dark"] as const) {

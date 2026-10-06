@@ -73,7 +73,7 @@ export function preselectedScopes(pending: PendingPairing | null | undefined): S
 }
 
 /** What a scope set lets this browser do, in the operator's words (F7). */
-export const READ_CAPABILITY = "Read sessions and terminals";
+export const READ_CAPABILITY = "See its sessions and raw output";
 export const CONTROL_CAPABILITY = "Type, send messages and interrupt";
 const CONTROL_SCOPES: readonly Scope[] = ["pane-input", "message-send", "pane-interrupt"];
 
@@ -93,10 +93,10 @@ export const FACTORY_MANAGE_CAPABILITY = "Stop and restart workers and sessions"
 const SCOPE_CAPABILITY: Readonly<Record<Scope, string>> = {
   "machine-read": "See this machine",
   "session-read": "See its sessions",
-  "pane-read": "Read its terminals",
-  "pane-input": "Type into terminals",
+  "pane-read": "Read raw output",
+  "pane-input": "Type into its sessions",
   "message-send": "Send messages to supervisors",
-  "pane-interrupt": "Interrupt panes",
+  "pane-interrupt": "Interrupt supervisors",
   "session-launch": "Start new sessions",
   "factory-operate": FACTORY_OPERATE_CAPABILITY,
   "factory-manage": FACTORY_MANAGE_CAPABILITY,

@@ -86,16 +86,10 @@ function reasonLine(document: Document, gate: FleetControlGate, id: string, name
   line.className = "fleet-ops-reason";
   line.id = id;
   line.append(`${names ? `${names}: ` : ""}${gate.state}. ${gate.reason}`);
-  if (gate.grantable) line.append(" Allow managing workers in Paired machines.");
-  else {
-    // The command breaks after its commas, never inside a scope (cas-b52d).
-    const code = document.createElement("code");
-    for (const [index, piece] of gate.command.split(",").entries()) {
-      if (index > 0) { code.append(","); code.append(document.createElement("wbr")); }
-      code.append(piece);
-    }
-    line.append(" Run: ", code);
-  }
+  // cas-97d58 F06: one remedy for both permissions. Paired machines shows
+  // the grant (or its command, with Copy); a menu never carries a command
+  // line that a 720px viewport cuts off mid-word.
+  line.append(gate.grantable ? " Allow managing workers in Paired machines." : " Add it in Paired machines.");
   return line;
 }
 
@@ -395,6 +389,22 @@ export function undoBar(document: Document, context: FleetOpsViewContext): HTMLE
   const text = document.createElement("span"); text.textContent = offer.label;
   bar.append(text, button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo()));
   if (context.phone) appendNoticeDismiss(document, context, bar, offer);
+  return bar;
+}
+
+/**
+ * cas-97d58 F12: a destructive action's result, where the Undo would be. It
+ * takes focus (so it scrolls into view at 1280×720) and needs no Undo.
+ */
+export function resultBar(document: Document, context: FleetOpsViewContext): HTMLElement | undefined {
+  const result = context.state.currentResult(context.now);
+  if (!result) return undefined;
+  const bar = document.createElement("div");
+  bar.className = "fleet-ops-result";
+  bar.tabIndex = -1;
+  bar.dataset.fleetFocus = "result";
+  const text = document.createElement("span"); text.textContent = result.label;
+  bar.append(text);
   return bar;
 }
 

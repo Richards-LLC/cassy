@@ -329,3 +329,20 @@ export function arrivalStore(storage: StorageLike | undefined): {
     },
   };
 }
+
+/**
+ * cas-97d58 F14: the newest supervisor reply the operator has seen in each
+ * conversation, so a reload that replays history does not count replies
+ * already read as unread again. Purged with the machine like every
+ * conversation namespace.
+ */
+export function readMarkStore(storage: StorageLike | undefined): {
+  load(): Map<string, number>;
+  save(conversation: string, mark: number): void;
+} {
+  const store = new ConversationStore(storage, "read", (raw) => typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : undefined);
+  return {
+    load: () => store.entries(),
+    save: (conversation, mark) => { store.set(conversation, mark); },
+  };
+}

@@ -82,6 +82,8 @@ export interface ArtifactRef {
 export interface OperatorReply {
   /** Local application receipt, never shared operator-read state. */
   device_persisted?: boolean;
+  /** cas-97d58 F05: storing this reply on this device failed (not just pending). */
+  device_store_failed?: boolean;
   notification_id: number;
   reply_to: number | null;
   message: string;

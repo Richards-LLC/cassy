@@ -4,6 +4,7 @@ import { replaceMachineConnection } from "./connection-lifecycle";
 import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
 import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
+import { ConversationHistory } from "./conversation-history";
 import type { StoredMachine } from "./types";
 
 const supervisors: HubConnectionSupervisor[] = [];
@@ -475,6 +476,58 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     await vi.waitFor(() => expect(connection.snapshot().latencyMs).toBe(41));
     expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
+  });
+
+  it("settles a known legacy send's queued receipt across socket replacement (cas-9dc6)", async () => {
+    transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const installation = await storedMachine("late-receipt");
+    const history = new ConversationHistory();
+    const received = vi.fn((_session, receipt) => history.acknowledge(receipt));
+    const connection = new HubConnectionSupervisor(installation, {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onMessageQueued: received,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const original = TransportSocket.instances[0]!;
+    original.open();
+    original.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
+    history.submit("send-again", "supervisor", "Did the Mac tests start?");
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "send-again" } })).toBe(true);
+    // The network probe replaces legacy sockets. An already queued terminal
+    // receipt from the socket that wrote the ref remains positive evidence.
+    (connection as unknown as { networkChanged(): void }).networkChanged();
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    const replacement = TransportSocket.instances[1]!;
+    const receipt = { client_ref: "send-again", notification_id: 1009, target: "supervisor", stamped: true };
+    original.receive({ MessageQueued: receipt });
+    await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(1));
+    replacement.open();
+    replacement.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    history.hydrateSend({ notification_id: 1009, target: "supervisor", text: "Did the Mac tests start?", state: "acknowledged", stamped: true, device_id: installation.deviceId, at: new Date().toISOString() });
+    expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
+    expect(history.pendingSends()).toEqual([]);
+    // No unrelated old frame may restore an abandoned socket or settle a ref
+    // that this socket did not write. Rotation and stop revoke the drain.
+    original.receive({ MessageQueued: { ...receipt, client_ref: "someone-else" } });
+    original.receive({ Welcome: { state: { panes: [] } } });
+    await Promise.resolve();
+    expect(received).toHaveBeenCalledTimes(1);
+    installation.credentialId = "rotated";
+    original.receive({ MessageQueued: receipt });
+    await Promise.resolve();
+    expect(received).toHaveBeenCalledTimes(1);
+    installation.credentialId = "late-receipt";
+    connection.stop();
+    original.receive({ MessageQueued: receipt });
+    await Promise.resolve();
+    expect(received).toHaveBeenCalledTimes(1);
   });
 
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {

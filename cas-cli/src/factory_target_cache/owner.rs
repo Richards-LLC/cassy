@@ -62,11 +62,11 @@ fn worktree_metadata(path: &Path) -> io::Result<fs::Metadata> {
     Ok(metadata)
 }
 
-fn require_ignored_target(worktree: &Path) -> io::Result<()> {
+fn target_is_ignored(worktree: &Path) -> io::Result<bool> {
     // Ownership-only fixtures have no Git checkout. Production checkouts must
     // ignore output already; never edit the operator's shared Git exclusions.
     if !worktree.join(".git").exists() {
-        return Ok(());
+        return Ok(true);
     }
     for path in ["target/".to_string(), format!("target/{MARKER}")] {
         let status = std::process::Command::new("git")
@@ -79,13 +79,14 @@ fn require_ignored_target(worktree: &Path) -> io::Result<()> {
             .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_INDEX_FILE")
             .status()?;
+        if status.code() == Some(1) {
+            return Ok(false);
+        }
         if !status.success() {
-            return Err(io::Error::other(
-                "worker target/ must be ignored before placing ownership marker; Git configuration was not changed",
-            ));
+            return Err(io::Error::other("cannot verify worker target ignore policy"));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn boot() -> io::Result<String> {
@@ -215,8 +216,9 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
     {
         return Err(io::Error::other("private target must be a real directory"));
     }
-    if create && !target.exists() {
-        require_ignored_target(&worktree)?;
+    if create && !target.exists() && !target_is_ignored(&worktree)? {
+        tracing::warn!(worktree = %worktree.display(), "worker target is not ignored; using legacy output without ownership; retirement disabled");
+        return Ok(None);
     }
     let (record_path, lock_path) = paths(cas_root, &worktree)?;
     let file = OpenOptions::new()

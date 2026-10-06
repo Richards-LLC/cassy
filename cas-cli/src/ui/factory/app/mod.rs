@@ -6203,7 +6203,6 @@ mod spawn_isolation_tests {
             .output()
             .unwrap();
         std::fs::write(dir.join("README.md"), "# test").unwrap();
-        std::fs::write(dir.join(".gitignore"), "/target/\n").unwrap();
         Command::new("git")
             .args(["add", "."])
             .current_dir(dir)
@@ -6543,6 +6542,10 @@ mod spawn_isolation_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        // This regression also proves owned-target retirement provenance.
+        std::fs::write(repo.join(".gitignore"), "/target/\n").unwrap();
+        assert!(Command::new("git").args(["add", ".gitignore"]).current_dir(&repo).status().unwrap().success());
+        assert!(Command::new("git").args(["commit", "-qm", "ignore owned build output"]).current_dir(&repo).status().unwrap().success());
 
         let cas_dir = repo.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();

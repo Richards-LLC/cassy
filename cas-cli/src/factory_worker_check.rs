@@ -1434,7 +1434,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
 
     #[cfg(unix)]
     #[test]
-    fn unignored_target_refuses_marker_without_shared_git_mutation_cas_f96d() {
+    fn unignored_target_stays_legacy_clean_without_shared_git_mutation_cas_f96d() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off"), ("CAS_FACTORY_DISABLE_TARGET_SEED", "1")]);
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
         fixture_commit(&source);
@@ -1446,9 +1447,13 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         git(&source, &["worktree", "add", "-q", "--detach", worker.to_str().unwrap()]).unwrap();
         let config = std::fs::read(source.join(".git/config")).unwrap();
         let exclude = std::fs::read(source.join(".git/info/exclude")).unwrap();
-        let error = crate::factory_target_cache::owner::acquire(&root, &worker).err().unwrap();
-        assert!(error.to_string().contains("target/ must be ignored"), "{error}");
-        assert!(!worker.join("target").exists(), "refusal must precede marker placement");
+        assert!(crate::factory_target_cache::owner::acquire(&root, &worker).unwrap().is_none());
+        assert!(!worker.join("target").exists(), "legacy fallback places no marker");
+        assert!(!root.join("worker-target-owners").exists());
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &worker, &fake).unwrap();
+        assert!(passing_receipt(&root, &worker, &fixture_head(&worker)).is_some());
         assert!(git(&worker, &["status", "--porcelain", "--untracked-files=all"]).unwrap().is_empty());
         assert_eq!(std::fs::read(source.join(".git/config")).unwrap(), config);
         assert_eq!(std::fs::read(source.join(".git/info/exclude")).unwrap(), exclude);

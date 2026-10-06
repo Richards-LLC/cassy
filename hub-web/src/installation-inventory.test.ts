@@ -83,6 +83,16 @@ describe("recognizable browser installations (cas-2e77)", () => {
     expect(visible.textContent).not.toContain("Active");
   });
 
+  it("clamps hub activity ahead of this browser's clock while retaining the exact local and UTC times (QA F03)", async () => {
+    const future = { ...own, issued_at: "2026-10-09T12:00:00Z", last_used_at: "2026-10-10T14:00:00Z" };
+    const { dialog } = await inventory([future]);
+    const times = [...dialog.querySelectorAll("time")];
+    expect(times.map(node => node.textContent)).toEqual(["Just now", "Just now"]);
+    expect(times.map(node => node.dateTime)).toEqual([future.issued_at, future.last_used_at]);
+    expect(times[0]?.title).toBe(new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(Date.parse(future.issued_at)));
+    expect(dialog.querySelector("details")?.textContent).toContain(future.last_used_at);
+  });
+
   it("never revokes without consent and retains own-browser cleanup", async () => {
     const { dialog, request, ownRevoke } = await inventory([own]);
     const consent = vi.spyOn(window, "confirm").mockReturnValue(false);

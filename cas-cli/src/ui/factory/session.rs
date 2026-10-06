@@ -844,6 +844,19 @@ mod tests {
         assert!(!sessions_dir().exists());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_kill_cleans_main_and_gui_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        recorded_session("cli-dead", i32::MAX as u32);
+        stale_socket(&socket_path("cli-dead"));
+        stale_socket(&gui_socket_path("cli-dead"));
+        crate::cli::factory::execute_kill(Some("cli-dead"), true).unwrap();
+        assert!(!metadata_path("cli-dead").exists());
+        assert!(!socket_path("cli-dead").exists());
+        assert!(!gui_socket_path("cli-dead").exists());
+    }
+
     #[test]
     fn create_metadata_preserves_only_same_session_roster_holds_cas_60dd() {
         let home = tempfile::tempdir().unwrap();
@@ -902,6 +915,7 @@ mod tests {
 
     #[test]
     fn test_generate_session_name_without_project() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let name = generate_session_name(None);
         // Should be adjective-noun-number format (e.g., "swift-falcon-42")
         let parts: Vec<&str> = name.split('-').collect();
@@ -910,6 +924,7 @@ mod tests {
 
     #[test]
     fn test_generate_session_name_with_project() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let name = generate_session_name(Some("/home/user/my-project"));
         // Should be project-adjective-noun-number (e.g., "my-project-swift-falcon-42")
         assert!(
@@ -920,6 +935,7 @@ mod tests {
 
     #[test]
     fn test_session_paths() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let name = "test-session";
         let sock = socket_path(name);
         let meta = metadata_path(name);
@@ -930,6 +946,7 @@ mod tests {
 
     #[test]
     fn test_create_metadata() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let meta = create_metadata(
             "test-session",
             12345,
@@ -952,6 +969,7 @@ mod tests {
 
     #[test]
     fn test_find_session_for_project() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let manager = SessionManager::new();
 
         // When no sessions exist, should return None

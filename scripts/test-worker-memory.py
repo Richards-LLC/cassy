@@ -35,6 +35,8 @@ sys.modules['host_memory'] = host
 worker = load('worker_memory', ROOT / 'scripts/worker-memory.py')
 GIB = 1024**3
 HIGH = {'total_bytes': 64*GIB, 'available_bytes': 60*GIB, 'reserve_bytes': 16*GIB, 'budget_bytes': 44*GIB, 'source': 'fixture'}
+TRAIN_ENV_KEYS = ('CAS_RELEASE_TRAIN_INVOCATION_KIND', 'CAS_RELEASE_TRAIN_RUN_DIR',
+                  'CAS_RELEASE_TRAIN_STAGE')
 
 
 class AdmissionTests(unittest.TestCase):
@@ -330,11 +332,20 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         with self.admit('proof'): pass
 
     def test_cas_7b7b9_compiler_cache_server_starts_outside_the_lease(self):
+        self.assert_compiler_cache_starts_outside_lease()
+
+    def test_compiler_cache_preserves_release_train_environment(self):
+        self.env.update(zip(TRAIN_ENV_KEYS, ('cut', str(self.root / 'train'), 'gate')))
+        self.assert_compiler_cache_starts_outside_lease()
+
+    def assert_compiler_cache_starts_outside_lease(self):
         calls = self.root / 'calls'
         fake = self.root / 'bin' / 'sccache'
         fake.parent.mkdir()
         fake.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
-                        f'open({str(calls)!r},"a").write(json.dumps([sys.argv[1:], sorted(k for k in os.environ if "LEASE" in k), [os.readlink("/proc/self/fd/"+n) for n in os.listdir("/proc/self/fd") if os.path.exists("/proc/self/fd/"+n)] if os.path.isdir("/proc/self/fd") else []])+"\\n")\n'
+                        f'lease_keys = {host.LEASE_ENV_KEYS!r}\n'
+                        f'train_keys = {TRAIN_ENV_KEYS!r}\n'
+                        f'open({str(calls)!r},"a").write(json.dumps([sys.argv[1:], sorted(k for k in os.environ if k in lease_keys), [os.readlink("/proc/self/fd/"+n) for n in os.listdir("/proc/self/fd") if os.path.exists("/proc/self/fd/"+n)] if os.path.isdir("/proc/self/fd") else [], {{k: os.environ[k] for k in train_keys if k in os.environ}}])+"\\n")\n'
                         'sys.exit(2)\n')
         fake.chmod(0o755)
         lease = os.open(self.root / 'lease', os.O_RDWR | os.O_CREAT, 0o600)
@@ -343,10 +354,11 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         env = dict(self.env, RUSTC_WRAPPER=str(fake), **{host.LEASE_ENV: '{}',
                    'CAS_RELEASE_GATE_SCRATCH_LEASE_FDS': str(lease)})
         self.assertTrue(host.start_compiler_cache(env))  # "Address in use" (exit 2) is fine
-        argv, lease_keys, descriptors = json.loads(calls.read_text().splitlines()[0])
+        argv, lease_keys, descriptors, train_env = json.loads(calls.read_text().splitlines()[0])
         self.assertEqual(argv, ['--start-server'])
         self.assertEqual(lease_keys, [])
         self.assertNotIn(str(self.root / 'lease'), descriptors)
+        self.assertEqual(train_env, {k: self.env[k] for k in TRAIN_ENV_KEYS if k in self.env})
         self.assertFalse(host.start_compiler_cache(dict(self.env, RUSTC_WRAPPER='/usr/bin/ccache')))
         self.assertFalse(host.start_compiler_cache({k: v for k, v in self.env.items()
                                                     if k not in ('RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WRAPPER')}))

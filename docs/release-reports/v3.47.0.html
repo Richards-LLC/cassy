@@ -1,0 +1,349 @@
+<!doctype html>
+<!-- Render with ../scripts/render.py. Contract and source schema: exemplar.md.
+     UPPER_CASE slots accept escaped text or renderer-owned HTML only.
+     section data-section markers are stable; preserve their order. -->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark"><title>cas-src v3.47.0 · Release report · Published 6 October 2026 · 08:48 UTC</title>
+<style>
+:root{ --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--good-tint:rgba(34,104,69,0.10);--warning-tint:rgba(127,85,4,0.10);--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F; --font-display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;--font-body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{ --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;--ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,0.16);--evidence:#A3A7B4;--action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;--good-tint:rgba(95,196,146,0.14);--warning-tint:rgba(226,177,77,0.14);--danger-tint:rgba(239,123,114,0.14);--focus:#A9B3FF }}
+
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 var(--font-body)}
+a{color:var(--action);text-underline-offset:3px;overflow-wrap:anywhere}a:hover{text-decoration-thickness:2px}a:focus-visible,summary:focus-visible{outline:3px solid var(--action);outline-offset:4px}
+.skip{position:absolute;top:8px;left:8px;transform:translateY(-200%);padding:12px;background:var(--surface);color:var(--ink);z-index:3}.skip:focus{transform:none}
+main{max-width:1120px;margin:auto;padding:0 24px}.hero{background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict);padding:48px max(24px,calc((100vw - 1072px)/2)) 24px}
+.eyebrow{font:600 12px/1.5 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}.folio{display:flex;justify-content:space-between;gap:16px;margin:0 0 32px}.hero-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:48px;align-items:center}
+h1{font:400 clamp(40px,4.6vw,60px)/1.06 var(--font-display);letter-spacing:-.025em;margin:0;max-width:19ch}.hero h1 em{font-weight:400;color:var(--verdict)}h2{font:600 27px/1.2 var(--font-body);letter-spacing:-.015em;margin:0 0 24px}h3{font:600 21px/1.35 var(--font-body);margin:4px 0 16px}h4{font-size:17px;line-height:1.4;margin:0 0 12px;font-weight:600}p{margin:0 0 16px;max-width:68ch}figure{margin:0}svg{display:block;width:100%;height:auto}.svg-label,.svg-count{font:15px var(--font-body);fill:var(--ink)}.svg-count{font-family:var(--font-mono)}.svg-meta{font:10px var(--font-mono);fill:var(--ink-muted)}.svg-note{font:11px var(--font-body);fill:var(--ink-muted)}.dot{fill:var(--evidence)}.decisive{fill:var(--verdict)}.figure-claim{font-size:14px;line-height:1.45;margin:8px 0 0;color:var(--ink-muted)}.hero-note{border-top:1px solid var(--line-strong);margin:32px 0 0;padding-top:16px;display:flex;gap:24px;justify-content:space-between;font-size:14px;color:var(--ink-muted)}.hero-note p{margin:0}.hero-note a{white-space:nowrap}
+.report-section{padding:64px 0;border-bottom:1px solid var(--line-strong)}.section-top{display:flex;justify-content:space-between;gap:16px}.section-no{white-space:nowrap;font:14px var(--font-mono);color:var(--ink-muted)}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-bottom:24px}.stat{border-left:1px solid var(--line-strong);padding-left:16px}.stat:first-child{border:0;padding:0}.stat-value{display:block;font:400 44px/1.1 var(--font-display);letter-spacing:-.025em;margin-bottom:8px}.stat-label{display:block;font-weight:600;margin-bottom:8px}.stat p{font-size:12px;line-height:1.5;color:var(--ink-muted);margin:0}.method{font-size:14px;color:var(--ink-muted)}details{margin-top:24px}summary{cursor:pointer;font-weight:600;color:var(--action)}details p{font-size:14px;margin-top:16px}.table-wrap{overflow-x:auto;margin:24px 0}table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}caption{text-align:left;color:var(--ink-muted);font-size:14px;margin-bottom:12px}th,td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:500}thead th{font:600 11px/1.6 var(--font-mono);letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--line-strong)}.num{text-align:right;font-variant-numeric:tabular-nums}tbody th{min-width:56px}tbody tr:last-child td,tbody tr:last-child th{border-bottom:1px solid var(--line-strong)}code,pre{font-family:var(--font-mono);font-size:.86em}code{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:24px 0;padding:20px;border-left:3px solid var(--verdict);background:var(--surface);color:var(--ink)}
+.theme{padding:32px 0;border-top:1px solid var(--line);display:grid;grid-template-columns:220px 1fr;gap:48px}.theme:first-child{border-top:0;padding-top:0}.change{padding:0 0 24px;margin:0 0 24px;border-bottom:1px solid var(--line)}.change:last-child{margin:0;padding:0;border:0}.pair{display:grid;grid-template-columns:1fr 1.25fr;gap:24px}.pair p{font-size:15px;line-height:1.6;margin:0}.was{color:var(--ink-muted)}.state{display:block;font:600 10px/1.8 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}.now .state{color:var(--verdict)}
+.users .theme-1 .theme-label{padding:24px;background:var(--surface-hero);color:var(--ink);align-self:start;border-left:3px solid var(--verdict)}.users .theme-2{grid-template-columns:1fr}.users .theme-2 .theme-label{display:flex;gap:16px;align-items:baseline}.users .theme-2 .pair{grid-template-columns:1fr 1fr}.users .theme-2 .change{display:grid;grid-template-columns:220px 1fr;gap:48px}.users .theme-4{grid-template-columns:1fr}.users .theme-4 .changes{display:grid;grid-template-columns:1fr 1fr;gap:24px}.users .theme-4 .change{padding:24px;background:var(--surface);color:var(--ink);border:0;margin:0}.users .theme-4 .pair{display:block}.users .theme-4 .was{margin-bottom:16px}
+.dev .theme{gap:32px}.dev .change{display:grid;grid-template-columns:150px 1fr;gap:24px;margin:0 0 16px;padding-bottom:16px}.dev h4{font-size:14px}.dev .pair{display:block}.dev .pair p{font-size:14px}.dev .was{margin-bottom:4px}.dev .state{display:inline;margin-right:8px}.dev .changes>p{font-size:14px;color:var(--ink-muted)}.install pre{font-size:32px}.install h3{margin-top:32px}.install code{word-break:break-all}.stitch{width:132px;color:var(--verdict);margin-bottom:24px}.provenance{font-size:14px}.provenance pre{font-size:12px}.provenance p{max-width:90ch}.page-footer{max-width:1120px;margin:auto;padding:32px 24px 48px;display:flex;justify-content:space-between;gap:24px;font-size:12px;color:var(--ink-muted)}
+@media(max-width:820px){.hero-grid{gap:24px}.theme{grid-template-columns:160px 1fr;gap:24px}.users .theme-2 .change{grid-template-columns:160px 1fr;gap:24px}.dev .theme,.dev .change{grid-template-columns:1fr;gap:8px}.stats{gap:16px}.stat-value{font-size:34px}}
+@media(max-width:600px){main{padding:0 24px}.hero{padding:24px 24px 20px}.folio{display:block;margin-bottom:24px}.folio span{display:block}.hero-grid{grid-template-columns:1fr;gap:24px}h1{font-size:40px;max-width:19ch}.hero figure{max-width:400px}.hero-note{display:block;margin-top:20px;padding-top:12px;font-size:12px}.hero-note a{display:inline-block;margin-top:8px}.figure-claim{font-size:12px}.report-section{padding:40px 0}.stats{grid-template-columns:1fr 1fr;gap:24px}.stat:nth-child(3){border:0;padding:0}.stat-value{font-size:38px}.theme,.users .theme-2 .change{grid-template-columns:1fr;gap:16px}.pair,.users .theme-2 .pair{grid-template-columns:1fr;gap:12px}.users .theme-1 .theme-label{padding:16px}.users .theme-4 .changes{grid-template-columns:1fr}.theme{padding:24px 0}.theme-label h3{margin-bottom:4px}.change{margin-bottom:20px;padding-bottom:20px}.users .theme-2 .theme-label{display:block}.table-wrap{margin:20px 0}td,th{padding-right:10px;font-size:12px}thead th{font-size:10px}.ledger td:last-child{overflow-wrap:anywhere;width:24%}.page-footer{display:block}.page-footer span{display:block;margin-bottom:8px}.section-top{gap:8px}h2{font-size:25px}.install pre{font-size:27px}}
+
+@page{margin:15mm}
+@media print{
+:root{ --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--good-tint:rgba(34,104,69,0.10);--warning-tint:rgba(127,85,4,0.10);--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F;color-scheme:light}
+body{background:var(--surface);color:var(--ink);font-size:10pt;line-height:1.4}
+main{max-width:none;padding:0}.skip{display:none}
+.hero{background:var(--surface);color:var(--ink);padding:4mm 0 6mm;break-after:auto}
+.folio{margin-bottom:6mm}.hero-grid{grid-template-columns:1fr 1fr;gap:8mm}
+.hero h1{font-size:26pt;max-width:22ch}.hero figure{width:100%}
+.hero-note{margin-top:5mm;font-size:8pt}.figure-claim{font-size:8pt}
+.report-section{padding:7mm 0 0;border:0;break-before:auto}
+.section-top{break-after:avoid}h2{font-size:20pt;margin-bottom:5mm}
+h3{font-size:14pt}h4{font-size:10pt}h2,h3,h4{break-after:avoid}p{max-width:none;orphans:3;widows:3}
+.stats{gap:5mm;break-inside:avoid}.stat-value{font-size:25pt}.stat p{font-size:8pt}.stat-label{font-size:9pt}
+.method,details p,caption{font-size:8pt}summary{font-size:9pt}
+.table-wrap{overflow:visible;margin:5mm 0}table{font-size:9pt;table-layout:fixed}
+thead{display:table-header-group}th,td{padding:2mm;font-size:8pt;overflow-wrap:anywhere}
+tr,figure,pre,.change{break-inside:avoid;page-break-inside:avoid}
+a[href^="http"]::after{content:" (" attr(href) ")";font:7pt var(--font-body);overflow-wrap:anywhere;color:var(--ink-muted)}
+a{color:var(--ink);text-decoration:underline}
+.theme,.users .theme-2,.users .theme-4,.dev .theme{display:block;padding:4mm 0;break-inside:auto}
+.changes{orphans:1;widows:1}
+.theme-label{margin-bottom:3mm;break-after:avoid;break-inside:avoid}.theme-label .eyebrow{display:none}.theme-label h3{margin-bottom:2mm}
+.users .theme-1 .theme-label{background:var(--surface);color:var(--ink);padding:0;border:0}
+.users .theme-2 .theme-label,.users .theme-2 .change{display:block}
+.pair,.users .theme-2 .pair{grid-template-columns:1fr 1fr;gap:6mm}.pair p{font-size:9pt}
+.users .change{display:inline-block;width:100%;margin-bottom:3mm;padding-bottom:3mm}
+.users h4{margin-bottom:2mm}.users .state{display:inline;margin-right:2mm}
+.users .theme-4 .changes{display:block}.users .theme-4 .change{background:var(--surface);color:var(--ink);padding:0 0 3mm;margin:0 0 3mm}
+.users .theme-4 .pair{display:grid}.users .theme-4 .was{margin:0}
+.dev .change{display:inline-block;width:100%;margin-bottom:2.5mm;padding-bottom:2.5mm}.dev h4{display:inline-block;width:22%;vertical-align:top;margin:0 3% 0 0}
+.dev .pair p,.dev h4{font-size:9pt}.dev .pair{display:inline-block;width:74%;vertical-align:top}.dev .changes>p{font-size:8pt}
+.ledger th:first-child{width:28%}.ledger td:last-child{width:22%}
+.ledger th,.ledger td{font-size:8pt;line-height:1.2;padding:1mm 2mm 1mm 0}
+.install pre{font-size:20pt}.install h3{margin-top:6mm}
+.provenance{font-size:9pt}.provenance pre{font-size:8pt}
+.page-footer{font-size:8pt;padding:8mm 0 0}.page-footer a:after{content:none}
+pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}.stitch{width:35mm}
+}
+</style></head><body>
+<a class="skip" href="#content">Skip to release details</a>
+<!-- section: hero -->
+<header class="hero" data-section="hero"><div class="folio eyebrow"><span>cas-src v3.47.0 / Release notes</span><span>Published 6 October 2026 · 08:48 UTC</span></div>
+<div class="hero-grid"><h1>Your conversations wait in an inbox you can read and answer from any browser.</h1><figure>
+<!-- Change-map contract v1: each g[data-surface] has data-count (integer),
+     data-issues (JSON string array), data-emphasis (true/false). Every circle
+     carries data-issue; one equal-area circle per verified closure. Zero rows
+     stay labelled. SVG description and adjacent table carry identical data. -->
+<svg viewBox="0 0 340 526" role="img" aria-labelledby="map-title map-desc" data-change-map="1" data-total="0">
+<title id="map-title">The closure map is empty until release evidence names verified issues.</title><desc id="map-desc">Messages that always reach you 0, Clearer conversations 0, Release 0, Faster, steadier checks 0, Team sync 0, Commander delivery 0, Verification 0, Browser test tiering 0, Factory 0, Cloud sync 0, Gates and runtime 0, Memory 0. Each filled circle represents one closed issue. Total 0.</desc>
+<text x="0" y="16" class="svg-meta">SURFACE</text><text x="337" y="16" text-anchor="end" class="svg-meta">CLOSED</text>
+<g data-surface="Messages that always reach you" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="51" class="svg-label">Messages that always reach you</text>
+<text x="134" y="50" class="svg-note">no listed issues</text>
+<text x="337" y="51" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Clearer conversations" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="91" class="svg-label">Clearer conversations</text>
+<text x="134" y="90" class="svg-note">no listed issues</text>
+<text x="337" y="91" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Release" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="131" class="svg-label">Release</text>
+<text x="134" y="130" class="svg-note">no listed issues</text>
+<text x="337" y="131" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Faster, steadier checks" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="171" class="svg-label">Faster, steadier checks</text>
+<text x="134" y="170" class="svg-note">no listed issues</text>
+<text x="337" y="171" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Team sync" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="211" class="svg-label">Team sync</text>
+<text x="134" y="210" class="svg-note">no listed issues</text>
+<text x="337" y="211" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Commander delivery" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="251" class="svg-label">Commander delivery</text>
+<text x="134" y="250" class="svg-note">no listed issues</text>
+<text x="337" y="251" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Verification" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="291" class="svg-label">Verification</text>
+<text x="134" y="290" class="svg-note">no listed issues</text>
+<text x="337" y="291" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Browser test tiering" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="331" class="svg-label">Browser test tiering</text>
+<text x="134" y="330" class="svg-note">no listed issues</text>
+<text x="337" y="331" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Factory" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="371" class="svg-label">Factory</text>
+<text x="134" y="370" class="svg-note">no listed issues</text>
+<text x="337" y="371" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Cloud sync" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="411" class="svg-label">Cloud sync</text>
+<text x="134" y="410" class="svg-note">no listed issues</text>
+<text x="337" y="411" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Gates and runtime" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="451" class="svg-label">Gates and runtime</text>
+<text x="134" y="450" class="svg-note">no listed issues</text>
+<text x="337" y="451" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Memory" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="491" class="svg-label">Memory</text>
+<text x="134" y="490" class="svg-note">no listed issues</text>
+<text x="337" y="491" text-anchor="end" class="svg-count">0</text></g></svg><figcaption class="figure-claim">The closure map is empty until release evidence names verified issues.</figcaption></figure></div>
+<div class="hero-note"><p>One dot, one closed issue. 0 issue-bearing surfaces.</p><a href="#map-data">Read the map data ↓</a></div></header>
+<main id="content">
+<!-- section: glance -->
+<section class="report-section" data-section="glance"><div class="section-top"><h2>Release at a glance</h2><span class="section-no">01 / 06</span></div>
+<div class="stats"><div class="stat"><span class="stat-value">0</span><span class="stat-label">Issues closed</span><p>Named, verified closed issues in this report</p></div>
+<div class="stat"><span class="stat-value">0</span><span class="stat-label">Features added</span><p>Top-level Added entries in the CHANGELOG section</p></div>
+<div class="stat"><span class="stat-value">0</span><span class="stat-label">Changed entries</span><p>Top-level Changed entries in the CHANGELOG section</p></div>
+<div class="stat"><span class="stat-value">0</span><span class="stat-label">Fix entries</span><p>Top-level Fixed entries in the CHANGELOG section</p></div>
+<div class="stat"><span class="stat-value">83m 46s</span><span class="stat-label">Green to published</span><p>gate.green.epoch to the published receipt, when available</p></div>
+<div class="stat"><span class="stat-value">3m 17s — within budget (10m 0s budget)</span><span class="stat-label">Tag to published</span><p>First tag workflow to publication; measured budget result</p></div></div><div class="method"></div>
+<details open id="map-data"><summary>Change map · data and reading guide</summary><p>One filled dot represents one closed issue. Dots have equal weight: this is a count of closures, not a measured impact score.</p><div class="table-wrap"><table><caption>Change map data · closed issues by surface</caption><thead><tr>
+<th scope="col">Surface</th>
+<th scope="col" class="num">Issues closed</th>
+<th scope="col">Issue numbers</th>
+</tr></thead><tbody>
+<tr>
+<th scope="row">Messages that always reach you</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Clearer conversations</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Release</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Faster, steadier checks</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Team sync</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Commander delivery</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Verification</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Browser test tiering</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Factory</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Cloud sync</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Gates and runtime</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Memory</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Total</th>
+<td class="num">0</td>
+<td>0 issue-bearing themes</td>
+</tr>
+</tbody></table></div><p>Source: CHANGELOG <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.47.0/CHANGELOG.md</code>, release-notes <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.47.0/docs/release-notes/2026-10-06-v3.47.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.47.0; retrieved 2026-10-06T08:48:32Z.</p></details></section>
+<!-- section: users -->
+<section class="report-section users" data-section="users"><div class="section-top"><h2>What you can do now</h2><span class="section-no">02 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Messages that always reach you</h3></div><div class="changes">
+<article class="change"><h4>Your inbox when the machine is off</h4><div class="pair"><p class="was"><span class="state">Was</span>with the computer off or asleep, Commander showed nothing and you couldn&#x27;t reply. →</p><p class="now"><span class="state">Now</span>up to 90 days of conversations, kept encrypted by Petra Stella Cloud, stay readable on every browser you sign in, including a new phone.</p></div></article>
+<article class="change"><h4>Replies wait for the machine</h4><div class="pair"><p class="was"><span class="state">Was</span>a reply needed the machine to be on. →</p><p class="now"><span class="state">Now</span>it waits as &quot;Pending machine&quot;, is sent once when the machine is back, and shows &quot;Accepted by machine&quot;.</p></div></article>
+<article class="change"><h4>Sign in with your account</h4><div class="pair"><p class="was"><span class="state">Was</span>only browsers paired to the machine could see its conversations. →</p><p class="now"><span class="state">Now</span>you approve a browser from your Petra Stella account by matching a code, and a message that can&#x27;t be verified is held back with a note saying so.</p></div></article>
+<article class="change"><h4>Sends never go twice</h4><div class="pair"><p class="was"><span class="state">Was</span>two open tabs could both send the same queued message. →</p><p class="now"><span class="state">Now</span>each queued message is sent from one tab only, and anything waiting survives a reload without being resent by itself.</p></div></article>
+<article class="change"><h4>Retry from any tab</h4><div class="pair"><p class="was"><span class="state">Was</span>with two tabs open, a message confirmed in one tab could leave the other offering Retry, and retrying could stall. →</p><p class="now"><span class="state">Now</span>a confirmation in either tab settles both, and Retry works from either tab without a second copy.</p></div></article>
+<article class="change"><h4>No stale &quot;will go out by itself&quot;</h4><div class="pair"><p class="was"><span class="state">Was</span>that line could stay after the message was delivered. →</p><p class="now"><span class="state">Now</span>it clears once nothing is waiting, even when another tab sent it.</p></div></article>
+<article class="change"><h4>Notices stay resolved</h4><div class="pair"><p class="was"><span class="state">Was</span>after a reload, a delivery problem you had already resolved could come back in the conversation as a Blocker. →</p><p class="now"><span class="state">Now</span>a resolved notice stays resolved, and &quot;Taking control…&quot; disappears once your message is on its way.</p></div></article>
+<article class="change"><h4>Replies show where they are</h4><div class="pair"><p class="was"><span class="state">Was</span>Commander counted a reply as delivered before your browser had saved it. →</p><p class="now"><span class="state">Now</span>each reply says &quot;Forwarded · not stored on this device&quot; until this device saves it, then &quot;Stored on this device&quot;.</p></div></article>
+<article class="change"><h4>Your devices, listed</h4><div class="pair"><p class="was"><span class="state">Was</span>every re-pair added another copy of the same browser, one computer had 14. →</p><p class="now"><span class="state">Now</span>re-pairing refreshes the same entry, and each machine lists its browsers with Revoke and Remove from this browser.</p></div></article>
+<article class="change"><h4>Admin by explicit choice</h4><div class="pair"><p class="was"><span class="state">Was</span>an invitation could not ask for the right to remove other browsers. →</p><p class="now"><span class="state">Now</span>it can request Hub administration, which is never pre-ticked and must be chosen on purpose.</p></div></article>
+</div></section>
+<section class="theme theme-2"><div class="theme-label"><span class="eyebrow">02</span><h3>Clearer conversations</h3></div><div class="changes">
+<article class="change"><h4>One screen for everything</h4><div class="pair"><p class="was"><span class="state">Was</span>Commander had a separate Terminal view that showed wrong status and stale alerts. →</p><p class="now"><span class="state">Now</span>Conversations is the only screen, with Interrupt and a read-only Raw output view in the conversation header.</p></div></article>
+<article class="change"><h4>Questions show real choices</h4><div class="pair"><p class="was"><span class="state">Was</span>every question offered made-up &quot;Yes, go ahead / Hold&quot; buttons. →</p><p class="now"><span class="state">Now</span>buttons appear only for choices the question offers; otherwise you type the answer.</p></div></article>
+<article class="change"><h4>Each question once</h4><div class="pair"><p class="was"><span class="state">Was</span>a &quot;Waiting on you&quot; panel repeated the question and covered the message box. →</p><p class="now"><span class="state">Now</span>the question appears once in the conversation, with a small bookmark that jumps to it.</p></div></article>
+<article class="change"><h4>Plain status words</h4><div class="pair"><p class="was"><span class="state">Was</span>the side panel showed raw codes like &quot;AWAITINGMERGE&quot;, star markup in previews and a wrong count. →</p><p class="now"><span class="state">Now</span>it says &quot;In progress&quot; or &quot;Awaiting merge&quot;, previews read cleanly, and the list shows who is really working on what.</p></div></article>
+<article class="change"><h4>Connection problems explained</h4><div class="pair"><p class="was"><span class="state">Was</span>&quot;Reconnecting&quot; gave no reason. →</p><p class="now"><span class="state">Now</span>Connection details names the cause, what to do, the next retry and the last good connection, and can download a safe report for support.</p></div></article>
+<article class="change"><h4>Readable error notes</h4><div class="pair"><p class="was"><span class="state">Was</span>on a wide screen an error note squeezed into a narrow strip. →</p><p class="now"><span class="state">Now</span>it uses the full row and names what failed.</p></div></article>
+<article class="change"><h4>Asked once to start a session</h4><div class="pair"><p class="was"><span class="state">Was</span>New session asked you twice to allow starting sessions, under two different names. →</p><p class="now"><span class="state">Now</span>one Allow, and the project list opens.</p></div></article>
+<article class="change"><h4>Steadier connection state</h4><div class="pair"><p class="was"><span class="state">Was</span>a machine that briefly stopped answering could jump to &quot;Reconnecting&quot; after one missed check-in. →</p><p class="now"><span class="state">Now</span>it shows &quot;Unsteady&quot; and only reconnects after four missed check-ins.</p></div></article>
+<article class="change"><h4>Whole machine names</h4><div class="pair"><p class="was"><span class="state">Was</span>a long machine name stayed cut off even on the conversation you had selected, and the phone header clipped it. →</p><p class="now"><span class="state">Now</span>the selected or focused conversation shows the full name, and the phone header no longer clips it.</p></div></article>
+<article class="change"><h4>Phone search lands where you read</h4><div class="pair"><p class="was"><span class="state">Was</span>opening a conversation from search on a phone left you nowhere on the page. →</p><p class="now"><span class="state">Now</span>you land on the conversation itself, and the keyboard stays down.</p></div></article>
+<article class="change"><h4>Connection card on a sideways phone</h4><div class="pair"><p class="was"><span class="state">Was</span>in landscape, a connection problem&#x27;s card cut off Retry. →</p><p class="now"><span class="state">Now</span>the card scrolls, so Retry and Diagnose are always reachable.</p></div></article>
+<article class="change"><h4>Hub status after a restart</h4><div class="pair"><p class="was"><span class="state">Was</span>after a reboot, <code>cas hub status</code> only said whether the hub answered, and a stuck system service could freeze it. →</p><p class="now"><span class="state">Now</span>it reports what came back and what to do next, and gives up on a stuck service within half a second.</p></div></article>
+</div></section>
+<section class="theme theme-3"><div class="theme-label"><span class="eyebrow">03</span><h3>Faster, steadier checks</h3></div><div class="changes">
+<article class="change"><h4>Browser tests in minutes</h4><div class="pair"><p class="was"><span class="state">Was</span>every change to Commander ran all of its roughly 80 browser tests three times, about an hour. →</p><p class="now"><span class="state">Now</span>each change runs only the screens it can affect, often one, and the full set runs once per release batch.</p></div></article>
+<article class="change"><h4>Messages to busy helpers</h4><div class="pair"><p class="was"><span class="state">Was</span>a message to a helper that stayed busy for a few minutes could be dropped as undeliverable. →</p><p class="now"><span class="state">Now</span>it waits and appears at the helper&#x27;s next step.</p></div></article>
+<article class="change"><h4>Quicker task wrap-up</h4><div class="pair"><p class="was"><span class="state">Was</span>finishing a task on a large project could hang for a minute with no answer. →</p><p class="now"><span class="state">Now</span>it finishes, or says plainly within 35 seconds that it ran out of time and changed nothing.</p></div></article>
+<article class="change"><h4>Release lessons kept</h4><div class="pair"><p class="was"><span class="state">Was</span>release problems were fixed by hand and forgotten, and reports said no one had stepped in. →</p><p class="now"><span class="state">Now</span>a release can&#x27;t finish until each problem is recorded as a lesson or an open job, and reports count every manual step.</p></div></article>
+<article class="change"><h4>Cleaner disk</h4><div class="pair"><p class="was"><span class="state">Was</span>interrupted release checks and an unbounded build cache piled up nearly 40 GB on one computer. →</p><p class="now"><span class="state">Now</span>they clean up on every exit, leftovers are swept on the next run and caches stay capped.</p></div></article>
+<article class="change"><h4>Release checks protected</h4><div class="pair"><p class="was"><span class="state">Was</span>browser tests running alongside a release check could use up the computer&#x27;s memory and stop the check. →</p><p class="now"><span class="state">Now</span>tests share memory safely, several run side by side, quick checks never wait behind them, and the release check goes first.</p></div></article>
+<article class="change"><h4>Finished work closes cleanly</h4><div class="pair"><p class="was"><span class="state">Was</span>merged work could not be closed once the helper that did it had moved on to something else. →</p><p class="now"><span class="state">Now</span>it closes from its merged result, and corrected work from a retired helper can still be reviewed and closed.</p></div></article>
+<article class="change"><h4>Build folders reclaimed</h4><div class="pair"><p class="was"><span class="state">Was</span>some build folders could never be cleaned up while an unrelated program was running. →</p><p class="now"><span class="state">Now</span>Cassy marks the folders it creates, so it can remove them safely later.</p></div></article>
+<article class="change"><h4>Release setup checked early</h4><div class="pair"><p class="was"><span class="state">Was</span>a release tool setting failed only after the release was already merged. →</p><p class="now"><span class="state">Now</span>it is checked before anything lands.</p></div></article>
+<article class="change"><h4>Fewer false alarms</h4><div class="pair"><p class="was"><span class="state">Was</span>readability checks failed easy-to-read buttons and renamed page parts looked like new problems. →</p><p class="now"><span class="state">Now</span>those checks read the real colours and match issues by what they are.</p></div></article>
+<article class="change"><h4>No false clipping reports</h4><div class="pair"><p class="was"><span class="state">Was</span>layout checks reported text as cut off when it was deliberately shortened with &quot;…&quot; or not drawn at all. →</p><p class="now"><span class="state">Now</span>they skip what isn&#x27;t drawn and still catch real clipping.</p></div></article>
+</div></section>
+<section class="theme theme-4"><div class="theme-label"><span class="eyebrow">04</span><h3>Team sync</h3></div><div class="changes">
+<article class="change"><h4>Honest sync summaries</h4><div class="pair"><p class="was"><span class="state">Was</span>syncing with your team could say &quot;0 pending&quot; while thousands of items were held back. →</p><p class="now"><span class="state">Now</span>it counts what is really waiting or refused, shows when your team last synced, and gives the command that fixes a team-only setting mismatch.</p></div></article>
+<article class="change"><h4>Stuck items recover</h4><div class="pair"><p class="was"><span class="state">Was</span>about 200 task links and a few notes retried and failed forever. →</p><p class="now"><span class="state">Now</span>the missing tasks are sent first, and anything that can&#x27;t sync is set aside with a reason.</p></div></article>
+</div></section></section>
+<!-- section: dev -->
+<section class="report-section dev" data-section="dev"><div class="section-top"><h2>Under the hood</h2><span class="section-no">03 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Commander delivery</h3></div><div class="changes">
+<article class="change"><h4>Operator inbox</h4><div class="pair"><p class="was"><span class="state">Was</span>operator turns existed only in the hub&#x27;s SQLite, unreachable while the machine was off. →</p><p class="now"><span class="state">Now</span>an HPKE/AES-GCM cloud inbox (cas-operator-crypto, byte-identical browser HPKE, cloud-held keys, not E2E) replays 90 days to each approved browser and withholds unverifiable envelopes.</p></div></article>
+<article class="change"><h4>Offline commands</h4><div class="pair"><p class="was"><span class="state">Was</span>a reply needed a live hub connection. →</p><p class="now"><span class="state">Now</span>replies are sealed to the machine command key under a stable command_id, admitted once with the queue row in one transaction (m265), and expire after 24h.</p></div></article>
+<article class="change"><h4>Account sign-in and CSP</h4><div class="pair"><p class="was"><span class="state">Was</span>no account-level browser enrollment existed. →</p><p class="now"><span class="state">Now</span>browsers enroll by device-code approval or <code>cas hub operator approve &lt;code&gt;</code>, and connect-src pins exactly the cloud operator API origin.</p></div></article>
+<article class="change"><h4>Transactional outbox</h4><div class="pair"><p class="was"><span class="state">Was</span>a reply was stamped in a separate write after it was queued. →</p><p class="now"><span class="state">Now</span>each operator-visible turn and its immutable operator_delivery_outbox row commit in one transaction (m263), drained every 15s through a PSC-PoP signed transport.</p></div></article>
+<article class="change"><h4>Enrollment assertion</h4><div class="pair"><p class="was"><span class="state">Was</span>installations were always unenrolled. →</p><p class="now"><span class="state">Now</span>POST /v1/auth/account/{challenge,enrollment} verifies the issuer-signed psc-op-enrollment+jwt (one-use 5-minute challenge, aud, ins_jkt == DPoP key, acct == machine principal) before recording Enrolled.</p></div></article>
+<article class="change"><h4>Atomic pending sends</h4><div class="pair"><p class="was"><span class="state">Was</span>pendingSendStore did whole-namespace localStorage read-modify-write, so tabs raced. →</p><p class="now"><span class="state">Now</span>an IndexedDB journal claims each held send per item, scoped to hub, device and session, and never auto-resends.</p></div></article>
+<article class="change"><h4>Cross-tab receipts and Retry</h4><div class="pair"><p class="was"><span class="state">Was</span>a delivery receipt reached only the tab that sent, and peer captions could cancel a retry. →</p><p class="now"><span class="state">Now</span>receipts are shared by client_ref across tabs, explicit Retry reuses the original reference behind an owner fence, and a receipt racing the retry wins.</p></div></article>
+<article class="change"><h4>Held-send line</h4><div class="pair"><p class="was"><span class="state">Was</span>showHeldSendStatus ran for live sends and nothing cleared its &quot;will go out by itself&quot; fallback. →</p><p class="now"><span class="state">Now</span>it shows only for a held send, and settleHeldComposerStatus clears it after a flush, receipt, reconnect or another tab&#x27;s journal change.</p></div></article>
+<article class="change"><h4>No-delivery settlement</h4><div class="pair"><p class="was"><span class="state">Was</span>a refused or upstream-unavailable send could only re-hold through History, which the claim fence blocked, so Cancel refused and a late refusal could re-hold a newer Retry. →</p><p class="now"><span class="state">Now</span>an authoritative no-delivery settles against the original wire claim (owner, credential and content fenced).</p></div></article>
+<article class="change"><h4>Notices out of the journal</h4><div class="pair"><p class="was"><span class="state">Was</span>persistDeviceReply ran before the isOperatorNotice route and journal restore hydrated every row, so resolved notices returned after reload. →</p><p class="now"><span class="state">Now</span>notices are routed first, never journaled, legacy notice rows are pruned, and the take-control notice clears once control is held.</p></div></article>
+<article class="change"><h4>Device reply receipts</h4><div class="pair"><p class="was"><span class="state">Was</span>the hub inferred delivery at WebSocket write, before client persistence. →</p><p class="now"><span class="state">Now</span>the browser sends OperatorReplyPersisted after storing, the hub records operator_reply_device_receipts (m264), and the caption tracks it.</p></div></article>
+<article class="change"><h4>Installation rotation</h4><div class="pair"><p class="was"><span class="state">Was</span>AuthStore::exchange_pairing minted a device UUID per re-pair. →</p><p class="now"><span class="state">Now</span>a possession-proven re-pair rotates the installation via /v1/auth/pairing/{protocol,commit,abort}, /v1/auth/devices lists them, and hub:admin by explicit consent revokes others.</p></div></article>
+<article class="change"><h4>Connection causes</h4><div class="pair"><p class="was"><span class="state">Was</span>any fetch failure looked the same and lagged SSE records were skipped. →</p><p class="now"><span class="state">Now</span>18 typed causes in a 64-entry ring, X-Cas-Request-Id for granted origins, viewer_lagged and epoch markers, 10s deadlines and a sanitized diagnostics export.</p></div></article>
+<article class="change"><h4>Terminal view removed</h4><div class="pair"><p class="was"><span class="state">Was</span>a second Terminal surface with its own fleet model and a 130-event stale Attention feed. →</p><p class="now"><span class="state">Now</span>Conversations only, with InterruptPane and a read-only Raw output dialog in the header; about 6,200 lines and 53 KB of JS gone.</p></div></article>
+<article class="change"><h4>Conversation polish</h4><div class="pair"><p class="was"><span class="state">Was</span>DEFAULT_ASK_OPTIONS invented quick replies, previews leaked Markdown and status rendered raw enums. →</p><p class="now"><span class="state">Now</span>options only when declared, one in-thread ask plus bookmark, plain-text previews and roster-joined status labels.</p></div></article>
+<article class="change"><h4>Single launch consent</h4><div class="pair"><p class="was"><span class="state">Was</span>the grant view&#x27;s Allow led to a second &quot;Allow &quot;Start new sessions&quot;&quot; confirm sheet. →</p><p class="now"><span class="state">Now</span>the first named Allow grants session:launch and opens the project list.</p></div></article>
+<article class="change"><h4>Half-open stays Unsteady</h4><div class="pair"><p class="was"><span class="state">Was</span>an event-triggered catalog read&#x27;s TypeError aborted the event stream and skipped the heartbeat gate, so one missed beat became Reconnecting. →</p><p class="now"><span class="state">Now</span>failed or timed-out event reads are left to the heartbeat (Reconnecting at beat 4), and only a refused pairing ends the stream.</p></div></article>
+<article class="change"><h4>Machine name on focus</h4><div class="pair"><p class="was"><span class="state">Was</span>the row&#x27;s machine name stayed ellipsised on the open or keyboard-focused row. →</p><p class="now"><span class="state">Now</span>focused and open rows wrap the whole name clear of the time stamp; resting rows keep the allowlisted ellipsis.</p></div></article>
+<article class="change"><h4>Phone host line and focus</h4><div class="pair"><p class="was"><span class="state">Was</span>the phone header clipped machine glyphs, and a coarse-pointer search jump left focus on BODY. →</p><p class="now"><span class="state">Now</span>the host line has glyph room, and coarse-pointer jumps land on the reading region or back link with the composer unfocused.</p></div></article>
+<article class="change"><h4>Landscape connection card</h4><div class="pair"><p class="was"><span class="state">Was</span>#pane-grid&#x27;s overflow: hidden cut Retry and Diagnose off the failure card at 844×390. →</p><p class="now"><span class="state">Now</span>the pane scrolls vertically while it holds the card.</p></div></article>
+<article class="change"><h4>Hub status</h4><div class="pair"><p class="was"><span class="state">Was</span>a hung systemctl blocked <code>cas hub status</code> (10.6s measured). →</p><p class="now"><span class="state">Now</span>probes are capped at 500ms with a typed unknown state, and status --json adds a read-only runtime_receipt.</p></div></article>
+</div></section>
+<section class="theme theme-2"><div class="theme-label"><span class="eyebrow">02</span><h3>Browser test tiering</h3></div><div class="changes">
+<article class="change"><h4>Impact selection</h4><div class="pair"><p class="was"><span class="state">Was</span>journeys-for-diff treated hub-web/dist as surface-wide, so every delivery selected all 18 journeys (~81 tests, ~20 min, run three times). →</p><p class="now"><span class="state">Now</span>dist is ignored and selection follows Touches, imports, main.ts symbols and CSS selectors; a narrow fix selected 1.</p></div></article>
+<article class="change"><h4>Tier enforcement</h4><div class="pair"><p class="was"><span class="state">Was</span>worker and QA browser runs executed the full suite. →</p><p class="now"><span class="state">Now</span>they run only the affected journeys at 4 workers, --full is supervisor-only at assembly, and a PreToolUse guard denies unfiltered Playwright to workers and QA.</p></div></article>
+<article class="change"><h4>Receipt gates</h4><div class="pair"><p class="was"><span class="state">Was</span>close and QA accepted any hand-picked subset. →</p><p class="now"><span class="state">Now</span>they recompute the selection at the tip and require a passing journey-receipt.json for every selected ID, and an epic close needs one full-suite receipt.</p></div></article>
+</div></section>
+<section class="theme theme-3"><div class="theme-label"><span class="eyebrow">03</span><h3>Cloud sync</h3></div><div class="changes">
+<article class="change"><h4>Sync receipts</h4><div class="pair"><p class="was"><span class="state">Was</span>a team-linked sync skipped the personal push, so its receipt read &quot;0 pending, 0 failed/parked&quot; over thousands of team_owned_project rejections, and status showed only the personal last_pull_at. →</p><p class="now"><span class="state">Now</span>the receipt refreshes from the queue, status reports the team pull watermark, and status and doctor flag the team_only mismatch with its fix.</p></div></article>
+<article class="change"><h4>Orphan dependency repair</h4><div class="pair"><p class="was"><span class="state">Was</span>196 parent-child edges burned retries as orphan_dependency and 3 origin-null memories had no attributable project. →</p><p class="now"><span class="state">Now</span>healed edges stage missing own-project endpoint tasks insert-only and wait for them, foreign or deleted endpoints park with a reason, and origin-null memories park as unattributed_origin.</p></div></article>
+</div></section>
+<section class="theme theme-4"><div class="theme-label"><span class="eyebrow">04</span><h3>Release train</h3></div><div class="changes">
+<article class="change"><h4>Learning loop</h4><div class="pair"><p class="was"><span class="state">Was</span>blockers were fixed by hand and never recorded. →</p><p class="now"><span class="state">Now</span>receipts refuse until each blocked stage and hand fix maps to a learned gate row or an open task, printing the exact <code>release-gate.sh --learn</code> command.</p></div></article>
+<article class="change"><h4>Honest interventions</h4><div class="pair"><p class="was"><span class="state">Was</span>INTERVENTIONS counted only kind=manual rows and printed 0 since 3.42.0. →</p><p class="now"><span class="state">Now</span>it counts resumed blockers, hand fixes and manual rows (3.46.0 replays as 8), in the report and both replies.</p></div></article>
+<article class="change"><h4>Publish toolchain preflight</h4><div class="pair"><p class="was"><span class="state">Was</span>cargo-zigbuild rejected build.jobs only after the release landed on main (hotfix PR #1132). →</p><p class="now"><span class="state">Now</span>a publish-toolchain row loads the real zigbuild config first, and a failed publish deletes its own local tag.</p></div></article>
+<article class="change"><h4>Tooling warning</h4><div class="pair"><p class="was"><span class="state">Was</span>the off-main tooling warning was buried under git merge-base noise and dead refs. →</p><p class="now"><span class="state">Now</span>noise is captured and merged, stale, epic-covered and duplicate refs are skipped.</p></div></article>
+</div></section>
+<section class="theme theme-5"><div class="theme-label"><span class="eyebrow">05</span><h3>Gates and runtime</h3></div><div class="changes">
+<article class="change"><h4>QA binds the delivered tip</h4><div class="pair"><p class="was"><span class="state">Was</span>a park could bind QA two commits behind its tip, and qa_request re-found that stale pass. →</p><p class="now"><span class="state">Now</span>an own-lineage advance binds the tip, qa_request rebinds and supersedes, and shared branches never move the anchor.</p></div></article>
+<article class="change"><h4>Bounded child close</h4><div class="pair"><p class="was"><span class="state">Was</span>a supervisor close on a 450-child epic ran about 60k git processes and timed out at 55s claiming COMMITTED. →</p><p class="now"><span class="state">Now</span>a 35s budgeted content gate with a timing log, about 1.3k processes, a typed retryable refusal and IN_PROGRESS on deadline.</p></div></article>
+<article class="change"><h4>Busy-recipient mail</h4><div class="pair"><p class="was"><span class="state">Was</span>three declined wakes stamped a message abandoned and hid it from hooks. →</p><p class="now"><span class="state">Now</span>it parks as awaiting_busy_recipient, stays surfaceable, and the reassign notice waits for 10 minutes of silence.</p></div></article>
+<article class="change"><h4>Worker selection</h4><div class="pair"><p class="was"><span class="state">Was</span>an explicit --worker-cli claude lost to the stock worker default, and a Claude fallback was routed as Codex over PTY. →</p><p class="now"><span class="state">Now</span>explicit flags win, launch specs are recorded per name, and --worker-spec names apply.</p></div></article>
+<article class="change"><h4>Retired-worker recovery</h4><div class="pair"><p class="was"><span class="state">Was</span>the pre-close hook validated a retired worker&#x27;s moved-on worktree, and qa_request refused an Open task. →</p><p class="now"><span class="state">Now</span>a live supervisor parks and closes a corrected delivery from its pushed receipt against the WorkTarget, and qa_request takes an explicit head on a reopened task.</p></div></article>
+<article class="change"><h4>Detached assignee close</h4><div class="pair"><p class="was"><span class="state">Was</span>a merged commit_receipt was refused with &quot;expected task worktree branch …, found ``&quot; when the assignee&#x27;s checkout was detached. →</p><p class="now"><span class="state">Now</span>a supervisor receipt that is an ancestor of the WorkTarget closes without override; worker and unmerged paths are unchanged.</p></div></article>
+<article class="change"><h4>Snapshot hash approval proof</h4><div class="pair"><p class="was"><span class="state">Was</span>the SHA-256 snapshot approval had no public-path test. →</p><p class="now"><span class="state">Now</span>an MCP notes→close test refuses a 1,500+ character literal, closes on the exact hash and refuses a same-prefix wrong hash.</p></div></article>
+<article class="change"><h4>Canonical proof targets</h4><div class="pair"><p class="was"><span class="state">Was</span>close suggestions prescribed --test agent_definition_contract_test and other modules now inside combined targets, which failed with &quot;no test target named&quot;. →</p><p class="now"><span class="state">Now</span>modules map to their containing Cargo target (integration_contracts and so on), and unknown suites fail closed.</p></div></article>
+<article class="change"><h4>Recycle and reset</h4><div class="pair"><p class="was"><span class="state">Was</span>recycle_worker demanded force on a clean worker, then rejected force. →</p><p class="now"><span class="state">Now</span>a clean recycle keeps name, tasks and worktree, and clear_context errors name clear_context.</p></div></article>
+<article class="change"><h4>Visual QA skipped and ellipsised content</h4><div class="pair"><p class="was"><span class="state">Was</span>content-visibility: hidden subtrees and ellipsised one-line text were measured as clipped. →</p><p class="now"><span class="state">Now</span>checkVisibility() marks skipped content not drawn, the X walk stops at the ellipsising box, and a real visible clip still fails.</p></div></article>
+<article class="change"><h4>Visual QA identity and contrast</h4><div class="pair"><p class="was"><span class="state">Was</span>findings keyed on full selectors and color(srgb …) was unparsed (2.57:1 reported for 12.08:1). →</p><p class="now"><span class="state">Now</span>findings match by rule, state and text, and CSS Color 4 and opaque layers resolve.</p></div></article>
+<article class="change"><h4>Host-memory admission</h4><div class="pair"><p class="was"><span class="state">Was</span>worker Playwright and Vitest runs admitted nothing, and 125 headless Chromium pushed MemAvailable under the proof reserve, aborting it. →</p><p class="now"><span class="state">Now</span>worker-memory.py reserves weighted counting slots behind a proof-priority lease (two browser suites plus tsc under a normal budget, serial at 8 GiB, light commands never queued), waits visibly within CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS, and hook denies still win.</p></div></article>
+<article class="change"><h4>Private fixture pools</h4><div class="pair"><p class="was"><span class="state">Was</span>the test-release-gate train-proof fixture ran assembly-proof.py against the real host locks and held intent EX for 8 minutes. →</p><p class="now"><span class="state">Now</span>in-process and subprocess fixtures use private admission pools, with no production env bypass.</p></div></article>
+<article class="change"><h4>Forked mold RSS</h4><div class="pair"><p class="was"><span class="state">Was</span>link RSS receipts measured only the waited process. →</p><p class="now"><span class="state">Now</span>they also sample the same link&#x27;s forked mold workers.</p></div></article>
+<article class="change"><h4>Owned worker targets</h4><div class="pair"><p class="was"><span class="state">Was</span>seeded worker target/ dirs had no owner record, so retirement refused them whenever an opaque same-uid process existed. →</p><p class="now"><span class="state">Now</span>new targets carry checkout, target and lease identity plus PID start and boot provenance before any data; an unignored target/ stays legacy and seeding still succeeds.</p></div></article>
+<article class="change"><h4>Scratch cleanup</h4><div class="pair"><p class="was"><span class="state">Was</span>aborted proofs leaked about 9.7 GB of scratch and the shared assembly cache reached 29 GB. →</p><p class="now"><span class="state">Now</span>owner leases reap on TERM/INT/HUP, dead owners are swept, the cache is capped by CAS_ASSEMBLY_TARGET_MAX_GIB (20) and age, and gc_report shows retained bytes.</p></div></article>
+<article class="change"><h4>Parallel links and proof targets</h4><div class="pair"><p class="was"><span class="state">Was</span>assembly linked one test binary at a time and proofs shared one CARGO_TARGET_DIR across worktrees. →</p><p class="now"><span class="state">Now</span>link slots are admitted from live memory, capped by CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS, and each worktree proves into its own target.</p></div></article>
+<article class="change"><h4>Journey flakes</h4><div class="pair"><p class="was"><span class="state">Was</span>reattach backoff grew to 16–30s, CI ran 16 recording browsers and failure traces never uploaded. →</p><p class="now"><span class="state">Now</span>reattach is capped at 10s, CI runs 6 workers, and hidden .results traces upload on failure.</p></div></article>
+<article class="change"><h4>Journey fixtures and settle</h4><div class="pair"><p class="was"><span class="state">Was</span>phone fixtures assumed a desktop layout, and a frozen screenshot settle could outlive its page. →</p><p class="now"><span class="state">Now</span>fixtures follow the real phone layout in a responsive four-variant lane, settling is cancelled and drained with the page, and repeat captures are isolated by index.</p></div></article>
+</div></section></section>
+<!-- section: ledger -->
+<section class="report-section ledger" data-section="ledger"><div class="section-top"><h2>Fixes ledger</h2><span class="section-no">04 / 06</span></div><div class="table-wrap"><table><caption>Issue register · 0 verified closures</caption><thead><tr>
+<th scope="col">Issue</th>
+<th scope="col">State</th>
+<th scope="col">Closed</th>
+<th scope="col">Theme</th>
+</tr></thead><tbody>
+</tbody></table></div></section>
+<!-- section: install -->
+<section class="report-section install" data-section="install"><div class="section-top"><h2>Install</h2><span class="section-no">05 / 06</span></div>
+<svg class="stitch" viewBox="0 0 132 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="currentColor"/><circle cx="31" cy="8" r="5" fill="currentColor"/><circle cx="54" cy="8" r="5" fill="currentColor"/><circle cx="77" cy="8" r="5" fill="currentColor"/><circle cx="100" cy="8" r="5" fill="currentColor"/><circle cx="123" cy="8" r="5" fill="currentColor"/></svg><pre><code>cas update  # install v3.47.0 through the project&#x27;s normal release channel</code></pre>
+<div class="table-wrap"><table><caption>Change map data · closed issues by surface</caption><thead><tr>
+<th scope="col">Asset</th>
+<th scope="col">Digest</th>
+<th scope="col" class="num">Size</th>
+</tr></thead><tbody>
+<tr>
+<th scope="row">cas-aarch64-apple-darwin.tar.gz</th>
+<td>sha256:356b4630c29f328b94113be4b68b7dc45ab41252ecf8ffdce183a3b99c7c69a9</td>
+<td class="num">29772848</td>
+</tr>
+<tr>
+<th scope="row">cas-x86_64-unknown-linux-gnu.tar.gz</th>
+<td>sha256:2fe19923608e2a122402411caff9253fc68b5fd7a2aaec9beddcd75742eefd9f</td>
+<td class="num">34280998</td>
+</tr>
+</tbody></table></div></section>
+<!-- section: provenance -->
+<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 2026-10-06T08:48:32Z.</p>
+<p>Source: CHANGELOG <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.47.0/CHANGELOG.md</code>, release-notes <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.47.0/docs/release-notes/2026-10-06-v3.47.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.47.0; retrieved 2026-10-06T08:48:32Z.</p>
+<p>GitHub issue theme assignment uses labels first, then the keyword table in the CLI. Any issue classified as <code>Unclassified</code> is shown in the map so a human can correct the Markdown before rendering.</p>
+<p>Release-notes draft: <code>docs/release-notes/2026-10-06-v3.47.0-slack.md</code>.</p>
+<p>CHANGELOG source: <code>CHANGELOG.md</code>.</p>
+<p>GitHub release: &lt;https://github.com/Richards-LLC/cassy/releases/tag/v3.47.0&gt; (published or unknown).</p>
+<p>Release receipt: <code>/home/pippenz/.cas/artifacts/release/v3.47.0-release-3.47.0/release-published.receipt</code>.</p>
+<p>Source warnings:</p>
+<ul>
+<li>GitHub issues: referenced closures unavailable or not closed: #1134</li>
+</ul></section>
+</main><footer class="page-footer"><span>cas-src v3.47.0 / Release report</span><span><a href="v3.47.0.md">Markdown source</a> · <a href="v3.47.0.pdf">Print edition</a></span></footer>
+<script>addEventListener("beforeprint",()=>document.querySelectorAll("details").forEach(panel=>{panel.open=true}));</script>
+</body></html>

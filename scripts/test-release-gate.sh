@@ -64,7 +64,7 @@ new_fixture() {
     # Only copied fixture code selects a private pool. Keep real locking and
     # inherited-lease validation in subprocesses and clones; production has no
     # environment knob that redirects its host/user admission directory.
-    python3 - "$repo/scripts/host_memory.py" "$tmp/host-memory" <<'PY_HOST_MEMORY_FIXTURE'
+    python3 - "$repo/scripts/host_memory.py" "$tmp/host-memory" <<'PY_HOST_MEMORY_FIXTURE' || return 1
 from pathlib import Path
 import sys
 path, pool = map(Path, sys.argv[1:])

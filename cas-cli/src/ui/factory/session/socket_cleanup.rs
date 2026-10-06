@@ -57,10 +57,24 @@ pub(super) fn bind(path: &Path, sessions: &Path) -> io::Result<std::os::unix::ne
 
 #[cfg(target_os = "linux")]
 pub(super) fn remove_if_unheld(path: &Path, sessions: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Ok(());
+    }
     let Some(base) = sessions.parent() else {
         return Ok(());
     };
-    let _lock = transition_lock(base)?;
+    let _lock = match transition_lock(base) {
+        Ok(lock) => lock,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     remove_locked(path, sessions, false)
 }
 

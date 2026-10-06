@@ -838,6 +838,13 @@ mod tests {
     }
 
     #[test]
+    fn remove_absent_metadata_is_idempotent_cas_c636() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        SessionManager::new().remove_metadata("absent").unwrap();
+        assert!(!sessions_dir().exists());
+    }
+
+    #[test]
     fn create_metadata_preserves_only_same_session_roster_holds_cas_60dd() {
         let home = tempfile::tempdir().unwrap();
         let _guard = crate::test_support::TestEnvGuard::with_vars(&[(

@@ -56,3 +56,16 @@ test('the same test claims its directory again (a retry or --repeat-each) and it
     assert.match(readFileSync(join(directory, 'receipt-owner.json'), 'utf8'), /start a new session/);
   } finally { done(); }
 });
+
+test('same-titled light and dark variants cannot reclaim each other as retries (cas-256a)', () => {
+  const { root, done } = fresh();
+  try {
+    const title = 'HUB-J17 phone feedback';
+    const directory = join(root, 'HUB-J17', 'parts', 'phone-feedback');
+    const identity = (theme) => ({ project: 'journeys', titlePath: ['fleet-ops.journey.ts', `phone fleet feedback ${theme}`, title] });
+    claimReceiptDirectory(directory, title, identity('light'));
+    writeFileSync(join(directory, 'J01.png'), 'light capture');
+    assert.throws(() => claimReceiptDirectory(directory, title, identity('dark')), /already claimed/);
+    assert.equal(readFileSync(join(directory, 'J01.png'), 'utf8'), 'light capture');
+  } finally { done(); }
+});

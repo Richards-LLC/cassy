@@ -15,6 +15,47 @@ function journals(now = () => 1_000) {
 }
 
 describe("atomic Commander journal", () => {
+  it("requeues an existing history row after a claim makes no socket write (cas-9dc6)", async () => {
+    const db = new IDBFactory(), history = new ConversationHistory();
+    const peer = new CommanderJournal(db, async () => fence, () => 1_000, false);
+    let inspectClaim = false, observedClaim = false;
+    const writer = new CommanderJournal(db, async () => {
+      if (inspectClaim) {
+        const snapshot = await peer.read(scope);
+        if (snapshot.sends[0]?.state === "sending") {
+          observedClaim = true;
+          // The real onChange path sees the durable claim before the socket
+          // readiness check returns false, and removes its in-memory queue.
+          expect(history.synchronizePending(snapshot.sends, 1_010)).toEqual([]);
+          expect(history.pendingSends()[0].state).toBe("unconfirmed");
+        }
+      }
+      return fence;
+    }, () => 1_000, false);
+    const item = send("readiness-gap");
+    await writer.reconcile(scope, [], [item], fence);
+    history.restorePending((await peer.read(scope)).sends, 1_000);
+    inspectClaim = true;
+    expect(await writer.dispatch(scope, item.id, fence, () => false)).toBe("waiting");
+    inspectClaim = false;
+    expect(observedClaim).toBe(true);
+    const reset = await peer.read(scope);
+    expect(history.synchronizePending(reset.sends, 1_020)).toEqual([item]);
+    expect(history.events).toHaveLength(1);
+    expect(history.pendingSends()[0]).toMatchObject({ id: item.id, state: "held" });
+    expect(history.pendingSends()[0].sentAt).toBeUndefined();
+    expect(history.synchronizePending(reset.sends, 1_030), "already queued rows are not queued twice").toEqual([]);
+    let writes = 0;
+    expect(await peer.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");
+    await peer.acknowledge(scope, { client_ref: item.id, notification_id: 99, target: item.target, stamped: true }, fence);
+    const confirmed = await writer.read(scope);
+    expect(history.synchronizePending(confirmed.sends, 1_040, confirmed.receipts)).toEqual([]);
+    expect(history.synchronizePending(reset.sends, 1_050), "a stale held snapshot cannot requeue a delivered row").toEqual([]);
+    expect(history.events).toHaveLength(1);
+    expect(writes).toBe(1);
+    const event = history.events[0];
+    expect(event.kind === "send" && history.showsDelivered(event.value)).toBe(true);
+  });
   it("an authoritative no-delivery refusal makes Cancel durable and strips the private payload", async () => {
     const { a, b, make, db } = journals();
     const item = send("refused");

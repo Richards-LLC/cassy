@@ -184,6 +184,58 @@ sys.exit(m.link([sys.executable, '-c', "import pathlib,time; p=pathlib.Path("+re
         self.assertTrue(all("excludes mold workers" in item["rss_scope"] for item in completed))
         self.assertTrue(all("peak_child_rss_bytes" not in item for item in completed))
 
+    def test_unwaited_mold_worker_rss_matches_same_link_external_sample(self):
+        worker = self.root / "ld.mold"
+        worker.symlink_to(sys.executable)
+        pidfile, done = self.root / "worker.pid", self.root / "worker.done"
+        worker_code = ("import os,pathlib,time; allocation=bytearray(64*1024*1024); "
+                       "pathlib.Path(" + repr(str(pidfile)) + ").write_text(str(os.getpid())); "
+                       "time.sleep(.6); pathlib.Path(" + repr(str(done)) + ").touch()")
+        # Driver waits for a file, never waitpid(): the worker's RSS is absent
+        # from its rusage even though both belong to this exact invocation.
+        driver_code = ("import subprocess,time,pathlib; subprocess.Popen(["
+                       + repr(str(worker)) + ", '-c', " + repr(worker_code) + "]); "
+                       "done=pathlib.Path(" + repr(str(done)) + ")\n"
+                       "while not done.exists(): time.sleep(.01)\n")
+        external = []
+        stop = threading.Event()
+        def sample_external():
+            while not stop.is_set():
+                if pidfile.exists():
+                    sample = subprocess.run(["ps", "-o", "rss=", "-p", pidfile.read_text()],
+                                            text=True, capture_output=True)
+                    if sample.returncode == 0 and sample.stdout.strip():
+                        external.append(int(sample.stdout.strip()) * 1024)
+                stop.wait(.04)
+        observer = threading.Thread(target=sample_external)
+        observer.start()
+        try:
+            with mock.patch.dict(os.environ, dict(self.env,
+                    CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG=str(self.events)), clear=True), \
+                    mock.patch.object(guard, "LINK_LEASE_ROOT", self.root), \
+                    mock.patch.object(guard.proof, "memory_snapshot", return_value=self.high):
+                self.assertEqual(guard.link([sys.executable, "-c", driver_code]), 0)
+        finally:
+            stop.set()
+            observer.join(timeout=5)
+            if pidfile.exists() and not done.exists():
+                try:
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        completed = [json.loads(line) for line in self.events.read_text().splitlines()
+                     if json.loads(line)["phase"] == "link-complete"]
+        self.assertTrue(external, "independent ps must sample this worker")
+        receipt = completed[0]
+        peak = receipt.get("peak_mold_worker_rss_bytes", 0)
+        self.assertGreaterEqual(peak, 64 * 1024 * 1024, receipt)
+        self.assertLess(abs(peak - max(external)), 8 * 1024 * 1024)
+        self.assertGreater(peak, receipt["peak_waited_driver_rss_bytes"])
+        self.assertGreaterEqual(receipt["peak_process_tree_rss_bytes"], peak)
+        self.assertEqual(receipt["mold_worker_peak"]["pid"], int(pidfile.read_text()))
+        print("SAME_LINK_RSS: " + json.dumps({"external_worker_peak_bytes": max(external),
+              "receipt": receipt}, sort_keys=True))
+
     def wait_until(self, predicate):
         until = time.monotonic() + 5
         while time.monotonic() < until:

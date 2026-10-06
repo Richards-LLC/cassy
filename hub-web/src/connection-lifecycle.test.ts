@@ -78,6 +78,8 @@ function transport(multiplex = false) {
     refusePairing: (value: boolean) => { refused = value; },
     catalogRevision: (value: number) => { catalogRevision = value; },
     event: (event: Record<string, unknown> = { kind: "session_added" }) => eventController!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)),
+    endEvents: () => eventController!.close(),
+    replay: (events: Record<string, unknown>[]) => eventController!.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""))),
   };
 }
 
@@ -94,7 +96,7 @@ class TransportSocket {
   onerror: (() => void) | null = null;
   constructor(readonly url: URL) { TransportSocket.instances.push(this); }
   open(): void { this.readyState = TransportSocket.OPEN; this.onopen?.(); }
-  receive(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
+  receive(message: unknown): void { if (this.readyState === TransportSocket.OPEN) this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
   close(code = 1000): void { this.readyState = 3; this.onclose?.({ code } as CloseEvent); }
   send(value: string): void { this.sent.push(value); }
 }
@@ -475,6 +477,49 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     await vi.waitFor(() => expect(connection.snapshot().latencyMs).toBe(41));
     expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
+  });
+
+  it.each([false, true])("keeps a healthy legacy attach through a peer exit (replay=%s, cas-49cc)", async (replay) => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("peer-clean-exit"), () => {}, event => events.push(event));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    for (const session of ["healthy", "removed-peer"]) {
+      await connection.attach(session);
+      const socket = TransportSocket.instances.at(-1)!;
+      socket.open();
+      socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    }
+    const healthy = TransportSocket.instances[0]!;
+    const peer = TransportSocket.instances[1]!;
+    const window = Array.from({ length: 1021 }, (_, index) => ({ kind: "pane_added", sequence: 4180 + index, session: "removed-peer" }));
+    const tail = [
+      { kind: "pane_exited", sequence: 5201, session: "removed-peer", pane_id: "worker" },
+      { kind: "daemon_disconnected", sequence: 5202, session: "removed-peer", diagnostic: { cause: "clean_exit", exit_code: 0 } },
+      { kind: "session_removed", sequence: 5203, session: "removed-peer" },
+    ];
+    const metadata = { kind: "stream_metadata", epoch: "stable-hub", oldest_sequence: 4180, latest_sequence: 5203 };
+    hub.replay([metadata, ...window, { kind: "replay_complete" }, ...tail]);
+    peer.close(1000);
+    await vi.waitFor(() => expect(events).toHaveLength(1024));
+    expect(healthy.readyState).toBe(TransportSocket.OPEN);
+    if (replay) {
+      hub.endEvents();
+      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(hub.streams).toHaveLength(2));
+      hub.replay([metadata, ...window, ...tail, { kind: "replay_complete" }]);
+    }
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(events).toHaveLength(1024);
+    expect(healthy.readyState).toBe(TransportSocket.OPEN);
+    expect(TransportSocket.instances.filter(socket => socket.url.pathname.includes("/healthy/"))).toHaveLength(1);
+    expect(connection.attachSnapshot("healthy")?.phase).toBe("live");
   });
 
   it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {

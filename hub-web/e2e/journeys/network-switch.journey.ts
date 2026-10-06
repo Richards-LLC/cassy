@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { test, expect, journeyPart } from "./journey";
-import { ATLAS, STUDIO, PELICAN } from "./world";
+import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import { HubDouble, SCOPES } from "./hub-double";
 import { ProtocolClock } from "./protocol-clock";
 import { journalRows } from "./commander-journal-storage";
@@ -985,5 +985,45 @@ test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journe
     await page.locator("#palette-paired-machines").click();
     // cas-97d58 F16: the browser is the cause, not an unreachable machine.
     await expect(page.locator("#paired-machines-list .paired-machine-state")).toHaveText(`This browser can't connect. ${recovery}`);
+  });
+});
+
+
+test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attaches (cas-49cc)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Two healthy machines survive another session's clean exit and its replay", async () => {
+    const peer = "removed-peer";
+    const atlas = { ...ATLAS, sessions: [...ATLAS.sessions, { ...ATLAS.sessions[0]!, name: peer, supervisor: peer, project_dir: "/projects/peer" }] };
+    const { hub, clock, header } = await connected(page, false, [atlas, STUDIO]);
+    const nav = page.getByRole("navigation", { name: "Choose a supervisor" });
+    await nav.getByRole("button", { name: /peer/ }).click();
+    await expect(header).toHaveText(" · Live");
+    await nav.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(header).toHaveText(" · Live");
+    await chooseConversation(page);
+    await expect(header).toHaveText(" · Live");
+    const before = [hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)];
+    atlas.sessions = [...ATLAS.sessions];
+    hub.hold(peer);
+    hub.drop(peer);
+    const prior = Array.from({ length: 1021 }, (_, index) => ({ kind: "pane_added", sequence: 4180 + index, session: peer }));
+    const tail = [
+      { kind: "pane_exited", sequence: 5201, session: peer, pane_id: "worker" },
+      { kind: "daemon_disconnected", sequence: 5202, session: peer, diagnostic: { cause: "clean_exit", exit_code: 0 } },
+      { kind: "session_removed", sequence: 5203, session: peer },
+    ];
+    await page.evaluate(({ prior, tail }) => {
+      const wire = window as unknown as { __journeyMachineEvent: (host: string, data: string) => number };
+      const emit = (event: unknown) => wire.__journeyMachineEvent("atlas.test", JSON.stringify(event));
+      const metadata = { kind: "stream_metadata", epoch: "peer-reset", oldest_sequence: 4180, latest_sequence: 5203 };
+      // Initial retained window, its live removal tail, then a replay of the same window.
+      for (const event of [metadata, ...prior, { kind: "replay_complete" }, ...tail,
+        metadata, ...prior, ...tail, { kind: "replay_complete" }]) emit(event);
+    }, { prior, tail });
+    await hub.waitFor(() => hub.catalogFetchCount("atlas") > 1);
+    for (let step = 0; step < 12; step++) {
+      await clock.advance(1_000);
+      await expect(header).toHaveText(" · Live");
+      expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
+    }
   });
 });

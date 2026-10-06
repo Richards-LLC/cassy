@@ -2909,12 +2909,16 @@ button.chip:disabled { cursor: default; }
 /* Machine leases and cloud notices stay separate from conversation turns. */
 .machine-presence { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .machine-presence h3 { font-size: var(--fs-md); margin: 0; }
+.machine-presence-history { display: flex; flex-direction: column; gap: var(--space-2); margin-block-start: var(--space-2); padding-block-start: var(--space-3); border-block-start: var(--line-width) solid var(--line-subtle); }
+.machine-presence-history h4 { font-size: var(--fs-md); margin: 0; }
 .machine-presence-rows, .machine-presence-notices { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-3); }
 .machine-presence-rows > li, .machine-presence-notices > li { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
 .machine-presence p { margin: 0; }
 .machine-presence time { color: var(--text-mid); }
 .machine-presence details { min-width: 0; }
-.machine-presence summary { cursor: pointer; min-height: var(--button-height); display: flex; align-items: center; }
+.machine-presence summary { cursor: pointer; min-height: var(--button-height); display: flex; align-items: center; gap: var(--space-2); }
+.machine-presence-chevron { flex: none; width: 7px; height: 7px; border-inline-end: 2px solid currentColor; border-block-end: 2px solid currentColor; transform: rotate(-45deg); }
+.machine-presence details[open] > summary .machine-presence-chevron { transform: translateY(-2px) rotate(45deg); }
 .machine-presence details[open] { display: flex; flex-direction: column; gap: var(--space-2); }
 .machine-presence summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
 .machine-presence button { align-self: flex-start; max-width: 100%; white-space: normal; text-align: left; }

@@ -38,6 +38,11 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attributes: Record<st
   return node;
 }
 
+function presenceTimestamp(value: string): string {
+  const age = relativeTimestamp(value);
+  return age === "now" ? age : `${age} ago`;
+}
+
 /** QA F03: envelopes refused on open or verification are kept for replay
  * coverage and never shown; the operator still learns that they exist. */
 export function unverifiedCount(snapshot: InboxSnapshot): number {
@@ -354,7 +359,7 @@ export class InboxView {
     } else {
       const observerStale = presence.observerCheckedAt === null || Date.now() - Date.parse(presence.observerCheckedAt) > 180_000;
       if (presence.observerStatus === "unavailable" || observerStale) {
-        section.append(el("p", { class: "operator-inbox-warning", role: "status" }, "Observer unavailable. Cassy Cloud cannot promise an alert within five minutes."));
+        section.append(el("p", { class: "operator-inbox-warning", role: "status" }, "Cassy Cloud's alert check is unavailable, so an alert may take longer than five minutes."));
       }
       const machines = el("ul", { class: "machine-presence-rows", "aria-label": "Monitored machines" });
       for (const machine of presence.machines) {
@@ -363,7 +368,7 @@ export class InboxView {
         row.append(el("strong", {}, label), el("p", {}, `${snapshot?.presenceError ? "Last known: " : ""}${presenceLabel(machine)}`));
         if (machine.lastReportAt) {
           const report = el("p", {}, "Last report ");
-          report.append(el("time", { datetime: machine.lastReportAt }, relativeTimestamp(machine.lastReportAt)));
+          report.append(el("time", { datetime: machine.lastReportAt }, presenceTimestamp(machine.lastReportAt)));
           row.append(report);
         }
         if (machine.silence) row.append(el("p", {}, `Alerts resume ${new Date(machine.silence.until).toLocaleString()}.`));
@@ -373,7 +378,7 @@ export class InboxView {
             const names = { hub: "Hub", serve: "Serve", factory: "Factory" };
             const states = { up: "up", degraded: "degraded", down: "down", unknown: "not known" };
             const item = el("li", {}, `${names[component.component]}: ${states[component.state]} · observed `);
-            item.append(el("time", { datetime: component.observedAt }, relativeTimestamp(component.observedAt)));
+            item.append(el("time", { datetime: component.observedAt }, presenceTimestamp(component.observedAt)));
             components.append(item);
           }
           row.append(components);
@@ -381,9 +386,15 @@ export class InboxView {
         if (machine.monitoring !== "not_capable") {
           if (this.controller.canManageMonitoring()) {
             const consent = el("details", { id: `presence-consent-${machine.machineId}` });
-            consent.append(el("summary", { id: `presence-details-${machine.machineId}` }, `Monitoring settings for ${label}`));
-            consent.append(el("p", {}, "Cassy Cloud receives a report about this machine's Hub, Serve and Factory about once a minute. If reports stop, an alert appears in this inbox within about five minutes while the observer is healthy. It keeps only the latest status and keeps notices for 90 days; Cassy Cloud can read them. No email or phone push is sent."));
-            if (machine.monitoring === "disabled") consent.append(el("p", {}, "Enable alerts, then restart the machine's hub reporter. It must be enrolled with presence reporting permission."));
+            const summary = el("summary", { id: `presence-details-${machine.machineId}` });
+            summary.append(el("span", { class: "machine-presence-chevron", "aria-hidden": "true" }), document.createTextNode(`Monitoring settings for ${label}`));
+            consent.append(summary);
+            consent.append(el("p", {}, "Cassy Cloud receives a report about this machine's Hub, Serve and Factory about once a minute. If reports stop, an alert appears in this inbox within about five minutes while Cassy Cloud's alert check is working. It keeps only the latest status and keeps notices for 90 days; Cassy Cloud can read them. No email or phone push is sent."));
+            if (machine.monitoring === "disabled") {
+              const setup = el("p", {}, "Enable alerts, then run ");
+              setup.append(el("code", {}, "cas hub restart"), document.createTextNode(` on ${label}. This machine must be allowed to send status reports to Cassy Cloud.`));
+              consent.append(setup);
+            }
             const enabled = machine.monitoring !== "enabled";
             const toggle = el("button", { type: "button", id: `presence-toggle-${machine.machineId}` }, `${enabled ? "Enable" : "Disable"} alerts for ${label}`);
             toggle.disabled = this.busy;
@@ -401,15 +412,18 @@ export class InboxView {
     }
     const notices = snapshot ? presenceNotices(snapshot.events) : [];
     if (notices.length > 0) {
+      const history = el("section", { class: "machine-presence-history", "aria-labelledby": "machine-presence-history-title" });
+      history.append(el("h4", { id: "machine-presence-history-title" }, "Alert history"));
       const list = el("ol", { class: "machine-presence-notices", "aria-label": "Machine alert history" });
       for (const notice of notices.slice().reverse()) {
         const label = snapshot?.machines.find((entry) => entry.machineId === notice.machineId)?.label ?? "Machine";
         const item = el("li", { "data-presence-event": notice.eventId, "data-outage-epoch": notice.outageEpoch });
-        item.append(el("strong", {}, `${label} ${notice.kind === "machine_unobserved" ? "unreachable" : "recovered"}`), el("time", { datetime: notice.detectedAt }, relativeTimestamp(notice.detectedAt)));
+        item.append(el("strong", {}, `${label} ${notice.kind === "machine_unobserved" ? "unreachable" : "recovered"}`), el("time", { datetime: notice.detectedAt }, presenceTimestamp(notice.detectedAt)));
         if (notice.refEventId) item.setAttribute("data-ref-event", notice.refEventId);
         list.append(item);
       }
-      section.append(list);
+      history.append(list);
+      section.append(history);
     }
     const refresh = el("button", { type: "button", id: "presence-refresh" }, "Refresh machine status");
     refresh.disabled = this.busy;

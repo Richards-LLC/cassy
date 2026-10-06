@@ -472,8 +472,13 @@ EOF
     chmod +x "$repo/scripts/npm-env-stub"
     local failed=0
     for row in ci-script-tests nextest doctests archive-mode snapshot-portability builtin-projections hub-web-tests; do
-        output="$(GATE_FIXTURE_EXPECT_CLEAN=1 NPM="$repo/scripts/npm-env-stub" \
-            run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only "$row" 2>&1 || true)"
+        # Suite-only diagnostics need no branch discovery; pass every train
+        # variable through, including BRANCH which run_gate normally removes.
+        output="$(cd "$repo" && env -u ZIG \
+            GATE_FIXTURE_EXPECT_CLEAN=1 GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+            NPM="$repo/scripts/npm-env-stub" CARGO="$repo/scripts/cargo-stub" \
+            PATH="$repo/scripts:$PATH" \
+            "$repo/scripts/release-gate.sh" 9.99.7 --only "$row" 2>&1 || true)"
         if grep -qF "PASS $row" <<<"$output"; then
             printf 'ok   %s child environment has no train/gate controls\n' "$row"
         else

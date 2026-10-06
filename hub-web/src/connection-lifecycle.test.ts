@@ -200,7 +200,7 @@ describe("Commander live connection lifecycle", () => {
       expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Kept across recovery", client_ref: "kept" } })).toBe(true);
     }
   });
-  it.each(["same pairing", "replaced pairing", "new generation", "stopped"])("fences a resend receipt queued on a retired legacy socket: %s (cas-547a)", async (change) => {
+  it.each(["same pairing", "already confirmed", "replaced pairing", "new generation", "stopped"])("fences a resend receipt queued on a retired legacy socket: %s (cas-547a)", async (change) => {
     const hub = transport();
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
@@ -228,6 +228,12 @@ describe("Commander live connection lifecycle", () => {
     history.hold("resend", "supervisor", message.SendMessage.text, 18_000);
     expect(connection.send("session-a", message)).toBe(true);
     history.release("resend", 18_000);
+    const receipt = { MessageQueued: { client_ref: "resend", notification_id: 99, target: "supervisor", stamped: true } };
+    if (change === "already confirmed") {
+      writer.receive(receipt);
+      expect(queued).toHaveBeenCalledTimes(1);
+      queued.mockClear();
+    }
     hub.event({ kind: "viewer_lagged" });
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     connection.retry();
@@ -244,12 +250,13 @@ describe("Commander live connection lifecycle", () => {
     writer.receive({ MessageQueued: { client_ref: "unknown", notification_id: 99, target: "supervisor", stamped: true } });
     writer.receive({ MessageQueued: { client_ref: "resend", notification_id: 99, target: "other-supervisor", stamped: true } });
     expect(queued).not.toHaveBeenCalled();
-    const receipt = { MessageQueued: { client_ref: "resend", notification_id: 99, target: "supervisor", stamped: true } };
-    writer.receive(receipt); writer.receive(receipt);
+    writer.receive(receipt);
+    writer.receive({ MessageQueued: { ...receipt.MessageQueued, notification_id: 100 } });
     const accepted = change === "same pairing";
     expect(queued).toHaveBeenCalledTimes(accepted ? 1 : 0);
     const send = history.events.find(event => event.kind === "send");
-    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(accepted);
+    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(accepted || change === "already confirmed");
+    if (accepted || change === "already confirmed") expect(send?.kind === "send" && send.value.notificationId).toBe(99);
     expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
     expect(connection.attachSnapshot("session-a")?.phase).toBe(phase);
     expect(state).toHaveBeenCalledTimes(stateCount);

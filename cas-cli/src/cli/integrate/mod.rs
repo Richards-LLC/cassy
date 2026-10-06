@@ -55,6 +55,7 @@ pub mod keep_block;
 pub mod lock;
 pub mod md;
 pub mod neon;
+mod output;
 #[cfg(test)]
 mod neon_parsers_test;
 #[cfg(feature = "mcp-proxy")]
@@ -139,7 +140,7 @@ pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
         IntegrateCommands::Github { action } => github::execute(action.clone())?,
         #[cfg(feature = "mcp-proxy")]
         IntegrateCommands::Violet(args) => {
-            let outcome = violet::execute(args, _cli.json)?;
+            let outcome = violet::execute(args, _cli.json, _cli.full)?;
             if _cli.json {
                 // Violet already emitted its structured report. Appending
                 // the human outcome would invalidate the JSON stream.
@@ -148,23 +149,16 @@ pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
             outcome
         }
     };
-    render_outcome(&outcome);
+    render_outcome(&outcome, _cli.full)?;
     Ok(())
 }
 
-fn render_outcome(outcome: &IntegrationOutcome) {
-    println!(
-        "{} {}: {}",
-        outcome.platform.as_str(),
-        outcome.action.as_str(),
-        outcome.status.as_str()
-    );
-    for line in &outcome.summary {
-        println!("  {line}");
-    }
-    for f in &outcome.files {
-        println!("  wrote {}", f.display());
-    }
+fn render_outcome(outcome: &IntegrationOutcome, full: bool) -> std::io::Result<()> {
+    output::render(outcome, &mut std::io::stdout().lock(), full)
+}
+
+fn render_summary(summary: &[String], full: bool) -> std::io::Result<()> {
+    output::render_summary(summary, &mut std::io::stdout().lock(), full)
 }
 
 #[cfg(test)]

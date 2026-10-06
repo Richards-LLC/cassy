@@ -550,6 +550,39 @@ describe("Commander live connection lifecycle", () => {
     expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.message?.SendMessage?.client_ref === "held-before-live")).toHaveLength(1);
   });
 
+  it("checks the machine immediately when a fresh session recovers during event backoff (cas-9dc6)", async () => {
+    const hub = transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("session-recovers-first"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const initial = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const old = TransportSocket.instances[0]!;
+    old.open(); old.receive({ proto: 2 });
+    await initial;
+    old.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    hub.block(true);
+    hub.event({ kind: "viewer_lagged" });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    old.close(1011);
+    hub.block(false);
+    const recovering = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    const recovered = TransportSocket.instances[1]!;
+    recovered.open(); recovered.receive({ proto: 2 });
+    await recovering;
+    // The fresh session is reachable, while the machine's independent retry
+    // still waits. Its Welcome must prompt a check, not bypass send fencing.
+    expect(connection.snapshot().phase).toBe("backoff");
+    const streams = hub.streams.length;
+    recovered.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    await vi.waitFor(() => expect(hub.streams).toHaveLength(streams + 1), { timeout: 250, interval: 10 });
+    expect(connection.snapshot().phase).toBe("live");
+  });
+
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {
     const hub = transport(true);
     TransportSocket.instances = [];

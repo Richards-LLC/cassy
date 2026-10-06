@@ -29,37 +29,6 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   // the old 120 s budget (cas-f657 QA N2). Every wait inside is event-driven,
   // so the budget only needs headroom, as HUB-J3 has.
   test.setTimeout(240_000);
-  // Temporary native transport control; removed before final acceptance.
-  page.on("console", message => { if (message.text().startsWith("[DEBUG-547A-WS]")) console.log(message.text()); });
-  const installSocketCapture = () => {
-    const NativeSocket = window.WebSocket;
-    let next = 0;
-    window.WebSocket = class extends NativeSocket {
-      readonly debugId = ++next;
-      constructor(url: string | URL, protocols?: string | string[]) {
-        super(url, protocols);
-        this.addEventListener("message", event => {
-          try {
-            const frame = JSON.parse(event.data);
-            if (frame.MessageQueued || frame.Welcome) console.log("[DEBUG-547A-WS]", JSON.stringify({ event: "receive", socket: this.debugId, path: new URL(this.url).pathname, state: this.readyState, kind: frame.MessageQueued ? "MessageQueued" : "Welcome", ref: frame.MessageQueued?.client_ref, notification: frame.MessageQueued?.notification_id }));
-          } catch { /* binary terminal frames are irrelevant */ }
-        });
-      }
-      override close(code?: number, reason?: string): void {
-        console.log("[DEBUG-547A-WS]", JSON.stringify({ event: "close", socket: this.debugId, path: new URL(this.url).pathname, state: this.readyState, code, reason }));
-        super.close(code, reason);
-      }
-      override send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
-        if (typeof data === "string") {
-          try {
-            const frame = JSON.parse(data);
-            if (frame.SendMessage) console.log("[DEBUG-547A-WS]", JSON.stringify({ event: "send", socket: this.debugId, path: new URL(this.url).pathname, state: this.readyState, ref: frame.SendMessage.client_ref }));
-          } catch { /* non-JSON traffic */ }
-        }
-        super.send(data);
-      }
-    };
-  };
   await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -68,9 +37,6 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
-    // routeWebSocket installs its constructor after init scripts; observe it
-    // here, before the first selected session opens its socket.
-    await page.evaluate(installSocketCapture);
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(send).toBeVisible();
   });
@@ -432,20 +398,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     const resent = hub.nextSend();
     await again.click();
     expect((await resent).text).toBe("Did the Mac tests start?");
-    let unblock!: () => void;
-    let observeTicket!: () => void;
-    const barrier = new Promise<void>(resolve => { unblock = resolve; });
-    const ticket = new Promise<void>(resolve => { observeTicket = resolve; });
-    await page.route("**/v1/auth/websocket-ticket", async route => {
-      if (new URL(route.request().url()).hostname === "atlas.test") observeTicket();
-      await barrier;
-      await route.fulfill({ json: { ticket: "journey-ticket" } });
-    });
-    await page.evaluate(() => window.dispatchEvent(new Event("online")));
-    await ticket; // writer retired; replacement cannot open before the ACK.
-    console.log("[DEBUG-547A-WS] recovery-ticket barrier reached; sending correct receipt to original writer");
     hub.deliverLatest(PELICAN);
-    unblock();
     await expect(page.locator(".conversation-turn").filter({ hasText: "Did the Mac tests start?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);

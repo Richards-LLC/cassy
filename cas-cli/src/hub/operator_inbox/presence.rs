@@ -319,19 +319,71 @@ fn save_epoch(root: &Path, principal: &MachinePrincipal, epoch: String) -> anyho
 fn sample(root: &Path) -> (Option<String>, Vec<Component>) {
     use crate::hub::observation::{Observation, ObservationState, collect_runtime_receipt};
     let paths = crate::hub::HubRuntimePaths::new(root);
-    // This reporter runs inside the listening hub. Serve's external route is
-    // not probed here; its availability must not be inferred from the hub.
+    let sampled_at = std::time::Instant::now();
+    let started = chrono::Utc::now();
+    let record = paths
+        .read_process_record()
+        .ok()
+        .filter(|record| record.pid == std::process::id());
+    // Verify the current process's owned Serve route without changing it.
+    // An external HTTPS reachability claim needs an independent observer and
+    // is never inferred from this local control-plane probe.
+    let manager = crate::hub::tailscale::TailscaleServeManager::new(root);
+    let publication = match record.as_ref() {
+        Some(record) if record.transport_warning.is_some() => Observation::new(
+            ObservationState::Failed,
+            "serve_publication_unavailable",
+            "current_runtime_record",
+        ),
+        Some(record) => match manager.owned_receipt() {
+            Ok(Some(owned))
+                if record.tailscale_serve_target.as_deref()
+                    == Some(owned.local_target.as_str()) =>
+            {
+                match manager.serve_handlers(owned.https_port) {
+                    Ok(handlers)
+                        if handlers
+                            .iter()
+                            .any(|(path, target)| path == "/" && target == &owned.local_target) =>
+                    {
+                        Observation::new(
+                            ObservationState::Healthy,
+                            "owned_route_present",
+                            "current_serve_probe",
+                        )
+                    }
+                    Ok(_) => Observation::new(
+                        ObservationState::Failed,
+                        "owned_route_absent",
+                        "current_serve_probe",
+                    ),
+                    Err(_) => Observation::new(
+                        ObservationState::Unknown,
+                        "serve_probe_unavailable",
+                        "current_serve_probe",
+                    ),
+                }
+            }
+            _ => Observation::new(
+                ObservationState::Unknown,
+                "no_owned_publication_observed",
+                "current_serve_probe",
+            ),
+        },
+        None => Observation::new(
+            ObservationState::Unknown,
+            "runtime_record_unavailable",
+            "current_runtime_record",
+        ),
+    };
     let receipt = collect_runtime_receipt(
         &paths,
-        None,
+        record.as_ref(),
         Observation::new(ObservationState::Healthy, "reporter_running", "hub_process"),
-        Observation::new(
-            ObservationState::Unknown,
-            "not_sampled",
-            "presence_reporter",
-        ),
-        chrono::Utc::now(),
+        publication,
+        started,
     );
+    let age = sampled_at.elapsed().as_secs().saturating_add(1).min(300) as u16;
     let map = |name, state| Component {
         component: name,
         state: match state {
@@ -341,7 +393,7 @@ fn sample(root: &Path) -> (Option<String>, Vec<Component>) {
             | ObservationState::Disabled
             | ObservationState::Unsupported => ComponentState::Unknown,
         },
-        age_s: 0,
+        age_s: age,
     };
     (
         receipt.current_os_boot_id,
@@ -354,7 +406,7 @@ fn sample(root: &Path) -> (Option<String>, Vec<Component>) {
 }
 
 /// A single hub-owned loop. The synchronous signed transport has a bounded
-/// 10s HTTP deadline. Sleep after each exchange skips missed ticks and never
+/// per-request 10s HTTP deadline. Monotonic scheduling skips missed ticks and never
 /// queues a backlog after suspend. No enrollment or implicit opt-in occurs.
 pub fn spawn_presence_loop(root: PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -363,6 +415,7 @@ pub fn spawn_presence_loop(root: PathBuf) -> tokio::task::JoinHandle<()> {
         let instance = uuid::Uuid::new_v4().to_string();
         let mut active: Option<(MachinePrincipal, MachineTransport, Reporter)> = None;
         loop {
+            let tick = tokio::time::Instant::now();
             let work_root = root.clone();
             let principal_store = store.clone();
             let loaded = tokio::task::spawn_blocking(move || {
@@ -371,6 +424,10 @@ pub fn spawn_presence_loop(root: PathBuf) -> tokio::task::JoinHandle<()> {
             })
             .await;
             let Ok(Ok(Some((principal, (boot, components))))) = loaded else {
+                if active.is_some() {
+                    tracing::info!("presence reporter stopped: enrollment unavailable");
+                    return;
+                }
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 continue;
             };
@@ -451,7 +508,7 @@ pub fn spawn_presence_loop(root: PathBuf) -> tokio::task::JoinHandle<()> {
                 continue; // activation does not renew the lease; report now
             }
             let jitter = (uuid::Uuid::new_v4().as_u128() % 21) as u64;
-            tokio::time::sleep(Duration::from_secs(50 + jitter)).await;
+            tokio::time::sleep_until(tick + Duration::from_secs(50 + jitter)).await;
         }
     })
 }

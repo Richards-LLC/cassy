@@ -8,6 +8,150 @@ const HUB = "hub-soundwave";
 const PROJECT = "github.com/richards-llc/cassy";
 const sessionId = `s_${createHash("sha256").update(SESSION).digest("base64url")}`;
 
+test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3dd)", journeyPart, async ({ page, journey, browser }) => {
+  // Real browser enrollment/PoP/HPKE/IndexedDB, protocol-double presence.
+  // This cannot establish the deployed watchdog's outage detection bound.
+  const cloud = operatorCloudDouble();
+  const commandKey = (await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"])) as CryptoKeyPair;
+  const soundwave = await cloud.enrollMachine(HUB, [PROJECT], new Uint8Array(await crypto.subtle.exportKey("raw", commandKey.publicKey)), "soundwave");
+  cloud.presence.set(soundwave.id, { monitoring: "disabled", monitoring_generation: "0" });
+  await routeOperatorCloud(page.context(), cloud);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const inbox = page.getByRole("dialog", { name: "Operator inbox" });
+  const row = inbox.locator(`[data-machine-presence="${soundwave.id}"]`);
+  const notices = inbox.getByRole("list", { name: "Machine alert history" });
+  const refresh = async () => inbox.getByRole("button", { name: "Refresh machine status" }).click();
+  const peer = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  try {
+    const desk = await peer.newPage();
+    await desk.clock.install({ time: journeyNow() });
+    await routeOperatorCloud(peer, cloud);
+    const deskInbox = desk.getByRole("dialog", { name: "Operator inbox" });
+    const report = () => ({
+      monitoring: "enabled", monitoring_generation: "1", presence: "observed", last_report_at: new Date(journeyNow()).toISOString(),
+      lease_expires_at: new Date(journeyNow() + 180_000).toISOString(), deadline_at: new Date(journeyNow() + 240_000).toISOString(),
+      components: [
+        { component: "hub", state: "up", observed_at: new Date(journeyNow()).toISOString() },
+        { component: "serve", state: "degraded", observed_at: new Date(journeyNow()).toISOString() },
+        { component: "factory", state: "unknown", observed_at: new Date(journeyNow()).toISOString() },
+      ],
+    });
+    let outageId = "";
+    await journey.stage("The account opts this phone into machine alerts; nothing enables itself", async () => {
+      await journey.open();
+      await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+      await inbox.getByLabel("Name this browser").fill("Presence phone");
+      await inbox.getByRole("button", { name: "Sign in" }).click();
+      const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
+      await cloud.approve(code, { capabilities: ["feed:read", "account:manage"] });
+      await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible({ timeout: 15_000 });
+      expect(cloud.presence.get(soundwave.id)?.monitoring).toBe("disabled");
+      const settings = row.locator("summary");
+      await settings.focus();
+      await settings.press("Enter");
+      await expect(row.getByText(/keeps notices for 90 days/)).toBeVisible();
+      const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
+      await enable.focus();
+      await enable.press("Enter");
+      await expect(row.getByText("Waiting for the first report", { exact: true })).toBeVisible();
+      expect(cloud.presence.get(soundwave.id)?.monitoring_generation).toBe("1");
+    });
+    await journey.stage("Reporting and component degradation are separate facts", async () => {
+      cloud.presence.set(soundwave.id, report());
+      await refresh();
+      await expect(row.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible();
+      await expect(row.getByText(/Serve: degraded/)).toBeVisible();
+      await expect(row.getByText(/Factory: not known/)).toBeVisible();
+      await expect(row.getByText(/Last report/)).toBeVisible();
+      await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
+    });
+    await journey.stage("A separate read-only profile sees machine status without pairing", async () => {
+      await desk.goto(page.url());
+      await desk.getByRole("button", { name: "Operator inbox", exact: true }).click();
+      await deskInbox.getByLabel("Name this browser").fill("Presence desk");
+      await deskInbox.getByRole("button", { name: "Sign in" }).click();
+      const code = (await deskInbox.getByLabel("Sign-in code").textContent())!.trim();
+      await cloud.approve(code);
+      await expect(deskInbox.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(deskInbox.getByRole("button", { name: /Enable alerts|Disable alerts/ })).toHaveCount(0);
+    });
+    await journey.stage("A signed outage reaches both inboxes, without a conversation bubble", async () => {
+      const outage = await cloud.appendObserverNotice(soundwave, "machine_unobserved");
+      outageId = outage.eventId;
+      cloud.presence.set(soundwave.id, { ...report(), presence: "unobserved", open_outage: { outage_epoch: "1", opened_at: new Date(journeyNow()).toISOString(), unobserved_event_id: outageId } });
+      await refresh();
+      await expect(notices.getByText("soundwave unreachable", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(deskInbox.getByText("soundwave unreachable", { exact: true })).toBeVisible({ timeout: 15_000 });
+      const phone = [...cloud.devices.values()].find((device) => device.label === "Presence phone")!;
+      const desktop = [...cloud.devices.values()].find((device) => device.label === "Presence desk")!;
+      await expect.poll(() => cloud.acks.get(phone.id)?.size ?? 0).toBe(1);
+      await expect.poll(() => cloud.acks.get(desktop.id)?.size ?? 0).toBe(1);
+      await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
+    });
+    await journey.stage("Reload retains one device-persisted outage and its account identity", async () => {
+      await page.reload();
+      await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+      await expect(notices.locator(`[data-presence-event="${outageId}"]`)).toHaveCount(1);
+      await expect(notices.getByText("soundwave unreachable", { exact: true })).toBeVisible();
+      await expect(inbox.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(0);
+    });
+    await journey.stage("A verified recovery references the same outage on both devices", async () => {
+      const recovery = await cloud.appendObserverNotice(soundwave, "machine_recovered", { refEventId: outageId });
+      cloud.presence.set(soundwave.id, report());
+      await refresh();
+      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(notices.locator(`[data-presence-event="${recovery.eventId}"]`)).toHaveAttribute("data-ref-event", outageId);
+      await expect(notices.getByText("soundwave unreachable", { exact: true })).toHaveCount(1);
+      await expect(deskInbox.getByText("soundwave recovered", { exact: true })).toBeVisible({ timeout: 15_000 });
+      const phone = [...cloud.devices.values()].find((device) => device.label === "Presence phone")!;
+      await expect.poll(() => cloud.acks.get(phone.id)?.size ?? 0).toBe(2);
+      await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
+    });
+    await journey.stage("An unavailable observer is visible beside a fresh machine report", async () => {
+      cloud.observerStatus = "unavailable";
+      await refresh();
+      await expect(inbox.getByText(/Observer unavailable/)).toBeVisible();
+      await expect(row.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible();
+    });
+    const cells = [
+      { name: "phone-light", width: 390, height: 844, scheme: "light" as const },
+      { name: "phone-dark", width: 390, height: 844, scheme: "dark" as const },
+      { name: "desktop-light", width: 1280, height: 800, scheme: "light" as const },
+      { name: "desktop-dark", width: 1280, height: 800, scheme: "dark" as const },
+      { name: "forced-colors", width: 390, height: 844, scheme: "light" as const, media: { forcedColors: "active" as const }, query: "(forced-colors: active)" },
+      { name: "more-contrast", width: 390, height: 844, scheme: "light" as const, media: { contrast: "more" as const }, query: "(prefers-contrast: more)" },
+      { name: "reduced-motion", width: 390, height: 844, scheme: "light" as const, media: { reducedMotion: "reduce" as const }, query: "(prefers-reduced-motion: reduce)" },
+    ];
+    for (const cell of cells) await journey.stage(`Machine observations and notices in ${cell.name}`, async () => {
+      await page.setViewportSize({ width: cell.width, height: cell.height });
+      await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {}) });
+      await page.evaluate((scheme) => { document.documentElement.dataset.scheme = scheme; }, cell.scheme);
+      if ("query" in cell) expect(await page.evaluate((query) => matchMedia(query).matches, cell.query!)).toBe(true);
+      await expect(row.getByText(/Serve: degraded/)).toBeVisible();
+      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+    await journey.stage("The phone disables alerts while the hub is unreachable", async () => {
+      await page.emulateMedia({ forcedColors: null, contrast: null, reducedMotion: null });
+      const settings = row.locator("summary");
+      if (!(await row.locator("details").evaluate((node) => (node as HTMLDetailsElement).open))) {
+        await settings.focus();
+        await settings.press("Enter");
+      }
+      const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true });
+      await disable.focus();
+      await disable.press("Enter");
+      await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible();
+      expect(cloud.presence.get(soundwave.id)?.monitoring_generation).toBe("2");
+      await deskInbox.getByRole("button", { name: "Refresh machine status" }).click();
+      await expect(deskInbox.getByText("Monitoring is off", { exact: true })).toBeVisible();
+      await expect(notices.getByText("soundwave recovered", { exact: true })).toHaveCount(1);
+    });
+  } finally {
+    await peer.close();
+  }
+});
+
 /** A supervisor turn as the hub's drain seals it: an m263 frozen snapshot. */
 function supervisorTurn(promptId: number, prompt: string, at: string) {
   return {

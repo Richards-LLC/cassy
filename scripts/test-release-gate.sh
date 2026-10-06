@@ -418,6 +418,60 @@ run_scenario() {
     assert_named_failure "$3" "$output"
 }
 
+# cas-728e: copied producers must use real admission in a private pool. The
+# wait case also proves that isolation did not become an admission bypass.
+repo="$(new_fixture host-memory-admission)"
+if python3 - "$repo/scripts" "$script_dir" "$tmp/host-memory" <<'PY_HOST_MEMORY_REGRESSION'
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+fixture, production, pool = map(Path, sys.argv[1:])
+def load(path):
+    spec = importlib.util.spec_from_file_location('host_memory', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+host = load(fixture / 'host_memory.py')
+original = load(production / 'host_memory.py')
+assert original.DIRECTORY == Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'
+assert host.DIRECTORY == pool, (host.DIRECTORY, pool)
+assert host.DIRECTORY != original.DIRECTORY
+command = [sys.executable, '-c', """
+import importlib.util
+from pathlib import Path
+import os
+import sys
+spec = importlib.util.spec_from_file_location('proof', Path(sys.argv[1]) / 'assembly-proof.py')
+p = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(p)
+p._run_contexts = lambda *args: print('fixture contexts started')
+p.run_contexts(None, None, dict(os.environ), None, None, {})
+""", str(fixture)]
+env = dict(os.environ, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='1',
+           CAS_HOST_MEMORY_DIRECTORY=str(pool / 'operator-override'))
+env.pop(host.LEASE_ENV, None)
+high = {'total_bytes': 64 * 1024**3, 'available_bytes': 60 * 1024**3,
+        'reserve_bytes': 16 * 1024**3, 'budget_bytes': 44 * 1024**3, 'source': 'fixture'}
+with host.admission('worker', env, lambda _: high, report=lambda _: None):
+    blocked = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+    assert blocked.returncode != 0, blocked.stdout + blocked.stderr
+    assert 'worker suite running' in blocked.stdout + blocked.stderr
+    assert 'fixture contexts started' not in blocked.stdout
+admitted = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+assert 'fixture contexts started' in admitted.stdout
+assert not (pool / 'operator-override').exists()
+PY_HOST_MEMORY_REGRESSION
+then
+    ok 'fixture subprocess proofs use a private pool and still wait for its worker budget'
+else
+    bad 'fixture subprocess proof admission pool is not isolated or does not enforce leases'
+fi
+
 repo="$(new_fixture publish-toolchain)"
 output="$(GATE_FIXTURE_ZIGBUILD_FAIL=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only publish-toolchain 2>&1 || true)"
 assert_named_failure publish-toolchain "$output"

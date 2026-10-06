@@ -200,7 +200,7 @@ describe("Commander live connection lifecycle", () => {
       expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Kept across recovery", client_ref: "kept" } })).toBe(true);
     }
   });
-  it.each(["same pairing", "replaced pairing", "stopped"])("fences a resend receipt queued on a retired legacy socket: %s (cas-547a)", async (change) => {
+  it.each(["same pairing", "replaced pairing", "new generation", "stopped"])("fences a resend receipt queued on a retired legacy socket: %s (cas-547a)", async (change) => {
     const hub = transport();
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
@@ -233,6 +233,7 @@ describe("Commander live connection lifecycle", () => {
     connection.retry();
     await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
     if (change === "replaced pairing") machine.credentialId = "new-pairing";
+    if (change === "new generation") machine.credentialGeneration = 2;
     if (change === "stopped") connection.stop();
     const phase = connection.attachSnapshot("session-a")?.phase;
     const stateCount = state.mock.calls.length, errorCount = error.mock.calls.length;
@@ -241,6 +242,7 @@ describe("Commander live connection lifecycle", () => {
     writer.receive(welcome);
     writer.receive({ Error: { code: "upstream_unavailable", client_ref: "resend" } });
     writer.receive({ MessageQueued: { client_ref: "unknown", notification_id: 99, target: "supervisor", stamped: true } });
+    writer.receive({ MessageQueued: { client_ref: "resend", notification_id: 99, target: "other-supervisor", stamped: true } });
     expect(queued).not.toHaveBeenCalled();
     const receipt = { MessageQueued: { client_ref: "resend", notification_id: 99, target: "supervisor", stamped: true } };
     writer.receive(receipt); writer.receive(receipt);

@@ -255,7 +255,7 @@ export class HubConnectionSupervisor {
   /** Pending "stayed live" resets of the refusal streak, per session (cas-2036). */
   private readonly upstreamStreakResets = new Map<string, number>();
   /** Supervisor messages written to each legacy session socket, in order (cas-a355). */
-  private readonly legacySends = new WeakMap<WebSocket, string[]>();
+  private readonly legacySends = new WeakMap<WebSocket, Array<{ clientRef: string; target: string }>>();
   private readonly attachRetryTimers = new Map<string, number>();
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
   private readonly timedOutSockets = new WeakSet<WebSocket>();
@@ -1514,7 +1514,7 @@ export class HubConnectionSupervisor {
     const socket = this.sockets.get(session);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     socket.send(JSON.stringify(outbound));
-    const sent = sendMessageClientRef(outbound);
+    const sent = sendMessageIdentity(outbound);
     if (sent) this.legacySends.set(socket, [...(this.legacySends.get(socket) ?? []), sent]);
     return true;
   }
@@ -1528,10 +1528,10 @@ export class HubConnectionSupervisor {
   private unansweredAfter(session: string, clientRef: string): string[] {
     const socket = this.sockets.get(session);
     const written = socket ? this.legacySends.get(socket) ?? [] : [];
-    const index = written.indexOf(clientRef);
+    const index = written.findIndex(send => send.clientRef === clientRef);
     if (!socket || index < 0) return [];
     this.legacySends.set(socket, written.slice(0, index));
-    return written.slice(index + 1);
+    return written.slice(index + 1).map(send => send.clientRef);
   }
 
   private noteUpstreamRefusal(session: string): void {
@@ -1709,11 +1709,11 @@ export class HubConnectionSupervisor {
       const current = credentialFence(this.machine);
       const written = this.legacySends.get(socket) ?? [];
       if (!this.desired || !this.desiredSessions.has(session) || current.credentialId !== frameFence.credentialId || current.generation !== frameFence.generation
-        || !queued?.client_ref || !written.includes(queued.client_ref)) return;
+        || !queued?.client_ref || !written.some(send => send.clientRef === queued.client_ref && send.target === queued.target)) return;
       // Consume every attempt with this ref: explicit Retry keeps the ref,
       // and one positive receipt settles them all. Duplicate retired frames
       // must not override the first queue identity or keep a handler alive.
-      const remaining = written.filter(ref => ref !== queued.client_ref);
+      const remaining = written.filter(send => send.clientRef !== queued.client_ref);
       this.legacySends.set(socket, remaining);
       if (!remaining.length) socket.onmessage = null;
       this.callbacks.onMessageQueued?.(session, queued, frameFence);
@@ -1858,12 +1858,13 @@ export const UPSTREAM_BACKOFF_MAX_ATTEMPT = 3;
  */
 export const UPSTREAM_STREAK_SETTLE_MS = 10_000;
 
-/** The client_ref of an outbound SendMessage, if it carries one. */
-function sendMessageClientRef(message: unknown): string | undefined {
+/** Immutable receipt identity for an outbound SendMessage. */
+function sendMessageIdentity(message: unknown): { clientRef: string; target: string } | undefined {
   if (typeof message !== "object" || message === null) return undefined;
   const send = (message as Record<string, unknown>).SendMessage;
-  const ref = send && typeof send === "object" ? (send as Record<string, unknown>).client_ref : undefined;
-  return typeof ref === "string" ? ref : undefined;
+  if (!send || typeof send !== "object") return undefined;
+  const { client_ref, target } = send as Record<string, unknown>;
+  return typeof client_ref === "string" && typeof target === "string" ? { clientRef: client_ref, target } : undefined;
 }
 
 function withClientRef(message: unknown, clientRef: string | undefined): unknown {

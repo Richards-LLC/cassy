@@ -160,6 +160,44 @@ describe("Commander live connection lifecycle", () => {
     expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
     expect(writer.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === clientRef)).toHaveLength(2);
   });
+  it.each(["recovery", "stop"])("rejects a legacy ticket completed after %s (cas-547a)", async (change) => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const fetchNow = globalThis.fetch;
+    const tickets: Array<() => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/auth/websocket-ticket") {
+        await new Promise<void>(resolve => tickets.push(resolve));
+      }
+      return fetchNow(input, init);
+    }));
+    const connection = supervisor(await storedMachine("stale-legacy-ticket"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const oldAttach = connection.attach("session-a");
+    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    if (change === "stop") connection.stop();
+    else {
+      hub.event({ kind: "viewer_lagged" });
+      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+      connection.retry();
+      // Recovery has abandoned the old generation and started a fresh
+      // ticket, which stays pending while the retired ticket finishes.
+      await vi.waitFor(() => expect(tickets).toHaveLength(2));
+    }
+    tickets[0]!();
+    await oldAttach;
+    expect(TransportSocket.instances).toHaveLength(0);
+    if (change === "recovery") {
+      tickets[1]!();
+      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+      const socket = TransportSocket.instances[0]!;
+      socket.open();
+      socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3 } });
+      expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Kept across recovery", client_ref: "kept" } })).toBe(true);
+    }
+  });
   it("delivers a stalled catalog's entire burst and joins manual refreshes to its flight (cas-b55b)", async () => {
     const hub = transport();
     const events: Record<string, unknown>[] = [];

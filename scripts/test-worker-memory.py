@@ -186,6 +186,31 @@ class AdmissionTests(unittest.TestCase):
                 with self.assertRaises(BlockingIOError):
                     fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    def test_cas_4cb9_node_style_nested_spawn_can_reuse_live_ancestor(self):
+        with self.admit('worker') as (env, _):
+            program = f'''import sys,pathlib,json
+sys.path.insert(0,{str(ROOT/'scripts')!r})
+import host_memory as host
+with host.admission('worker',dict(__import__('os').environ),lambda env: (_ for _ in ()).throw(AssertionError('resampled')),directory=pathlib.Path({str(self.pool)!r})) as (env,fds):
+    assert fds == (), fds
+'''
+            child = subprocess.run([sys.executable, '-c', program], env=env, capture_output=True, text=True)
+            self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+
+    def test_cas_4cb9_assembly_propagates_its_host_descriptors(self):
+        def inspect(root, clone, env, *args):
+            record = json.loads(env[host.LEASE_ENV])
+            inherited = worker.proof.release_scratch.inherited_leases(env)
+            self.assertEqual(inherited, set(record['fds']))
+            for fd in inherited: os.fstat(fd)
+            with host.private_file(self.pool/'intent.lock') as probe:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return 'ran'
+        with mock.patch.object(worker.proof, 'HOST_MEMORY_DIRECTORY', self.pool), \
+             mock.patch.object(worker.proof, '_run_contexts', side_effect=inspect):
+            self.assertEqual(worker.proof.run_contexts(self.root, self.root, self.env, self.root, self.root, {}), 'ran')
+
     def test_cas_4cb9_slot_symlink_fails_closed(self):
         host.private_directory(self.pool)
         (self.root/'target').write_text('')

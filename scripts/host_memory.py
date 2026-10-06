@@ -108,18 +108,24 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
         # Preserve the open descriptions through nested Popen(close_fds=True).
         # Legacy claims have no FD list and retain their old inheritance shape.
         record = json.loads(env[LEASE_ENV])
-        fds = tuple(record.get('fds', ()))
+        recorded_fds = tuple(record.get('fds', ()))
+        fds = []
         paths = ('intent.lock', record.get('slot', 'budget.lock'))
-        if fds:
-            if len(fds) != 2 or any(type(fd) is not int or fd < 0 for fd in fds):
+        if recorded_fds:
+            if len(recorded_fds) != 2 or any(type(fd) is not int or fd < 0 for fd in recorded_fds):
                 raise ValueError('invalid inherited host memory descriptors')
-            for fd, path in zip(fds, paths):
-                info = os.fstat(fd)
+            for fd, path in zip(recorded_fds, paths):
                 with private_file(directory / path, False) as probe:
                     expected = os.fstat(probe.fileno())
-                if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
-                    raise ValueError('invalid inherited host memory descriptors')
-        yield dict(env), fds
+                try:
+                    info = os.fstat(fd)
+                except OSError:
+                    continue
+                if (info.st_dev, info.st_ino) == (expected.st_dev, expected.st_ino):
+                    fds.append(fd)
+        # npm/Node may close extra descriptors between wrappers. The validated
+        # live ancestor still owns admission; never pass a reused unrelated FD.
+        yield dict(env), tuple(fds)
         return
     started = time.monotonic()
     with private_file(directory / 'priority.lock') as priority, \

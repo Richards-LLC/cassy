@@ -302,7 +302,12 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     // at 390 and made Close read like an empty field.
     const tokens: Record<string, string> = { ...(scheme === "light" ? houseLight : houseDark), ...t };
     const resolve = (value: string): string => { const m = value.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/); return m ? resolve(tokens[m[1]] ?? m[2]) : value; };
-    expect(restValue("dialog .dialog-actions", "background")).toBe("var(--look-glass-strong)");
+    expect(restValue("dialog .dialog-actions", "background")).toBe("var(--look-glass-bar)");
+    // F02: a light frost, not a white slab over the sheet.
+    expect(parse(t["--look-glass-bar"])[3]).toBeLessThanOrEqual(0.4);
+    // The installations sheet's bar is its footer (outside the scroller): no frost, no extra height (QA F01).
+    expect(restValue("dialog.installation-inventory > .dialog-actions", "background")).toBe("transparent");
+    expect(restValue("dialog.installation-inventory > .dialog-actions", "margin-top")).toBe("0");
     expect(restValue("dialog .dialog-actions", "border-top")).toMatch(/^1px solid var\(--look-glass-line\)$/);
     expect(restValue("dialog .dialog-actions", "margin-top")).toBe("var(--space-3)");
     expect(Number.parseFloat(resolve("var(--space-3)"))).toBeGreaterThanOrEqual(8);
@@ -371,7 +376,7 @@ describe("Glass structure", () => {
     }
     const media = (query: string) => { const at = glass.indexOf(`@media ${query} {`); expect(at, query).toBeGreaterThan(-1); return glass.slice(at, glass.indexOf("\n}\n", at)); };
     const opaque = media("(prefers-contrast: more), (prefers-reduced-transparency: reduce), (forced-colors: active)");
-    for (const rule of ["--look-blur: none;", "--look-glass: var(--bg-panel);", "--look-glass-strong: var(--bg-panel);", "--sup-bg: var(--bg-panel);"]) expect(opaque, rule).toContain(rule);
+    for (const rule of ["--look-blur: none;", "--look-glass: var(--bg-panel);", "--look-glass-strong: var(--bg-panel);", "--look-glass-bar: var(--bg-panel);", "--sup-bg: var(--bg-panel);"]) expect(opaque, rule).toContain(rule);
     const more = media("(prefers-contrast: more)");
     for (const rule of ["--look-aurora: var(--bg-root);", "--line-subtle: var(--line-strong);"]) expect(more, rule).toContain(rule);
     // Nothing moves behind glass: an animated backdrop re-blurs every frosted

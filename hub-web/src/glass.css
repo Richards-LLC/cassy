@@ -50,6 +50,7 @@
   --look-glass: rgba(255, 255, 255, 0.6);
   --look-row-open: rgba(91, 63, 224, 0.14); /* the open conversation's violet wash; its edge is --color-action */
   --look-glass-strong: rgba(255, 255, 255, 0.78);
+  --look-glass-bar: rgba(255, 255, 255, 0.3); /* a dialog's action bar: light frost over the sheet, not a slab */
   --look-glass-edge: rgba(255, 255, 255, 0.85);
   --look-glass-line: rgba(76, 61, 160, 0.16);
   --look-shadow-float: 0 8px 22px -8px rgba(54, 38, 140, 0.26);
@@ -126,6 +127,7 @@
     --look-glass: rgba(22, 20, 44, 0.54);
     --look-row-open: rgba(168, 151, 255, 0.16); /* the open conversation's violet wash; its edge is --color-action */
     --look-glass-strong: rgba(26, 23, 52, 0.74);
+    --look-glass-bar: rgba(26, 23, 52, 0.34); /* a dialog's action bar: light frost over the sheet, not a slab */
     --look-glass-edge: rgba(255, 255, 255, 0.1);
     --look-glass-line: rgba(190, 180, 255, 0.14);
     --look-shadow-float: 0 8px 22px -8px rgba(0, 0, 0, 0.6);
@@ -201,6 +203,7 @@ html[data-scheme="dark"] {
   --look-glass: rgba(22, 20, 44, 0.54);
   --look-row-open: rgba(168, 151, 255, 0.16); /* the open conversation's violet wash; its edge is --color-action */
   --look-glass-strong: rgba(26, 23, 52, 0.74);
+  --look-glass-bar: rgba(26, 23, 52, 0.34); /* a dialog's action bar: light frost over the sheet, not a slab */
   --look-glass-edge: rgba(255, 255, 255, 0.1);
   --look-glass-line: rgba(190, 180, 255, 0.14);
   --look-shadow-float: 0 8px 22px -8px rgba(0, 0, 0, 0.6);
@@ -274,6 +277,7 @@ html[data-scheme="dark"] {
   :root, html:root[data-scheme] {
     --look-glass: var(--bg-panel);
     --look-glass-strong: var(--bg-panel);
+    --look-glass-bar: var(--bg-panel);
     --look-glass-edge: var(--line-strong);
     --look-blur: none;
     --panel: var(--bg-panel);
@@ -413,17 +417,22 @@ html[data-scheme="dark"] {
   }
   :root dialog::backdrop { background: var(--look-scrim); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 
-  /* A dialog's sticky action bar is part of the glass sheet, not an opaque
-     slab: strong glass, frosted, with a hairline above and a gap before it,
-     so the last field (an installation's Revoke) always clears it (cas-205e). */
+  /* A dialog's sticky action bar is part of the glass sheet, not a slab: a
+     light frost (--look-glass-bar) with a hairline above and a gap before it.
+     The installations sheet keeps it outside its scroller, so its last Revoke
+     always clears it (cas-205e). */
   :root dialog .dialog-actions {
     margin-top: var(--space-3);
     padding-block: var(--space-3) var(--space-1);
-    background: var(--look-glass-strong);
+    background: var(--look-glass-bar);
     -webkit-backdrop-filter: var(--look-blur);
     backdrop-filter: var(--look-blur);
     border-top: 1px solid var(--look-glass-line);
   }
+  /* The installations sheet's bar is its footer, outside the scroller, so it
+     needs no frost: only the hairline, and no extra height that would push
+     the last Revoke out of the default view at 390 (cas-205e QA F01, F02). */
+  :root dialog.installation-inventory > .dialog-actions { margin-top: 0; padding-block: var(--space-2) 0; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
   /* Its plain buttons (Close, Back) read as buttons: an outlined pill on glass. */
   :root dialog .dialog-actions button:not(.primary) { background: var(--look-glass-strong); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); }
 

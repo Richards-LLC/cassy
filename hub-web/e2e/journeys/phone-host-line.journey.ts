@@ -50,6 +50,16 @@ for (const cell of cells) {
           await search.focus();
           await search.fill("cas-src");
           await page.keyboard.press("Enter");
+          const focus = await page.evaluate(() => ({
+            tag: document.activeElement?.tagName,
+            id: document.activeElement?.id,
+            classes: document.activeElement?.className,
+            label: document.activeElement?.getAttribute("aria-label"),
+            finePointer: matchMedia("(pointer: fine)").matches,
+          }));
+          const focusPath = testInfo.outputPath("revisit-focus.json");
+          writeFileSync(focusPath, JSON.stringify(focus, null, 2) + "\n");
+          await testInfo.attach("revisit focus", { path: focusPath, contentType: "application/json" });
           // Phone navigation lands on the reading region, so reopening the
           // conversation does not raise the soft keyboard (cas-12c29).
           await expect(page.locator(".conversation-reading.thread")).toBeFocused();

@@ -1627,6 +1627,34 @@ unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
 repo="$(new_fixture train-proof)"
 cp -R "$script_dir/release-train.d" "$repo/scripts/"
 cp "$script_dir/release-train-resume.py" "$repo/scripts/"
+# This fixture proves train/assembly receipt consumption, while the ISA cases
+# above exercise real ELF refusal and auditing. Supply its already-proved ISA
+# receipt at the copied gate's key seam: prep changes Cargo.lock, so a receipt
+# seeded before prep would belong to a different input. Keep the real cache
+# reader and all nine receipt fields, without adding a production bypass.
+python3 - "$repo/scripts/release-gate.sh" <<'PY_TRAIN_ISA_RECEIPT'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+seam = '    if "$reuse_rows" && [[ -n "$key" ]]; then\n'
+assert body.count(seam) == 1, 'train ISA receipt seam changed'
+seed = '''    if [[ "$name" == release-binary-isa && -n "$key" && -n "$cache_dir" ]]; then
+        printf '%s %s %s PASS %s %s %s %s %s\\n' \\
+            "$key" "$cache_head" "$(date +%s)" "$cache_checkout_identity" \\
+            "$input_hash" "$env_fingerprint" "$cache_toolchain" \\
+            "$cache_implementation_digest" >"$cache_dir/$name.$key"
+    fi
+'''
+path.write_text(body.replace(seam, seed + seam))
+PY_TRAIN_ISA_RECEIPT
+# Any accidental execution of the auditor fails this fixture. The separate
+# seeded-EVEX/baseline cases retain the real auditor and zigbuild stub.
+cat >"$repo/scripts/test-check-portable-x86_64-isa.sh" <<'EOF'
+#!/usr/bin/env bash
+echo 'train fixture unexpectedly executed the ISA auditor' >&2
+exit 1
+EOF
 # This regression exercises assembly onward, with no GitHub/toolchain preflight.
 # Keep helper functions used by the nested integration fixtures while skipping
 # this train fixture's GitHub/toolchain stage.
@@ -1684,6 +1712,9 @@ if grep -q 'stopped after stage assemble' "$tmp/train-proof.log" \
     if [[ "$(grep -c '^nextest run --workspace.*--no-fail-fast' "$tmp/cargo.log")" == 1 ]] \
         && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 2 ]] \
         && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]] \
+        && [[ "$(grep -c '^zigbuild ' "$tmp/cargo.log" || true)" == 0 ]] \
+        && grep -q '^Reused PASS ' "$train_run"/rows/*/release-binary-isa.log \
+        && [[ "$(awk -F '\t' '$1 == "release-binary-isa" && $4 == 0 && $7 == "REUSED" {n++} END {print n+0}' "$train_run"/rows/*/timing.tsv)" == 1 ]] \
         && grep -q 'stage prep: done' "$tmp/train-proof.log" \
         && grep -q 'stage ledger: done' "$tmp/train-proof.log"; then
         ok 'real train assemble, prep, ledger and detached gate reuse both assembly contexts'

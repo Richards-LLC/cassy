@@ -135,12 +135,14 @@ impl CasService {
         )))
     }
 
-    /// cas-74284: `verification action=qa_request task_id=<parked delivery>
+    /// cas-74284 / cas-9ffa: `verification action=qa_request task_id=<delivery>
     /// summary=<reason>`. Supervisor-only. Opens an independent QA round for a
     /// parked delivery the park did not judge user-facing (for example a
     /// hub-web change parked without a demo_statement, whose demo_statement
     /// the delivery-proof scope lock no longer lets anyone add). From then on
-    /// every merge gate waits for that round's verdict.
+    /// every merge gate waits for that round's verdict. An explicit head_sha
+    /// identifies pushed Open/InProgress corrections through the WorkTarget;
+    /// requesting QA does not park or close that delivery.
     pub(super) async fn verification_qa_request(
         &self,
         req: VerificationRequest,
@@ -151,9 +153,11 @@ impl CasService {
                 "qa_request is supervisor-only; a worker's close dispatches QA for a user-facing delivery itself",
             ));
         }
-        let task_id = required(req.task_id.as_deref(), "task_id (the parked delivery)")?;
+        let task_id = required(req.task_id.as_deref(), "task_id (the delivery to review)")?;
         let reason = required(req.summary.as_deref(), "summary (why this delivery needs independent QA)")?;
-        let supervisor = self.inner.get_agent_id()?;
+        let supervisor = self.inner.resolve_live_supervisor_authority()
+            .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                "qa_request requires a live registered supervisor"))?.id;
         let task = self
             .inner
             .open_task_store()?
@@ -173,7 +177,7 @@ impl CasService {
             .max(1);
         let dispatch = self
             .inner
-            .request_independent_qa(&task, reason.trim())
+            .request_independent_qa_at_receipt(&task, reason.trim(), req.head_sha.as_deref())
             .map_err(|why| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_request rejected: {why}")))?;
         let note = if rejected_rounds >= max_rounds {
             format!(

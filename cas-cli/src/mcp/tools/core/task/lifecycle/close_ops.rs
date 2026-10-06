@@ -7024,9 +7024,31 @@ impl CasCore {
                 &context.target_branch,
             )
         });
+        // cas-9ffa: after request_changes a retired implementer's checkout
+        // can belong to another task. A live supervisor may recover the
+        // exact pushed correction through its declared WorkTarget instead.
+        // This identifies code to lint/park; it never proves integration.
+        let retired_receipt = if supervisor_override
+            && !supervisor_closing_merged_receipt
+            && !supervisor_closing_merged_anchor
+            && matches!(self.compute_verification_skip_reason(&task, &req),
+                VerificationSkipReason::AssigneeInactive { .. } | VerificationSkipReason::AssigneeUnknown)
+        {
+            match (declared_repo_context.as_ref(), req.commit_receipt.as_deref()) {
+                (Some(context), Some(receipt)) => {
+                    match validate_pushed_task_receipt(&task, context, receipt) {
+                        Ok(boundary) => Some(boundary),
+                        Err(message) => return Ok(Self::tool_error(message)),
+                    }
+                }
+                _ => None,
+            }
+        } else { None };
+        let recovery_branch = retired_receipt.as_ref().map(|(branch, _)| format!("origin/{branch}"));
         let worker_worktree_path = if matches!(close_disposition, TaskCloseDisposition::Decision | TaskCloseDisposition::EvidenceOnly)
             || supervisor_closing_merged_anchor
             || supervisor_closing_merged_receipt
+            || retired_receipt.is_some()
         {
             None
         } else {
@@ -7035,6 +7057,15 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(message)),
             }
         };
+        if retired_receipt.is_some() {
+            let context = declared_repo_context.as_ref().expect("recovery requires WorkTarget");
+            match run_declared_pre_close_hook(&task, context, None,
+                req.commit_receipt.as_deref(), true)
+            {
+                Ok(evidence) => task.deliverables.pre_close_hook = Some(evidence),
+                Err(message) => return Ok(Self::tool_error(format!("PRE-CLOSE HOOK FAILED: {message}"))),
+            }
+        }
         let standalone_target_repo = if close_repo_verified {
             close_project_root.clone()
         } else {
@@ -7521,7 +7552,7 @@ impl CasCore {
             && task.assignee.is_some()
             && (close_repo_verified || worker_worktree_path.is_some())
         {
-            match run_factory_branch_merge_gate_with_attribution(
+            match run_factory_branch_merge_gate_for_delivery(
                 &task,
                 &req,
                 &resolved_parent_branch,
@@ -7530,6 +7561,7 @@ impl CasCore {
                     receipt: req.commit_receipt.as_deref(),
                     window: commit_receipt_window.as_ref(),
                 },
+                recovery_branch.as_deref(),
             ) {
                 MergeStateGateOutcome::Proceed => {}
                 // cas-e74c: the delivery is proven integrated (or nothing on
@@ -7558,11 +7590,8 @@ impl CasCore {
                             factory_branch_merge_conflict_paths(
                                 &close_project_root,
                                 &resolved_parent_branch,
-                                &close_measured_factory_branch(
-                                    &close_project_root,
-                                    &task,
-                                    assignee,
-                                ),
+                                &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(
+                                    &close_project_root, &task, assignee)),
                             )
                         })
                         .unwrap_or_else(|| Ok(Vec::new()));
@@ -7606,7 +7635,7 @@ impl CasCore {
                     let anchor = task.assignee.as_deref().and_then(|assignee| {
                         resolve_branch_sha(
                             &close_project_root,
-                            &close_measured_factory_branch(&close_project_root, &task, assignee),
+                            &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee)),
                         )
                     });
                     if task.status != TaskStatus::AwaitingMerge {
@@ -7617,7 +7646,7 @@ impl CasCore {
                         // advance first, so the park, its QA round and its
                         // merge request all name the tip.
                         let measured_branch = task.assignee.as_deref().map(|assignee| {
-                            close_measured_factory_branch(&close_project_root, &task, assignee)
+                            recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
                         });
                         let parking = self.advance_commit_time_anchor_before_park(
                             task_store.as_ref(),
@@ -7639,7 +7668,7 @@ impl CasCore {
                             anchor.clone(),
                             merge_conflicted,
                             task.assignee.as_deref().map(|assignee| {
-                                close_measured_factory_branch(&close_project_root, &task, assignee)
+                                recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
                             }),
                         );
                     } else {
@@ -13358,10 +13387,21 @@ fn landed_anchor_receipt_rejection(
 
 pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     task: &Task,
+    req: &TaskCloseRequest,
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    attribution: TaskCommitAttribution<'_>,
+) -> MergeStateGateOutcome {
+    run_factory_branch_merge_gate_for_delivery(task, req, parent_branch, repo_path, attribution, None)
+}
+
+fn run_factory_branch_merge_gate_for_delivery(
+    task: &Task,
     _req: &TaskCloseRequest,
     parent_branch: &str,
     repo_path: &std::path::Path,
     attribution: TaskCommitAttribution<'_>,
+    validated_recovery_branch: Option<&str>,
 ) -> MergeStateGateOutcome {
     if task.task_type == TaskType::Epic {
         return MergeStateGateOutcome::Proceed;
@@ -13408,7 +13448,8 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // holds the task's commits.
     // cas-93db: never measure another task's delivery as this one. A valid
     // receipt still proves an integrated delivery after its branch is gone.
-    let factory_branch = match resolve_close_delivery_branch(repo_path, task, assignee) {
+    let factory_branch = match validated_recovery_branch.map(str::to_string)
+        .map(Ok).unwrap_or_else(|| resolve_close_delivery_branch(repo_path, task, assignee)) {
         Ok(branch) => branch,
         Err(reason)
             if !attribution.receipt.is_some_and(|receipt| {
@@ -20645,6 +20686,70 @@ fn parked_anchor_delivery_ref(
     None
 }
 
+/// Validate an explicit recovery boundary against the live remote in the
+/// task's declared repository. Local branches and cached origin refs cannot
+/// authorize a retired-worker close or a reopened QA request.
+/// Callers must establish live registered supervisor authority first.
+pub(crate) fn validate_pushed_task_receipt(
+    task: &Task,
+    context: &crate::mcp::tools::core::task::repo_context::RepoContext,
+    receipt: &str,
+) -> Result<(String, String), String> {
+    let receipt = receipt.trim();
+    if !matches!(receipt.len(), 40 | 64)
+        || !receipt.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("PUSHED TASK RECEIPT REJECTED: supply the full hexadecimal commit SHA".into());
+    }
+    let own_task = task.assignee.as_deref()
+        .map(|assignee| crate::factory_isolation::worker_task_branch(assignee, &task.id));
+    let candidates = task_delivery_branch_candidates(task);
+    for branch in candidates {
+        // A shared worker lane is not task identity without a durable record.
+        if own_task.as_deref() != Some(branch.as_str())
+            && task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
+            && !task.deliverables.handoff_branches.contains(&branch)
+        {
+            continue;
+        }
+        let Some(pushed) = crate::qa_pass::pushed_branch_tip(&context.repo_root, &branch) else {
+            continue;
+        };
+        if !pushed.eq_ignore_ascii_case(receipt) {
+            continue;
+        }
+        let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+        if run_bounded_git_fetch(&context.repo_root, &["fetch", "--quiet", "--no-tags", "origin", &refspec])
+            != BoundedFetch::Succeeded
+        {
+            return Err(format!("PUSHED TASK RECEIPT REJECTED: cannot fetch live task branch {branch}"));
+        }
+        let remote = format!("refs/remotes/origin/{branch}");
+        let tip = resolve_task_commit_receipt_sha(&context.repo_root, receipt)?;
+        if resolve_branch_sha(&context.repo_root, &remote).as_deref() != Some(tip.as_str()) {
+            return Err("PUSHED TASK RECEIPT REJECTED: remote task tip changed during validation; retry with its current SHA".into());
+        }
+        fetch_parent_branch_best_effort(&context.repo_root, &context.target_branch);
+        let (target, _) = preferred_live_target_ref_for_delivery(
+            &context.repo_root, &context.target_branch, task.delivery_mode);
+        if git_merge_base(&context.repo_root, &target, &tip).is_none() {
+            return Err("PUSHED TASK RECEIPT REJECTED: delivery has no common history with the declared target".into());
+        }
+        let attributed = task_tip_has_non_empty_attributed_diff(
+            &context.repo_root, task, &tip, task.deliverables.factory_branch_anchor.as_deref());
+        let correction = task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
+            parked_anchor_advance_is_attributable(&context.repo_root, anchor, &tip, &task.id, None)
+        });
+        if !attributed && !correction {
+            return Err(format!("PUSHED TASK RECEIPT REJECTED: {tip} is not attributable to task {}", task.id));
+        }
+        return Ok((branch, tip));
+    }
+    Err(format!(
+        "PUSHED TASK RECEIPT REJECTED: {receipt} is not the live pushed tip of task {}'s per-task or recorded delivery branch in {}. Push that branch and retry; a local ref, stale origin ref, or unrelated branch is insufficient.",
+        task.id, context.repo_root.display()))
+}
+
 fn pre_close_unreachable_rejection(
     task_id: &str,
     commit: &str,
@@ -20852,8 +20957,13 @@ pub(crate) fn run_declared_pre_close_hook(
                     && derived_epic_anchor.is_none()
                     && parked_anchor_delivery_ref(&repo_context.repo_root, task, tip).is_some()
             };
+            let receipt_is_pushed_recovery = supervisor_override
+                && !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref)
+                && normalized_receipt.is_some()
+                && validate_pushed_task_receipt(task, repo_context, tip).is_ok();
             if !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref)
                 && !anchor_is_unmerged_delivery()
+                && !receipt_is_pushed_recovery
             {
                 return Err(pre_close_unreachable_rejection(
                     &task.id,
@@ -20870,9 +20980,9 @@ pub(crate) fn run_declared_pre_close_hook(
                     supervisor_override,
                 ));
             }
-            let lint_parent = if normalized_receipt.is_some()
+            let lint_parent = if (normalized_receipt.is_some() && !receipt_is_pushed_recovery)
                 || derived_epic_anchor.is_some()
-                || (supervisor_override
+                || (supervisor_override && !receipt_is_pushed_recovery
                     && task.deliverables.factory_branch_anchor.as_deref() == Some(tip))
             {
                 target_only_receipt_lint_parent(&repo_context.repo_root, tip)?
@@ -24725,6 +24835,161 @@ mod merge_state_gate_tests {
         assert!(!is_error, "{closed}");
         assert!(!closed.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{closed}");
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
+    }
+
+    /// A reopened delivery remains on origin after its retired author's
+    /// checkout switches to unrelated work. Exercise the public close entry,
+    /// rather than manufacturing pre-close hook evidence directly.
+    async fn retired_worker_receipt_close_cas_9ffa(status: TaskStatus, published: bool, qa_request: bool) {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, AgentStatus, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", "seed.txt", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+
+        let worker = "retired-raven-9ffa";
+        let branch = "factory/retired-raven-9ffa-cas-9ffa";
+        let wt = p.join(".cas/worktrees").join(worker);
+        git(p, &["worktree", "add", "-q", "-b", branch, wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-9ffa): original delivery"]);
+        let original = rev_parse_local(&wt, "HEAD");
+        std::fs::write(wt.join("delivery.rs"), "pub fn corrected_delivery() {}\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "fix(cas-9ffa): requested correction"]);
+        let corrected = rev_parse_local(&wt, "HEAD");
+        if published {
+            git(&wt, &["push", "-q", "origin", branch]);
+        }
+        git(&wt, &["checkout", "-q", "-b", "factory/retired-raven-9ffa-cas-other", "main"]);
+        std::fs::write(wt.join("other.rs"), "pub fn unrelated() {}\n").unwrap();
+        git(&wt, &["add", "other.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-other): unrelated task"]);
+        git(&wt, &["checkout", "-q", "--detach"]);
+        // No local delivery branch can authorize this close. Only the pushed
+        // per-task ref may establish the supervisor's explicit boundary.
+        git(p, &["branch", "-D", branch]);
+        if status == TaskStatus::InProgress && published && !qa_request {
+            git(p, &["branch", branch, &original]);
+        }
+        assert!(!git_commit_is_ancestor(p, &corrected, "main"));
+        assert!(!git_commit_is_ancestor(&wt, &corrected, "HEAD"));
+
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-9ffa-fixture\"\n\n[verification]\nenabled = false\n").unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let mut retired = Agent::new_with_role(worker.into(), worker.into(), AgentRole::Worker);
+        retired.status = AgentStatus::Shutdown;
+        agents.register(&retired).unwrap();
+        let actor = "cas-9ffa-supervisor";
+        agents.register(&Agent::new_with_role(actor.into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task(worker);
+        task.id = "cas-9ffa".into();
+        task.status = status;
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.demo_statement = "Corrected delivery can receive an independent QA round".into();
+        task.deliverables.factory_branch_anchor = Some(original.clone());
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-9ffa-fixture".into(), target_branch: "main".into(),
+        });
+        task.notes = "Reopened after request_changes; assignee retired before re-parking".into();
+        store.add(&task).unwrap();
+        let response = if qa_request {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "qa_request", "task_id": task.id, "head_sha": corrected,
+                "summary": "Inspect the reopened corrected delivery of the retired worker",
+            })).unwrap();
+            service.verification(Parameters(request)).await.unwrap_or_else(|error| {
+                CasCore::tool_error(error.message.to_string())
+            })
+        } else {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "close", "id": task.id, "supervisor_override": true,
+                "commit_receipt": corrected, "reason": "Inspected the pushed corrected delivery of the retired worker",
+            })).unwrap();
+            service.task(Parameters(request)).await.unwrap()
+        };
+        let text = response.content.into_iter().filter_map(|content| match content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        let after = store.get(&task.id).unwrap();
+        let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
+        if published {
+            assert!(!text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
+            if qa_request {
+                assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
+                assert_eq!(after.status, status, "QA request must not waive the close gates: {text}");
+            } else {
+                assert!(text.contains("MERGE REQUIRED"), "{text}");
+                assert_eq!(after.status, TaskStatus::AwaitingMerge, "{text}");
+                assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(corrected.as_str()), "{text}");
+            }
+            assert_eq!(after.deliverables.parked_branch.as_deref(), Some(branch), "{text}");
+            assert_eq!(rounds.len(), 1, "{text}");
+            assert_eq!(rounds[0].bound_head, corrected, "{text}");
+            assert_eq!(rounds[0].branch.strip_prefix("origin/").unwrap_or(&rounds[0].branch), branch, "{text}");
+        } else {
+            assert_eq!(response.is_error, Some(true), "{text}");
+            assert_eq!(after.status, status, "unpublished delivery must not be parked: {text}");
+            assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(original.as_str()));
+            assert!(rounds.is_empty(), "unpublished delivery must not dispatch QA: {text}");
+        }
+        assert_eq!(rev_parse_local(&wt, "HEAD"), rev_parse_local(&wt, "factory/retired-raven-9ffa-cas-other"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_parks_reopened_retired_workers_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_parks_inprogress_retired_workers_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::InProgress, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_refuses_unpublished_retired_workers_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_requests_qa_for_reopened_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_qa_request_refuses_unpublished_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false, true).await;
     }
 
     /// cas-f1f4 (GH #1087): the gabber-studio cas-4c7d sequence through the
@@ -34964,6 +35229,83 @@ mod zero_change_close_tests {
 
         assert_eq!(evidence.task_tip.as_deref(), Some(merge_tip.as_str()));
         assert_ne!(epic_tip, old_epic_tip);
+    }
+
+    fn pushed_receipt_fixture_cas_9ffa() -> (TempDir, TempDir, Task, String) {
+        let (dir, origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        let branch = "factory/test-worker-cas-9ffa";
+        git(p, &["checkout", "-q", "-b", branch]);
+        std::fs::write(p.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-9ffa): corrected delivery"]);
+        let receipt = head_sha(p);
+        git(p, &["push", "-q", "origin", branch]);
+        git(p, &["checkout", "-q", "main"]);
+        let mut task = Task::new("cas-9ffa".into(), "retired delivery".into());
+        task.assignee = Some("test-worker".into());
+        task.deliverables.parked_branch = Some(branch.into());
+        (dir, origin, task, receipt)
+    }
+
+    #[test]
+    fn pre_close_validates_pushed_receipt_without_retired_checkout_cas_9ffa() {
+        let (dir, _origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        let evidence = run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), true).expect("supervisor identifies the pushed correction");
+        assert_eq!(evidence.task_tip.as_deref(), Some(receipt.as_str()));
+        assert!(evidence.worktree_branch.is_none());
+        assert_eq!(evidence.target_branch, "main");
+        assert!(!git_commit_is_ancestor(dir.path(), &receipt, "origin/main"),
+            "pre-close proof must not imply integration");
+    }
+
+    #[test]
+    fn pre_close_still_refuses_unmerged_worker_receipt_cas_9ffa() {
+        let (dir, _origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), false).expect_err("ordinary receipt must still be integrated");
+        assert!(error.contains("not reachable") && error.contains("live target_branch"), "{error}");
+    }
+
+    #[test]
+    fn pre_close_rejects_deleted_remote_with_stale_cache_cas_9ffa() {
+        let (dir, origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        let branch = task.deliverables.parked_branch.as_deref().unwrap();
+        git(origin.path(), &["update-ref", "-d", &format!("refs/heads/{branch}")]);
+        assert!(git_ref_exists(dir.path(), &format!("origin/{branch}")), "keep stale cache");
+        run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), true).expect_err("cached remote or local branch cannot authorize recovery");
+    }
+
+    #[test]
+    fn pre_close_rejects_receipt_pushed_only_to_foreign_branch_cas_9ffa() {
+        let (dir, origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        git(dir.path(), &["push", "-q", "origin", &format!("{receipt}:refs/heads/factory/foreign-cas-other")]);
+        let branch = task.deliverables.parked_branch.as_deref().unwrap();
+        git(origin.path(), &["update-ref", "-d", &format!("refs/heads/{branch}")]);
+        run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), true).expect_err("an unrelated pushed branch is insufficient");
+    }
+
+    #[test]
+    fn pre_close_lints_whole_unmerged_delivery_cas_9ffa() {
+        let (dir, _origin, task, _receipt) = pushed_receipt_fixture_cas_9ffa();
+        let p = dir.path();
+        let branch = task.deliverables.parked_branch.as_deref().unwrap();
+        git(p, &["checkout", "-q", branch]);
+        std::fs::write(p.join("unfinished.rs"), concat!("pub fn unfinished() { to", "do!(); }\n")).unwrap();
+        git(p, &["add", "unfinished.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-9ffa): unfinished work"]);
+        std::fs::write(p.join("correction.rs"), "pub fn correction() {}\n").unwrap();
+        git(p, &["add", "correction.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-9ffa): later correction"]);
+        let receipt = head_sha(p);
+        git(p, &["push", "-q", "origin", branch]);
+        git(p, &["checkout", "-q", "main"]);
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(p),
+            None, Some(&receipt), true).expect_err("last-commit-only lint hides earlier unfinished work");
+        assert!(error.contains(concat!("to", "do!()")) && error.contains("unfinished.rs"), "{error}");
     }
 
     #[test]

@@ -1864,6 +1864,48 @@ async fn per_task_branch_park_without_a_demo_dispatches_from_its_own_diff_cas_74
     assert_eq!(pass.bound_head, head, "the round binds the per-task tip");
 }
 
+/// The parked-request compatibility path accepts a live Standard supervisor
+/// session, not a worker or dead identity; explicit receipts remain stricter.
+#[tokio::test]
+async fn parked_qa_request_compatibility_does_not_authorize_worker_or_dead_caller_cas_9ffa() {
+    for (role, shutdown, receipt) in [
+        (AgentRole::Worker, false, false),
+        (AgentRole::Supervisor, true, false),
+        (AgentRole::Standard, true, false),
+        (AgentRole::Standard, false, true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let (_temp, _core, repo, task_id) = fixture(&mut env);
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(&task_id).unwrap();
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.update(&task).unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut caller = Agent::new_with_role("qa-caller".into(), "qa-caller".into(), role);
+        agents.register(&caller).unwrap();
+        if shutdown {
+            caller.status = cas::types::AgentStatus::Shutdown;
+            agents.update(&caller).unwrap();
+        }
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(caller.id);
+        let service = CasService::new(core, None);
+        let _role = SupervisorRole::enter(&mut env);
+        let mut request = serde_json::json!({
+            "action": "qa_request", "task_id": task_id, "summary": "inspect delivery",
+        });
+        if receipt {
+            request["head_sha"] = serde_json::json!(git(&repo, &["rev-parse", "HEAD"]));
+        }
+        let refusal = service.verification(Parameters(verification(request))).await
+            .expect_err("supervisor environment alone must not authorize this caller");
+        assert!(refusal.message.contains("live registered supervisor"), "{}", refusal.message);
+        assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty());
+        assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
+    }
+}
+
 /// cas-74284: a task labelled per `qa.user_facing_labels` (now including
 /// `hub-web`, the label cas-470e carried) cannot be created without a
 /// demo_statement.

@@ -488,10 +488,22 @@ impl CasCore {
     /// supervisor's reason recorded as the eligibility reason, so the merge
     /// gates wait for a verdict from then on. Returns the dispatch text, or
     /// why no round could be opened.
+    #[cfg(test)]
     pub(crate) fn request_independent_qa(
         &self,
         task: &Task,
         reason: &str,
+    ) -> Result<String, String> {
+        self.request_independent_qa_at_receipt(task, reason, None)
+    }
+
+    /// An explicit live pushed tip permits independent review of reopened
+    /// work without projecting it as parked, merged, or closed.
+    pub(crate) fn request_independent_qa_at_receipt(
+        &self,
+        task: &Task,
+        reason: &str,
+        head_sha: Option<&str>,
     ) -> Result<String, String> {
         let config = crate::config::Config::load(&self.cas_root)
             .map_err(|error| format!("could not load config: {error}"))?;
@@ -501,9 +513,30 @@ impl CasCore {
                     .to_string(),
             );
         }
+        if let Some(receipt) = head_sha {
+            self.resolve_live_supervisor_authority()
+                .map_err(|_| "explicit QA receipt requires a live registered supervisor".to_string())?;
+            if !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress | TaskStatus::AwaitingMerge) {
+                return Err(format!("{} is {:?}; explicit QA receipts require Open, InProgress, or AwaitingMerge", task.id, task.status));
+            }
+            let parent_epic = self.open_task_store().ok()
+                .and_then(|store| store.get_parent_epic(&task.id).ok().flatten());
+            let target = super::close_ops::effective_close_work_target(task, parent_epic.as_ref())
+                .ok_or("explicit QA receipt requires the task's declared WorkTarget")?;
+            let context = super::super::repo_context::resolve_repo_context(&self.cas_root, &target)?;
+            let (branch, head) = super::close_ops::validate_pushed_task_receipt(task, &context, receipt)?;
+            super::close_ops::run_declared_pre_close_hook(task, &context, None, Some(&head), true)?;
+            let changed = changed_paths_for_delivery(&context.repo_root,
+                &freshest_target_ref(&context.repo_root, &context.target_branch), &head).ok();
+            return self.independent_qa_for_paths(task, &context.repo_root, &context.target_branch,
+                &branch, Some(&head), changed,
+                close_delivery_location(&context.repo_root, &head, &context.target_branch), Some(reason))
+                .map(|status| status.text)
+                .ok_or_else(|| format!("Cassy could not open a round for {} @{head}", task.id));
+        }
         if task.status != TaskStatus::AwaitingMerge {
             return Err(format!(
-                "{} is {:?}, not parked awaiting merge. A round binds a parked delivery tip;                  the worker's close parks it (and dispatches QA itself when the diff is user-facing).",
+                "{} is {:?}, not parked awaiting merge. A round binds a parked delivery tip;                  the worker's close parks it (and dispatches QA itself when the diff is user-facing). A live supervisor can request review of reopened work with head_sha=<full pushed task SHA>.",
                 task.id, task.status
             ));
         }
@@ -2404,6 +2437,38 @@ mod stale_anchor_rebind_tests_cas_00eb {
             changed.iter().any(|path| path == "roster.css"),
             "{changed:?}"
         );
+    }
+
+    #[test]
+    fn explicit_qa_request_requires_live_registered_supervisor_cas_9ffa() {
+        for role in [cas_types::AgentRole::Standard, cas_types::AgentRole::Worker, cas_types::AgentRole::Supervisor] {
+            let mut env = TestEnvGuard::temp_home();
+            let mut f = fixture(&mut env, TaskStatus::Open);
+            let cas_dir = f.dir.path().join(".cas");
+            f.task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:cas-9ffa-fixture".into(),
+                target_branch: "main".into(),
+            });
+            open_task_store(&cas_dir).unwrap().update(&f.task).unwrap();
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let mut caller = Agent::new_with_role("receipt-caller".into(), "receipt-caller".into(), role);
+            agents.register(&caller).unwrap();
+            if role == cas_types::AgentRole::Supervisor {
+                caller.status = cas_types::AgentStatus::Shutdown;
+                agents.update(&caller).unwrap();
+            }
+            // Server identities are immutable. A second bind on f.core would
+            // keep its original supervisor, so use a new core for this caller.
+            let caller_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+            caller_core.set_agent_id_for_testing(caller.id);
+            // An environment claim does not grant receipt recovery authority.
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let refusal = caller_core.request_independent_qa_at_receipt(&f.task,
+                "review correction", Some(&f.tip)).expect_err("no live supervisor authority");
+            assert!(refusal.contains("live registered supervisor"), "{refusal}");
+            assert!(cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap().is_empty());
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(&f.task.id).unwrap().status, TaskStatus::Open);
+        }
     }
 
     /// AC2: qa_request on a parked task whose pending pass is bound to the

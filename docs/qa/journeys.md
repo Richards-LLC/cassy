@@ -158,7 +158,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation with a live supervisor
 - **Goal:** my message reaches the supervisor and I see its answer
-- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`, `hub-web/src/swipe-dismiss.ts`
+- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/connection.ts`
 - **Suite:** `hub-web/e2e/journeys/reply-typed.journey.ts`
 - **Gaps:** delivery by a running daemon and operator stamping are doubled
 

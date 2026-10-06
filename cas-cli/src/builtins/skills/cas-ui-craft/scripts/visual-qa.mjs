@@ -771,6 +771,11 @@ function markdownReport(result) {
     `Schemes: ${result.schemes.join(', ')}  `,
     `Viewports: ${result.viewports.map((viewport) => `${viewport.name} (${viewport.width}×${viewport.height})`).join(', ')}`,
     '',
+    ...(result.pageDeclarations.length ? [
+      '## Page declarations', '',
+      ...result.pageDeclarations.map((page) => `- ${page.url}: JavaScript required — ${page.reason}`),
+      '',
+    ] : []),
     '## Findings',
     '',
   ];
@@ -1001,6 +1006,7 @@ async function inspectVisualQa(options) {
   const infoFindings = [];
   const suppressed = [];
   const screenshots = [];
+  const pageDeclarations = [];
   const journeyRuns = [];
   const seen = new Set();
   let warnedUnownedTrace = false;
@@ -1030,6 +1036,23 @@ async function inspectVisualQa(options) {
             for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
             for (const finding of inspection.findings) recordFinding(finding);
 
+            // A reviewed application declaration exempts only the no-JS
+            // comparison. All visual and print checks still apply. Undeclared
+            // pages, including reports, retain the default no-JS requirement.
+            const requirement = await page.evaluate(() => {
+              const declarations = document.querySelectorAll('head meta[name="visual-qa:requires-javascript"]');
+              if (!declarations.length) return null;
+              return { count: declarations.length, reason: declarations[0].getAttribute('content')?.trim() ?? '' };
+            });
+            const requiresJavaScript = requirement?.count === 1 && Boolean(requirement.reason);
+            if (requirement && !requiresJavaScript) {
+              recordFinding({ type: 'invalid-javascript-requirement', selector: 'meta[name="visual-qa:requires-javascript"]',
+                elementPath: 'head > meta', reason: 'declare-one-javascript-requirement-with-a-nonempty-reason' });
+            }
+            if (requiresJavaScript && !pageDeclarations.some((page) => page.url === source)) {
+              pageDeclarations.push({ url: source, requiresJavaScript: true, reason: requirement.reason });
+            }
+
             const screenText = await page.locator('body').innerText().catch(() => '');
             await page.emulateMedia({ media: 'print' });
             const printText = await page.locator('body').innerText().catch(() => '');
@@ -1045,16 +1068,18 @@ async function inspectVisualQa(options) {
               recordFinding({ ...info, sampledBackground, sampledRatio }, true);
             }
 
-            const noScriptContext = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
-            const noScriptPage = await noScriptContext.newPage();
-            try {
-              await noScriptPage.goto(url, { waitUntil: 'load' });
-              const noScriptText = await noScriptPage.locator('body').innerText().catch(() => '');
-              if (screenText.trim().length > 20 && noScriptText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
-                recordFinding({ type: 'javascript-disabled-loss', selector: 'body', elementPath: 'body', textSample: noScriptText.trim().slice(0, 96), reason: 'content-requires-javascript', screenCharacters: screenText.trim().length, javascriptDisabledCharacters: noScriptText.trim().length });
+            if (!requiresJavaScript) {
+              const noScriptContext = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
+              const noScriptPage = await noScriptContext.newPage();
+              try {
+                await noScriptPage.goto(url, { waitUntil: 'load' });
+                const noScriptText = await noScriptPage.locator('body').innerText().catch(() => '');
+                if (screenText.trim().length > 20 && noScriptText.trim().length < Math.max(1, Math.floor(screenText.trim().length * 0.8))) {
+                  recordFinding({ type: 'javascript-disabled-loss', selector: 'body', elementPath: 'body', textSample: noScriptText.trim().slice(0, 96), reason: 'content-requires-javascript', screenCharacters: screenText.trim().length, javascriptDisabledCharacters: noScriptText.trim().length });
+                }
+              } finally {
+                await closeQaContext(noScriptContext);
               }
-            } finally {
-              await closeQaContext(noScriptContext);
             }
 
             const filename = `${slug(source)}-${scheme}-${viewport.name}.png`;
@@ -1165,6 +1190,7 @@ async function inspectVisualQa(options) {
     schemes,
     viewports,
     urls: inputUrls,
+    pageDeclarations,
     ...(journey ? { journey: { name: journey.name, url: journey.url, states: journey.states.map((state) => state.name) }, journeyRuns } : {}),
     findings,
     infoFindings,

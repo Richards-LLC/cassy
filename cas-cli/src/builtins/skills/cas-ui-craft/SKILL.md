@@ -37,7 +37,7 @@ page as ours. Compliance with a contract is the floor; this skill is the ceiling
    `cas-html-reports/references/technical-contract.md` is the full list; apply the same list to
    any other surface. No fixed height on a text-bearing box without a declared overflow
    strategy; a rule that sets a background sets its foreground. Done when a JS-disabled reload
-   and a print preview lose nothing and the visual-QA run in
+   (or a reviewed application declaration in the rubric) and a print preview meet their contracts, and the visual-QA run in
    [references/critique-rubric.md](references/critique-rubric.md#mechanical-defects-score-0)
    prints PASS.
 6. **Critique with the rubric before merge.** Score the artifact 1–5 on each dimension in

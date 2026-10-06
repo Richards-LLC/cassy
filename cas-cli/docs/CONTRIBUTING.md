@@ -729,6 +729,13 @@ not serialize. An existing `RUSTC_WRAPPER` wins; set
 `CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
 cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
 
+Capped worker checks and named tests override both `RUSTC_WRAPPER` and
+`RUSTC_WORKSPACE_WRAPPER` with empty strings, including Cargo-config and
+`CARGO_BUILD_*` fallbacks. Their Cargo/rustc descendants inherit a private target
+lifetime lease; a compiler-cache daemon must not retain it after Cargo exits.
+Prestarting sccache cannot prevent its client from spawning another daemon if
+the server exits. Supervisor and CI builds keep their configured wrappers.
+
 When a worker delivery parks awaiting merge or closes, Cassy keeps only
 `factory.target_cache_retention_count` warm parked check caches (default: 1).
 It prunes the other private `target/debug` outputs under the same per-worktree
@@ -878,9 +885,10 @@ the floor reserves space for subsequent worker writes and builds.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with
-`--remap-path-prefix`). Keep sccache enabled for same-path/CI reuse and for when
+`--remap-path-prefix`). Supervisor and CI builds keep sccache enabled for when
 [upstream path normalization](https://github.com/mozilla/sccache/pull/2678)
-lands; hardlink seeding is the current cross-worktree mechanism.
+lands; hardlink seeding is the current cross-worktree mechanism. Capped worker
+builds reuse their private Cargo target without a compiler-cache daemon.
 
 ### CI-load policy
 

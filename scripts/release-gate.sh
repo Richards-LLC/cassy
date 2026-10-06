@@ -17,8 +17,8 @@ cd "$repo_root"
 
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
-    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain release-binary-isa failure-log ancestor-proxy-config assemble-stale-base
-    version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
+    version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
@@ -875,9 +875,13 @@ release_binary_isa_toolchain() {
 check_release_binary_isa() {
     local target=x86_64-unknown-linux-gnu staging="$tmp_dir/release-binary-isa"
     local target_dir="${CARGO_TARGET_DIR:-target}"
+    # --only does not dispatch the separate Zig discovery row. Resolve it here
+    # too; zigbuild discovers the selected compiler through PATH, like release.sh.
+    check_epic_worktree_zig || return $?
     # Use the same locked target/profile and C/C++ baseline as release.sh.
-    # The existing assembly guard accounts for the build and linker memory.
-    run_assembly_compile release-binary-isa env \
+    # Keep the publisher's linker/rustflags: the native assembly compiler guard
+    # installs its own linker and would change the cross-target artifact.
+    env PATH="$(dirname "$ZIG"):$PATH" \
         CFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         CXXFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         "$cargo_bin" zigbuild -p cas --release --target "$target" --locked || return $?

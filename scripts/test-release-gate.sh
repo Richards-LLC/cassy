@@ -277,6 +277,13 @@ if [[ "$*" == 'tree --locked -p cas --target x86_64-unknown-linux-gnu --edges no
   printf '%s\n' 'rustls feature "ring"' 'blake3 feature "no_avx512"' 'blake3 v1.8.6 (/repo/vendor/blake3-1.8.6)'
 fi
 if [[ "$*" == 'zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked' ]]; then
+  [[ "$(command -v zig)" == "${ZIG:?}" ]] || {
+    echo 'release binary fixture: selected Zig is not on PATH' >&2; exit 1;
+  }
+  [[ "${CARGO_ENCODED_RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_ENCODED" \
+      && "${RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS" ]] || {
+    echo 'release binary fixture: publisher rustflags/linker were changed' >&2; exit 1;
+  }
   [[ "${CFLAGS_x86_64_unknown_linux_gnu:-}" == -march=x86_64 && "${CXXFLAGS_x86_64_unknown_linux_gnu:-}" == -march=x86_64 ]] || {
     echo 'release binary fixture: missing baseline C/C++ flags' >&2; exit 1;
   }
@@ -406,6 +413,8 @@ run_gate() {
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           "$failure_variable=1" \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          GATE_FIXTURE_ISA_ORIGINAL_ENCODED="${CARGO_ENCODED_RUSTFLAGS-__unset__}" \
+          GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS="${RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
           GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
           CARGO="$repo/scripts/cargo-stub" \
@@ -418,6 +427,8 @@ run_gate() {
         (cd "$repo" && \
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          GATE_FIXTURE_ISA_ORIGINAL_ENCODED="${CARGO_ENCODED_RUSTFLAGS-__unset__}" \
+          GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS="${RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
           GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
           CARGO="$repo/scripts/cargo-stub" \
@@ -486,9 +497,10 @@ for control in GATE_FIXTURE_ISA_BUILD_FAIL GATE_FIXTURE_ISA_MISSING; do
     assert_named_failure release-binary-isa "$output"
 done
 isa_target="$tmp/custom-cargo-target"
-output="$(CARGO_TARGET_DIR="$isa_target" run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
+output="$(CARGO_TARGET_DIR="$isa_target" CARGO_ENCODED_RUSTFLAGS=$'-C\x1ftarget-cpu=x86-64' RUSTFLAGS='-C debuginfo=1' \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
 if grep -qF 'PASS release-binary-isa' <<<"$output" && [[ -f "$isa_target/x86_64-unknown-linux-gnu/release/cas" ]]; then
-    ok 'release-binary-isa stages the configured Cargo target directory'
+    ok 'release-binary-isa preserves publisher linker flags, selected Zig and configured target directory'
 else
     bad "release-binary-isa ignored the configured target directory: $output"
 fi

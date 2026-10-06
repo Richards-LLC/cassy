@@ -238,7 +238,9 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
       .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
       .map((animation) => animation.finished.catch(() => undefined))));
     await allow.tap({ timeout: 15_000 });
-    await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
+    // Earlier in this journey ledger-api was launched: the project picker
+    // now offers its live supervisor, rather than an idle-project radio.
+    await expect(sheet.getByRole("button", { name: "Attach to ledger-api (bright-heron-21)", exact: true })).toBeVisible();
     await expect(sheet.getByRole("searchbox", { name: "Filter projects" })).toBeFocused();
     await expect(sheet.getByRole("button", { name: /^Allow starting sessions/ })).toHaveCount(0);
     await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();

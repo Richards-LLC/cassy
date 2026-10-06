@@ -638,6 +638,7 @@ impl CloudSyncer {
             let orphan = prior.is_some_and(|row| {
                 row.operation == SyncOperation::Upsert
                     && row.last_reason.as_deref() == Some("orphan_dependency")
+                    && row.last_error.as_deref().is_some_and(|error|error.contains("orphan_dependency"))
             });
             if snapshot.live.contains_key(&entity_id) {
                 if orphan {

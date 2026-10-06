@@ -91,12 +91,16 @@ impl SyncQueue {
     ) -> Result<bool, CasError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let prior=tx.query_row("SELECT operation,last_reason FROM sync_queue
+        let prior=tx.query_row("SELECT operation,last_reason,last_error FROM sync_queue
             WHERE entity_type='task_dependency' AND entity_id=?1 AND team_id=?2 AND project_id IS NULL",
-            params![id,team.unwrap_or("")],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?))).optional()?;
+            params![id,team.unwrap_or("")],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?))).optional()?;
         // A local edit/delete arriving after the pull read the queue wins.
-        if prior.is_some_and(|(operation, reason)| {
-            operation != "upsert" || reason.as_deref() != Some("orphan_dependency")
+        if prior.is_some_and(|(operation, reason, error)| {
+            operation != "upsert"
+                || reason.as_deref() != Some("orphan_dependency")
+                || !error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("orphan_dependency"))
         }) {
             return Ok(false);
         }

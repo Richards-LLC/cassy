@@ -1769,3 +1769,15 @@ fn cas_fd42_concurrent_dependency_delete_wins_over_healing() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].operation, SyncOperation::Delete);
 }
+
+#[test]
+fn cas_fd42_concurrent_dependency_edit_with_stale_verdict_wins() {
+    let (_temp,queue)=create_test_queue();
+    let tasks=[crate::types::Task::new("child".into(),"child".into()),crate::types::Task::new("parent".into(),"parent".into())];
+    queue.enqueue_for_team(EntityType::TaskDependency,"child:parent:blocks",SyncOperation::Upsert,Some("old"),"fd42-team").unwrap();
+    let row=queue.list_all(10).unwrap().pop().unwrap();
+    queue.record_row_outcome(row.id,"rejected",Some("orphan_dependency")).unwrap();queue.park_failed(row.id,"orphan_dependency",5).unwrap();
+    queue.enqueue_for_team(EntityType::TaskDependency,"child:parent:blocks",SyncOperation::Upsert,Some("newer edit"),"fd42-team").unwrap();
+    assert!(!queue.stage_healed_dependency("child:parent:blocks","old",&tasks,&tasks,Some("fd42-team"),"p",None,5).unwrap());
+    let rows=queue.list_all(10).unwrap();assert_eq!(rows.len(),1);assert_eq!(rows[0].payload.as_deref(),Some("newer edit"));
+}

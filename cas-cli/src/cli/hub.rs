@@ -1708,6 +1708,8 @@ fn serve_foreground_logged(
         // inbox, independent of viewer presence. Idle until enrolled.
         let operator_inbox_task =
             crate::hub::operator_inbox::drain::spawn_drain_loop(paths.root().to_path_buf());
+        let presence_task =
+            crate::hub::operator_inbox::presence::spawn_presence_loop(paths.root().to_path_buf());
 
         lock.set_phase("running")?;
         let result = if let Some(proxy_listener) = tailscale_listener {
@@ -1717,6 +1719,7 @@ fn serve_foreground_logged(
         };
         event_task.abort();
         operator_inbox_task.abort();
+        presence_task.abort();
         if let Some(task) = attention_task {
             task.abort();
         }

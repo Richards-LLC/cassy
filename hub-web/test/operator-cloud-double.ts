@@ -197,6 +197,11 @@ export class OperatorCloudDouble {
   activeEpoch = 0n;
   readonly devices = new Map<string, Device>();
   readonly machines = new Map<string, Machine>();
+  // Presence snapshots are client-choreography fixtures, not a watchdog or
+  // evidence that deployed cloud leases work. Notices use the real crypto.
+  readonly presence = new Map<string, Record<string, unknown>>();
+  observerStatus: "ok" | "unavailable" = "ok";
+  private readonly monitoringDecisions = new Map<string, { body: string; response: Record<string, unknown> }>();
   readonly events: StoredEvent[] = [];
   readonly tombstones = new Map<string, { sequence: bigint; digest: string }>();
   readonly enrollments = new Map<string, Enrollment>();
@@ -388,7 +393,7 @@ export class OperatorCloudDouble {
   }
 
   /** A cloud observer notice (§7.4) for `machine`, sealed and asserted. */
-  async appendObserverNotice(machine: Machine, kind: "machine_unobserved" | "machine_recovered", options: { tamperClaim?: string } = {}) {
+  async appendObserverNotice(machine: Machine, kind: "machine_unobserved" | "machine_recovered", options: { tamperClaim?: string; refEventId?: string; outageEpoch?: string } = {}) {
     await this.ensureAccount();
     const epoch = this.epochs.get(this.activeEpoch)!;
     const eventId = randomId();
@@ -399,8 +404,8 @@ export class OperatorCloudDouble {
       account_id: this.accountId,
       machine_id: machine.id,
       hub_id: machine.hubId,
-      outage_epoch: "1",
-      ref_event_id: null,
+      outage_epoch: options.outageEpoch ?? "1",
+      ref_event_id: options.refEventId ?? null,
       detected_at: iso(this.now()),
       last_report_at: iso(this.now() - 300_000),
       deadline_at: iso(this.now() - 60_000),
@@ -427,7 +432,7 @@ export class OperatorCloudDouble {
       mch: machine.id,
       hub: machine.hubId,
       kind,
-      outage_epoch: "1",
+      outage_epoch: options.outageEpoch ?? "1",
       event_id: eventId,
       digest: sealed.digest,
       fgen: this.feedGeneration.toString(),
@@ -435,6 +440,7 @@ export class OperatorCloudDouble {
       iat,
       exp: iat + 91 * 86_400,
     };
+    if (options.refEventId) claims.ref_event_id = options.refEventId;
     if (options.tamperClaim) claims[options.tamperClaim] = "tampered";
     const assertion = await this.sign("psc-op-machine-observation+jwt", claims);
     return this.storeEvent({
@@ -631,6 +637,46 @@ export class OperatorCloudDouble {
       return json(200, { wire_version: 1, revoked_at: device.revokedAt, active_epoch: this.activeEpoch.toString(), upload_state: "open" });
     }
     if (method === "GET" && path === "/api/operator/principals") return this.principals(device);
+    if (method === "GET" && path === "/api/operator/machine-presence") {
+      if (!device.capabilities.includes("feed:read")) return error(403, "capability_required");
+      return json(200, {
+        wire_version: 1, observer_status: this.observerStatus,
+        observer_checked_at: this.observerStatus === "ok" ? iso(this.now()) : null,
+        machines: [...this.machines.values()].filter((machine) => machine.status === "active").map((machine) => ({
+          machine_id: machine.id, hub_id: machine.hubId, monitoring: "not_capable", monitoring_generation: "0",
+          presence: null, last_report_at: null, lease_expires_at: null, deadline_at: null, silence: null, components: null, open_outage: null,
+          ...this.presence.get(machine.id),
+        })),
+      });
+    }
+    match = /^\/api\/operator\/machines\/([^/]+)\/monitoring$/.exec(path);
+    if (method === "PUT" && match) {
+      if (!device.capabilities.includes("account:manage")) return error(403, "insufficient_authority");
+      const machine = this.machines.get(match[1]);
+      if (!machine) return error(404, "machine_not_found");
+      const body = JSON.parse(decoder.decode(request.body));
+      const row = this.presence.get(machine.id);
+      const key = `${machine.id}:${body.decision_id}`;
+      const prior = this.monitoringDecisions.get(key);
+      const digest = decoder.decode(request.body);
+      if (prior) return prior.body === digest ? json(200, prior.response) : error(409, "monitoring_decision_conflict");
+      const generation = String(row?.monitoring_generation ?? "0");
+      if (body.expected_monitoring_generation !== generation) return error(409, "monitoring_generation_conflict", { current_monitoring_generation: generation });
+      if (body.enabled && machine.status !== "active") return error(422, "machine_unavailable");
+      if (!row || row.monitoring === "not_capable") return error(422, "presence_not_capable");
+      const state = body.enabled ? "enabled" : "disabled";
+      const changed = row.monitoring !== state;
+      const next = changed ? (BigInt(generation) + 1n).toString() : generation;
+      this.presence.set(machine.id, { ...row, monitoring: state, monitoring_generation: next,
+        presence: body.enabled ? "pending_first_report" : null, last_report_at: null, lease_expires_at: null,
+        deadline_at: body.enabled ? iso(this.now() + 240_000) : null, components: null, silence: null, open_outage: null,
+      });
+      const response = { wire_version: 1, machine_id: machine.id, hub_id: machine.hubId, changed,
+        monitoring: { state, monitoring_generation: next, decision_id: body.decision_id, decided_at: iso(this.now()) },
+      };
+      this.monitoringDecisions.set(key, { body: digest, response });
+      return json(200, response);
+    }
     if (method === "GET" && path === "/api/operator/keys/wraps") return this.keyWraps(device);
     if (method === "GET" && path === "/api/operator/feed") return this.replay(device, url.searchParams);
     if (method === "POST" && path === "/api/operator/feed/acks") return this.ackPersisted(request, device);

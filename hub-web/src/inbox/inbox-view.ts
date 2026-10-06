@@ -13,6 +13,7 @@ import { commandStatusLabel } from "./commands";
 import type { CommandState } from "./store";
 import type { InboxSnapshot, InboxState, OperatorInboxController } from "./controller";
 import { inboxThreads, type InboxTurn } from "./projection";
+import { presenceLabel, presenceNotices } from "./presence";
 
 export interface InboxViewDeps {
   defaultLabel: string;
@@ -125,6 +126,7 @@ export class InboxView {
     this.snapshot = await this.controller.snapshot();
     this.render();
     if (this.controller.current().kind === "ready") void this.controller.machines().then(async () => {
+      await this.controller.refreshPresence();
       this.snapshot = await this.controller.snapshot();
       this.render();
     }).catch(() => undefined);
@@ -172,6 +174,9 @@ export class InboxView {
   }
 
   render(): void {
+    const focused = document.activeElement instanceof HTMLElement && document.activeElement.closest(".machine-presence")
+      ? document.activeElement.id : null;
+    const expanded = new Set(Array.from(this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details[open]")).map((node) => node.id));
     const state = this.controller.current();
     const body = el("section", { class: "operator-inbox-body" });
     const header = el("header", { class: "operator-inbox-heading" });
@@ -190,6 +195,8 @@ export class InboxView {
     body.append(this.stateMarkup(state));
     if (this.status) body.append(el("p", { class: "operator-inbox-status", role: "alert" }, this.status));
     this.dialog.replaceChildren(body);
+    for (const details of this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details")) details.open = expanded.has(details.id);
+    if (focused) document.getElementById(focused)?.focus();
   }
 
   private stateMarkup(state: InboxState): HTMLElement {
@@ -255,6 +262,7 @@ export class InboxView {
     const selected = this.selected ? threads.find((thread) => thread.hubId === this.selected!.hubId && thread.session === this.selected!.session) : undefined;
     const withheld = snapshot ? unverifiedCount(snapshot) : 0;
     if (withheld > 0) section.append(el("p", { class: "operator-inbox-withheld", role: "status" }, withheldCopy(withheld)));
+    if (!selected) section.append(this.presenceMarkup());
     if (selected) {
       section.append(this.threadMarkup(selected));
     } else if (threads.length === 0) {
@@ -332,6 +340,81 @@ export class InboxView {
     }
     section.append(log);
     section.append(this.composerMarkup(thread));
+    return section;
+  }
+
+  private presenceMarkup(): HTMLElement {
+    const section = el("section", { class: "machine-presence", "aria-labelledby": "machine-presence-title" });
+    section.append(el("h3", { id: "machine-presence-title" }, "Machine alerts"));
+    const snapshot = this.snapshot;
+    const presence = snapshot?.presence;
+    if (snapshot?.presenceError) section.append(el("p", { role: "status" }, snapshot.presenceError));
+    if (!presence) {
+      section.append(el("p", {}, "Machine status has not been checked yet."));
+    } else {
+      const observerStale = presence.observerCheckedAt === null || Date.now() - Date.parse(presence.observerCheckedAt) > 180_000;
+      if (presence.observerStatus === "unavailable" || observerStale) {
+        section.append(el("p", { class: "operator-inbox-warning", role: "status" }, "Observer unavailable. Cassy Cloud cannot promise an alert within five minutes."));
+      }
+      const machines = el("ul", { class: "machine-presence-rows", "aria-label": "Monitored machines" });
+      for (const machine of presence.machines) {
+        const label = snapshot?.machines.find((entry) => entry.machineId === machine.machineId)?.label ?? "Machine";
+        const row = el("li", { "data-machine-presence": machine.machineId });
+        row.append(el("strong", {}, label), el("p", {}, `${snapshot?.presenceError ? "Last known: " : ""}${presenceLabel(machine)}`));
+        if (machine.lastReportAt) {
+          const report = el("p", {}, "Last report ");
+          report.append(el("time", { datetime: machine.lastReportAt }, relativeTimestamp(machine.lastReportAt)));
+          row.append(report);
+        }
+        if (machine.silence) row.append(el("p", {}, `Alerts resume ${new Date(machine.silence.until).toLocaleString()}.`));
+        if (machine.components.length > 0) {
+          const components = el("ul", { "aria-label": `${label} component observations` });
+          for (const component of machine.components) {
+            const names = { hub: "Hub", serve: "Serve", factory: "Factory" };
+            const states = { up: "up", degraded: "degraded", down: "down", unknown: "not known" };
+            const item = el("li", {}, `${names[component.component]}: ${states[component.state]} · observed `);
+            item.append(el("time", { datetime: component.observedAt }, relativeTimestamp(component.observedAt)));
+            components.append(item);
+          }
+          row.append(components);
+        }
+        if (machine.monitoring !== "not_capable") {
+          if (this.controller.canManageMonitoring()) {
+            const consent = el("details", { id: `presence-consent-${machine.machineId}` });
+            consent.append(el("summary", { id: `presence-details-${machine.machineId}` }, `Monitoring settings for ${label}`));
+            consent.append(el("p", {}, "Cassy Cloud receives a report about this machine's Hub, Serve and Factory about once a minute. If reports stop, an alert appears in this inbox within about five minutes while the observer is healthy. It keeps only the latest status and keeps notices for 90 days; Cassy Cloud can read them. No email or phone push is sent."));
+            if (machine.monitoring === "disabled") consent.append(el("p", {}, "Enable alerts, then restart the machine's hub reporter. It must be enrolled with presence reporting permission."));
+            const enabled = machine.monitoring !== "enabled";
+            const toggle = el("button", { type: "button", id: `presence-toggle-${machine.machineId}` }, `${enabled ? "Enable" : "Disable"} alerts for ${label}`);
+            toggle.disabled = this.busy;
+            toggle.onclick = () => void this.act(() => this.controller.setMonitoring(machine.machineId, enabled), `Could not ${enabled ? "enable" : "disable"} alerts. Review the current setting and try again.`);
+            consent.append(toggle);
+            row.append(consent);
+          } else {
+            row.append(el("p", {}, "An account-management device can change monitoring, even while this machine is off."));
+          }
+        }
+        machines.append(row);
+      }
+      if (presence.machines.length > 0) section.append(machines);
+      else section.append(el("p", {}, "No enrolled machines yet."));
+    }
+    const notices = snapshot ? presenceNotices(snapshot.events) : [];
+    if (notices.length > 0) {
+      const list = el("ol", { class: "machine-presence-notices", "aria-label": "Machine alert history" });
+      for (const notice of notices.slice().reverse()) {
+        const label = snapshot?.machines.find((entry) => entry.machineId === notice.machineId)?.label ?? "Machine";
+        const item = el("li", { "data-presence-event": notice.eventId, "data-outage-epoch": notice.outageEpoch });
+        item.append(el("strong", {}, `${label} ${notice.kind === "machine_unobserved" ? "unreachable" : "recovered"}`), el("time", { datetime: notice.detectedAt }, relativeTimestamp(notice.detectedAt)));
+        if (notice.refEventId) item.setAttribute("data-ref-event", notice.refEventId);
+        list.append(item);
+      }
+      section.append(list);
+    }
+    const refresh = el("button", { type: "button", id: "presence-refresh" }, "Refresh machine status");
+    refresh.disabled = this.busy;
+    refresh.onclick = () => void this.act(() => this.controller.refreshPresence(true), "Could not refresh machine status.");
+    section.append(refresh);
     return section;
   }
 

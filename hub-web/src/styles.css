@@ -2906,6 +2906,18 @@ button.chip:disabled { cursor: default; }
 .operator-inbox-warning, .operator-inbox-status { color: var(--text-mid); border-left: 3px solid currentColor; padding-left: var(--space-2); }
 .operator-inbox-signin, .operator-inbox-approval, .operator-inbox-ready, .operator-inbox-thread-view { display: flex; flex-direction: column; gap: var(--space-3); }
 .operator-inbox-code { align-self: flex-start; }
+/* Machine leases and cloud notices stay separate from conversation turns. */
+.machine-presence { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.machine-presence h3 { font-size: var(--fs-md); margin: 0; }
+.machine-presence-rows, .machine-presence-notices { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.machine-presence-rows > li, .machine-presence-notices > li { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+.machine-presence p { margin: 0; }
+.machine-presence time { color: var(--text-mid); }
+.machine-presence details { min-width: 0; }
+.machine-presence summary { cursor: pointer; min-height: var(--button-height); display: flex; align-items: center; }
+.machine-presence details[open] { display: flex; flex-direction: column; gap: var(--space-2); }
+.machine-presence summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
+.machine-presence button { align-self: flex-start; max-width: 100%; white-space: normal; text-align: left; }
 .operator-inbox-threads, .operator-inbox-turns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .operator-inbox-thread { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-3); text-align: left; }
 .operator-inbox-thread .operator-inbox-preview { grid-column: 1; color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

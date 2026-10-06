@@ -23,6 +23,7 @@ pub mod commands;
 pub mod drain;
 pub mod jws;
 pub mod machine;
+pub mod presence;
 mod wire;
 pub use wire::{
     AckOutcome, AckReceipt, AckRow, AppendOutcome, AppendReceipt, AppendRow, Cursor,

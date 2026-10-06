@@ -18,6 +18,12 @@ impl Scope {
         let next = (budget != Duration::MAX).then(|| Deadline::after(budget));
         Self(DEADLINE.replace(next))
     }
+
+    /// cas-bdd2: install a caller's deadline in a worker thread, so probes run
+    /// there honour the same budget and expire at the same instant.
+    pub(crate) fn inherit(deadline: Option<Deadline>) -> Self {
+        Self(DEADLINE.replace(deadline))
+    }
 }
 
 impl Drop for Scope {

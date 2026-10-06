@@ -1512,3 +1512,17 @@ fn row_outcome_columns_are_added_to_legacy_databases() {
     );
     assert_eq!(queue.retry_failed(5).unwrap(), 1);
 }
+
+#[test]
+fn cas_fd42_intentional_parks_are_not_team_push_failures() {
+    let (_temp, queue) = create_test_queue();
+    queue.enqueue_for_team(EntityType::Entry, "legacy-memory", SyncOperation::Upsert,
+        Some("{}"), "fd42-team").unwrap();
+    let row = queue.list_all(10).unwrap().pop().unwrap();
+    queue.record_row_outcome(row.id, "parked", Some("unattributed_origin")).unwrap();
+    queue.park_failed(row.id, "no attributable origin; retained intentionally", 5).unwrap();
+    assert_eq!(queue.pending_count_for_team("fd42-team", 5).unwrap(), 0);
+    assert_eq!(queue.failed_count_for_team("fd42-team", 5).unwrap(), 0,
+        "a named provenance park is not an attempted push failure");
+    assert_eq!(queue.list_all(10).unwrap().len(), 1, "retain the local diagnostic");
+}

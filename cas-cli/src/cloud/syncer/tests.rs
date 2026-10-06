@@ -3499,3 +3499,52 @@ async fn a_real_pull_lets_a_higher_local_revision_beat_a_newer_remote_timestamp(
         "a newer remote TIMESTAMP must not overwrite a higher local REVISION"
     );
 }
+
+/// The Sep 29 repair queued an old edge whose unchanged endpoints had never
+/// reached the team. Sorting the queue cannot publish rows that are absent.
+#[tokio::test]
+async fn cas_fd42_healing_stages_missing_historical_endpoint_tasks() {
+    use crate::types::{Dependency, DependencyType};
+    let project = "fd42-project";
+    let mut child = Task::new("fd42-child".into(), "old child".into());
+    child.status = TaskStatus::Closed;
+    let mut parent = Task::new("fd42-parent".into(), "old parent".into());
+    parent.status = TaskStatus::Closed;
+    let edge = Dependency::new(child.id.clone(), parent.id.clone(), DependencyType::ParentChild);
+    let (_temp, result, _tasks, queue) = pull_team_task_and_dependency_fixtures(
+        project, Vec::new(), vec![child, parent], vec![edge], Vec::new(),
+    ).await;
+    assert_eq!(result.healed_task_dependencies_to_cloud, 1);
+    let pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
+    let task_ids: std::collections::BTreeSet<_> = pending.iter()
+        .filter(|row| row.entity_type == crate::cloud::EntityType::Task)
+        .map(|row| row.entity_id.as_str()).collect();
+    assert_eq!(task_ids, std::collections::BTreeSet::from(["fd42-child", "fd42-parent"]),
+        "unchanged historical endpoints must be staged ahead of the healed edge");
+    assert_eq!(pending.iter().filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency).count(), 1);
+}
+
+#[tokio::test]
+async fn cas_fd42_team_push_names_origin_null_memory_park() {
+    use crate::cloud::{CloudConfig, CloudSyncerConfig, EntityType, SyncOperation};
+    use cas_store::{SqliteStore, Store};
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"fd42-project\"\n").unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    let entry = crate::types::Entry::new("fd42-legacy-memory".into(), "legacy local memory".into());
+    store.add(&entry).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue.enqueue_for_team(EntityType::Entry, &entry.id, SyncOperation::Upsert,
+        Some(&serde_json::to_string(&entry).unwrap()), "fd42-team").unwrap();
+    let syncer = CloudSyncer::new_for_project(queue.clone(), CloudConfig {
+        token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), "fd42-project".into(), temp.path());
+    syncer.push_team("fd42-team").unwrap();
+    let row = queue.list_all(10).unwrap().pop().unwrap();
+    assert_eq!(row.last_outcome.as_deref(), Some("parked"));
+    assert_eq!(row.last_reason.as_deref(), Some("unattributed_origin"));
+    assert_eq!(store.get(&entry.id).unwrap().origin_project, None,
+        "the pushing project must never invent legacy provenance");
+}

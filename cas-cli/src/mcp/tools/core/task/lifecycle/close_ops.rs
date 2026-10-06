@@ -7010,20 +7010,22 @@ impl CasCore {
                 &context.target_branch,
             )
         });
-        // cas-f01b (GH #1068): the same holds for a delivery that never
-        // parked, merged by a batch squash and named by the supervisor's
-        // commit_receipt. The worker may already be on its next task's
-        // branch; the receipt on the declared target is the delivery, so the
-        // worker checkout is not consulted. A worker's own close, or one
-        // without the override, still validates its branch.
-        let supervisor_closing_merged_receipt = declared_repo_context.as_ref().is_some_and(|context| {
-            supervisor_merged_anchor_close(
-                supervisor_override,
-                req.commit_receipt.as_deref().map(str::trim),
-                &context.repo_root,
-                &context.target_branch,
-            )
-        });
+        // cas-258f: an authenticated supervisor's explicit merged receipt
+        // identifies this delivery independently of the assignee's mutable
+        // checkout. This is repository evidence, not a review-gate waiver:
+        // no supervisor_override is needed, and every normal close gate still
+        // runs. Workers and unknown/stale callers retain checkout validation.
+        let supervisor_closing_merged_receipt = req
+            .commit_receipt
+            .as_deref()
+            .filter(|_| self.resolve_live_supervisor_authority().is_ok())
+            .zip(declared_repo_context.as_ref())
+            .is_some_and(|(receipt, context)| {
+                fetch_parent_branch_best_effort(&context.repo_root, &context.target_branch);
+                resolve_task_commit_receipt_sha(&context.repo_root, receipt).is_ok_and(|sha| {
+                    commit_is_merged_into_parent(&context.repo_root, &sha, &context.target_branch)
+                })
+            });
         // cas-9ffa: after request_changes a retired implementer's checkout
         // can belong to another task. A live supervisor may recover the
         // exact pushed correction through its declared WorkTarget instead.
@@ -24709,7 +24711,7 @@ mod merge_state_gate_tests {
     /// real handler. A worker delivers on its recorded System-A branch, the
     /// delivery lands on the target by squash, and the worker starts its next
     /// task on a per-task branch in the same checkout. The task never parked.
-    /// A close without override is still refused on the branch mismatch; a
+    /// A worker self-close is still refused on the branch mismatch; a
     /// supervisor override close naming the merged commit closes it.
     #[tokio::test]
     async fn override_close_with_merged_receipt_ignores_workers_next_branch_cas_f01b() {
@@ -24808,13 +24810,24 @@ mod merge_state_gate_tests {
                 .join("\n")
         };
 
-        // Without the override the worktree branch mismatch still refuses.
+        // A worker's own close still validates the current checkout even
+        // when a merged receipt exists; supervisor authority is required.
+        agents
+            .register(&Agent::new_with_role(
+                "rapid-cobra-76".into(),
+                "rapid-cobra-76".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        let worker_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        worker_core.set_agent_id_for_testing("rapid-cobra-76".into());
+        let worker_service = CasService::new(worker_core, None);
         let request = serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "reason": "delivered",
             "commit_receipt": squash,
         }))
         .unwrap();
-        let refused = text(service.task(Parameters(request)).await.unwrap());
+        let refused = text(worker_service.task(Parameters(request)).await.unwrap());
         assert!(
             refused.contains("expected task worktree branch `factory/rapid-cobra-76`")
                 && refused.contains("factory/rapid-cobra-76-1ae5"),

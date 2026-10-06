@@ -34,6 +34,10 @@ import { dormantRevealed } from "./dormant-visibility";
 
 export type ConnectionState = ConnectionSnapshot;
 
+// Leave a retired writer readable briefly for its in-flight receipts. Calling
+// close() immediately discards those frames even with onmessage installed.
+const LEGACY_RECEIPT_DRAIN_MS = 5_000;
+
 function revealDormant(): boolean {
   let storage: Storage | undefined;
   let search = "";
@@ -256,6 +260,7 @@ export class HubConnectionSupervisor {
   private readonly upstreamStreakResets = new Map<string, number>();
   /** Supervisor messages written to each legacy session socket, in order (cas-a355). */
   private readonly legacySends = new WeakMap<WebSocket, Array<{ clientRef: string; target: string }>>();
+  private readonly retiredLegacySockets = new Map<WebSocket, number>();
   private readonly attachRetryTimers = new Map<string, number>();
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
   private readonly timedOutSockets = new WeakSet<WebSocket>();
@@ -327,6 +332,7 @@ export class HubConnectionSupervisor {
     this.healthPing = undefined;
     for (const socket of this.sockets.values()) socket.close(1000, "machine removed");
     this.sockets.clear();
+    for (const socket of this.retiredLegacySockets.keys()) this.closeRetiredLegacySocket(socket);
     for (const session of this.attachLifecycles.keys()) {
       this.transitionAttach(session, "idle", "idle");
       this.attachLifecycles.delete(session);
@@ -939,9 +945,13 @@ export class HubConnectionSupervisor {
     if (this.probeTimer !== undefined) window.clearTimeout(this.probeTimer);
     this.probeTimer = undefined;
     for (const socket of this.sockets.values()) {
-      if (!this.legacySends.get(socket)?.length) socket.onmessage = null;
       socket.onopen = null; socket.onerror = null; socket.onclose = null;
-      try { socket.close(4000, "abandoned"); } catch { /* already closing */ }
+      if (socket.readyState === WebSocket.OPEN && this.legacySends.get(socket)?.length) {
+        // Remove it from the send path now, but keep the read side open. Only
+        // handleRetiredLegacyReceipt can consume frames after sockets.clear().
+        this.retiredLegacySockets.set(socket, window.setTimeout(() => this.closeRetiredLegacySocket(socket), LEGACY_RECEIPT_DRAIN_MS));
+        socket.onclose = () => this.closeRetiredLegacySocket(socket);
+      } else this.closeRetiredLegacySocket(socket);
     }
     this.sockets.clear();
     this.keyframeRequests.clear();
@@ -952,6 +962,15 @@ export class HubConnectionSupervisor {
       this.attachRetryTimers.delete(session);
       this.transitionAttach(session, "failed", "dialing", { reason });
     }
+  }
+
+  private closeRetiredLegacySocket(socket: WebSocket): void {
+    const timer = this.retiredLegacySockets.get(socket);
+    if (timer !== undefined) window.clearTimeout(timer);
+    this.retiredLegacySockets.delete(socket);
+    this.legacySends.delete(socket);
+    socket.onopen = null; socket.onmessage = null; socket.onerror = null; socket.onclose = null;
+    try { socket.close(4000, "abandoned"); } catch { /* already closing */ }
   }
 
   /** Replace the terminal sockets and attach every wanted session now. */
@@ -1390,6 +1409,7 @@ export class HubConnectionSupervisor {
     this.healthPing = undefined;
     for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
     this.sockets.clear();
+    for (const socket of this.retiredLegacySockets.keys()) this.closeRetiredLegacySocket(socket);
     const cause = this.failureCause(new AuthenticationError(kind, detail));
     if (session) this.transitionAttach(session, "failed", "auth", { reason: detail, authFailure: kind, cause });
     this.transition("failed", "auth", { reason: detail, authFailure: kind, cause });
@@ -1708,14 +1728,14 @@ export class HubConnectionSupervisor {
       const queued = messageQueuedFromDaemon(JSON.parse(text));
       const current = credentialFence(this.machine);
       const written = this.legacySends.get(socket) ?? [];
-      if (!this.desired || !this.desiredSessions.has(session) || current.credentialId !== frameFence.credentialId || current.generation !== frameFence.generation
+      if (!this.retiredLegacySockets.has(socket) || !this.desired || !this.desiredSessions.has(session) || current.credentialId !== frameFence.credentialId || current.generation !== frameFence.generation
         || !queued?.client_ref || !written.some(send => send.clientRef === queued.client_ref && send.target === queued.target)) return;
       // Consume every attempt with this ref: explicit Retry keeps the ref,
       // and one positive receipt settles them all. Duplicate retired frames
       // must not override the first queue identity or keep a handler alive.
       const remaining = written.filter(send => send.clientRef !== queued.client_ref);
       this.legacySends.set(socket, remaining);
-      if (!remaining.length) socket.onmessage = null;
+      if (!remaining.length) this.closeRetiredLegacySocket(socket);
       this.callbacks.onMessageQueued?.(session, queued, frameFence);
     } catch { /* Malformed/unreadable retired frames provide no receipt. */ }
   }

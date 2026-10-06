@@ -118,6 +118,7 @@ function sheet(options: {
   listedAfter?: number;
   profiles?: LaunchProfiles;
   grantError?: SessionLaunchGrantError;
+  grantWait?: Promise<void>;
 }): { sheet: LaunchSheet; calls: Calls; dialog: () => HTMLDialogElement } {
   const calls: Calls = { launches: [], grants: [], opened: [], browsed: [] };
   let polls = 0;
@@ -129,7 +130,7 @@ function sheet(options: {
     profiles: async () => options.profiles ?? {},
     browse: async (_machine, root, path) => { calls.browsed.push([root, path]); return options.listing!(root, path); },
     launch: async (machineId, request) => { calls.launches.push({ machineId, request }); return options.result ?? { ok: true, session: "new-otter-1", attached: false }; },
-    grant: async (machineId) => { calls.grants.push(machineId); if (options.grantError) throw options.grantError; const machine = options.machines.find((entry) => entry.id === machineId); if (machine) machine.scopes = [...machine.scopes, "session-launch"]; },
+    grant: async (machineId) => { calls.grants.push(machineId); await options.grantWait; if (options.grantError) throw options.grantError; const machine = options.machines.find((entry) => entry.id === machineId); if (machine) machine.scopes = [...machine.scopes, "session-launch"]; },
     sessionListed: async () => ++polls >= (options.listedAfter ?? 1),
     open: (machineId, session) => { calls.opened.push([machineId, session]); },
     copy: async () => undefined,
@@ -143,8 +144,8 @@ const visibleView = (dialog: HTMLDialogElement) => [...dialog.querySelectorAll<H
 const ATLAS: LaunchMachine = { id: "atlas", label: "Atlas", scopes: [...CONTROL, "session-launch"] };
 
 describe("LaunchSheet", () => {
-  it("replaces the form with the grant path when the machine lacks the scope", async () => {
-    const { sheet: s, dialog } = sheet({ machines: [{ id: "atlas", label: "Atlas", scopes: CONTROL }] });
+  it("grants launch once from the named consent and focuses project search", async () => {
+    const { sheet: s, calls, dialog } = sheet({ machines: [{ id: "atlas", label: "Atlas", scopes: CONTROL }] });
     s.open();
     await flush();
     expect(dialog().open).toBe(true);
@@ -152,40 +153,72 @@ describe("LaunchSheet", () => {
     expect(dialog().querySelector(".launch-grant")!.textContent).toContain("Allow starting sessions on Atlas");
     expect((dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).hidden).toBe(false);
     (dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).click();
-    expect(visibleView(dialog())).toEqual(["confirm"]);
-    expect(dialog().querySelector(".launch-confirm-copy")!.textContent).toContain("“Start new sessions” on Atlas");
-    (dialog().querySelector('[data-launch-action="confirm-grant"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(visibleView(dialog())).toEqual(["form"]));
+    expect(calls.grants).toEqual(["atlas"]);
+    expect(calls.launches).toEqual([]);
+    await vi.waitFor(() => expect(document.activeElement).toBe(dialog().querySelector('input[name="launch-query"]')));
+  });
+
+  it("sends one grant while Allow is pending and leaves no automatic session launch", async () => {
+    let release!: () => void;
+    const grantWait = new Promise<void>((resolve) => { release = resolve; });
+    const { sheet: s, calls, dialog } = sheet({ machines: [{ id: "atlas", label: "Atlas", scopes: [...CONTROL] }], grantWait });
+    s.open();
+    await flush();
+    const allow = dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement;
+    allow.click();
+    expect(allow.disabled).toBe(true);
+    // A queued activation must not create a second scope request either.
+    allow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(calls.grants).toEqual(["atlas"]);
+    release();
+    await vi.waitFor(() => expect(visibleView(dialog())).toEqual(["form"]));
+    expect(calls.launches).toEqual([]);
   });
 
   it("keeps invitation guidance for a read-only pairing", async () => {
-    const { sheet: s, dialog } = sheet({ machines: [{ id: "atlas", label: "Atlas", scopes: ["machine-read", "session-read", "pane-read"] }] });
+    const { sheet: s, calls, dialog } = sheet({ machines: [{ id: "atlas", label: "Atlas", scopes: ["machine-read", "session-read", "pane-read"] }] });
     s.open();
     await flush();
     expect((dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).hidden).toBe(true);
     expect(dialog().querySelector(".launch-grant-command code")!.textContent).toContain("session:launch");
+    dialog().querySelector('[data-launch-action="allow"]')!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(calls.grants).toEqual([]);
   });
 
-  it("cancels a confirmation when the chosen machine changes", async () => {
+  it("names and grants only the newly selected machine after one consent", async () => {
     const machines: LaunchMachine[] = [
-      { id: "atlas", label: "Atlas", scopes: CONTROL },
-      { id: "soundwave", label: "soundwave", scopes: CONTROL },
+      { id: "atlas", label: "Atlas", scopes: [...CONTROL] },
+      { id: "soundwave", label: "soundwave", scopes: [...CONTROL] },
     ];
     const { sheet: s, calls, dialog } = sheet({ machines });
     s.open("atlas");
     await flush();
-    (dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).click();
-    expect(visibleView(dialog())).toEqual(["confirm"]);
-    expect((dialog().querySelector('[data-launch-machine-field]') as HTMLElement).hidden).toBe(true);
     const picker = dialog().querySelector('select[name="launch-machine"]') as HTMLSelectElement;
     picker.value = "soundwave";
     picker.dispatchEvent(new Event("change", { bubbles: true }));
     expect(visibleView(dialog())).toEqual(["grant"]);
-    expect(dialog().querySelector(".launch-grant .launch-lead")!.textContent).toContain("soundwave");
-    (dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).click();
-    expect(dialog().querySelector(".launch-confirm-copy")!.textContent).toContain("soundwave");
-    (dialog().querySelector('[data-launch-action="confirm-grant"]') as HTMLButtonElement).click();
+    expect(dialog().querySelector('.launch-grant .launch-lead')!.textContent).toContain("soundwave");
+    const allow = dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement;
+    expect(allow.textContent).toBe("Allow starting sessions on soundwave");
+    allow.click();
     await vi.waitFor(() => expect(calls.grants).toEqual(["soundwave"]));
+    expect(machines[0]!.scopes).not.toContain("session-launch");
+  });
+
+  it("closing the consent without Allow leaves permission unchanged, including on revisit", async () => {
+    const machine: LaunchMachine = { id: "atlas", label: "Atlas", scopes: [...CONTROL] };
+    const { sheet: s, calls, dialog } = sheet({ machines: [machine] });
+    s.open();
+    await flush();
+    (dialog().querySelector('.launch-grant [data-launch-action="close"]') as HTMLButtonElement).click();
+    expect(calls.grants).toEqual([]);
+    expect(machine.scopes).toEqual(CONTROL);
+    s.open();
+    await flush();
+    expect(visibleView(dialog())).toEqual(["grant"]);
+    expect(calls.grants).toEqual([]);
+    s.close();
   });
 
   it("offers an invitation after a 403 and clears the refusal on reopen", async () => {
@@ -194,7 +227,6 @@ describe("LaunchSheet", () => {
     await flush();
     expect((dialog().querySelector(".launch-grant-invite") as HTMLElement).hidden).toBe(true);
     (dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).click();
-    (dialog().querySelector('[data-launch-action="confirm-grant"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect((dialog().querySelector(".launch-grant-error") as HTMLElement).hidden).toBe(false));
     expect((dialog().querySelector(".launch-grant-invite") as HTMLElement).hidden).toBe(false);
     expect((dialog().querySelector(".launch-grant-command") as HTMLElement).hidden).toBe(false);

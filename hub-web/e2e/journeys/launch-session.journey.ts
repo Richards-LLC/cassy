@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test, expect, journeyPart } from "./journey";
 import { SCOPES, type LaunchWorld, type Machine } from "./hub-double";
 import { PELICAN } from "./world";
@@ -62,9 +64,9 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeFocused();
     await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).tap();
-    await expect(sheet.getByText("Allow “Start new sessions” on Atlas · Linux?")).toBeVisible();
-    await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
-    await sheet.getByRole("button", { name: "Allow starting sessions", exact: true }).tap();
+    // cas-e123: this single deliberate Allow grants the named machine.
+    // A second consent would leave the project picker hidden.
+    await expect(sheet.getByRole("button", { name: /^Allow starting sessions/ })).toHaveCount(0);
     await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
     await expect(sheet.getByRole("searchbox", { name: "Filter projects" })).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
@@ -236,8 +238,12 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
       .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
       .map((animation) => animation.finished.catch(() => undefined))));
     await allow.tap({ timeout: 15_000 });
-    await expect(sheet.getByText(`Allow “Start new sessions” on ${ATLAS.label}?`)).toBeVisible();
-    await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
+    // Earlier in this journey ledger-api was launched: the project picker
+    // now offers its live supervisor, rather than an idle-project radio.
+    await expect(sheet.getByRole("button", { name: "Attach to ledger-api (bright-heron-21)", exact: true })).toBeVisible();
+    await expect(sheet.getByRole("searchbox", { name: "Filter projects" })).toBeFocused();
+    await expect(sheet.getByRole("button", { name: /^Allow starting sessions/ })).toHaveCount(0);
+    await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
     ATLAS.label = originalLabel;
   });
 });
@@ -275,3 +281,72 @@ test("HUB-J13 New session says a reconnecting machine is reconnecting, then load
     await expect(sheet.getByRole("button", { name: "Start", exact: true })).toHaveAttribute("aria-disabled", "false");
   });
 });
+
+// cas-e123: the consent is the only permission decision, across input and
+// display modes. Keep cancellation and read-only invitations explicit.
+const consentCells = [
+  { id: "M01", width: 1280, dark: false },
+  { id: "M02", width: 390, dark: false, long: true },
+  { id: "M03", width: 1280, dark: true, cancel: true },
+  { id: "M04", width: 390, dark: true, cancel: true },
+  { id: "M05", width: 390, dark: false, forced: true },
+  { id: "M06", width: 1280, dark: false, contrast: true },
+  { id: "M07", width: 390, dark: false, motion: true },
+  { id: "M08", width: 1280, dark: false, readonly: true },
+];
+for (const cell of consentCells) {
+  test(`HUB-J13 one launch consent ${cell.id} (cas-e123)`, journeyPart, async ({ page, journey }) => {
+    await page.setViewportSize({ width: cell.width, height: 844 });
+    await page.emulateMedia({ colorScheme: cell.dark ? "dark" : "light", forcedColors: cell.forced ? "active" : "none", contrast: cell.contrast ? "more" : "no-preference", reducedMotion: cell.motion ? "reduce" : "no-preference" });
+    const machine = { ...ATLAS, label: cell.long ? "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap" : ATLAS.label };
+    const scopes = cell.readonly ? ["machine-read", "session-read", "pane-read"] : [...SCOPES];
+    const hub = await journey.hub({ machines: [machine], paired: ["atlas"], scopes: { atlas: scopes }, launch: { atlas: atlasLaunch() } });
+    const sheet = page.getByRole("dialog", { name: "New session" });
+    await journey.open();
+    await journey.stage(`${cell.id} the machine permission is readable before consent`, async () => {
+      await page.getByRole("button", { name: "New session", exact: true }).click();
+      await expect(sheet).toBeVisible();
+      await expect(sheet.locator(".launch-grant .launch-lead")).toContainText(machine.label);
+      expect(hub.scopesFor("atlas")).not.toContain("session-launch");
+      const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${machine.label}` });
+      if (cell.readonly) {
+        await expect(allow).toHaveCount(0);
+        await expect(sheet.locator(".launch-grant-command")).toContainText("session:launch");
+      } else {
+        await expect(allow).toBeFocused();
+        expect(await allow.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (process.env.DELIVERY_QA && cell.id === "M01") {
+        mkdirSync(process.env.DELIVERY_QA, { recursive: true });
+        writeFileSync(join(process.env.DELIVERY_QA, "consent.html"), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style></head><body>${await sheet.evaluate(node => node.outerHTML)}</body></html>`);
+      }
+    });
+    await journey.stage(`${cell.id} cancel keeps permission, or one Allow opens projects`, async () => {
+      if (cell.readonly) {
+        await sheet.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(sheet).toBeHidden();
+        expect(hub.scopesFor("atlas")).not.toContain("session-launch");
+        return;
+      }
+      if (cell.cancel) {
+        if (cell.width === 390) await page.keyboard.press("Escape");
+        else await sheet.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(sheet).toBeHidden();
+        expect(hub.scopesFor("atlas")).not.toContain("session-launch");
+        await page.getByRole("button", { name: "New session", exact: true }).click();
+      }
+      const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${machine.label}` });
+      await expect(allow).toBeFocused();
+      await page.keyboard.press("Enter");
+      const search = sheet.getByRole("searchbox", { name: "Filter projects" });
+      await expect(search).toBeFocused();
+      await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
+      await expect(sheet.getByRole("button", { name: /^Allow starting sessions/ })).toHaveCount(0);
+      await expect(search).toMatchAriaSnapshot('- searchbox "Filter projects"');
+      expect(hub.scopesFor("atlas")).toContain("session-launch");
+      expect(hub.launches).toEqual([]);
+      if (process.env.DELIVERY_QA && cell.id === "M01") writeFileSync(join(process.env.DELIVERY_QA, "projects.html"), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style></head><body>${await sheet.evaluate(node => node.outerHTML)}</body></html>`);
+    });
+  });
+}

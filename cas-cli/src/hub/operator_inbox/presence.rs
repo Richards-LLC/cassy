@@ -405,6 +405,15 @@ fn sample(root: &Path) -> (Option<String>, Vec<Component>) {
     )
 }
 
+fn retry_not_before(response: &super::machine::HttpResponse) -> Option<tokio::time::Instant> {
+    if response.status != 429 && response.status < 500 {
+        return None;
+    }
+    response
+        .retry_after_s
+        .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(u64::from(seconds)))
+}
+
 /// A single hub-owned loop. The synchronous signed transport has a bounded
 /// per-request 10s HTTP deadline. Monotonic scheduling skips missed ticks and never
 /// queues a backlog after suspend. No enrollment or implicit opt-in occurs.
@@ -483,8 +492,10 @@ pub fn spawn_presence_loop(root: PathBuf) -> tokio::task::JoinHandle<()> {
                 transport.exchange_blocking("POST", path, &body)
             })
             .await;
+            let mut retry_at = None;
             match response {
                 Ok(Ok(response)) => {
+                    retry_at = retry_not_before(&response);
                     if let Some(epoch) = reporter.receive(response.status, &response.body)
                         && save_epoch(&root, bound, epoch).is_err()
                     {
@@ -508,7 +519,8 @@ pub fn spawn_presence_loop(root: PathBuf) -> tokio::task::JoinHandle<()> {
                 continue; // activation does not renew the lease; report now
             }
             let jitter = (uuid::Uuid::new_v4().as_u128() % 21) as u64;
-            tokio::time::sleep_until(tick + Duration::from_secs(50 + jitter)).await;
+            let scheduled = tick + Duration::from_secs(50 + jitter);
+            tokio::time::sleep_until(retry_at.map_or(scheduled, |at| at.max(scheduled))).await;
         }
     })
 }

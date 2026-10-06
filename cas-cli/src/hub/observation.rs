@@ -155,9 +155,9 @@ pub(crate) fn collect_runtime_receipt(
         factory,
         boot_prerequisites,
         independent_monitoring: Observation::new(
-            ObservationState::Unsupported,
-            "cloud_presence_contract_pending",
-            "phase_a_only",
+            ObservationState::Unknown,
+            "cloud_snapshot_required",
+            "operator_presence_v1",
         ),
     }
 }
@@ -466,7 +466,7 @@ mod tests {
         assert_eq!(receipt.factory.health.reason, "no_registered_factories");
         assert_eq!(
             receipt.independent_monitoring.state,
-            ObservationState::Unsupported
+            ObservationState::Unknown
         );
         assert!(!receipt.boot_prerequisites.reboot_verified);
     }

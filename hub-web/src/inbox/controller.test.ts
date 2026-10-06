@@ -21,6 +21,33 @@ async function signIn(cloud: OperatorCloudDouble, inbox: OperatorInboxController
 }
 
 describe("operator inbox controller", () => {
+  it("refreshes machine status even when feed replay is unavailable", async () => {
+    const cloud = new OperatorCloudDouble();
+    const machine = await cloud.enrollMachine("hub", [], await exportPublicKey((await generateKeyPair()).publicKey));
+    cloud.presence.set(machine.id, { monitoring: "enabled", monitoring_generation: "1", presence: "unobserved" });
+    const transport = cloud.fetchFor(PAGE_ORIGIN);
+    const inbox = new OperatorInboxController({ origin: cloud.baseUrl, store: new MemoryInboxStore(), pageOrigin: PAGE_ORIGIN, fetch: (input, init) => {
+      if (new URL(String(input)).pathname === "/api/operator/feed") throw new TypeError("feed unavailable");
+      return transport(input, init);
+    } });
+    await signIn(cloud, inbox);
+    await inbox.runOnce();
+    expect((await inbox.snapshot()).presence?.machines[0].presence).toBe("unobserved");
+  });
+
+  it("keeps a presence-revoked device signed out after its replay round", async () => {
+    const cloud = new OperatorCloudDouble();
+    const transport = cloud.fetchFor(PAGE_ORIGIN);
+    const inbox = new OperatorInboxController({ origin: cloud.baseUrl, store: new MemoryInboxStore(), pageOrigin: PAGE_ORIGIN, fetch: (input, init) => {
+      if (String(input).endsWith("/machine-presence")) return Promise.resolve(new Response(JSON.stringify({ error: "grant_revoked" }), { status: 401 }));
+      return transport(input, init);
+    } });
+    await signIn(cloud, inbox);
+    await inbox.runOnce();
+    expect(inbox.current().kind).toBe("revoked");
+    expect(inbox.client.credential).toBeNull();
+  });
+
   it("offers monitoring only to account-management devices and fences concurrent decisions", async () => {
     const cloud = new OperatorCloudDouble();
     const machine = await cloud.enrollMachine("hub", [], await exportPublicKey((await generateKeyPair()).publicKey));

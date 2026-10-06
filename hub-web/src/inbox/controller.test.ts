@@ -21,6 +21,37 @@ async function signIn(cloud: OperatorCloudDouble, inbox: OperatorInboxController
 }
 
 describe("operator inbox controller", () => {
+  it("refreshes after a monitoring decision even when an earlier status request is in flight", async () => {
+    const cloud = new OperatorCloudDouble();
+    const machine = await cloud.enrollMachine("hub", [], await exportPublicKey((await generateKeyPair()).publicKey));
+    cloud.presence.set(machine.id, { monitoring: "enabled", monitoring_generation: "1", presence: "pending_first_report" });
+    const transport = cloud.fetchFor(PAGE_ORIGIN);
+    let hold = false;
+    let release!: () => void;
+    let started!: () => void;
+    const requested = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const inbox = new OperatorInboxController({ origin: cloud.baseUrl, store: new MemoryInboxStore(), pageOrigin: PAGE_ORIGIN, fetch: async (input, init) => {
+      const response = await transport(input, init);
+      if (hold && String(input).endsWith("/machine-presence")) {
+        hold = false;
+        started();
+        await gate;
+      }
+      return response;
+    } });
+    await signIn(cloud, inbox, ["feed:read", "account:manage"]);
+    await inbox.refreshPresence();
+    hold = true;
+    const earlier = inbox.refreshPresence(true);
+    await requested;
+    const changed = inbox.setMonitoring(machine.id, false);
+    await expect.poll(() => cloud.presence.get(machine.id)?.monitoring).toBe("disabled");
+    release();
+    await Promise.all([earlier, changed]);
+    expect((await inbox.snapshot()).presence?.machines[0].monitoring).toBe("disabled");
+  });
+
   it("refreshes machine status even when feed replay is unavailable", async () => {
     const cloud = new OperatorCloudDouble();
     const machine = await cloud.enrollMachine("hub", [], await exportPublicKey((await generateKeyPair()).publicKey));

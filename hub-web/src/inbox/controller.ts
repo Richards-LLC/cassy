@@ -221,7 +221,13 @@ export class OperatorInboxController {
   async refreshPresence(force = false): Promise<void> {
     const identity = this.identity;
     if (!identity || (!force && this.now() - this.presenceFetchedAt < 30_000)) return;
-    if (this.presenceRequest) return this.presenceRequest;
+    if (this.presenceRequest) {
+      await this.presenceRequest;
+      // A request started before a successful consent change may return
+      // the old generation. A forced refresh must read after that change.
+      if (force && this.identity === identity) await this.refreshPresence(true);
+      return;
+    }
     const work = async () => {
       try {
         const response = await this.client.request({ method: "GET", path: "/api/operator/machine-presence", auth: "grant" });

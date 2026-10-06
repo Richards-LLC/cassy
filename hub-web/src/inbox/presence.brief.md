@@ -30,4 +30,18 @@ Native headings, lists, buttons and a consent details disclosure; all actions re
 
 ## Critique
 
-Pending real renders and pixel checks; this draft is not a visual approval.
+Self-review, 2026-10-06, on the Commander build at `8c92afe2e`:
+
+| Dimension | Score | Render evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | A named machine's cloud lease, component observations and linked outage/recovery history share the existing Glass inbox sheet; none becomes a conversation bubble. |
+| Fit | 4 | The status ledger explains which machine stopped reporting and the account's monitoring choice, even with no hub paired. |
+| Hierarchy | 4 | The observer warning precedes machine status; observations sit beneath the machine name, and notice history has its own ordered list. |
+| Craft | 4 | Strict visual QA passes the actual dialog snapshot in light/dark at 1280×800 and 390×844 with no findings. |
+| Accessibility | 4 | The native J19 control passes keyboard opt-in/disable, phone wrapping and forced colors, reduced motion and increased contrast; settings remain a labeled native disclosure. |
+
+Evidence: task artifacts `cas-e3dd/qa-control/visual-qa/` and
+`cas-e3dd/j19-control/`. This reviews the real Commander bundle against the
+protocol double. The deployed watchdog and physical outage/recovery remain
+unexercised pending the disposable test account; this is no live acceptance
+claim. Independent QA and final-tip affected journeys remain required.

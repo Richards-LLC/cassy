@@ -249,6 +249,12 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
+    // cas-b113: resolved watchdog notices must not return from the device
+    // journal as conversation blockers, nor make the rail wait on me.
+    await expect(log.locator(".bub", { hasText: NOTICE_TEXT })).toHaveCount(0);
+    await expect(log).not.toContainText("never reached it");
+    await expect(page.locator('.conversation-context .context-jump[data-kind="blocker"]')).toHaveCount(0);
+    await expect(page.locator(".conversation-context")).not.toContainText("Waiting on you");
   });
 
   await journey.stage("An answer to an earlier session's question stays here", async () => {

@@ -387,12 +387,36 @@ describe("journal privacy and immutable replay", () => {
     expect(await a.persistReply(scope, { ...reply, attachments: [{ artifact_id: "art-other", name: "changed", mime: "text/plain", size_bytes: 1, sha256: "a".repeat(64) }] }, fence)).toBe(false);
     expect((await a.read(scope)).replies).toHaveLength(1);
   });
-  it("notice replay canonicalizes defaults and field order without storing unknown fields", async () => {
-    const { a } = journals();
-    expect(await a.persistReply(scope, { ...reply, notice: { source: "relay-watchdog", subject: 7, private_extra: "discard" } } as never, fence)).toBe(true);
-    expect((await a.read(scope)).replies[0].reply.notice).toEqual({ source: "relay-watchdog", subject: 7, resolved: false });
-    expect(await a.persistReply(scope, { ...reply, notice: { resolved: false, subject: 7, source: "relay-watchdog" } }, fence)).toBe(true);
-    expect(await a.persistReply(scope, { ...reply, notice: { source: "relay-watchdog", subject: 7, resolved: true } }, fence)).toBe(false);
+  it("keeps notices out of the reply journal, including resolution frames (cas-b113)", async () => {
+    const { a, make } = journals();
+    for (const resolved of [false, true]) {
+      expect(await a.persistReply(scope, { ...reply, notice: { source: "relay-watchdog", subject: 7, resolved } }, fence)).toBe(false);
+    }
+    expect(await a.persistReply(scope, reply, fence)).toBe(true);
+    expect((await make().read(scope)).replies.map(row => row.reply.message)).toEqual(["Reply"]);
+  });
+  it("removes old journaled notices before restore or cross-tab synchronization (cas-b113)", async () => {
+    const { a, make, db } = journals();
+    await a.persistReply(scope, reply, fence);
+    const oldRows = [false, true].map((resolved, i) => {
+      const notification_id = 100 + i;
+      return { key: JSON.stringify([JSON.stringify([scope.hub, scope.baseUrl, scope.device, scope.session]), notification_id]), scope,
+        reply: { ...reply, notification_id, message: "Never reached it", kind: "blocker", notice: { source: "relay-watchdog", subject: 7, resolved } }, persistedAt: 1_000 };
+    });
+    await seedRows(db, { replies: oldRows });
+    const reload = make();
+    expect((await reload.read(scope)).replies.map(row => row.reply.message)).toEqual(["Reply"]);
+    expect((await a.read(scope)).replies).toHaveLength(1);
+    // Scope discovery is another entry point before the thread restores.
+    await seedRows(db, { replies: oldRows.map(row => ({ ...row, scope: { ...scope, session: "notice-only" },
+      key: JSON.stringify([JSON.stringify([scope.hub, scope.baseUrl, scope.device, "notice-only"]), row.reply.notification_id]) })) });
+    expect(await reload.scopes({ id: scope.hub, baseUrl: scope.baseUrl, deviceId: scope.device } as never)).toEqual([scope]);
+    const request = db.open(DELIVERY_DB, 1);
+    const records = await new Promise<unknown[]>(resolve => { request.onsuccess = () => {
+      const database = request.result, tx = database.transaction("replies", "readonly"), read = tx.objectStore("replies").getAll();
+      tx.oncomplete = () => { database.close(); resolve(read.result); };
+    }; });
+    expect(JSON.stringify(records)).not.toContain("Never reached it");
   });
   it("the newly committed reply remains durable at the cap even when all timestamps tie", async () => {
     const { a } = journals();

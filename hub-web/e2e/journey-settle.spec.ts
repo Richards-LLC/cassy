@@ -58,3 +58,16 @@ test("running screenshot settle waits for both animation frames", async ({ page 
   expect(observed.pending()).toBe(0);
   expect(await page.getByRole("heading").textContent()).toBe("Painted twice");
 });
+
+test("page closure during frozen settling rejects and drains the evaluation", async ({ page }) => {
+  await page.clock.install({ time: JOURNEY_NOW });
+  await page.clock.pauseAt(JOURNEY_NOW + 60_000);
+  const observed = observeEvaluations(page);
+  const settling = settle(observed.page);
+  // Observe rejection before triggering closure, even if it wins the race.
+  const rejected = expect(settling).rejects.toThrow(/closed/);
+  await expect.poll(observed.pending).toBe(1);
+  await page.close();
+  await rejected;
+  expect(observed.pending()).toBe(0);
+});

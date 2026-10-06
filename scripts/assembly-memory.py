@@ -285,7 +285,7 @@ def link(command):
                          "wall_s": round(time.monotonic() - started, 3),
                          "measurement_source": "driver wait4 ru_maxrss (Linux KiB, macOS bytes); sampled /proc stat RSS or macOS ps RSS (KiB) for the same driver and observed descendants"})
         if exceeded:
-            print("assembly linker RSS exceeded memory estimate; recalibration required", file=sys.stderr)
+            print("assembly linker driver exceeded memory estimate; recalibration required", file=sys.stderr)
             return 1
         return child.returncode
 

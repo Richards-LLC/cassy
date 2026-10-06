@@ -347,6 +347,12 @@ class ReceiptTests(unittest.TestCase):
         logs.mkdir(parents=True)
         actual_run = proof.subprocess.run
         captured = {}
+        link_rss = {"phase": "link-complete", "driver_pid": 101,
+                    "peak_waited_driver_rss_bytes": 20 * proof.GIB // 1024,
+                    "peak_mold_worker_rss_bytes": proof.GIB,
+                    "peak_process_tree_rss_bytes": proof.GIB + 20 * proof.GIB // 1024,
+                    "rss_sampling_status": "sampled", "rss_sample_count": 8,
+                    "mold_worker_peak": {"pid": 102, "start_identity": "fixture-start"}}
 
         def gate(command, **kwargs):
             if command[0] == 'git':
@@ -355,6 +361,7 @@ class ReceiptTests(unittest.TestCase):
             rows = Path(kwargs['env']['CAS_RELEASE_GATE_LOG_DIR'])
             rows.mkdir()
             (rows / 'nextest.log').write_text('PASS: 1 test(s) passed\n')
+            (rows / 'link-rss.jsonl').write_text(json.dumps(link_rss) + '\n')
             kwargs['stdout'].write('PASS nextest fixture\n')
             return proof.subprocess.CompletedProcess(command, 0)
 
@@ -362,6 +369,7 @@ class ReceiptTests(unittest.TestCase):
             result = proof.run_row(self.root, 'nextest', {'CARGO_TARGET_DIR': '/other/worktree/target'}, logs)
         self.assertEqual(captured['CARGO_TARGET_DIR'], str(self.root / 'target'))
         self.assertEqual(result['head'], self.git('rev-parse', 'HEAD'))
+        self.assertEqual(result['link_rss'], [link_rss], 'assembly receipt retains both RSS scopes and worker identity')
         self.assertIn(str(self.root), (logs / 'nextest.log').read_text())
         self.assertIn(self.git('rev-parse', 'HEAD'), (logs / 'nextest.log').read_text())
 

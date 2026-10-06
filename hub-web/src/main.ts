@@ -3362,6 +3362,11 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Send again to retry; if another device controls the session, wait for it to release control.`, "error");
       return;
     }
+    // cas-cff2: control is held now, so "Taking control…" is done. The send
+    // itself speaks next: the bubble's Sending… and Delivered, or the
+    // waiting line if the connection holds it. Left up, it outlived the
+    // reply beside a Delivered message.
+    if (messageStatus?.text === plan.notice) clearComposerStatus();
   }
   await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
   } finally {

@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import type { Machine } from "./hub-double";
 import { expectDraft, installDraftDiagnostic } from "./draft-diagnostic";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -570,5 +570,37 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await composer.pressSequentially("!");
     await expect(note).toBeHidden();
     await expect(composer).not.toHaveAttribute("aria-describedby", /\bmessage-draft-note\b/);
+  });
+});
+
+test("HUB-J5 sending without control takes it, and the take notice clears once the message goes (cas-cff2)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const composer = page.getByRole("textbox", { name: "Your message" });
+  const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
+  const status = page.locator("#message-status");
+  // The lease lapsed while the operator was away: this device reads as not
+  // in control, and nobody else holds it, until the page takes it itself.
+  let taken = false;
+  await page.route(/\/v1\/sessions\/[^/]+\/lease$/, (route) => {
+    if (route.request().method() === "POST") { taken = true; return route.fallback(); }
+    if (!taken) return route.fulfill({ json: { held_by_me: false, controller_label: null } });
+    return route.fallback();
+  });
+  await journey.stage("Send while this device does not hold the session", async () => {
+    await journey.open();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(send).toBeVisible();
+    await composer.fill("Take it and send this.");
+    const sent = hub.nextSend();
+    await send.click();
+    expect((await sent).text).toBe("Take it and send this.");
+    expect(taken).toBe(true);
+  });
+  await journey.stage("Delivered: the take notice is gone", async () => {
+    hub.deliverLatest(PELICAN);
+    await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    await expect(status).toBeHidden();
+    await expect(page.getByText(/Taking control of/)).toHaveCount(0);
   });
 });

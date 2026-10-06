@@ -15,6 +15,33 @@ function journals(now = () => 1_000) {
 }
 
 describe("atomic Commander journal", () => {
+  it.each(["existing", "restored"])("does not offer Retry in a %s peer history while a real journal claim is in flight (cas-fb48)", async (mode) => {
+    const db = new IDBFactory(), history = new ConversationHistory();
+    let now = 1_000, checks = 0;
+    let release!: () => void, entered!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const claimed = new Promise<void>(resolve => { entered = resolve; });
+    const peer = new CommanderJournal(db, async () => fence, () => now, false);
+    const writer = new CommanderJournal(db, async () => {
+      if (++checks === 2) { entered(); await barrier; }
+      return fence;
+    }, () => now, false);
+    const item = send("peer-flight");
+    await writer.reconcile(scope, [], [item], fence);
+    if (mode === "existing") history.restorePending((await peer.read(scope)).sends, now);
+    let writes = 0;
+    const dispatch = writer.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    await claimed;
+    now += 200;
+    const snapshot = await peer.read(scope);
+    expect(snapshot.sends[0].state).toBe("sending");
+    history.synchronizePending(snapshot.sends, now, snapshot.receipts);
+    const event = history.events[0];
+    try {
+      expect(event.kind === "send" && history.canRetrySend(event.value), "Retry must wait for the peer's receipt deadline").toBe(false);
+    } finally { release(); await dispatch; writer.close(); peer.close(); }
+    expect(writes).toBe(1);
+  });
   it("requeues an existing history row after a claim makes no socket write (cas-9dc6)", async () => {
     const db = new IDBFactory(), history = new ConversationHistory();
     const peer = new CommanderJournal(db, async () => fence, () => 1_000, false);

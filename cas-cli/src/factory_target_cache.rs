@@ -20,6 +20,8 @@ use walkdir::WalkDir;
 use crate::config::FactoryConfig;
 
 mod lane;
+#[cfg(unix)]
+pub(crate) mod owner;
 pub(crate) mod parked;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod process_probe;

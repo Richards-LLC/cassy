@@ -18,6 +18,16 @@ pub(super) fn linux_uses_many(
     cache: &Path,
     own_lock_fds: &[i32],
 ) -> bool {
+    linux_uses_many_owned(proc_root, worktree, cache, own_lock_fds, false)
+}
+
+pub(super) fn linux_uses_many_owned(
+    proc_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    own_lock_fds: &[i32],
+    lease_managed: bool,
+) -> bool {
     if worktree.as_os_str().is_empty() || cache.as_os_str().is_empty() {
         return true;
     }
@@ -33,7 +43,7 @@ pub(super) fn linux_uses_many(
             continue;
         };
         let process = entry.path();
-        match process_uses(&process, pid, worktree, cache, own_lock_fds) {
+        match process_uses(&process, pid, worktree, cache, own_lock_fds, lease_managed) {
             Ok(true) => return true,
             Ok(false) => {}
             // A process can exit between directory enumeration and probes.
@@ -55,6 +65,7 @@ fn process_uses(
     worktree: &Path,
     cache: &Path,
     own_lock_fds: &[i32],
+    lease_managed: bool,
 ) -> io::Result<bool> {
     let stat = fs::read_to_string(process.join("stat"))?;
     let fields: Vec<_> = stat
@@ -73,13 +84,18 @@ fn process_uses(
     if matches!(fields.first().copied(), Some("Z" | "X")) || flags & 0x0020_0000 != 0 {
         return Ok(false);
     }
+    let mut unknown = false;
     for link in ["cwd", "exe"] {
-        let path = fs::read_link(process.join(link))?;
-        if path.starts_with(worktree) || path.starts_with(cache) {
-            return Ok(true);
+        match fs::read_link(process.join(link)) {
+            Ok(path) if path.starts_with(worktree) || path.starts_with(cache) => return Ok(true),
+            Ok(_) => {}
+            Err(_) => unknown = true,
         }
     }
-    let cmdline = fs::read(process.join("cmdline"))?;
+    let cmdline = fs::read(process.join("cmdline")).unwrap_or_else(|_| {
+        unknown = true;
+        Vec::new()
+    });
     let worktree_bytes = worktree.as_os_str().as_encoded_bytes();
     let cache_bytes = cache.as_os_str().as_encoded_bytes();
     if cmdline.split(|byte| *byte == 0).any(|argument| {
@@ -92,11 +108,28 @@ fn process_uses(
     }) {
         return Ok(true);
     }
-    if maps_use(&fs::read(process.join("maps"))?, worktree, cache) {
+    let maps = fs::read(process.join("maps")).unwrap_or_else(|_| {
+        unknown = true;
+        Vec::new()
+    });
+    if maps_use(&maps, worktree, cache) {
         return Ok(true);
     }
-    for fd in fs::read_dir(process.join("fd"))? {
-        let fd = fd?;
+    let fds = match fs::read_dir(process.join("fd")) {
+        Ok(fds) => Some(fds),
+        Err(_) => {
+            unknown = true;
+            None
+        }
+    };
+    for fd in fds.into_iter().flatten() {
+        let fd = match fd {
+            Ok(fd) => fd,
+            Err(_) => {
+                unknown = true;
+                continue;
+            }
+        };
         if pid == std::process::id()
             && own_lock_fds
                 .iter()
@@ -108,10 +141,12 @@ fn process_uses(
             Ok(path) if path.starts_with(worktree) || path.starts_with(cache) => return Ok(true),
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound && vanished(&fd.path()) => {}
-            Err(error) => return Err(error),
+            Err(_) => unknown = true,
         }
     }
-    Ok(false)
+    // Only a validated target with its exclusive lifetime lease can tolerate
+    // opaque unrelated processes. All readable evidence was still inspected.
+    Ok(unknown && !lease_managed)
 }
 
 #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -223,5 +258,29 @@ mod tests {
         fs::remove_dir(process.join("maps")).unwrap();
         assert!(linux_uses(&root, &cache, &cache, None));
         assert!(linux_uses(&root.join("unavailable"), &cache, &cache, None));
+    }
+
+    #[test]
+    fn leased_target_ignores_opaque_only_after_all_positive_evidence_cas_f96d() {
+        let (_temp, root, process, cache) = fixture();
+        fs::remove_file(process.join("maps")).unwrap();
+        fs::create_dir(process.join("maps")).unwrap(); // deterministic opaque read
+        assert!(linux_uses_many_owned(&root, &cache, &cache, &[], false));
+        assert!(!linux_uses_many_owned(&root, &cache, &cache, &[], true));
+        symlink(cache.join("unrelated-output"), process.join("fd/19")).unwrap();
+        assert!(linux_uses_many_owned(&root, &cache, &cache, &[], true));
+        fs::remove_file(process.join("fd/19")).unwrap();
+        fs::remove_file(process.join("exe")).unwrap();
+        symlink(cache.join("binary"), process.join("exe")).unwrap();
+        assert!(linux_uses_many_owned(&root, &cache, &cache, &[], true));
+        fs::remove_file(process.join("stat")).unwrap();
+        assert!(linux_uses_many_owned(&root, &cache, &cache, &[], true));
+        assert!(linux_uses_many_owned(
+            &root.join("unavailable"),
+            &cache,
+            &cache,
+            &[],
+            true
+        ));
     }
 }

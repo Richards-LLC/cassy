@@ -1,5 +1,6 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
+//! A separate target lifetime lease is inherited to protect surviving children.
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -541,6 +542,8 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         tracing::warn!(%error, "worker target re-seed skipped; Cargo will rebuild privately");
     }
     #[cfg(unix)]
+    let target_lease = crate::factory_target_cache::owner::acquire(&cas_root, &repo)?;
+    #[cfg(unix)]
     discard_shared_fingerprints(&repo.join("target"))?;
     let count_file = slots.join(format!("count-{lane_key}"));
     let mut command = if test.is_some() {
@@ -569,6 +572,10 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         && cargo_args.get(4).is_some_and(|arg| arg == "-E")
     {
         cargo_args.insert(4, "--lib".into());
+    }
+    #[cfg(unix)]
+    if let Some(lease) = &target_lease {
+        lease.inherit(&mut command);
     }
     let mut child = command
         .args(&cargo_args)
@@ -1075,6 +1082,41 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn private_runner_records_ownership_before_fake_build_and_inherits_lease_cas_f96d() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_BUILD_GUARD", "off"), ("CAS_FACTORY_DISABLE_TARGET_SEED", "1"),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, r#"python3 - <<'PY'
+import json, os
+from pathlib import Path
+repo = Path.cwd()
+records = [json.loads(p.read_text()) for p in (repo.parent.parent / 'worker-target-owners').glob('*.json')]
+record, = [r for r in records if r['worktree'] == str(repo)]
+assert record['active'] and record['start'] > 0
+assert [p.name for p in (repo / 'target').iterdir()] == ['.cas-worker-target-owner'], 'provenance must precede data'
+inherited = []
+for fd in os.listdir('/proc/self/fd'):
+    try:
+        stat = os.fstat(int(fd))
+        inherited.append((stat.st_dev, stat.st_ino))
+    except OSError:
+        pass
+assert (record['lease_dev'], record['lease_ino']) in inherited, 'output lease must reach real command'
+(repo / 'target' / 'build-observed').write_text('lease protected')
+PY"#);
+        execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &fake).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("target/build-observed")).unwrap(), "lease protected");
+        assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
+
     #[cfg(unix)]
     #[test]
     fn runner_discards_legacy_shared_fingerprints_cas_a7cf() {
@@ -1392,6 +1434,33 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
 
     #[cfg(unix)]
     #[test]
+    fn unignored_target_stays_legacy_clean_without_shared_git_mutation_cas_f96d() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off"), ("CAS_FACTORY_DISABLE_TARGET_SEED", "1")]);
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fixture_commit(&source);
+        std::fs::write(source.join(".gitignore"), "").unwrap();
+        git(&source, &["add", ".gitignore"]).unwrap();
+        git(&source, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "unignored output"]).unwrap();
+        let root = dir.path().join(".cas");
+        let worker = root.join("worktrees/worker");
+        git(&source, &["worktree", "add", "-q", "--detach", worker.to_str().unwrap()]).unwrap();
+        let config = std::fs::read(source.join(".git/config")).unwrap();
+        let exclude = std::fs::read(source.join(".git/info/exclude")).unwrap();
+        assert!(crate::factory_target_cache::owner::acquire(&root, &worker).unwrap().is_none());
+        assert!(!worker.join("target").exists(), "legacy fallback places no marker");
+        assert!(!root.join("worker-target-owners").exists());
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &worker, &fake).unwrap();
+        assert!(passing_receipt(&root, &worker, &fixture_head(&worker)).is_some());
+        assert!(git(&worker, &["status", "--porcelain", "--untracked-files=all"]).unwrap().is_empty());
+        assert_eq!(std::fs::read(source.join(".git/config")).unwrap(), config);
+        assert_eq!(std::fs::read(source.join(".git/info/exclude")).unwrap(), exclude);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn runner_checks_clean_commit_and_invalidates_failed_retry() {
         use std::os::unix::fs::PermissionsExt;
         let _env =
@@ -1401,6 +1470,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         let repo = root.join("worktrees/worker");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join(".gitignore"), "/target/\n").unwrap();
+        git(&repo, &["add", ".gitignore"]).unwrap();
         git(
             &repo,
             &[

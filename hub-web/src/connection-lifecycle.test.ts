@@ -522,6 +522,31 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.attachSnapshot("healthy")?.phase).toBe("live");
   });
 
+  it("refreshes the session catalog on event recovery without replacing its speaking attach (cas-49cc)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    let listed: string | undefined;
+    hub.catalogRevision(1);
+    const connection = supervisor(await storedMachine("event-catalog"), () => {}, () => {}, sessions => { listed = sessions[0]?.name; });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(listed).toBe("catalog-1");
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ Welcome: { state: { panes: [] } } });
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    hub.catalogRevision(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(listed).toBe("catalog-2");
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+  });
+
   it.each([false, true])("measures current ready transport reads without relaxing the send fence (multiplex=%s, cas-49cc)", async (multiplex) => {
     const hub = transport(multiplex);
     TransportSocket.instances = [];

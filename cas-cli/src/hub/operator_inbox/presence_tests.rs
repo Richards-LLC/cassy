@@ -147,6 +147,30 @@ fn presence_generation_change_activates_but_preserves_seq_for_existing_epoch() {
 }
 
 #[test]
+fn presence_generation_refresh_cannot_steal_epoch_from_newer_process() {
+    // This process suspended at epoch1/gen1. While it slept, the account
+    // disabled/re-enabled monitoring (gen3) and a newer process took epoch2.
+    // The cloud checks generation before epoch, so the stale heartbeat first
+    // receives a generation conflict instead of the fencing conflict.
+    let mut r = activated();
+    r.prepare(vec![], None);
+    r.receive(
+        409,
+        br#"{"error":"monitoring_generation_conflict","current_monitoring_generation":"3","monitoring_state":"enabled"}"#,
+    );
+    let activation = r.prepare(vec![], None).unwrap();
+    assert_eq!(activation.path, ACTIVATE);
+    let request: Value = serde_json::from_slice(&activation.body).unwrap();
+    assert_eq!(request["previous_reporter_epoch"], "1");
+    r.receive(
+        409,
+        br#"{"error":"reporter_epoch_conflict","current_reporter_epoch":"2"}"#,
+    );
+    assert!(r.prepare(vec![], None).is_none());
+    assert!(matches!(r.phase, Phase::Stopped("reporter_fenced")));
+}
+
+#[test]
 fn presence_stale_report_advances_seq_with_fresh_observations() {
     let mut r = activated();
     r.prepare(vec![], None);

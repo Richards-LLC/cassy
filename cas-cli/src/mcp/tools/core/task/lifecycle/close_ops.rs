@@ -29210,9 +29210,7 @@ mod merge_state_gate_tests {
         git(p, &["add", "."]);
         git(p, &["commit", "-qm", "unrelated rebuild on the target"]);
         git(p, &["checkout", "factory/worker"]);
-        let merged = std::process::Command::new("git")
-            .args(["merge", "--no-ff", "-q", "main", "-m", "cas-test1: sync target"])
-            .current_dir(p)
+        let merged = git_command(p, &["merge", "--no-ff", "-q", "main", "-m", "cas-test1: sync target"])
             .output()
             .unwrap();
         if !merged.status.success() {

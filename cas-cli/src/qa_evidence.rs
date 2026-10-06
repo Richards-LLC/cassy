@@ -1460,7 +1460,10 @@ fn short(sha: &str) -> &str {
 pub fn producing_command(key: &str, bundle_dir: &Path) -> String {
     let dir = bundle_dir.display();
     match key {
-        "trace" | "receipt" | "aria_yaml" | "aria_json" | "cells" | "a11y" => format!(
+        "trace" => format!(
+            "run the cas-qa-craft evidence spec under the Playwright test runner with trace {{ mode: 'on', snapshots: {{ dom, aria, screen }} }} and copy its test-results trace.zip into {dir}; for a signed-in run, scrub it first with node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --scrub-trace <raw trace.zip> {dir}/trace.zip ({CONTRACT_REFERENCE})"
+        ),
+        "receipt" | "aria_yaml" | "aria_json" | "cells" | "a11y" => format!(
             "run the cas-qa-craft evidence spec with trace snapshots {{ dom, aria, screen }} and write {key} into {dir} ({CONTRACT_REFERENCE})"
         ),
         "trace_actions" => format!(
@@ -1567,7 +1570,11 @@ pub fn trace_expect_summary(trace_zip: &Path) -> Result<ExpectSummary, String> {
     let mut body = String::new();
     archive
         .by_name("test.trace")
-        .map_err(|_| "has no test.trace (record it with the Playwright test runner)".to_string())?
+        .map_err(|_| {
+            // cas-b10d: a library `context.tracing` zip records protocol calls,
+            // not the test's outcome, so its assertions cannot be counted.
+            "has no test.trace: record it with the Playwright test runner (trace: 'on'); a library context.tracing zip carries no test outcome".to_string()
+        })?
         .read_to_string(&mut body)
         .map_err(|error| format!("test.trace is unreadable ({error})"))?;
     Ok(expect_summary_from_events(&body))

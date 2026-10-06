@@ -260,6 +260,8 @@ export class HubConnectionSupervisor {
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
   private readonly timedOutSockets = new WeakSet<WebSocket>();
   private readonly readySockets = new WeakSet<WebSocket>();
+  private readonly legacyReadAt = new WeakMap<WebSocket, number>();
+  private machineReadAt?: number;
   private machineSocket?: WebSocket;
   private machineSocketReady = false;
   private machineSocketOpening?: Promise<boolean>;
@@ -407,6 +409,7 @@ export class HubConnectionSupervisor {
     if (!this.desired) return;
     this.connectionGeneration += 1;
     let stage = this.resumeStage;
+    let liveSince: number | undefined;
     try {
       const unsupported = unsupportedBrowserReason();
       if (unsupported) throw new UnsupportedBrowserError(unsupported);
@@ -430,7 +433,7 @@ export class HubConnectionSupervisor {
       }
       this.transition("attaching", "attaching");
       const response = await this.withStageTimeout("attaching", (signal) => this.openEventStream(signal));
-      this.attempt = 0;
+      liveSince = Date.now();
       this.resumeStage = "resolving";
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
@@ -438,18 +441,20 @@ export class HubConnectionSupervisor {
       this.connectionLost = false;
       this.transition("live", "live");
       this.startHeartbeat();
-      // Back from an outage: the terminal sockets from before it are not
-      // trusted (a half-open one takes sends and delivers nothing); every
-      // session attaches afresh, now (cas-0978).
+      // Event-stream loss alone does not condemn terminal transports that
+      // still answer. A proved machine outage already abandoned them.
       if (recovering) this.reattachDesired("Reconnected after the network changed");
       // A session can become ready before this event stream. Its earlier
       // flush was fenced while the machine was attaching; wake it now, after
-      // any untrusted recovery sockets have been abandoned.
+      // missing or stale recovery sockets have been replaced.
       this.releaseHeldMessages();
       await this.consumeEvents(response, this.eventAbort!.signal);
       if (this.desired) throw new Error("hub event stream closed");
     } catch (error) {
       if (!this.desired) return;
+      // Headers alone do not prove recovery. A flapping event stream must
+      // survive the settling window before its retry streak starts over.
+      if (liveSince !== undefined && Date.now() - liveSince >= EVENT_STREAM_STABLE_MS) this.attempt = 0;
       if (error instanceof UnsupportedBrowserError) {
         this.stopHeartbeat();
         this.transition("failed", stage, { reason: error.message, fatal: true });
@@ -878,7 +883,7 @@ export class HubConnectionSupervisor {
             // close() on it can wait out a closing handshake that never
             // comes, so it is dropped and replaced now (cas-0978).
             this.missedHeartbeats = 0;
-            this.reattachDesired("Machine terminal transport stopped answering");
+            this.reattachDesired("Machine terminal transport stopped answering", true);
             return;
           }
         }
@@ -953,11 +958,34 @@ export class HubConnectionSupervisor {
     }
   }
 
-  /** Replace the terminal sockets and attach every wanted session now. */
-  private reattachDesired(reason: string): void {
-    this.abandonSockets(reason);
-    this.socketAttempts.clear();
-    for (const session of this.desiredSessions) void this.attach(session);
+  /** Recover event delivery without discarding recently speaking terminals. */
+  private reattachDesired(reason: string, force = false): void {
+    const now = Date.now();
+    const machineHealthy = this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN
+      && this.machineReadAt !== undefined && now - this.machineReadAt < ATTACH_LIVENESS_MS;
+    if (force || (this.machineSocket && !machineHealthy)) {
+      this.abandonSockets(reason);
+      this.socketAttempts.clear();
+    } else {
+      for (const [session, socket] of this.sockets) {
+        const lastRead = this.legacyReadAt.get(socket);
+        // Opening sockets already have bounded open/Welcome deadlines. Let
+        // those deadlines judge them rather than restart each opening.
+        const opening = socket.readyState === WebSocket.CONNECTING
+          || (socket.readyState === WebSocket.OPEN && !this.readySockets.has(socket));
+        if (opening || (socket.readyState === WebSocket.OPEN && lastRead !== undefined
+          && now - lastRead < ATTACH_LIVENESS_MS)) continue;
+        socket.onopen = null; socket.onmessage = null; socket.onerror = null; socket.onclose = null;
+        try { socket.close(4000, "abandoned"); } catch { /* already closing */ }
+        this.sockets.delete(session);
+        this.clearAttachTimeouts(session);
+        for (const key of this.keyframeRequests) if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
+        this.transitionAttach(session, "failed", "dialing", { reason });
+      }
+    }
+    for (const session of this.desiredSessions) {
+      if (!this.attachRetryTimers.has(session)) void this.attach(session);
+    }
   }
 
   /**
@@ -1012,7 +1040,6 @@ export class HubConnectionSupervisor {
       // Waiting out a backoff: try again now, from a fresh schedule.
       if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
       this.retryTimer = undefined;
-      this.attempt = 0;
       void this.connect();
       return;
     }
@@ -1022,8 +1049,8 @@ export class HubConnectionSupervisor {
   /**
    * Live on paper: prove it. HTTP must answer within the probe window, and so
    * must the machine socket's health ping; a socket that does not is
-   * half-open and is replaced. Legacy per-session sockets have no ping, so
-   * after a change they are replaced outright.
+   * half-open and is replaced. Recent daemon frames prove a legacy attach
+   * still answers, so a hint alone must not replace it.
    */
   private async probeNow(): Promise<void> {
     try {
@@ -1046,7 +1073,7 @@ export class HubConnectionSupervisor {
         this.probeTimer = undefined;
         if (this.machineSocket === socket && this.probePingId === id) {
           this.probePingId = undefined;
-          this.reattachDesired("Machine terminal transport stopped answering");
+          this.reattachDesired("Machine terminal transport stopped answering", true);
         }
       }, SOCKET_PROBE_TIMEOUT_MS);
       return;
@@ -1105,9 +1132,12 @@ export class HubConnectionSupervisor {
   private async openLegacyAttach(session: string): Promise<void> {
     const existing = this.sockets.get(session);
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
+    const generation = this.machineSocketGeneration;
     this.transitionAttach(session, "auth", "auth");
     const ticket = await this.request<{ ticket: string }>("POST", "/v1/auth/websocket-ticket", { session });
-    if (!this.desired) return;
+    if (!this.desired || generation !== this.machineSocketGeneration || !this.desiredSessions.has(session)) return;
+    const current = this.sockets.get(session);
+    if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)) return;
     const endpoint = new URL(`/v1/sessions/${encodeURIComponent(session)}/attach`, this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
@@ -1124,7 +1154,9 @@ export class HubConnectionSupervisor {
       this.startReadyTimeout(session, socket);
     };
     socket.onmessage = (message) => {
-      if (this.sockets.get(session) === socket) void this.handleDaemonMessage(session, message.data, frameFence);
+      if (this.sockets.get(session) !== socket) return;
+      this.legacyReadAt.set(socket, Date.now());
+      void this.handleDaemonMessage(session, message.data, frameFence);
     };
     socket.onclose = (event) => {
       const timedOut = this.timedOutSockets.has(socket);
@@ -1250,6 +1282,7 @@ export class HubConnectionSupervisor {
       };
       socket.onmessage = (event) => {
         if (this.machineSocket !== socket) return;
+        this.machineReadAt = Date.now();
         if (!this.machineSocketReady) {
           if (typeof event.data !== "string") {
             protocolFailure("Machine protocol mismatch: expected a proto 2 JSON handshake");
@@ -1819,6 +1852,11 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
 function isSupervisorMessage(message: unknown): boolean {
   return typeof message === "object" && message !== null && "SendMessage" in message;
 }
+
+/** Four heartbeat windows: a recently speaking terminal survives event-only recovery. */
+export const ATTACH_LIVENESS_MS = HEARTBEAT_INTERVAL_MS * RECONNECT_AFTER_MISSED_HEARTBEATS;
+/** Event headers alone must not reset exponential reconnect backoff. */
+export const EVENT_STREAM_STABLE_MS = 10_000;
 
 /** Reattach attempts after repeated `upstream_unavailable` refusals stop growing here: backoffDelay(3), about 8 s (cas-a355). */
 export const UPSTREAM_BACKOFF_MAX_ATTEMPT = 3;

@@ -587,6 +587,54 @@ describe("Commander live connection lifecycle", () => {
     expect(socket.readyState).toBe(TransportSocket.OPEN);
   });
 
+  it.each([false, true])("still replaces a stale or proved-offline legacy attach (offline=%s, cas-49cc)", async (offline) => {
+    transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("untrusted-attach"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] } } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    if (!offline) await vi.advanceTimersByTimeAsync(20_000);
+    hints.dispatchEvent(new Event(offline ? "offline" : "online"));
+    await vi.waitFor(() => expect(socket.readyState).toBe(3));
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Never into a dead socket" } })).toBe(false);
+    if (!offline) {
+      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+      expect(TransportSocket.instances[1]!.readyState).toBe(TransportSocket.CONNECTING);
+    }
+  });
+
+  it("resets event retry backoff only after a stream survives ten seconds (cas-49cc)", async () => {
+    const hub = transport();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("event-settle"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(2_000));
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+  });
+
   it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
     const hub = transport();
     TransportSocket.instances = [];
@@ -602,19 +650,19 @@ describe("Commander live connection lifecycle", () => {
     hub.event({ kind: "viewer_lagged" });
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     // A dispatch's IndexedDB/credential await can finish after this transition.
-    // The old socket is physically open, but recovery will replace it.
+    // Event recovery still fences sends, while recent daemon frames keep
+    // the healthy terminal available for its in-flight receipts (cas-49cc).
     expect(socket.readyState).toBe(TransportSocket.OPEN);
     const before = socket.sent.length;
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
     expect(socket.sent).toHaveLength(before);
     connection.retry();
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
-    const recovered = TransportSocket.instances[1]!;
-    recovered.open();
-    recovered.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(TransportSocket.instances).toHaveLength(1);
+    const recovered = socket;
     await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(true);
-    expect(socket.sent).toHaveLength(before);
+    expect(socket.sent).toHaveLength(before + 1);
     expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
   });
 

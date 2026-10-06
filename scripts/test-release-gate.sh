@@ -10,7 +10,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/release-portable.sh
 source "$script_dir/release-portable.sh"
 release_portable_define_sha256sum
-gate="$script_dir/release-gate.sh"
+gate="${RELEASE_GATE_TEST_GATE:-$script_dir/release-gate.sh}"
 # cas-db34: the physical spelling. macOS's $TMPDIR is under /var, a symlink
 # to /private/var, and the gate reports the resolved checkout path; fixtures
 # compare against that spelling.
@@ -102,7 +102,7 @@ path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
     "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
-    [[ ! -f "$script_dir/release-test-env.sh" ]] || cp "$script_dir/release-test-env.sh" "$repo/scripts/"
+    cp "$script_dir/release-test-env.sh" "$script_dir/release-integration-gates.py" "$repo/scripts/"
     for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
     done
@@ -470,17 +470,18 @@ test_child_environment() (
 python3 -c 'import os; assert not [k for k in os.environ if k.startswith(("CAS_RELEASE_TRAIN_", "CAS_RELEASE_GATE_"))]'
 EOF
     chmod +x "$repo/scripts/npm-env-stub"
-    output="$(GATE_FIXTURE_EXPECT_CLEAN=1 NPM="$repo/scripts/npm-env-stub" \
-        run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 \
-        --only ci-script-tests,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,hub-web-tests 2>&1 || true)"
+    local failed=0
     for row in ci-script-tests nextest doctests archive-mode snapshot-portability builtin-projections hub-web-tests; do
+        output="$(GATE_FIXTURE_EXPECT_CLEAN=1 NPM="$repo/scripts/npm-env-stub" \
+            run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only "$row" 2>&1 || true)"
         if grep -qF "PASS $row" <<<"$output"; then
             printf 'ok   %s child environment has no train/gate controls\n' "$row"
         else
             printf 'FAIL %s child environment: %s\n' "$row" "$output"
-            return 1
+            failed=$((failed + 1))
         fi
     done
+    [[ "$failed" == 0 ]]
 )
 if [[ "${1:-}" == --test-child-env-only ]]; then
     test_child_environment

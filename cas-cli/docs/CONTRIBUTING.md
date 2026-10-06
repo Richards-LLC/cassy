@@ -610,6 +610,21 @@ instead of its worktree path; ignored local environment/config files are keyed
 by contents too. New exclusions require confirming that they cannot change the
 compiled candidate or test behavior.
 
+Rolling integration runs the release gate's no-build rows before builder
+admission, plus `ci-script-tests` with every declared release-train control
+exported. `integration.json` records each named row as PASS or FAIL under
+`no_build`, bound to the integration tip. Train preflight refuses a missing,
+stale or failed row before assembly and names the blocker; rerun
+`cas factory integration-recover` after fixing the tip. Generic projects
+without Cassy's release gate keep their existing runner.
+
+All gate suite children use `scripts/release-test-env.sh`: it removes harness
+identity, train/gate control namespaces and receipt destinations, provides a
+clean temporary HOME and disables global Git configuration. Cargo and Rustup
+locations remain explicit. The parent retains its orchestration environment;
+validated host memory admission and compiler linker resource context survive
+so nested suites and linkers remain admitted without inheriting release knobs.
+
 For daemon-initiated sweeps, persist the scratch base with
 `cas config set factory.release_gate_home_dir /home/cas-release-gate/base`
 in the project's `.cas/config.toml`. The daemon passes this key to assembly

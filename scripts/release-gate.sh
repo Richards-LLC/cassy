@@ -142,7 +142,8 @@ if [[ "${1:-}" == --fast-rows ]]; then
     }
     # Keep an explicit allowlist: adding a costly full-gate row cannot silently
     # add a build or a host-dependent release precondition to lane admission.
-    set -- "$version" --only failure-log,version-literals,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene
+    integration_fast_rows="$(python3 scripts/release-integration-gates.py --fast-rows)" || exit $?
+    set -- "$version" --only "$integration_fast_rows"
 fi
 
 if [[ "$#" -ne 1 && "$#" -ne 2 && "$#" -ne 3 ]] || [[ ! "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -170,6 +171,8 @@ cd "$repo_root"
 gate_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/release-portable.sh
 source "$gate_script_dir/release-portable.sh"
+# shellcheck source=scripts/release-test-env.sh
+source "$gate_script_dir/release-test-env.sh"
 release_portable_path_add_cargo_bin
 release_portable_define_sha256sum
 
@@ -242,6 +245,8 @@ register_scratch() {
         --path "$1" register
 }
 register_scratch "$tmp_dir"
+release_test_home="$tmp_dir/test-home"
+mkdir -p "$release_test_home"
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
@@ -709,8 +714,7 @@ check_assemble_stale_base() {
     # Recovery launches factory sweep children.  Keep the supervisor's
     # identity out of this process boundary so the executable fixture proves
     # the GH #901 regression cannot be hidden by the invoking shell.
-    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
-        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+    release_test_child env \
         python3 "$fixture"
 }
 
@@ -779,7 +783,7 @@ check_src_runtime_manifest_dir_reads() {
 }
 
 check_fixture_paths() {
-    "$cargo_bin" nextest run -p cas --test builtin_archive_portability_test \
+    release_test_child "$cargo_bin" nextest run -p cas --test builtin_archive_portability_test \
         builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime || return 1
     check_src_runtime_manifest_dir_reads
 }
@@ -792,7 +796,7 @@ install_hub_web_dependencies() {
     mkdir -p "$tmp_dir/npm-cache"
     (cd hub-web && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
-        "$npm_bin" ci --no-audit --no-fund) || return $?
+        release_test_child "$npm_bin" ci --no-audit --no-fund) || return $?
     : >"$tmp_dir/hub-web-npm-installed"
 }
 
@@ -804,8 +808,8 @@ check_hub_web_tests() {
     fi
     install_hub_web_dependencies || return $?
     (cd hub-web && \
-        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" "$npm_bin" run typecheck && \
-        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" "$npm_bin" test)
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" release_test_child "$npm_bin" run typecheck && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" release_test_child "$npm_bin" test)
 }
 
 check_hub_web_dist_drift() {
@@ -818,7 +822,7 @@ check_hub_web_dist_drift() {
     install_hub_web_dependencies || return $?
     (cd hub-web && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
-        "$npm_bin" run build && \
+        release_test_child "$npm_bin" run build && \
         git diff --exit-code -- dist)
 }
 
@@ -827,7 +831,7 @@ check_hub_web_visual_qa() {
     if [[ -n "${RELEASE_GATE_HUB_WEB_VISUAL_QA:-}" ]]; then
         artifact_dir="$row_log_dir/hub-web-visual-qa"
         mkdir -p "$artifact_dir"
-        "$RELEASE_GATE_HUB_WEB_VISUAL_QA" "$artifact_dir"
+        release_test_child "$RELEASE_GATE_HUB_WEB_VISUAL_QA" "$artifact_dir"
         return $?
     fi
     # Releases before Commander carried no web package. Keep the row visible in
@@ -848,15 +852,15 @@ check_hub_web_visual_qa() {
     (cd hub-web && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
         PLAYWRIGHT_BROWSERS_PATH="$tmp_dir/playwright" \
-        "$npm_bin" exec --yes --package=playwright -- playwright install chromium && \
+        release_test_child "$npm_bin" exec --yes --package=playwright -- playwright install chromium && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
         PLAYWRIGHT_BROWSERS_PATH="$tmp_dir/playwright" \
-        "$npm_bin" exec --yes --package=playwright -- node scripts/visual-qa.mjs \
+        release_test_child "$npm_bin" exec --yes --package=playwright -- node scripts/visual-qa.mjs \
             --artifact-dir "$artifact_dir")
 }
 
 check_workspace_tests() {
-    "$cargo_bin" check --workspace --tests
+    release_test_child "$cargo_bin" check --workspace --tests
 }
 
 # A final release-profile artifact catches dependency backends that are absent
@@ -882,7 +886,7 @@ check_release_binary_isa() {
     # Use the same locked target/profile and C/C++ baseline as release.sh.
     # Keep the publisher's linker/rustflags: the native assembly compiler guard
     # installs its own linker and would change the cross-target artifact.
-    env PATH="$(dirname "$ZIG"):$PATH" \
+    release_test_child env PATH="$(dirname "$ZIG"):$PATH" \
         CFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         CXXFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         "$cargo_bin" zigbuild -p cas --release --target "$target" --locked || return $?
@@ -890,7 +894,7 @@ check_release_binary_isa() {
     cp "$target_dir/$target/release/cas" "$staging/cas" || return $?
     # Audit the packaging copy rather than a dev/test executable. This also
     # retains the auditor's deterministic baseline and seeded-EVEX self-tests.
-    "$repo_root/scripts/test-check-portable-x86_64-isa.sh" "$staging/cas"
+    release_test_child "$repo_root/scripts/test-check-portable-x86_64-isa.sh" "$staging/cas"
 }
 
 check_macos() {
@@ -951,7 +955,7 @@ else
 fi
 EOF
     chmod +x "$macos_cc"
-    env RUSTC_WRAPPER= \
+    release_test_child env RUSTC_WRAPPER= \
         "CC_aarch64-apple-darwin=$macos_cc" \
         "CC_aarch64_apple_darwin=$macos_cc" \
         TARGET_CC="$macos_cc" \
@@ -1058,21 +1062,18 @@ check_nextest() {
     fi
     if [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]]; then
         run_assembly_compile nextest \
-            env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
-            -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+            bash "$gate_script_dir/release-test-env.sh" --home "$release_test_home" env \
             "$cargo_bin" nextest run --workspace "${selection[@]}" --no-run || return $?
         await_assembly_test_slot nextest || return $?
     fi
-    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
-        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
-        CARGO="$cargo_bin" "$repo_root/scripts/run-verified-tests.sh" \
+    release_test_child env \
+        CAS_ROOT="${hermetic_cas_root:-}" CARGO="$cargo_bin" "$repo_root/scripts/run-verified-tests.sh" \
         nextest run --workspace "${selection[@]}" --no-fail-fast
 }
 
 check_doctests() {
-    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
-        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
-        CARGO="$cargo_bin" "$repo_root/scripts/run-verified-tests.sh" test -p cas --doc
+    release_test_child env \
+        CAS_ROOT="${hermetic_cas_root:-}" CARGO="$cargo_bin" "$repo_root/scripts/run-verified-tests.sh" test -p cas --doc
 }
 
 # A populated proxy.toml in an ancestor .cas is visible to any test that
@@ -1215,8 +1216,7 @@ check_archive_mode() {
         status=$?
         return "$status"
     }
-    local -a compile_command=(env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
-        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+    local -a compile_command=(bash "$gate_script_dir/release-test-env.sh" --home "$release_test_home" env \
         "$cargo_bin" nextest archive --workspace --archive-file "$archive")
     if [[ -n "${CAS_RELEASE_GATE_ASSEMBLY_SYNC_DIR:-}${CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY:-}" ]]; then
         compile_command=(run_assembly_compile archive-mode "${compile_command[@]}")
@@ -1263,9 +1263,8 @@ check_archive_mode() {
     # exercise the queue consumer's independent archive environment.
     if (
         cd "$archive_dir"
-        env -u CAS_ROOT -u COLUMNS -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE \
-            -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
-            HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
+        release_test_child env -u COLUMNS \
+            TMPDIR="$archive_tmp" \
             CARGO_HOME="$archive_cargo_home" RUSTC_WRAPPER=/nonexistent/sccache \
             INSTA_WORKSPACE_ROOT="$remap" CARGO="$cargo_bin" \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
@@ -1301,7 +1300,7 @@ check_snapshot_portability() {
     # COLUMNS must be absent, rather than merely empty: terminal-width probes
     # commonly distinguish the two states.
     local status
-    env -u COLUMNS INSTA_UPDATE=no TMPDIR="$deep_tmp" \
+    release_test_child env -u COLUMNS INSTA_UPDATE=no TMPDIR="$deep_tmp" \
         "$cargo_bin" nextest run -p cas --test component_output_test
     status=$?
     # Never leave insta's pending-snapshot artifacts behind: they would fail
@@ -1311,7 +1310,7 @@ check_snapshot_portability() {
 }
 
 check_builtin_projections() {
-    "$cargo_bin" nextest run -p cas --test builtin_flavor_drift_test \
+    release_test_child "$cargo_bin" nextest run -p cas --test builtin_flavor_drift_test \
         root_managed_projections_stay_synced_and_project_skills_stay_ignored || return $?
     [[ -x "$reference_history_script" ]] || {
         printf 'builtin-projections: missing executable %s\n' "$reference_history_script"
@@ -1438,7 +1437,7 @@ check_test_env() {
         python3 scripts/check-test-env.py || return $?
     fi
     if [[ -f scripts/test-check-test-env.py ]]; then
-        python3 scripts/test-check-test-env.py
+        release_test_child python3 scripts/test-check-test-env.py
     fi
 }
 
@@ -1453,7 +1452,7 @@ check_test_shape() {
         python3 scripts/check-test-shape.py || return $?
     fi
     if [[ -f scripts/test-check-test-shape.py ]]; then
-        python3 scripts/test-check-test-shape.py
+        release_test_child python3 scripts/test-check-test-shape.py
     fi
 }
 
@@ -1467,18 +1466,7 @@ check_ci_script_tests() (
     # Nested gate self-tests own their receipts and synchronization. Otherwise
     # they truncate this row's timing.tsv and append synthetic failed rows.
     # Keep the outer gate's controls intact by scrubbing only this subshell.
-    local key
-    while IFS= read -r key; do
-        case "$key" in
-            CAS_RELEASE_GATE_*|CAS_RELEASE_ARTIFACTS_ROOT|CAS_RELEASE_RECEIPTS_RUN_DIR|VERIFIED_TEST_COUNT_FILE|VERIFIED_TEST_LOG)
-                unset "$key"
-                ;;
-        esac
-    done < <(compgen -e)
-    # Also discard inherited make modes: -n/-t/-i can manufacture a PASS.
-    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
-        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID -u CAS_SESSION_ID -u CAS_ROOT \
-        -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKELEVEL \
+    release_test_child \
         make -C cas-cli test-ci-tiers
 )
 

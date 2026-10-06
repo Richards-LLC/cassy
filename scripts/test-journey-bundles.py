@@ -75,6 +75,24 @@ class BundleTests(unittest.TestCase):
         self.fold()
         self.assertEqual(json.loads((main / "bundle.json").read_text())["verdict"], "FAIL")
 
+    def test_same_leaf_title_variants_keep_both_receipts_and_full_title_paths(self):
+        for theme in ["light", "dark"]:
+            part = self.receipt("HUB-J17", "phone feedback", part=f"phone-feedback-{theme}")
+            result = json.loads((part / "result.json").read_text())
+            result.update(project="journeys", title_path=["fleet-ops.journey.ts", f"phone feedback {theme}", "HUB-J17 phone feedback"])
+            (part / "result.json").write_text(json.dumps(result))
+            (part / "receipt.webm").write_text(theme)
+        self.assertEqual(self.fold(), 0)
+        directory = self.artifacts / "journeys/HUB-J17"
+        data = json.loads((directory / "bundle.json").read_text())
+        parts = data["files"]["parts"]
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(len(data["files"]["cells"]), 2)
+        self.assertEqual({part["title"] for part in parts}, {"phone feedback"})
+        self.assertEqual({part["project"] for part in parts}, {"journeys"})
+        self.assertEqual({part["title_path"][1] for part in parts}, {"phone feedback light", "phone feedback dark"})
+        self.assertEqual({(directory / part["receipt"]).read_text() for part in parts}, {"light", "dark"})
+
     def test_real_hub_part_preserves_transport_and_its_already_scrubbed_trace(self):
         part = self.receipt("HUB-J11", "real disposable hub", part="real-hub-run-0")
         result = json.loads((part / "result.json").read_text())

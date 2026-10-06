@@ -269,6 +269,19 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(row.locator(".conversation-when")).toBeVisible();
     expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
     await expect(row.locator(".conversation-machine")).toHaveAttribute("title", "Forge build box with an unusual hostname");
+    // cas-7374: the ellipsis is for the resting row only. Reached from the
+    // keyboard, the row shows the whole machine name, wrapped in its title
+    // column, still clear of the time stamp and with no leading dot.
+    await row.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(row).toBeFocused();
+    expect(await row.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
+    expect(await clearOfTime()).toEqual({ ellipsised: false, clear: true });
+    expect(await noLeadingDot()).toBe(true);
+    await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-focused.png") });
+    await row.evaluate((node) => (node as HTMLElement).blur());
+    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
     // Phone width: the same, with the list as the whole page.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();

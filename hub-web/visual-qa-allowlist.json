@@ -64,6 +64,16 @@
       "type": "content-overflow",
       "selector": "#paired-machines-toggle > span:nth-child(2)",
       "reason": "cas-c19d accepts the shared runner's companion overflow finding for the same overlong-machine-name ellipsis: the label carries the full name as its title and in the button's spoken name, and Paired machines shows the name whole."
+    },
+    {
+      "type": "clipped-content",
+      "selector": ".conversation-row:not([aria-current=\"true\"]) .conversation-machine-name",
+      "reason": "cas-7374/cas-2078 accept the resting conversation row's single-line machine-name ellipsis (cas-766c, cas-1ca1): the row's .conversation-machine title and its spoken name carry the whole machine name, and the focused or open row shows it whole, wrapped in the title column. Only the resting row is truncated."
+    },
+    {
+      "type": "content-overflow",
+      "selector": ".conversation-row:not([aria-current=\"true\"]) .conversation-machine-name",
+      "reason": "cas-7374/cas-2078 accept the resting conversation row's single-line machine-name ellipsis (cas-766c, cas-1ca1): the row's .conversation-machine title and its spoken name carry the whole machine name, and the focused or open row shows it whole, wrapped in the title column. Only the resting row is truncated."
     }
   ]
 }

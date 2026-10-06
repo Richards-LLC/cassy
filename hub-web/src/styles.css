@@ -1726,6 +1726,11 @@ dialog form > *,
    the line, so the clipping span gets 2px of block padding (given back by the
    margin) to hold whole glyphs; the CI visual gate flagged the shaved tops. */
 .conversation-machine-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-block: 2px; margin-block: -2px; }
+/* cas-7374/cas-2078: the resting row keeps that deliberate ellipsis, but the
+   focused or open row shows the whole machine name, wrapped inside the title
+   column, so keyboard and touch users can read it without the hover title. */
+.conversation-row:is(:focus-visible, [aria-current="true"]) .conversation-machine { white-space: normal; }
+.conversation-row:is(:focus-visible, [aria-current="true"]) .conversation-machine-name { overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 .conversation-supervisor { flex-basis: 100%; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }
 .conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }

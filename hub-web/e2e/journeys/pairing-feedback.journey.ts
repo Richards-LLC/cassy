@@ -41,6 +41,8 @@ for (const width of [390, 1280]) {
           await expect(feedback).toContainText("Pairing timed out after 10s");
           await expect(feedback).toContainText("Allow Local network access");
           await expect(feedback).toContainText("Pair again");
+          await expect(feedback).toContainText("press Pair again");
+          await expect(feedback).not.toContainText("tap Pair");
           await expect(feedback).toBeInViewport({ ratio: 1 });
           await expect(feedback).toBeFocused();
           await expect(feedback).toMatchAriaSnapshot('- alert: /Pairing timed out after 10s/');
@@ -70,6 +72,7 @@ for (const width of [390, 1280]) {
           const feedback = dialog.locator(".pair-status");
           await expect(feedback).toHaveAttribute("role", "status");
           await expect(feedback).toContainText("Updating this browser installation");
+          expect(await dialog.evaluate(el => el.contains(document.activeElement)), "retry focus remains in the dialog").toBe(true);
           blocked = false;
           await held!.fallback();
           await expect(dialog).toBeHidden();
@@ -83,9 +86,16 @@ for (const width of [390, 1280]) {
           await page.goto(`./#pair=${"i".repeat(43)}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=machine:read,session:read,pane:read`);
           const dialog = page.locator("#pair-dialog");
           await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
-          await dialog.getByRole("textbox", { name: "Name for this browser" }).fill("Work laptop");
+          const browserName = dialog.getByRole("textbox", { name: "Name for this browser" });
+          await browserName.fill("   ");
+          await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+          await expect(browserName).toBeFocused();
+          expect(await browserName.evaluate(el => (el as HTMLInputElement).validity.valid)).toBe(false);
+          expect(hub.exchanges).toHaveLength(0);
+          await browserName.fill("  Work laptop  ");
           await dialog.getByRole("button", { name: "Pair", exact: true }).click();
           await expect(dialog).toBeHidden();
+          expect([...hub.installations.values()][0]!.device_label).toBe("Work laptop");
         });
         await journey.stage("Recognize this browser without reading protocol fields", async () => {
           await showConversationList(page);
@@ -121,6 +131,22 @@ for (const width of [390, 1280]) {
           await expect(technical).not.toHaveAttribute("open", "");
           await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
           await expect(page.getByRole("button", { name: "Browser installations on Atlas", exact: true })).toBeFocused();
+          const longName = "LongBrowserName".repeat(7);
+          [...hub.installations.values()][0]!.device_label = longName;
+          await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
+          const longHeading = page.locator(".installation-inventory-row h3");
+          await expect(longHeading).toHaveText(`${longName} · This browser`);
+          const bounds = await longHeading.evaluate(el => {
+            const heading = el.getBoundingClientRect();
+            const row = el.closest(".installation-inventory-row")!.getBoundingClientRect();
+            const sheet = el.closest("dialog")!.getBoundingClientRect();
+            return { headingRight: heading.right, rowRight: row.right, sheetRight: sheet.right };
+          });
+          expect(bounds.headingRight).toBeLessThanOrEqual(bounds.sheetRight);
+          expect(bounds.rowRight).toBeLessThanOrEqual(bounds.sheetRight);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+          await page.screenshot({ path: info.outputPath("inventory-long.png") });
+          await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
         });
       });
     });

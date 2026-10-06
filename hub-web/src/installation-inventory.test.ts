@@ -67,7 +67,7 @@ describe("recognizable browser installations (cas-2e77)", () => {
   });
 
   it("revokes the consented exact peer ID while keeping human access state and status consistent", async () => {
-    const peer = { ...own, device_id: "peer/id", device_label: "Old tablet" };
+    const peer = { ...own, device_id: "peer/id", device_label: "  Old tablet  " };
     const { dialog, request, ownRevoke } = await inventory([peer]);
     const consent = vi.spyOn(window, "confirm").mockReturnValue(true);
     const button = dialog.querySelector<HTMLButtonElement>(".installation-inventory-row button")!;

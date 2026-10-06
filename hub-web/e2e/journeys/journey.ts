@@ -97,7 +97,9 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
       : undefined;
     // Concurrent repeats must keep their captures instead of clearing another
     // attempt's files through claimReceiptDirectory's retry cleanup.
-    const root = testInfo.project.repeatEach > 1 ? join(RECEIPTS, `repeat-${testInfo.repeatEachIndex + 1}`) : RECEIPTS;
+    // CLI --repeat-each does not change project.repeatEach. The first attempt
+    // keeps the ordinary bundle path; every later repeat has its own root.
+    const root = testInfo.repeatEachIndex > 0 ? join(RECEIPTS, `repeat-${testInfo.repeatEachIndex + 1}`) : RECEIPTS;
     const dir = part ? join(root, id, "parts", part) : join(root, id);
     claimReceiptDirectory(dir, testInfo.title);
     const stages: Stage[] = [];

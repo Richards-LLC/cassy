@@ -319,6 +319,8 @@ class ChildScope:
     """Stop and reap process groups before any owned directory is removed."""
     def __init__(self):
         self.children = set()
+        # Called with each child's process group id right after it starts.
+        self.spawn_hooks = []
         self.signalled = set()
         self.interrupted = False
         self.spawning = False
@@ -391,6 +393,8 @@ class ChildScope:
             try:
                 child = subprocess.Popen(command, env=child_env, start_new_session=True, pass_fds=tuple(inherited), **kwargs)
                 self.children.add(child)
+                for hook in list(self.spawn_hooks):
+                    hook(child.pid)
             finally:
                 self.spawning = False
             if self.cancelled:

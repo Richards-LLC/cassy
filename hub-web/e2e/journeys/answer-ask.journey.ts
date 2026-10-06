@@ -270,7 +270,13 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
 test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the row ages (cas-9e33, cas-24fe)", journeyPart, async ({ page, journey }) => {
   // The machine's clock runs five minutes ahead, and nothing in the thread has
   // shown it yet: no history, one answer arriving live.
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], clockAheadMs: { [PELICAN]: 300_000 } });
+  // The machine's clock moves with the browser's: when the page skips ahead,
+  // so do its stamps. Otherwise a stored copy that lands before the live answer
+  // dates that answer by a stamp the skip left behind.
+  let skipped = 0;
+  const time = { now: () => journeyNow() + skipped, delay: (callback: () => void, ms: number) => void setTimeout(callback, ms) };
+  const skip = async (ms: number) => { await page.clock.fastForward(ms); skipped += ms; };
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], clockAheadMs: { [PELICAN]: 300_000 }, time });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const log = page.getByRole("log");
   let before: string[] = [];
@@ -292,7 +298,7 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
   });
 
   await journey.stage("Reload three minutes later", async () => {
-    await page.clock.fastForward(180_000);
+    await skip(180_000);
     await page.reload();
     await openConversation(page, "cas-src");
     await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
@@ -308,7 +314,7 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
   });
 
   await journey.stage("Come back five minutes later", async () => {
-    await page.clock.fastForward(300_000);
+    await skip(300_000);
     await expect(list.locator(".conversation-when")).toHaveText("8m");
     // The reload measured the lead, so the next live answer says the clock is ahead.
     await openConversation(page, "cas-src");

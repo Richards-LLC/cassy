@@ -193,7 +193,7 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
 }
 
 /** Two animation frames: let the UI paint before a screenshot. */
-async function settle(page: Page): Promise<void> {
+export async function settle(page: Page): Promise<void> {
   // A test that holds the page clock (ProtocolClock) holds animation frames
   // too; the screenshot then shows the held frame, after at most a short
   // real-time wait instead of a hang (cas-1f7e).

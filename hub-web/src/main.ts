@@ -37,7 +37,7 @@ import { ensureMachineConnection, replaceMachineConnection } from "./connection-
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft, type PairingStep } from "./pairing-draft";
-import { bindPairingDialogCancel } from "./pairing-dialog";
+import { bindPairingDialogCancel, focusPairingFeedback } from "./pairing-dialog";
 import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
 import { PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
@@ -1146,6 +1146,12 @@ async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> 
 async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {
   const invitation = pendingPairing?.kind === "invitation" ? pendingPairing : null;
   if (!invitation) throw new Error("Create a pairing request or open a one-time pairing link first.");
+  const browserName = form.querySelector<HTMLInputElement>('input[name="device"]');
+  if (browserName) {
+    browserName.value = browserName.value.trim();
+    browserName.setCustomValidity(browserName.value ? "" : "Enter a name for this browser.");
+    if (!browserName.reportValidity()) return false;
+  }
   const values = new FormData(form);
   pairingDraft = updatePairingDraft(pairingDraft, values.entries(), !invitation.hubUrl);
   const operation = pairingOperations.begin();
@@ -1153,6 +1159,9 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   exchangeOperationGeneration = operation.generation;
   pairingStatus = "Updating this browser installation… Cancel restores its previous access.";
   render();
+  // Pair is now disabled; keep the keyboard in the dialog on its available
+  // next action rather than letting the browser drop focus to the body.
+  document.querySelector<HTMLButtonElement>("#pair-dialog #pair-cancel")?.focus({ preventScroll: true });
   let machine: StoredMachine;
   try {
     machine = await installationAccess.pair({
@@ -1257,6 +1266,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
       // this attempt consumed anything; the error copy preserves that uncertainty.
       pairingStatus = error.message;
       render(false);
+      focusPairingFeedback(document.querySelector<HTMLDialogElement>("#pair-dialog"));
       throw error;
     }
     if (error instanceof PairingExchangeError) {
@@ -1266,6 +1276,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
       pairingDraft = createPairingDraft(location.origin);
       pairingStatus = pairingStorageClearFailureMessage(error.message, cleared);
       render(false);
+      focusPairingFeedback(document.querySelector<HTMLDialogElement>("#pair-dialog"));
     } else {
       render();
     }
@@ -1391,6 +1402,9 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           const machine = result.invitation.machineLabel ?? result.invitation.hubId;
           pairingStatus = `Approved — this browser's reachability check for ${machine} failed. Check Tailscale (VPN), browser site permissions (Local network access), and Private DNS or secure DNS, then press Pair to try this approved invitation.`;
+          render();
+          focusPairingFeedback(document.querySelector<HTMLDialogElement>("#pair-dialog"));
+          return;
         }
         render();
       }
@@ -3606,6 +3620,7 @@ function render(captureDraft = true): void {
   const pairedDialogWasOpen = machineDialog?.open === true;
   if (pairedDialogWasOpen) machineDialog!.remove();
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
+  const pairingFeedbackWasFocused = pairDialogWasOpen && document.activeElement?.matches("#pair-dialog .pair-status") === true;
   // The open conversation's grid (its thread, connection card and hidden pane
   // host) survives a rebuild, so a heartbeat never remounts the thread.
   const preservedGrid = selectedThreadKey && currentGrid?.dataset.sessionKey === selectedThreadKey ? currentGrid : undefined;
@@ -3671,7 +3686,11 @@ function render(captureDraft = true): void {
     document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
     queueMicrotask(() => document.querySelector<HTMLInputElement>("#command-palette-query")?.focus());
   }
-  if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+  if (pairDialogWasOpen) {
+    const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+    dialog?.showModal();
+    if (pairingFeedbackWasFocused) focusPairingFeedback(dialog);
+  }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
@@ -4769,6 +4788,8 @@ function bindEvents(): void {
   }
   const pairForm = document.querySelector<HTMLFormElement>("#pair-form");
   const pairCancel = document.querySelector<HTMLButtonElement>("#pair-cancel");
+  const pairDevice = pairForm?.querySelector<HTMLInputElement>('input[name="device"]');
+  if (pairDevice) pairDevice.addEventListener("input", () => pairDevice.setCustomValidity(""));
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
   const pairCreate = document.querySelector<HTMLButtonElement>("#pair-create");
   const pairDialog = document.querySelector<HTMLDialogElement>("#pair-dialog");

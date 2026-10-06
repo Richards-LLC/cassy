@@ -20,3 +20,14 @@ export function bindPairingDialogCancel(
     cancel();
   });
 }
+
+/** A failed attempt owns its visible advice, rather than reopening a field. */
+export function focusPairingFeedback(dialog: HTMLDialogElement | null): void {
+  const feedback = dialog?.querySelector<HTMLElement>(".pair-status");
+  if (!dialog?.open || !feedback || feedback.hidden || !feedback.textContent?.trim()) return;
+  feedback.setAttribute("role", "alert");
+  feedback.focus({ preventScroll: true });
+  // Centering clears the sticky action row on short screens; focus alone can
+  // put the last line under Pair. No animation delays the failure feedback.
+  feedback.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+}

@@ -95,7 +95,7 @@ function addressHelp(pageOrigin: string, open: boolean): string {
 }
 
 function pairStatusMarkup(pairingStatus: string): string {
-  return `<p class="pair-status" role="status"${pairingStatus ? "" : " hidden"}>${escapeHtml(pairingStatus)}</p>`;
+  return `<p id="pair-status" class="pair-status" role="status" tabindex="-1"${pairingStatus ? "" : " hidden"}>${escapeHtml(pairingStatus)}</p>`;
 }
 
 /**

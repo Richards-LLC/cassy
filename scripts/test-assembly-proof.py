@@ -27,6 +27,11 @@ class ReceiptTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # A private admission pool: live worker suites on this host must not
+        # make proof fixtures wait or time out.
+        patcher = mock.patch.object(proof, "HOST_MEMORY_DIRECTORY", self.root / ".host-memory")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.git("init", "-q")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("config", "user.name", "Fixture")

@@ -522,6 +522,38 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.attachSnapshot("healthy")?.phase).toBe("live");
   });
 
+  it.each([false, true])("measures current ready transport reads without relaxing the send fence (multiplex=%s, cas-49cc)", async (multiplex) => {
+    const hub = transport(multiplex);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("read-health"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const pending = connection.attach("healthy");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    if (multiplex) socket.receive({ proto: 2 });
+    await pending;
+    const receive = (message: unknown) => socket.receive(multiplex ? { channel: "pty:healthy", message } : message);
+    receive({ Welcome: { state: { panes: [] } } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    expect(connection.hasLiveAttach("missing")).toBe(false);
+    hub.endEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Still fenced during event recovery" } })).toBe(false);
+    // Move the read clock without running retry timers or heartbeat signing.
+    vi.setSystemTime(Date.now() + 20_000);
+    expect(connection.hasLiveAttach("healthy")).toBe(false);
+    receive({ StateUpdate: { state: { panes: [] } } });
+    expect(connection.hasLiveAttach("healthy")).toBe(true);
+    socket.close(1000);
+    expect(connection.hasLiveAttach("healthy")).toBe(false);
+  });
+
   it("keeps a speaking legacy attach after a successful network hint (cas-49cc)", async () => {
     const hub = transport();
     const hints = new EventTarget();

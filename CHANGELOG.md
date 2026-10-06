@@ -58,6 +58,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The composer's "will go out by itself" line shows only while a message is
   actually held, and clears once it is delivered, including when another tab
   delivered it.
+- Sending after this device's control of the session has lapsed takes control
+  and then sends; the "Taking control of … to deliver this message" notice now
+  clears as soon as control is held instead of staying under the reply.
+- A refused or unavailable send settles against the claim that sent it, so
+  Cancel removes a waiting message and a late refusal can't put a newer Retry
+  back on hold.
+- A resolved delivery notice stays resolved after a reload: notices are no
+  longer kept in the device's reply journal, and older journaled notices are
+  pruned, so they can't come back as Blocker bubbles in the conversation.
 - A reply counts as delivered to a device only after that browser stores it:
   the browser sends `OperatorReplyPersisted` and the hub records a per-device
   receipt (migration m264 `operator_reply_device_receipts`). Reply captions

@@ -522,6 +522,66 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.attachSnapshot("healthy")?.phase).toBe("live");
   });
 
+  it("keeps a speaking legacy attach after a successful network hint (cas-49cc)", async () => {
+    const hub = transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("healthy-hint"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] } } });
+    const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+    hints.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket")).toHaveLength(1);
+  });
+
+  it("bounds 30 seconds of 1Hz SSE flaps without redialing a speaking attach (cas-49cc)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    class SpeakingSocket extends TransportSocket {
+      constructor(url: URL) {
+        super(url);
+        queueMicrotask(() => { this.open(); this.receive({ Welcome: { state: { panes: [] } } }); });
+      }
+    }
+    vi.stubGlobal("WebSocket", SpeakingSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const retries: number[] = [];
+    const connection = supervisor(await storedMachine("flapping-events"), state => {
+      if (state.phase === "backoff") retries.push(state.retryInMs!);
+    });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("healthy");
+    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    const socket = TransportSocket.instances[0]!;
+    const pulse = setInterval(() => {
+      socket.receive({ StateUpdate: { state: { panes: [] } } });
+      try { hub.endEvents(); } catch { /* no stream open during backoff */ }
+    }, 1_000);
+    for (let second = 0; second < 30; second++) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    clearInterval(pulse);
+    expect(hub.streams.length).toBeLessThanOrEqual(6);
+    expect(retries.slice(0, 4)).toEqual([1_000, 2_000, 4_000, 8_000]);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket")).toHaveLength(1);
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+  });
+
   it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
     const hub = transport();
     TransportSocket.instances = [];

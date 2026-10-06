@@ -166,8 +166,9 @@ class AdmissionTests(unittest.TestCase):
         for role, mode in [('proof', fcntl.LOCK_SH), ('worker', fcntl.LOCK_EX)]:
             with self.subTest(role=role), host.private_file(self.pool/'budget.lock') as budget:
                 fcntl.flock(budget, mode)
-                with self.assertRaisesRegex(ValueError, 'deadline expired'):
-                    with self.admit('worker'): self.fail('admitted over legacy lease')
+                for applicant in ('proof', 'worker'):
+                    with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                        with self.admit(applicant): self.fail('admitted over legacy lease')
 
     def test_cas_4cb9_legacy_proof_intent_waits_for_new_worker(self):
         with self.admit('worker'), host.private_file(self.pool/'intent.lock') as intent:
@@ -191,6 +192,45 @@ class AdmissionTests(unittest.TestCase):
         (self.pool/'slot-0.lock').symlink_to(self.root/'target')
         with self.assertRaises(OSError):
             with self.admit('worker'): self.fail('unsafe slot admitted')
+
+    def test_cas_4cb9_proof_window_excludes_another_proof(self):
+        with self.admit('proof'):
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                with self.admit('proof'): self.fail('parallel proof admitted')
+
+    def test_cas_4cb9_orphan_child_keeps_weight_and_proof_exclusion(self):
+        marker, release = self.root/'orphan-started', self.root/'orphan-release'
+        program = ('import pathlib,time;pathlib.Path(' + repr(str(marker)) + ').touch();'
+                   '\nwhile not pathlib.Path(' + repr(str(release)) + ').exists(): time.sleep(.01)')
+        launcher = f'''import os,sys,pathlib,subprocess,time
+sys.path.insert(0,{str(ROOT/'scripts')!r})
+import host_memory as host
+with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=pathlib.Path({str(self.pool)!r})) as (env,fds):
+    subprocess.Popen([sys.executable,'-c',{program!r}],env=env,pass_fds=fds)
+    while not pathlib.Path({str(marker)!r}).exists(): time.sleep(.01)
+    os._exit(0)
+'''
+        wrapper = subprocess.Popen([sys.executable, '-c', launcher], env=self.env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            self.wait_for_markers([marker])
+            self.assertEqual(wrapper.wait(timeout=3), 0)
+            low = dict(HIGH, budget_bytes=8*GIB)
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                with host.admission('worker', self.env, lambda _: low, directory=self.pool,
+                                    wait_secs=.1, poll_secs=.01, report=self.events.append):
+                    self.fail('orphan reservation lost')
+            with self.admit('worker', estimate_bytes=GIB):
+                self.assertEqual(self.events[-1]['reserved_bytes'], 4*GIB)
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                with self.admit('proof'): self.fail('proof started over orphan')
+        finally:
+            release.touch()
+            if wrapper.poll() is None: wrapper.kill()
+            wrapper.communicate(timeout=3)
+        with self.admit('proof'): pass
+        with self.admit('worker'):
+            self.assertEqual(self.events[-1]['reserved_bytes'], 0)
 
     def wait_for_proof(self, child, marker):
         # Node/Python startup can exceed a fixed sleep under assembly load.

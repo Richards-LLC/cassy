@@ -96,7 +96,7 @@ def estimate(command, cwd=None, depth=0):
         return max(weights, default=heavy)
     if name == 'tsc' and not any(arg.startswith('--watch') or arg == '-w' for arg in args):
         return host_memory.GIB
-    if name == 'vite' and args[:1] == ['build'] and '--watch' not in args:
+    if name == 'vite' and args[:1] == ['build'] and not any(arg.startswith('--watch') for arg in args):
         return host_memory.GIB
     if name in ('node', 'nodejs') and args:
         script = Path(args[0]).name
@@ -107,8 +107,7 @@ def estimate(command, cwd=None, depth=0):
             return 2 * host_memory.GIB
         if script == 'generate-tokens.mjs':
             return host_memory.GIB
-    if name == 'vitest' and not any(arg in ('--watch', '-w', '--browser') or
-                                    arg.startswith('--browser.') for arg in args):
+    if name == 'vitest' and not any(arg == '-w' or arg.startswith(('--watch', '--browser')) for arg in args):
         cap = None
         for index, arg in enumerate(args):
             if arg.startswith('--maxWorkers='): cap = arg.split('=', 1)[1]

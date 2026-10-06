@@ -124,7 +124,7 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
     started = time.monotonic()
     with private_file(directory / 'priority.lock') as priority, \
          private_file(directory / 'intent.lock') as intent, private_file(directory / 'budget.lock') as budget:
-        priority_held = intent_held = budget_held = False
+        priority_held = intent_held = False
         slot = None
         try:
             while True:
@@ -137,11 +137,12 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
                         fcntl.flock(priority, (fcntl.LOCK_EX if role == 'proof' else fcntl.LOCK_SH) | fcntl.LOCK_NB)
                         priority_held = True
                     if not intent_held:
+                        if role == 'worker': reason = 'proof running'
                         fcntl.flock(intent, (fcntl.LOCK_EX if role == 'proof' else fcntl.LOCK_SH) | fcntl.LOCK_NB)
                         intent_held = True
                     reason = 'worker suite running'
-                    fcntl.flock(budget, (fcntl.LOCK_SH if role == 'proof' else fcntl.LOCK_EX) | fcntl.LOCK_NB)
-                    budget_held = True
+                    # EX also drains old proofs, which only hold budget SH.
+                    fcntl.flock(budget, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     # Workers use budget.lock only as an allocation mutex. Old
                     # worker EX and proof SH leases still exclude new admissions.
                     if role == 'worker':
@@ -155,14 +156,12 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
                             slot.truncate()
                             slot.flush()
                             fcntl.flock(budget, fcntl.LOCK_UN)
-                            budget_held = False
                         emit(role, 'admitted', started, report, memory)
                         break
                     slot.close()
                     slot = None
                     reason = 'worker suite estimate + headroom exceeds fresh memory budget'
                     fcntl.flock(budget, fcntl.LOCK_UN)
-                    budget_held = False
                 except BlockingIOError:
                     if role == 'worker' and priority_held:
                         try:

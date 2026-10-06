@@ -206,6 +206,18 @@ class SelectionTests(unittest.TestCase):
                 self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J2', 'HUB-J3'})
                 self.assertTrue(all('uncertain-source-parser' in j['reason'] for j in result['journeys']))
 
+    def test_unterminated_regex_cannot_yield_empty_or_narrow_selection(self):
+        path = 'hub-web/e2e/fixture.ts'
+        self.write(path, 'export function replyOnly() { return /ready/.test(value); }\n')
+        base = self.commit()
+        self.write(path, 'export function replyOnly() { return /unterminated\n}\n')
+        head = self.commit()
+        for args, kwargs in [((base, head), {}), (('--paths', path), {'base': base, 'head': head}), (('--paths', path), {'head': head})]:
+            with self.subTest(args=args, kwargs=kwargs):
+                result = json.loads(self.run_selector(*args, **kwargs).stdout)
+                self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J2', 'HUB-J3'})
+                self.assertTrue(all('uncertain-source-parser:Unterminated regex literal' in j['reason'] for j in result['journeys']))
+
     def test_shared_fixture_option_method_narrows_to_users(self):
         self.write('hub-web/e2e/fixture.ts', 'export class Double {\n private operation(route: unknown): void {\n const fleet = this.options.fleet;\n if (!fleet) return;\n fleet.count = 1;\n }\n}\n')
         spec = self.root / 'hub-web/e2e/fleet.journey.ts'

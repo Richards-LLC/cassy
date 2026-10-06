@@ -410,6 +410,18 @@ mod tests {
         cleanup(&root, &mut untrusted, policy(), &[]);
         assert_eq!(untrusted[0].disposition, CacheDisposition::OwnershipChanged);
         fs::write(preview.join("source.rs"), "reader edits must survive").unwrap();
+        // Preserve the reader's pending Git diff across the attempted cleanup.
+        let pending_edit = || {
+            let output = std::process::Command::new("git")
+                .current_dir(&preview)
+                .args(["diff", "--exit-code"])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert!(!output.stdout.is_empty());
+            output.stdout
+        };
+        let before = pending_edit();
         let mut records = inspect(&root, policy(), &[]);
         cleanup(&root, &mut records, policy(), &[]);
         assert_eq!(
@@ -420,9 +432,11 @@ mod tests {
                 CacheDisposition::LiveProcess
             }
         );
-        assert_eq!(
-            fs::read_to_string(preview.join("source.rs")).unwrap(),
-            "reader edits must survive"
+        assert_eq!(pending_edit(), before);
+        assert!(
+            list_validated_git_worktrees(root.parent().unwrap())
+                .iter()
+                .any(|candidate| candidate.path == preview)
         );
     }
 

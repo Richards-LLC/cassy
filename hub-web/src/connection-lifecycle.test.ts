@@ -478,6 +478,28 @@ describe("Commander live connection lifecycle", () => {
     expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
   });
 
+  it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("reconnecting-send"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
+    hub.event({ kind: "viewer_lagged" });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    // A dispatch's IndexedDB/credential await can finish after this transition.
+    // The old socket is physically open, but recovery will replace it.
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+    const before = socket.sent.length;
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
+    expect(socket.sent).toHaveLength(before);
+  });
+
   it("settles a known legacy send's queued receipt across socket replacement (cas-9dc6)", async () => {
     transport();
     TransportSocket.instances = [];

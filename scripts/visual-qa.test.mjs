@@ -562,6 +562,26 @@ test('text folded inside a closed <details> is not clipped; an open disclosure t
   assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '') && !finding.elementPath.endsWith('div.clip')), [], JSON.stringify(clipped, null, 2));
 });
 
+test('an intentional multi-line clamp with an ellipsis is not clipped; an unclamped hidden overflow still is (cas-272d)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-clamp-'));
+  const result = await runVisualQa({
+    urls: [fixture('line-clamp.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 844 },
+    ],
+  });
+  const on = (id) => result.findings.filter((finding) => (finding.selector ?? '').includes(id) || (finding.elementPath ?? '').includes(id));
+  // The clamp hides its later lines on purpose and shows an ellipsis: no finding.
+  assert.deepEqual(on('#clamped'), [], JSON.stringify(result.findings, null, 2));
+  // Negative control: hidden lines with no clamp and no ellipsis still fail.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(on('#unclamped').some((finding) => finding.type === 'clipped-content'), JSON.stringify(result.findings, null, 2));
+});
+
 test('a long value scrolling inside an editable field is not clipped; a box that clips the field still is (cas-000c)', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-editable-'));
   const result = await runVisualQa({

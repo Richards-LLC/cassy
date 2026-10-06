@@ -288,6 +288,17 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const editableField = (element) => (element.tagName === 'INPUT' && !NON_TEXT_INPUTS.has((element.getAttribute('type') || 'text').toLowerCase()))
       || element.tagName === 'TEXTAREA'
       || (element.hasAttribute('contenteditable') && element.isContentEditable === true);
+    // A multi-line clamp is the design, not lost text: a computed line count
+    // (-webkit-line-clamp, or line-clamp) hides the later lines behind an
+    // ellipsis. Engines report the -webkit-box host as flow-root, so the count
+    // is the signal. It must clip vertically and not also overflow sideways.
+    const lineClampBox = (element, style = getComputedStyle(element)) => {
+      const lines = Math.max(...[style.webkitLineClamp, style.getPropertyValue('line-clamp')].map((value) => Number.parseInt(value || '', 10)).filter(Number.isFinite), 0);
+      return lines > 0 && style.display !== 'inline'
+        && (style.overflowY === 'hidden' || style.overflowY === 'clip')
+        && style.textOverflow === 'ellipsis'
+        && element.scrollWidth <= element.clientWidth + boxTolerance;
+    };
     const nonVisualReason = (element) => {
       if (!element) return null;
       if (ariaHidden(element)) return 'aria-hidden';
@@ -450,7 +461,9 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const editsInPlace = editableField(element);
       const clipped = (overflowX && !editsInPlace && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
       // GH #1081: an explicit single-line ellipsis is the design, not lost text.
-      const intentionalEllipsis = overflowX && style.textOverflow === 'ellipsis' && element.scrollHeight <= element.clientHeight + boxTolerance;
+      const singleLineEllipsis = overflowX && style.textOverflow === 'ellipsis' && element.scrollHeight <= element.clientHeight + boxTolerance;
+      const intentionalClamp = lineClampBox(element, style);
+      const intentionalEllipsis = singleLineEllipsis || intentionalClamp;
       if (clipped && !intentionalEllipsis) {
         add('content-overflow', item, { reason: 'content-exceeds-clipped-border-box', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         add('clipped-content', item, { reason: 'scroll-size-exceeds-client-size', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
@@ -486,13 +499,17 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
           const ancestorBox = ancestor.getBoundingClientRect();
           const ellipsisX = clipsX && style.textOverflow === 'ellipsis' && ancestor.scrollHeight <= ancestor.clientHeight + boxTolerance;
           const outsideX = clipsX && !ellipsisX && (item.box.x < ancestorBox.x - boxTolerance || item.box.right > ancestorBox.right + boxTolerance);
-          const outsideY = clipsY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
+          // A clamping box decides which lines are drawn; the hidden lines'
+          // range is not lost text, so the walk stops on Y there.
+          const clampY = clipsY && lineClampBox(ancestor, style);
+          const outsideY = clipsY && !clampY && (item.box.y < ancestorBox.y - boxTolerance || item.box.bottom > ancestorBox.bottom + boxTolerance);
           if (outsideX || outsideY) add('clipped-content', item, { reason: 'text-bounds-exceed-overflow-ancestor', ancestorPath: selectorFor(ancestor), ancestorBox: box(ancestorBox) });
           // An ellipsising box decides which part of its line is
           // drawn. The text range still measures the whole unellipsised line,
           // so a clipping ancestor further up (a title row with overflow-x:
           // clip) would see that phantom width; the walk stops on X here.
           if (ellipsisX) checkX = false;
+          if (clampY) checkY = false;
           if (scrollsY) {
             const contentTop = ancestorBox.y + ancestor.clientTop - ancestor.scrollTop;
             const contentBottom = contentTop + ancestor.scrollHeight;

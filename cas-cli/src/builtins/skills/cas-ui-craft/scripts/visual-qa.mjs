@@ -284,6 +284,10 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     // the engine's own answer; `content-visibility: auto` off-screen content
     // stays visible to it, because scrolling renders it.
     const skippedContent = (element) => typeof element.checkVisibility === 'function' && !element.checkVisibility();
+    const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'range', 'color', 'file', 'hidden', 'button', 'submit', 'reset', 'image']);
+    const editableField = (element) => (element.tagName === 'INPUT' && !NON_TEXT_INPUTS.has((element.getAttribute('type') || 'text').toLowerCase()))
+      || element.tagName === 'TEXTAREA'
+      || (element.hasAttribute('contenteditable') && element.isContentEditable === true);
     const nonVisualReason = (element) => {
       if (!element) return null;
       if (ariaHidden(element)) return 'aria-hidden';
@@ -440,7 +444,11 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const overflowX = style.overflowX === 'hidden' || style.overflowX === 'clip';
       const overflowY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const contentExceedsBorder = element !== document.documentElement && element !== document.body && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance);
-      const clipped = (overflowX && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
+      // A long value scrolling sideways inside an editable field is how
+      // editing works, not clipped copy: the field's own horizontal scroll is
+      // not measured. A container that clips the field itself still is.
+      const editsInPlace = editableField(element);
+      const clipped = (overflowX && !editsInPlace && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
       // GH #1081: an explicit single-line ellipsis is the design, not lost text.
       const intentionalEllipsis = overflowX && style.textOverflow === 'ellipsis' && element.scrollHeight <= element.clientHeight + boxTolerance;
       if (clipped && !intentionalEllipsis) {

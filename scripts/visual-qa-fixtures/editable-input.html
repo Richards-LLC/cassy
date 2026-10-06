@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 520px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      label { display: grid; gap: 6px; margin: 0 0 12px; }
+      input, textarea { box-sizing: border-box; width: 100%; padding: 10px 12px; font: inherit; color: inherit; background: #fff; border: 1px solid #172033; }
+      /* cas-000c negative control: a box too narrow for its input, which clips it. */
+      .tight { width: 120px; overflow: hidden; }
+      .tight input { width: 260px; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+        input, textarea { background: #172033; border-color: #8aa4d6; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Name this browser</h1>
+      <!-- cas-000c: a long value scrolls inside its own field while you edit it; that is not clipped copy. -->
+      <label>Name for this browser
+        <input id="long-name" type="text" value="Independent browser with a deliberately long but recognizable installation name">
+      </label>
+      <label>Notes
+        <textarea id="long-notes" rows="1" wrap="off">A single unwrapped line that is longer than the textarea is wide, scrolled while editing.</textarea>
+      </label>
+      <div class="tight" id="tight-box"><input id="clipped-input" type="text" value="Cut off by its box"></div>
+    </main>
+  </body>
+</html>

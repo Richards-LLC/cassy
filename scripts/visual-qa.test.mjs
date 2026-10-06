@@ -562,6 +562,25 @@ test('text folded inside a closed <details> is not clipped; an open disclosure t
   assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '') && !finding.elementPath.endsWith('div.clip')), [], JSON.stringify(clipped, null, 2));
 });
 
+test('a long value scrolling inside an editable field is not clipped; a box that clips the field still is (cas-000c)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-editable-'));
+  const result = await runVisualQa({
+    urls: [fixture('editable-input.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 844 },
+    ],
+  });
+  // The long input value and the unwrapped textarea line scroll while editing: no finding on either field.
+  assert.deepEqual(result.findings.filter((finding) => /#long-name|#long-notes|label:nth-of-type\((1|2)\) > (input|textarea)/.test(finding.elementPath ?? finding.selector ?? '')), [], JSON.stringify(result.findings, null, 2));
+  // Negative control: the box that clips its input is still flagged.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(result.findings.some((finding) => finding.type === 'clipped-content' && /tight-box/.test(finding.selector ?? finding.elementPath ?? '')), JSON.stringify(result.findings, null, 2));
+});
+
 test('text the engine skips (content-visibility: hidden) is not clipped; a visible clip still is (cas-861c)', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-content-visibility-'));
   const result = await runVisualQa({

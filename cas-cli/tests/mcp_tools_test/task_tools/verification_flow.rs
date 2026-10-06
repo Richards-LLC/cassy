@@ -11700,7 +11700,7 @@ async fn snapshot_hash_note_close_cas_1f28(correct_hash: bool) {
     let repo = temp.path();
     let cas_dir = repo.join(".cas");
     std::fs::write(cas_dir.join("config.toml"),
-        "[verification]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n").unwrap();
+        "[project]\ncanonical_id = 'cas-1f28-fixture'\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n").unwrap();
     proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
     let path = "crates/cas-mux/src/opencode_projection.snapshot.json";
@@ -11729,7 +11729,7 @@ async fn snapshot_hash_note_close_cas_1f28(correct_hash: bool) {
     task.deliverables.factory_branch_anchor = Some(tip.clone());
     task.deliverables.parked_branch = Some(branch.into());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: repo.to_str().unwrap().into(), target_branch: "main".into(),
+        repo_selector: "project:cas-1f28-fixture".into(), target_branch: "main".into(),
     });
     store.add(&task).unwrap();
     let service = CasService::new(core, None);

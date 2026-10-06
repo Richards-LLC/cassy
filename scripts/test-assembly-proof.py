@@ -635,7 +635,7 @@ p.prove(root)
 
     @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "needs /proc")
     def test_cas_7b7b9_row_daemon_does_not_keep_the_proof_lease(self):
-        # The 3.47.0 incident: a row's build started an sccache server that
+        # The release incident (cas-7b7b9): a row's build started an sccache server that
         # inherited the proof's intent/budget and held them after the proof.
         pool = self.root / ".host-memory"
         pidfile = self.root / "daemon-pid"

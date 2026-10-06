@@ -908,15 +908,15 @@ impl CasCore {
     /// cas-54b0: the round's linked work item can no longer produce a
     /// verdict: cancelled, closed (a verdict would have resolved the round),
     /// or missing. Returns its id and what happened to it.
+    ///
+    /// Only a definite answer withdraws a round. A store error that is not
+    /// "not found" (a locked database, an I/O fault, an unreadable row) leaves
+    /// the round alone: treating it as missing would withdraw a live, claimed
+    /// review mid-way and dispatch a duplicate.
     fn dead_qa_work_item(&self, pass: &QaPass) -> Option<(String, &'static str)> {
         let qa_task_id = pass.qa_task_id.clone()?;
         let store = self.open_task_store().ok()?;
-        let gone = match store.get(&qa_task_id) {
-            Ok(item) if item.status == TaskStatus::Cancelled => "cancelled",
-            Ok(item) if item.status == TaskStatus::Closed => "closed without a verdict",
-            Ok(_) => return None,
-            Err(_) => "missing",
-        };
+        let gone = qa_work_item_gone(&qa_task_id, store.get(&qa_task_id))?;
         Some((qa_task_id, gone))
     }
 
@@ -1560,6 +1560,30 @@ impl CasCore {
 /// not contain: an unmerged branch tip is sent back to park for merge and QA
 /// with its tip as the receipt, and only a missing branch is described as an
 /// out-of-band merge.
+/// cas-54b0: what happened to a QA round's work item, when that is certain.
+/// `None` means it can still produce a verdict, or Cassy could not tell.
+fn qa_work_item_gone(
+    qa_task_id: &str,
+    lookup: Result<Task, cas_store::StoreError>,
+) -> Option<&'static str> {
+    match lookup {
+        Ok(item) if item.status == TaskStatus::Cancelled => Some("cancelled"),
+        Ok(item) if item.status == TaskStatus::Closed => Some("closed without a verdict"),
+        Ok(_) => None,
+        Err(cas_store::StoreError::TaskNotFound(_) | cas_store::StoreError::NotFound(_)) => {
+            Some("missing")
+        }
+        Err(error) => {
+            tracing::warn!(
+                qa_task = %qa_task_id,
+                error = %error,
+                "cas-54b0: QA work item could not be read; its round is left open"
+            );
+            None
+        }
+    }
+}
+
 pub(crate) fn unresolved_delivery_refusal(
     task_id: &str,
     target_branch: &str,
@@ -1583,6 +1607,53 @@ pub(crate) fn unresolved_delivery_refusal(
              resolve here. If it merged into {target_branch}, close with \
              commit_receipt=<merged sha>. {remedy}."
         ),
+    }
+}
+
+#[cfg(test)]
+mod qa_work_item_tests {
+    use super::*;
+
+    fn item(status: TaskStatus) -> Result<Task, cas_store::StoreError> {
+        let mut task = Task::new("cas-qa1".to_string(), "QA pass".to_string());
+        task.status = status;
+        Ok(task)
+    }
+
+    /// cas-54b0: only a definite answer withdraws a round. A locked database
+    /// or an unreadable row must not read as a missing work item.
+    #[test]
+    fn only_not_found_reads_as_a_missing_work_item_cas_54b0() {
+        assert_eq!(
+            qa_work_item_gone("cas-qa1", item(TaskStatus::Cancelled)),
+            Some("cancelled")
+        );
+        assert_eq!(
+            qa_work_item_gone("cas-qa1", item(TaskStatus::Closed)),
+            Some("closed without a verdict")
+        );
+        for live in [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+        ] {
+            assert_eq!(qa_work_item_gone("cas-qa1", item(live)), None);
+        }
+        for missing in [
+            cas_store::StoreError::TaskNotFound("cas-qa1".to_string()),
+            cas_store::StoreError::NotFound("cas-qa1".to_string()),
+        ] {
+            assert_eq!(qa_work_item_gone("cas-qa1", Err(missing)), Some("missing"));
+        }
+        for unknown in [
+            cas_store::StoreError::Database(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("database is locked".to_string()),
+            )),
+            cas_store::StoreError::Other("I/O error".to_string()),
+        ] {
+            assert_eq!(qa_work_item_gone("cas-qa1", Err(unknown)), None);
+        }
     }
 }
 

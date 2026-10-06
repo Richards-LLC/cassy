@@ -2396,6 +2396,66 @@ async fn qa_request_replaces_a_round_whose_work_item_was_cancelled_cas_54b0() {
     );
 }
 
+/// cas-54b0 review: a work item Cassy cannot read is not a missing one. With
+/// the QA task's row unreadable (a store error that is not "not found"),
+/// qa_request leaves the open round and its reviewer alone instead of
+/// withdrawing it and dispatching a duplicate.
+#[tokio::test]
+async fn an_unreadable_qa_work_item_keeps_its_open_round_cas_54b0() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let open = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    let qa_task = open.qa_task_id.clone().expect("its work item");
+    // A text priority makes the row fail to decode: a database error, not
+    // TaskNotFound.
+    let db = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    db.execute(
+        "UPDATE tasks SET priority = 'unreadable' WHERE id = ?1",
+        rusqlite::params![qa_task],
+    )
+    .unwrap();
+    drop(db);
+    assert!(
+        !matches!(
+            open_task_store(&cas_dir).unwrap().get(&qa_task),
+            Ok(_)
+                | Err(cas_store::StoreError::TaskNotFound(_) | cas_store::StoreError::NotFound(_))
+        ),
+        "the fixture must produce a store error other than not found"
+    );
+
+    let _role = SupervisorRole::enter(&mut test_env);
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let requested = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_request",
+                "task_id": task_id,
+                "summary": "re-request while the store is unhealthy",
+            }))))
+            .await
+            .expect("the request answers"),
+    );
+    assert!(requested.contains("INDEPENDENT QA PENDING"), "{requested}");
+    assert!(!requested.contains("withdrawn"), "{requested}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1, "no duplicate round: {passes:?}");
+    assert_eq!(passes[0].id, open.id);
+    assert!(
+        passes[0].state.is_active() && !passes[0].is_withdrawn(),
+        "{:?}",
+        passes[0]
+    );
+    assert_eq!(passes[0].qa_task_id.as_deref(), Some(qa_task.as_str()));
+}
+
 /// cas-54b0: cancelling an already-cancelled QA work item returned "Already
 /// cancelled" and left its orphaned round pending. The retry now repairs it.
 #[tokio::test]

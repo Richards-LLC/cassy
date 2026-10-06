@@ -340,7 +340,7 @@ test("HUB-J2 an installation the hub verified reads as in the operator inbox (ca
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.emulateMedia({ colorScheme: "light" });
     const { readFile, writeFile } = await import("node:fs/promises");
-    const css = await readFile(new URL("../../../dist/app.css", import.meta.url), "utf8");
+    const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
     const dialog = await page.locator(".installation-inventory").evaluate((node) => node.outerHTML);
     await writeFile(`${qa}/enrolled.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Browser installations</title><style>${css}</style></head><body>${dialog}</body></html>`);
     const modes: Array<[string, string, Parameters<typeof page.emulateMedia>[0]]> = [

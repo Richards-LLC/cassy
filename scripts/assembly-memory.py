@@ -2,7 +2,8 @@
 """Memory guard and stable linker admission for assembly producers.
 
 Linkers share memory-bounded host/user slots, independent of Cargo job counts.
-The wrapper preserves the selected native linker and records waited-driver RSS separately from the external link estimate.
+The wrapper preserves native linker flags and records driver rusage separately
+from sampled RSS of that invocation and its observed forked workers.
 """
 import argparse
 from contextlib import ExitStack
@@ -14,7 +15,6 @@ import os
 from pathlib import Path
 import platform
 import re
-import resource
 import shlex
 import signal
 import stat
@@ -116,6 +116,127 @@ def claim_slot(directory, env):
             return None, event
 
 
+# Passive observation preserves the producer process group and inherited leases.
+# Samples are lower bounds: a worker that forks and reparents between samples
+# may never be observed. Remember start identity once seen, including on reparent.
+RSS_SAMPLE_SECS = .1
+RSS_DRAIN_SECS = 5
+
+
+def process_snapshot():
+    """Return pid -> (parent pid, start identity, resident bytes, name, state)."""
+    if platform.system() == "Darwin":
+        rows = subprocess.check_output(
+            ["ps", "-axo", "pid=,ppid=,lstart=,rss=,stat=,comm="], text=True)
+        result = {}
+        for line in rows.splitlines():
+            fields = line.split(None, 9)
+            if len(fields) != 10:
+                raise ValueError("invalid process RSS snapshot")
+            result[int(fields[0])] = (int(fields[1]), " ".join(fields[2:7]),
+                                     int(fields[7]) * 1024, Path(fields[9]).name, fields[8][0])
+        return result
+    if platform.system() != "Linux":
+        raise ValueError("process RSS sampling requires Linux /proc or macOS ps")
+    result = {}
+    pagesize = os.sysconf("SC_PAGE_SIZE")
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            raw = (path / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        # comm can contain spaces and parentheses; stat fields follow the last ).
+        comm, tail = raw.rsplit(")", 1)
+        fields = tail.split()
+        result[int(path.name)] = (int(fields[1]), fields[19],
+                                  int(fields[21]) * pagesize,
+                                  comm.split("(", 1)[1], fields[0])
+    return result
+
+
+class LinkRssSampler:
+    def __init__(self, driver_pid):
+        self.driver_pid = driver_pid
+        self.known = {}
+        self.samples = 0
+        self.peak_tree = 0
+        self.peak_worker = 0
+        self.worker_peak = None
+        self.errors = []
+
+    def sample(self):
+        try:
+            snapshot = process_snapshot()
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            if not self.errors:
+                self.errors.append(type(exc).__name__ + ": " + str(exc))
+            return False
+        if not self.known and self.driver_pid in snapshot:
+            self.known[self.driver_pid] = snapshot[self.driver_pid][1]
+        # Only the same process lifetime can seed descendants. PID reuse must
+        # not adopt another link after the original process has exited.
+        current = {pid for pid, start in self.known.items()
+                   if pid in snapshot and snapshot[pid][1] == start}
+        while True:
+            descendants = {pid for pid, row in snapshot.items() if row[0] in current}
+            fresh = descendants - current
+            if not fresh:
+                break
+            for pid in fresh:
+                self.known[pid] = snapshot[pid][1]
+            current.update(fresh)
+        live = {pid for pid in current if snapshot[pid][4] not in ("Z", "X")}
+        if live:
+            self.samples += 1
+            self.peak_tree = max(self.peak_tree, sum(snapshot[pid][2] for pid in live))
+            for pid in live:
+                parent, start, rss, name, state = snapshot[pid]
+                if name in ("mold", "ld.mold") and rss > self.peak_worker:
+                    self.peak_worker = rss
+                    self.worker_peak = {"pid": pid, "start_identity": start,
+                                        "name": name, "rss_bytes": rss,
+                                        "sample_unix_ns": time.time_ns()}
+        return bool(live)
+
+    def receipt(self, drain_expired):
+        return {"driver_pid": self.driver_pid,
+                "peak_process_tree_rss_bytes": self.peak_tree if self.samples else None,
+                "peak_mold_worker_rss_bytes": self.peak_worker if self.samples else None,
+                "mold_worker_peak": self.worker_peak,
+                "rss_sample_count": self.samples, "rss_sample_interval_s": RSS_SAMPLE_SECS,
+                "rss_sampling_status": ("partial" if self.errors or drain_expired else
+                                        "sampled" if self.samples else "unavailable"),
+                "rss_sampling_errors": self.errors, "rss_drain_expired": drain_expired,
+                "rss_sampling_limit": "sampled lower bound; workers that fork and reparent between samples may be missed; summed RSS double-counts shared pages"}
+
+
+def wait_with_rss(child):
+    sampler = LinkRssSampler(child.pid)
+    waited_usage = None
+    drain_started = None
+    drain_expired = False
+    while True:
+        live = sampler.sample()
+        if waited_usage is None:
+            pid, status, usage = os.wait4(child.pid, os.WNOHANG)
+            if pid:
+                child.returncode = os.waitstatus_to_exitcode(status)
+                waited_usage = usage
+                drain_started = time.monotonic()
+        if waited_usage is not None:
+            if not live:
+                break
+            if time.monotonic() - drain_started >= RSS_DRAIN_SECS:
+                drain_expired = True
+                break
+        time.sleep(RSS_SAMPLE_SECS)
+    peak = waited_usage.ru_maxrss
+    peak_bytes = int(peak if platform.system() == "Darwin" else peak * 1024)
+    return peak_bytes, sampler.receipt(drain_expired)
+
+
 def link(command):
     env = settings(os.environ)
     directory = LINK_LEASE_ROOT / f"cas-assembly-links-{os.getuid()}"
@@ -143,18 +264,28 @@ def link(command):
             raise ValueError("assembly linker memory/slot deadline expired")
         time.sleep(min(poll(env), deadline(env) - elapsed))
     with lease:
-        child = subprocess.run(command, pass_fds=tuple({lease.fileno()} | proof.release_scratch.inherited_leases()))
-        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        peak_bytes = int(peak if platform.system() == "Darwin" else peak * 1024)
+        child = subprocess.Popen(command, pass_fds=tuple({lease.fileno()} | proof.release_scratch.inherited_leases()))
+        try:
+            peak_bytes, sampled = wait_with_rss(child)
+        finally:
+            # Keep cleanup on the same process group/lease contract as before.
+            if child.returncode is None:
+                child.kill()
+                child.wait()
+        exceeded = peak_bytes > proof.LINK_BYTES
         append(receipt, {"phase": "link-complete", "status": child.returncode,
                          "slot_index": event["slot_index"], "link_slots": event["link_slots"],
                          "peak_waited_driver_rss_bytes": peak_bytes, "estimate_bytes": proof.LINK_BYTES,
-                         "rss_scope": "waited driver RSS; excludes mold workers",
-                         "estimate_exceeded": peak_bytes > proof.LINK_BYTES,
+                         **sampled,
+                         "rss_scope": "waited driver RSS excludes unwaited workers; sampled process tree includes observed mold workers",
+                         "estimate_exceeded": exceeded,
+                         "sampled_tree_estimate_exceeded": (None if sampled["peak_process_tree_rss_bytes"] is None
+                                                            else sampled["peak_process_tree_rss_bytes"] > proof.LINK_BYTES),
+                         "estimate_check_scope": "waited driver; sampled tree is observational",
                          "wall_s": round(time.monotonic() - started, 3),
-                         "measurement_source": "waited driver ru_maxrss (Linux KiB, macOS bytes); excludes unwaited mold workers; not whole-link peak"})
-        if peak_bytes > proof.LINK_BYTES:
-            print("assembly linker driver exceeded memory estimate; recalibration required", file=sys.stderr)
+                         "measurement_source": "driver wait4 ru_maxrss (Linux KiB, macOS bytes); sampled /proc stat RSS or macOS ps RSS (KiB) for the same driver and observed descendants"})
+        if exceeded:
+            print("assembly linker RSS exceeded memory estimate; recalibration required", file=sys.stderr)
             return 1
         return child.returncode
 

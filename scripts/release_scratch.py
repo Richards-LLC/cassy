@@ -69,6 +69,8 @@ def read_owner(path):
     if file.stat().st_uid != os.getuid():
         raise ValueError("foreign owner record")
     owner = json.loads(file.read_text())
+    if not isinstance(owner, dict):
+        return None
     stat = path.stat()
     if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
         return None  # The lease protocol requires a private, same-user directory.
@@ -677,7 +679,7 @@ def sweep(repo, base, clean=False, env=None):
                             protected = worktrees(repo)
                             if generated and not clean:
                                 protected = [tree for tree in protected if tree != path / 'workspace-remap']
-                            keep_base = registered(path, protected, generated_remap=generated)
+                            keep_base = registered(path, protected, generated_remap=generated and not clean)
                             # Only exact generated receipts may unregister a worktree;
                             # unknown/worker/parked checkouts retain their whole base.
                             candidates = ([path / name for name in REGENERABLE

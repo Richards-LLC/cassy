@@ -415,11 +415,14 @@ sys.stdin.read()
         self.assertTrue(base.exists(), report)
 
     def test_unknown_owner_or_receipt_preserves_generated_registration_cas_638d(self):
-        for mutation in ('owner', 'receipt'):
+        for mutation in ('owner', 'owner-array', 'receipt'):
             with self.subTest(mutation=mutation):
                 base, _ = self.generated_remap()
                 if mutation == 'owner':
                     (base / scratch.OWNER).unlink()
+                    self.old(base)
+                elif mutation == 'owner-array':
+                    (base / scratch.OWNER).write_text('[1]')
                     self.old(base)
                 else:
                     (base / scratch.REMAP_RECEIPT).unlink()

@@ -93,7 +93,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Entry:** `/commander/` with two paired machines, each running one supervisor
 - **Goal:** I can tell which conversation has something new and get to it quickly
 - **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/palette-commands.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`, `hub-web/src/session-connection.ts`, `hub-web/src/connection-state-view.ts`
-- **Suite:** `hub-web/e2e/journeys/find-conversation.journey.ts`
+- **Suite:** `hub-web/e2e/journeys/find-conversation.journey.ts`, `hub-web/e2e/journeys/phone-host-line.journey.ts`
 - **Gaps:** none
 
 #### Steps
@@ -121,6 +121,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Nothing live: "No live supervisors listed", with a route to dormant sessions.
 - A machine becomes unreachable while a message is pending: the row stays with "Unreachable · message pending".
+- At 390px the machine name's glyphs fit vertically inside the clipped host line, in light and dark. Its full machine and supervisor identity stays available when the codename yields; long machine names still ellipsise horizontally. The header parts also cover desktop identity, forced colors, reduced motion, increased contrast, and a keyboard revisit (cas-9412).
 - Many rows: the list is not sorted by attention.
 - On a Mac, every surface names the palette chord "⌘K" (the list search and the Appearance & commands tooltip, with a conversation open too), never "Ctrl K", and ⌘K reaches the search and then the palette. This runs as a separate HUB-J3 part; the journeys declare a Linux keyboard platform by default, so they read the same on any host (cas-2a33).
 

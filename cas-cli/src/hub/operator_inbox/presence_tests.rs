@@ -1,5 +1,58 @@
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn presence_rate_limit_waits_from_response_without_changing_unanswered_body() {
+    let mut r = activated();
+    let body = r.prepare(vec![], None).unwrap().body.clone();
+    let response = super::super::machine::HttpResponse {
+        status: 429,
+        body: br#"{"error":"rate_limited"}"#.to_vec(),
+        date: None,
+        retry_after_s: Some(600),
+    };
+    let not_before = retry_not_before(&response).unwrap();
+    r.receive(response.status, &response.body);
+    tokio::time::advance(Duration::from_secs(599)).await;
+    assert!(tokio::time::Instant::now() < not_before);
+    assert_eq!(r.prepare(vec![], None).unwrap().body, body);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(tokio::time::Instant::now(), not_before);
+    let retry: Value = serde_json::from_slice(&r.prepare(vec![], None).unwrap().body).unwrap();
+    assert_eq!(retry["seq"], "1");
+}
+
+#[test]
+fn presence_http_transport_preserves_server_retry_after() {
+    use std::io::Read;
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/api/operator/machine/presence",
+        listener.local_addr().unwrap()
+    );
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+        }
+        stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 600\r\nContent-Length: 24\r\nConnection: close\r\n\r\n{\"error\":\"rate_limited\"}").unwrap();
+    });
+    let result = UreqHttp::default().send("POST", &url, &[], &[]).unwrap();
+    server.join().unwrap();
+    assert_eq!(result.status, 429);
+    assert_eq!(result.retry_after_s, Some(600));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.body).unwrap()["error"],
+        "rate_limited"
+    );
+}
+
 fn reporter() -> Reporter {
     Reporter::new(
         "machine".into(),

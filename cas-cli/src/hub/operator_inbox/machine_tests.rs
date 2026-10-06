@@ -39,6 +39,7 @@ fn reply(status: u16, body: Value) -> HttpResponse {
         status,
         body: serde_json::to_vec(&body).unwrap(),
         date: Some(chrono::Utc::now().to_rfc2822()),
+        retry_after_s: None,
     }
 }
 

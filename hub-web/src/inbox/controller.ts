@@ -332,8 +332,13 @@ export class OperatorInboxController {
   async runOnce(): Promise<number> {
     const identity = this.identity;
     if (!identity) return 30_000;
+    // Presence is a separate cloud resource: a feed outage must not prevent
+    // the phone seeing machine status or a device revocation.
+    await this.refreshPresence();
+    if (this.identity !== identity) return 30_000;
     try {
       const outcome = await this.withReplayLock(() => replayRound(this.context(identity)));
+      if (this.identity !== identity) return 30_000;
       if (outcome?.kind === "generation_changed") {
         this.generationWarning = "The account inbox was reset. Earlier history on this device is from the previous inbox.";
         identity.feedGeneration = outcome.feedGeneration;
@@ -354,7 +359,7 @@ export class OperatorInboxController {
       const hadMachines = this.machinesCache !== null;
       await this.machines().catch(() => undefined);
       if (!hadMachines && this.machinesCache) await this.changed();
-      await this.refreshPresence();
+      if (this.identity !== identity) return 30_000;
       if (this.state.kind !== "ready") this.state = { kind: "ready", accountHint: identity.emailHint, label: identity.label };
       if (outcome && (outcome.stored.length > 0 || outcome.kind === "more")) await this.changed();
       if (!outcome) return 5_000;

@@ -105,7 +105,21 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
         raise ValueError('invalid worker memory estimate')
     private_directory(directory)
     if inherited(env, directory):
-        yield dict(env), ()
+        # Preserve the open descriptions through nested Popen(close_fds=True).
+        # Legacy claims have no FD list and retain their old inheritance shape.
+        record = json.loads(env[LEASE_ENV])
+        fds = tuple(record.get('fds', ()))
+        paths = ('intent.lock', record.get('slot', 'budget.lock'))
+        if fds:
+            if len(fds) != 2 or any(type(fd) is not int or fd < 0 for fd in fds):
+                raise ValueError('invalid inherited host memory descriptors')
+            for fd, path in zip(fds, paths):
+                info = os.fstat(fd)
+                with private_file(directory / path, False) as probe:
+                    expected = os.fstat(probe.fileno())
+                if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
+                    raise ValueError('invalid inherited host memory descriptors')
+        yield dict(env), fds
         return
     started = time.monotonic()
     with private_file(directory / 'priority.lock') as priority, \
@@ -150,7 +164,7 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
                     fcntl.flock(budget, fcntl.LOCK_UN)
                     budget_held = False
                 except BlockingIOError:
-                    if role == 'worker' and intent_held:
+                    if role == 'worker' and priority_held:
                         try:
                             fcntl.flock(budget, fcntl.LOCK_SH | fcntl.LOCK_NB)
                             reason = 'proof running'
@@ -178,11 +192,12 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
             record = {'pid': os.getpid(), 'token': token, 'role': role}
             if slot:
                 record['slot'] = slot_name
+            fds = (intent.fileno(), slot.fileno()) if slot else (intent.fileno(), budget.fileno())
+            record['fds'] = list(fds)
             with private_file(claim_path) as claim:
                 json.dump(record, claim)
                 claim.flush()
             try:
-                fds = (intent.fileno(), slot.fileno()) if slot else (intent.fileno(), budget.fileno())
                 yield dict(env, **{LEASE_ENV: json.dumps(record)}), fds
             finally:
                 claim_path.unlink(missing_ok=True)

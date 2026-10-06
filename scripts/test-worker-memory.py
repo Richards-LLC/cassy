@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host admission tests using Python children and fake JS runner; no browsers/npm."""
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
@@ -115,6 +116,81 @@ class AdmissionTests(unittest.TestCase):
         release_two.touch()
         stdout, stderr = second.communicate(timeout=5)
         self.assertEqual(second.returncode, 0, stdout + stderr)
+
+    def test_cas_4cb9_light_command_passes_waiting_browser_at_low_budget(self):
+        low = dict(HIGH, budget_bytes=8*GIB)
+        first, one, release_one = self.start_counted_command('playwright', 'first', low)
+        self.wait_for_markers([one])
+        second, two, release_two = self.start_counted_command('playwright', 'second', low)
+        light, typecheck, release_light = self.start_counted_command('tsc', 'typecheck', low)
+        self.wait_for_markers([one, typecheck])
+        self.assertFalse(two.exists(), 'waiting browser consumed light-command capacity')
+        release_light.touch()
+        stdout, stderr = light.communicate(timeout=5)
+        self.assertEqual(light.returncode, 0, stdout + stderr)
+        release_one.touch()
+        stdout, stderr = first.communicate(timeout=5)
+        self.assertEqual(first.returncode, 0, stdout + stderr)
+        self.wait_for_markers([two])
+        release_two.touch()
+        stdout, stderr = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 0, stdout + stderr)
+
+    def test_cas_4cb9_weights_follow_shell_and_actual_package_scripts(self):
+        cases = [
+            (['tsc', '--noEmit'], 1), (['vite', 'build'], 1),
+            (worker.constrained(['npx', 'vitest', 'run']), 2),
+            (['sh', '-c', 'tsc --noEmit && tsc --noEmit -p e2e'], 1),
+            (['bash', '-c', 'cd hub-web && npm run typecheck > /tmp/log 2>&1'], 1),
+            (['bash', '-c', 'cd hub-web && npm run build'], 1),
+            (['bash', '-c', 'cd hub-web && npm test'], 2),
+            (['bash', '-c', 'vitest run --maxWorkers=2'], 2),
+            (['bash', '-c', 'tsc && playwright test'], 4),
+            (['bash', '-c', 'tsc & vite build'], 4),
+            (['bash', '-c', 'tsc && "$COMMAND"'], 4),
+            (['bash', '-c', 'vitest run --maxWorkers=2 --maxWorkers=8'], 4),
+            (['vitest', 'run', '--maxWorkers=2', '--browser'], 4),
+            (['tsc', '--watch'], 4), (['npm', 'run', 'unknown'], 4),
+        ]
+        for command, weight in cases:
+            with self.subTest(command=command):
+                self.assertEqual(worker.estimate(command, ROOT), weight * GIB)
+
+    def test_cas_4cb9_package_entrypoints_have_weighted_admission(self):
+        commands = json.loads((ROOT/'hub-web/package.json').read_text())['scripts']
+        for name, weight in [('build', 1), ('typecheck', 1), ('visual-qa', 4)]:
+            self.assertEqual(worker.estimate(['sh', '-c', commands[name]], ROOT/'hub-web'), weight*GIB)
+
+    def test_cas_4cb9_legacy_proof_and_worker_exclude_new_workers(self):
+        host.private_directory(self.pool)
+        for role, mode in [('proof', fcntl.LOCK_SH), ('worker', fcntl.LOCK_EX)]:
+            with self.subTest(role=role), host.private_file(self.pool/'budget.lock') as budget:
+                fcntl.flock(budget, mode)
+                with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                    with self.admit('worker'): self.fail('admitted over legacy lease')
+
+    def test_cas_4cb9_legacy_proof_intent_waits_for_new_worker(self):
+        with self.admit('worker'), host.private_file(self.pool/'intent.lock') as intent:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(intent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_cas_4cb9_nested_admission_passes_live_slot_descriptors(self):
+        with self.admit('worker') as (env, fds):
+            self.assertTrue(host.inherited(env, self.pool))
+            with host.admission('worker', env, lambda _: self.fail('nested resampled'),
+                                directory=self.pool) as (_, nested_fds):
+                self.assertEqual(nested_fds, fds)
+            record = json.loads(env[host.LEASE_ENV])
+            with host.private_file(self.pool/record['slot'], False) as probe:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_cas_4cb9_slot_symlink_fails_closed(self):
+        host.private_directory(self.pool)
+        (self.root/'target').write_text('')
+        (self.pool/'slot-0.lock').symlink_to(self.root/'target')
+        with self.assertRaises(OSError):
+            with self.admit('worker'): self.fail('unsafe slot admitted')
 
     def wait_for_proof(self, child, marker):
         # Node/Python startup can exceed a fixed sleep under assembly load.

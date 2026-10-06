@@ -66,16 +66,26 @@ def estimate(command, cwd=None, depth=0):
             words = list(lexer)
         except ValueError:
             return heavy
-        statements, current = [], []
+        statements, current, redirect = [], [], False
         for word in words:
+            if redirect:
+                if word in ('&&', ';', '&', '|', '||', '>', '>>', '<', '>&'):
+                    return heavy
+                redirect = False
+                continue
+            if word in ('>', '>>', '<', '>&'):
+                if current and current[-1].isdigit(): current.pop()
+                redirect = True
+                continue
             if word in ('&&', ';'):
                 if not current: return heavy
                 statements.append(current)
                 current = []
-            elif word in ('&', '|', '||', '(', ')', '>', '>>', '<', '<<'):
+            elif word in ('&', '|', '||', '(', ')', '<<'):
                 return heavy
             else:
                 current.append(word)
+        if redirect: return heavy
         if current: statements.append(current)
         weights = []
         for statement in statements:

@@ -442,6 +442,10 @@ export class HubConnectionSupervisor {
       // trusted (a half-open one takes sends and delivers nothing); every
       // session attaches afresh, now (cas-0978).
       if (recovering) this.reattachDesired("Reconnected after the network changed");
+      // A session can become ready before this event stream. Its earlier
+      // flush was fenced while the machine was attaching; wake it now, after
+      // any untrusted recovery sockets have been abandoned.
+      this.releaseHeldMessages();
       await this.consumeEvents(response, this.eventAbort!.signal);
       if (this.desired) throw new Error("hub event stream closed");
     } catch (error) {

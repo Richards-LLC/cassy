@@ -577,9 +577,36 @@ test('an intentional multi-line clamp with an ellipsis is not clipped; an unclam
   const on = (id) => result.findings.filter((finding) => (finding.selector ?? '').includes(id) || (finding.elementPath ?? '').includes(id));
   // The clamp hides its later lines on purpose and shows an ellipsis: no finding.
   assert.deepEqual(on('#clamped'), [], JSON.stringify(result.findings, null, 2));
-  // Negative control: hidden lines with no clamp and no ellipsis still fail.
+  // A -webkit-box clamp draws its own ellipsis with text-overflow left at
+  // its default, as an audit summary with an expand toggle does (GH #1109).
+  assert.deepEqual(on('#engine-ellipsis'), [], JSON.stringify(result.findings, null, 2));
+  // Negative controls: hidden lines with no clamp and no ellipsis still fail,
+  // and so does a line count on a plain block, which clamps nothing.
   assert.equal(result.status, 'FAIL');
   assert.ok(on('#unclamped').some((finding) => finding.type === 'clipped-content'), JSON.stringify(result.findings, null, 2));
+  assert.ok(on('#stray').some((finding) => finding.type === 'clipped-content'), JSON.stringify(result.findings, null, 2));
+});
+
+test('cards in a horizontal scroll-snap carousel are reachable, not clipped; a row that cannot scroll still is (GH #1109)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-carousel-'));
+  const result = await runVisualQa({
+    urls: [fixture('carousel.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 844 },
+    ],
+  });
+  const on = (id) => result.findings.filter((finding) => [finding.selector, finding.elementPath, finding.ancestorPath].some((value) => (value ?? '').includes(id)));
+  // Off-screen cards are reached by scrolling the rail: plain, inside a
+  // section that hides its bleed, and inside a narrow shell with overflow
+  // hidden, as the audit page's carousel sits.
+  for (const id of ['#rail', '#bleed-rail', '#screens', 'ul.rail', 'div.scroller']) assert.deepEqual(on(id), [], `${id}: ${JSON.stringify(on(id), null, 2)}`);
+  // Negative control: the same cards in a row that does not scroll are cut off.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(on('stuck').some((finding) => finding.type === 'clipped-content' && finding.reason === 'text-bounds-exceed-overflow-ancestor'), JSON.stringify(result.findings, null, 2));
 });
 
 test('a long value scrolling inside an editable field is not clipped; a box that clips the field still is (cas-000c)', async () => {

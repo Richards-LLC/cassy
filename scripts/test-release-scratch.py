@@ -321,6 +321,7 @@ sys.stdin.read()
         report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
         self.assertTrue((live/'workspace-remap/source').exists(), report)
         child.kill();child.communicate(timeout=5)
+        scratch.sweep(self.repo,self.base,clean=True,env=self.env)
         for mutation in ('branch','dirty','locked'):
             base, _ = self.generated_remap()
             remap = base/'workspace-remap'
@@ -345,6 +346,30 @@ sys.stdin.read()
         report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
         self.assertTrue((remap/'source').exists(),report)
         self.assertEqual(replacement,scratch.worktrees(self.repo))
+
+    def test_missing_generated_checkout_prunes_only_receipted_admin_cas_638d(self):
+        base, _ = self.generated_remap()
+        remap = base/'workspace-remap'
+        admin = Path(subprocess.check_output(['git','-C',str(remap),'rev-parse','--absolute-git-dir'],text=True).strip())
+        shutil.rmtree(remap)
+        report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        self.assertFalse(admin.exists(),report)
+        self.assertFalse(base.exists(),report)
+
+    def test_generated_report_is_read_only_and_cassy_checkout_is_retained_cas_638d(self):
+        base, _ = self.generated_remap()
+        before = {str(path):path.read_bytes() for path in base.rglob('*') if path.is_file()}
+        protected = scratch.worktrees(self.repo)
+        report = scratch.sweep(self.repo,self.base,env=self.env)
+        self.assertTrue(report['entries'][0]['reclaimable'],report)
+        self.assertEqual(protected,scratch.worktrees(self.repo))
+        self.assertEqual(before,{str(path):path.read_bytes() for path in base.rglob('*') if path.is_file()})
+        # Even an ignored .cas in a detached checkout is delivery provenance.
+        remap = base/'workspace-remap'
+        (remap/'.cas').mkdir()
+        (remap/'.cas/parked-task').write_text('preserve')
+        report = scratch.sweep(self.repo,self.base,clean=True,env=self.env)
+        self.assertTrue((remap/'.cas/parked-task').exists(),report)
 
     def test_start_time_mismatch_is_dead_but_matching_owner_is_live(self):
         old = self.parent / 'base.reused-pid'

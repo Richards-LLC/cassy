@@ -342,6 +342,19 @@ export class HubConnectionSupervisor {
 
   attachSnapshots(): ReadonlyMap<string, AttachSnapshot> { return this.attachLifecycles; }
 
+  /** Current daemon traffic can stay live while only event delivery retries. */
+  hasLiveAttach(session: string): boolean {
+    if (!this.desired || this.lifecycle.fatal || this.lifecycle.authFailure || this.lifecycle.networkAccessHelp
+      || this.missedHeartbeats >= RECONNECT_AFTER_MISSED_HEARTBEATS
+      || this.attachLifecycles.get(session)?.phase !== "live") return false;
+    const socket = this.sockets.get(session);
+    const lastRead = socket ? this.legacyReadAt.get(socket) : this.machineReadAt;
+    const ready = socket
+      ? socket.readyState === WebSocket.OPEN && this.readySockets.has(socket)
+      : this.servedByMachineSocket(session);
+    return ready && lastRead !== undefined && Date.now() - lastRead < ATTACH_LIVENESS_MS;
+  }
+
   retry(): void {
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;

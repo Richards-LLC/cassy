@@ -1095,12 +1095,12 @@ function conversationConnection(machineId: string, session: string | undefined):
   const machine = connectionStates.get(machineId);
   if (!session) return machine;
   const key = sessionKey(machineId, session);
-  return sessionConnection(machine, attachStates.get(key), sessionsEverLive.has(key));
+  return sessionConnection(machine, attachStates.get(key), sessionsEverLive.has(key), connections.get(machineId)?.hasLiveAttach(session));
 }
 
 function machineFooterConnection(machineId: string): ConnectionState | undefined {
   const prefix = `${machineId}:`;
-  const attached = [...attachStates].filter(([key]) => key.startsWith(prefix)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key) }));
+  const attached = [...attachStates].filter(([key]) => key.startsWith(prefix)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key), responding: connections.get(machineId)?.hasLiveAttach(attach.session) }));
   return machineConnection(connectionStates.get(machineId), attached);
 }
 
@@ -3541,7 +3541,7 @@ function render(captureDraft = true): void {
   // Workers and tasks keep rendering the last snapshot while a hub is
   // unreachable. Presented unlabelled, that reads as current truth.
   const statusIsStale = Boolean(selected) && machineConnectionSnapshot !== undefined
-    && (machineConnectionSnapshot.phase !== "live" || machineConnectionSnapshot.degraded);
+    && ((machineConnectionSnapshot.phase !== "live" && headerConnection?.phase !== "live") || machineConnectionSnapshot.degraded);
   const lastLive = selected ? lastLiveAt.get(selected.id) : undefined;
   const staleStatusAge = lastLive === undefined ? undefined : relativeTimestamp(lastLive);
   const staleStatusTail = staleStatusAge === undefined

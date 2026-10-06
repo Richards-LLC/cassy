@@ -4525,6 +4525,7 @@ function bindEvents(): void {
       // A keyboard lands in the reply box, as a palette jump does; a phone's
       // soft-keyboard Enter lands to read, with no keyboard raised again.
       if (window.matchMedia("(pointer: fine)").matches) focusJumpedComposer(opened);
+      else landFocus([focusTargets.thread, focusTargets.conversationBack], { keep: true, nextTask: true, waitMs: 2_000 });
     };
   }
 

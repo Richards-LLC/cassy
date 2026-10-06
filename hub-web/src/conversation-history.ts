@@ -353,6 +353,7 @@ export class ConversationHistory {
       }
     }
     const stored = new Map(sends.map((send) => [send.id, send]));
+    const reheld: PendingSend[] = [];
     for (const event of [...this.events]) {
       if (event.kind !== "send" || event.value.notificationId !== undefined || event.value.dismissed || event.value.replaced) continue;
       const current = stored.get(event.value.id);
@@ -361,6 +362,17 @@ export class ConversationHistory {
         // send arrives through durable history/live fan-out; a cancelled one
         // must not turn into a misleading "unsent" chip in another tab.
         this.events.splice(this.events.indexOf(event), 1);
+      } else if (current.state === "held" && !event.value.held) {
+        // A claimed row can be observed before the socket readiness check.
+        // Authoritative no-write settlement makes that same row held again;
+        // return it to the caller so the removed queue entry is restored with
+        // its original journal deadline. Receipted events were excluded above.
+        event.value.held = true;
+        event.value.state = "sending";
+        delete event.value.sentAt;
+        delete event.value.unconfirmedAt;
+        delete event.value.error;
+        reheld.push(current);
       } else if (current.state !== "held" && event.value.held) {
         delete event.value.held;
         event.value.state = current.state === "error" ? "error" : "unconfirmed";
@@ -370,7 +382,7 @@ export class ConversationHistory {
         event.value.restored = true;
       }
     }
-    return this.restorePending(sends, now);
+    return [...reheld, ...this.restorePending(sends, now)];
   }
 
   /**

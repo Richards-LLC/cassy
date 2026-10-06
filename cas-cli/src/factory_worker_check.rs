@@ -581,6 +581,12 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         .args(&cargo_args)
         .current_dir(&repo)
         .env("CARGO_TARGET_DIR", repo.join("target"))
+        // cas-4b15: a cold sccache client would pass the deliberately inherited
+        // target lease to its long-lived server. Empty overrides also defeat
+        // Cargo config/CARGO_BUILD_* fallbacks, including workspace wrappers.
+        // Cargo/rustc descendants still inherit the output lifetime lease.
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .spawn()
         .context("start capped worker Cargo command")?;
     FileExt::unlock(&admission)?;

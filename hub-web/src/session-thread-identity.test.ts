@@ -143,7 +143,9 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(emptyThreadCopy({ ...base, connection: "Needs pairing", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet. Atlas · Linux needs pairing again before new ones can arrive." });
     expect(emptyThreadCopy({ ...base, connection: "Unreachable · message pending", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. Atlas · Linux can't be reached — anything new will show here once it's back.");
     expect(emptyThreadCopy({ ...base, connection: "Can't reach · retrying", resolved: true }).said).toContain("Reconnecting to Atlas · Linux");
-    for (const connection of ["Live", "Degraded", "Connecting", "Idle", undefined]) expect(emptyThreadCopy({ ...base, connection, resolved: false }).state).toBe("loading");
+    for (const connection of ["Live", "Degraded", "Unsteady", "Connecting", "Idle", undefined]) expect(emptyThreadCopy({ ...base, connection, resolved: false }).state).toBe("loading");
+    // cas-97d58 F10: the banner says "unsteady — checking…"; the thread agrees.
+    expect(emptyThreadCopy({ ...base, connection: "Unsteady", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. The connection is unsteady, so a new one may arrive late.");
     expect(emptyThreadCopy({ ...base, connection: "Reconnecting", resolved: false })).toEqual({ state: "waiting", said: "Reconnecting to Atlas · Linux — messages from the cas-src supervisor will load once it's back." });
     expect(emptyThreadCopy({ ...base, connection: "Unreachable", resolved: false }).said).toBe("Atlas · Linux can't be reached — messages from the cas-src supervisor will load once it's back.");
     expect(emptyThreadCopy({ connection: "Needs pairing", resolved: false }).said).toBe("This machine needs pairing again before messages from this supervisor can load.");

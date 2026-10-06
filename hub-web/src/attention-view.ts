@@ -34,7 +34,8 @@ export interface AttentionPanelOptions {
 
 const ACTION_LABEL: Record<Exclude<AttentionAction, "none">, string> = {
   repair: "Re-pair",
-  view_pane: "View pane",
+  // cas-97d58 F06: the Terminal view is gone; this opens the conversation.
+  view_pane: "Open conversation",
   retry: "Retry",
   open_pr: "Open PR",
 };

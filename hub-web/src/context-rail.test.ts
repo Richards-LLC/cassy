@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { conversationShellMarkup } from "./conversation-shell";
 import { ConversationView } from "./conversation-view";
-import { CONTEXT_ENTRY_LIMIT, contextSections, entryText, syncContextRail, threadAttachments, BLOCKER_HINT } from "./context-rail";
+import { CONTEXT_ENTRY_LIMIT, contextSections, entryText, syncContextRail, threadAttachments, BLOCKER_HINT, PINNED_MARK } from "./context-rail";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 22, hh, mm).getTime();
@@ -95,7 +95,7 @@ describe("desktop context rail (P10)", () => {
     expect(links[0]!.querySelector(".context-meta")?.textContent).toBe("86 KB");
   });
 
-  it("lists open asks and blockers, newest first, leaving out the ask pinned above the composer (F18), and a click lands on the turn", () => {
+  it("lists every open ask and blocker, newest first, marking the one pinned above the composer (cas-97d58 F09), and a click lands on the turn", () => {
     const rail = mountShell();
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "patient-pelican-9", header: false });
@@ -109,13 +109,15 @@ describe("desktop context rail (P10)", () => {
     expect(history.pinnedAsk()?.notification_id).toBe(11);
     const jumps = [...rail.querySelectorAll<HTMLButtonElement>(".context-jump")];
     expect(jumps.map((jump) => [jump.dataset.kind, jump.querySelector(".context-kind")?.textContent, jump.querySelector(".context-text")?.textContent])).toEqual([
+      ["ask", "Question", "Fix it in-train, or ship 3.26.0 with it allowlisted?"],
       ["blocker", "Blocker", "The release gate went red."],
       ["ask", "Question", "Keep the old runner pool for now?"],
     ]);
-    // A blocker's entry says how it clears; a question's does not need to (journey F12).
-    expect(jumps.map((jump) => jump.querySelector(".context-hint")?.textContent ?? null)).toEqual([BLOCKER_HINT, null]);
+    // A blocker's entry says how it clears; the pinned question says where it is (journey F12, F09).
+    expect(jumps.map((jump) => jump.querySelector(".context-hint")?.textContent ?? null)).toEqual([PINNED_MARK, BLOCKER_HINT, null]);
+    expect(jumps.map((jump) => jump.dataset.pinned ?? null)).toEqual(["true", null, null]);
     expect(BLOCKER_HINT).toBe("Reply to unblock");
-    jumps[0]!.click();
+    jumps[1]!.click();
     const turn = document.querySelector<HTMLElement>('.thread [data-key="reply:10"]')!;
     expect(document.activeElement).toBe(turn);
     expect(turn.tabIndex).toBe(-1);
@@ -133,10 +135,14 @@ describe("desktop context rail (P10)", () => {
     const history = new ConversationHistory();
     history.reply(reply(10, "ask", "Ship it?"), at(9, 57));
     history.reply(reply(11, "ask", "And tag it?"), at(9, 58));
-    // Only the older ask is listed; the newest is the pinned one.
+    // Both open asks are listed; the newest is marked as the pinned one.
     expect(syncContextRail(document, { history, progress: false, attention: 0 })).toBe(true);
-    expect(rail.querySelectorAll(".context-jump")).toHaveLength(1);
+    expect(rail.querySelectorAll(".context-jump")).toHaveLength(2);
     history.submit("r", "patient-pelican-9", "Ship it.", at(9, 59), 10);
+    // The bookmark still points at "And tag it?", so the rail still lists it (F09).
+    expect(syncContextRail(document, { history, progress: false, attention: 0 })).toBe(true);
+    expect([...rail.querySelectorAll(".context-jump .context-text")].map((text) => text.textContent)).toEqual(["And tag it?"]);
+    history.submit("t", "patient-pelican-9", "Tag it.", at(10, 0), 11);
     expect(syncContextRail(document, { history, progress: false, attention: 0 })).toBe(false);
     expect(rail.querySelectorAll(".context-jump")).toHaveLength(0);
     expect(shell().classList.contains("context-open")).toBe(false);

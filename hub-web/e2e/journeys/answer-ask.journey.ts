@@ -100,10 +100,12 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
     await expect(question).toContainText("Fix it in the train, or ship with it allowlisted?");
     await expect(question.getByRole("button")).toHaveCount(2);
     await expect(pinned.locator(".obj")).toHaveCount(0);
-    // The rail lists only the hydrated blocker (cas-ce17), never the pinned question.
-    await expect(waiting.locator("li")).toHaveCount(1);
+    // cas-97d58 F09: the rail and the bookmark read the same open asks. The
+    // rail lists the hydrated blocker and the pinned question, marked as pinned.
+    await expect(waiting.locator("li")).toHaveCount(2);
     await expect(waiting.locator('.context-jump[data-kind="blocker"]')).toHaveCount(1);
-    await expect(waiting.locator('.context-jump[data-kind="ask"]')).toHaveCount(0);
+    await expect(waiting.locator('.context-jump[data-kind="ask"]')).toHaveCount(1);
+    await expect(waiting.locator('.context-jump[data-kind="ask"] .context-pinned')).toHaveText("Pinned above your reply");
     // The waiting blocker says how it clears, in the thread and in the rail (journey F12).
     await expect(page.getByRole("log").locator('.obj.blk[data-waiting="true"] .blk-hint')).toHaveText("Reply to unblock");
     await expect(waiting.locator('.context-jump[data-kind="blocker"] .context-hint')).toHaveText("Reply to unblock");
@@ -134,11 +136,11 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
     expect(await sent).toMatchObject({ text: "Fix in-train", in_reply_to: ask });
     await expect(pinned).toBeHidden();
     // The question stays in the thread with the chosen answer and no open
-    // choices, and keeps its device receipt (DESIGN.md reply receipt facts).
+    // choices; a kept reply carries no visible receipt (cas-97d58 F05).
     await expect(page.getByRole("log").getByRole("group", { name: `Question from ${PELICAN}` }).filter({ hasText: "clippy warning" })).toMatchAriaSnapshot(`
       - group "Question from ${PELICAN}":
         - paragraph: /clippy warning/
-        - text: Fix in-train Stored on this device
+        - text: Fix in-train
     `);
     await expect(page.getByRole("button", { name: "Ship with allowlist" })).toHaveCount(0);
     // Handled, the question quiets to the supervisor's colour and keeps the

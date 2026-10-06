@@ -120,10 +120,18 @@ describe("menu, confirm and undo state (cas-a474)", () => {
     expect(state.currentUndo(1_000 + UNDO_WINDOW_MS - 1)?.action.label).toBe("Resume");
     expect(state.currentUndo(1_000 + UNDO_WINDOW_MS)).toBeUndefined();
     state.succeeded("agent:swift-lark-3", pause, 2_000);
-    expect(state.takeUndo(2_500)?.request.op).toMatchObject({ hold: false });
+    const undone = state.takeUndo(2_500)!;
+    expect(undone.request.op).toMatchObject({ hold: false });
     expect(state.takeUndo(2_600)).toBeUndefined();
+    // cas-97d58 F12: the Undo itself succeeds with no Undo of its own.
+    state.succeeded("agent:swift-lark-3", undone, 2_700);
+    expect(state.announcement).toBe("swift-lark-3 resumed.");
+    expect(state.currentUndo(2_700)).toBeUndefined();
     state.succeeded("agent:swift-lark-3", stopAction(lark), 3_000);
     expect(state.currentUndo(3_000)).toBeUndefined();
+    // cas-97d58 F12: a destructive result stays visible for the Undo window instead.
+    expect(state.currentResult(3_000)?.label).toBe("swift-lark-3 stopped.");
+    expect(state.currentResult(3_000 + UNDO_WINDOW_MS)).toBeUndefined();
     state.succeeded("header", spawnAction(2), 3_000);
     expect(state.currentUndo(3_000)).toBeUndefined();
   });
@@ -179,7 +187,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     expect(items[0]!.hasAttribute("aria-disabled")).toBe(false);
     const stop = items[2]!;
     expect(stop.getAttribute("aria-disabled")).toBe("true");
-    expect(view.querySelector(`#${stop.getAttribute("aria-describedby")!}`)?.textContent).toContain("Not allowed on this pairing. Needs the Stop and restart workers and sessions permission (factory:manage). Run: cas hub pair --origin https://commander.example --scopes");
+    expect(view.querySelector(`#${stop.getAttribute("aria-describedby")!}`)?.textContent).toBe("Restart and Stop: Not allowed on this pairing. Needs the Stop and restart workers and sessions permission. Add it in Paired machines.");
     // A separator sets the destructive items apart.
     expect(view.querySelector('[role="separator"]')).not.toBeNull();
   });
@@ -219,7 +227,9 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     expect([...header.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(["Focus cas-f29b"]);
     const readOnly = headerControls(document, context(["machine-read", "session-read", "pane-read"]), undefined);
     expect(readOnly.querySelector(".fleet-ops-add")?.getAttribute("aria-disabled")).toBe("true");
-    expect(readOnly.querySelector(".fleet-ops-reason")?.textContent).toContain("factory:operate");
+    // cas-97d58 F06: by what it allows, never the scope id.
+    expect(readOnly.querySelector(".fleet-ops-reason")?.textContent).toContain("Needs the Manage workers and tasks permission.");
+    expect(readOnly.querySelector(".fleet-ops-reason")?.textContent).not.toMatch(/factory:/);
   });
 
   it("draws the Undo offer while it lasts", () => {

@@ -64,6 +64,8 @@ export interface FleetAction {
   readonly question?: string;
   /** The inverse, for Undo; reversible actions only. */
   readonly inverse?: () => FleetAction;
+  /** cas-97d58 F12: this action is itself an Undo, so it offers no Undo of its own. */
+  readonly undoing?: boolean;
 }
 
 /** Status values that mean the worker is held. */
@@ -340,7 +342,7 @@ export class FleetOpsState {
     this.selectionVersion += 1;
     this.closeMenus(); this.cancelConfirm();
     this.pending.clear(); this.requests.clear(); this.notes.clear();
-    this.undo = undefined; this.announcement = "";
+    this.undo = undefined; this.result = undefined; this.announcement = "";
     return true;
   }
 
@@ -357,6 +359,12 @@ export class FleetOpsState {
   readonly pending = new Map<string, FleetAction>();
   readonly notes = new Map<string, RowNote>();
   undo: UndoOffer | undefined;
+  /**
+   * cas-97d58 F12: a destructive action's outcome (Stop, Restart, End) has no
+   * Undo, and its row may leave the panel; this keeps the result on screen
+   * for the same window an Undo would have.
+   */
+  result: { label: string; expiresAt: number } | undefined;
   announcement = "";
 
   toggleMenu(rowKey: string): void {
@@ -396,6 +404,7 @@ export class FleetOpsState {
     this.requests.set(rowKey, request);
     this.pending.set(rowKey, action);
     this.notes.delete(rowKey);
+    this.result = undefined;
     this.announcement = action.progress;
     return { selection: this.selectionVersion, rowKey, request };
   }
@@ -405,8 +414,9 @@ export class FleetOpsState {
     this.requests.delete(rowKey);
     this.notes.delete(rowKey);
     this.announcement = action.done;
-    const inverse = action.inverse || outcome?.inverse ? hubInverse(action, outcome) : undefined;
+    const inverse = !action.undoing && (action.inverse || outcome?.inverse) ? hubInverse(action, outcome) : undefined;
     this.undo = inverse ? { action: inverse, label: action.done, expiresAt: now + UNDO_WINDOW_MS } : undefined;
+    this.result = !inverse && action.destructive ? { label: action.done, expiresAt: now + UNDO_WINDOW_MS } : undefined;
   }
 
   failed(rowKey: string, action: FleetAction, failure: { stale?: boolean; current?: Readonly<Record<string, unknown>>; detail?: string; subject?: string }): void {
@@ -423,6 +433,12 @@ export class FleetOpsState {
     this.announcement = text;
   }
 
+  /** A destructive action's visible result while it lasts (F12). */
+  currentResult(now: number): { label: string; expiresAt: number } | undefined {
+    if (this.result && now >= this.result.expiresAt) this.result = undefined;
+    return this.result;
+  }
+
   /** The Undo offer while it lasts; undefined once it has expired. */
   currentUndo(now: number): UndoOffer | undefined {
     if (this.undo && now >= this.undo.expiresAt) this.undo = undefined;
@@ -432,7 +448,7 @@ export class FleetOpsState {
   takeUndo(now: number): FleetAction | undefined {
     const offer = this.currentUndo(now);
     this.undo = undefined;
-    return offer?.action;
+    return offer ? { ...offer.action, undoing: true } : undefined;
   }
 }
 

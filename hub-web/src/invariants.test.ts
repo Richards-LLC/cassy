@@ -120,7 +120,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // DOM, is described by it, and says it out loud when tapped.
     expect(source).toContain('applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());');
     expect(source).toContain('button.setAttribute("aria-disabled", "true");');
-    expect(source).toContain("if (reason) { toast(reason); return; }");
+    expect(source).toContain("if (reason) { toast(reason, { thread, until: () => interruptUnavailableReason() !== reason }); return; }");
     expect(source).not.toContain('disabled aria-describedby="conversation-interrupt-reason"');
   });
 
@@ -536,7 +536,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('const force = Boolean(holder && machine.scopes.includes("hub-admin"));');
     expect(source).toContain("if (!await takeControlForMessage(machine, session, force)) {");
     expect(source).toContain('const took = holder ? `Took control from ${holder}. ` : "";');
-    expect(source).toContain("toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`);");
+    expect(source).toContain("toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`, { thread: key });");
     expect(source).toContain("Interrupt works once it releases control.");
   });
 
@@ -1041,7 +1041,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)), connectionStates.get(machine.id))) return;");
     expect(source).not.toContain('headline: "Terminal transport problem"');
     // While the session is known to be down the banner says so; no toast repeats it over the banner (cas-00cc).
-    expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("The conversation is reconnecting");');
+    expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("The conversation is reconnecting", { thread: sessionKey(machineId, session) });');
     expect(source).toContain("if (shown) placeToastClearOfBanner(shown);");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");

@@ -46,7 +46,8 @@ describe("offline operator messages (§10)", () => {
     const phone = await device(cloud, "new phone", scope);
     const queued = await queueOfflineMessage(phone.context, target, "Ship it once soundwave is back");
     expect(queued.state).toBe("pending_machine");
-    expect(commandStatusLabel(queued.state)).toBe("Pending machine");
+    expect(commandStatusLabel(queued.state)).toBe("Waiting for the machine");
+    expect(commandStatusLabel(queued.state, "soundwave")).toBe("Waiting for soundwave");
 
     // The machine can open exactly this command with its own key and IDs.
     const stored = cloud.commands.get(queued.commandId)!;
@@ -73,7 +74,7 @@ describe("offline operator messages (§10)", () => {
     cloud.acceptCommand(queued.commandId);
     const [synced] = await syncCommands(phone.context);
     expect(synced.state).toBe("accepted");
-    expect(commandStatusLabel(synced.state)).toBe("Accepted by machine");
+    expect(commandStatusLabel(synced.state, "soundwave")).toBe("soundwave received it");
   });
 
   it("refuses a session this device was not granted, before anything leaves the device", async () => {

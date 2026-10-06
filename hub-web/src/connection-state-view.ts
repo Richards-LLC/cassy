@@ -352,7 +352,9 @@ export function fatalConnectionRecovery(reason?: string): string {
 }
 
 export function lostConnectionBanner(machineLabel: string, fatal: boolean, reason?: string): string {
-  return fatal ? `Lost connection to ${machineLabel}. ${fatalConnectionRecovery(reason)}` : `Lost connection to ${machineLabel}. Reconnecting…`;
+  // cas-97d58 F16: a fatal failure is this browser's (an unsupported API),
+  // not the machine's, so it says so first.
+  return fatal ? `This browser can't connect to ${machineLabel}. ${fatalConnectionRecovery(reason)}` : `Lost connection to ${machineLabel}. Reconnecting…`;
 }
 
 /**

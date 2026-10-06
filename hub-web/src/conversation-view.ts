@@ -5,7 +5,8 @@ import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { bindSwipeDismiss } from "./swipe-dismiss";
-import { CANT_REACH_RETRYING, NEEDS_PAIRING } from "./connection-state";
+import { machineName } from "./conversation-list";
+import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
@@ -260,7 +261,9 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
 /** The header's connection label, as the empty thread reads it. */
 function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "reconnecting" | "unreachable" {
   return label === undefined || label === "Live" ? "live"
-    : label === "Degraded" ? "degraded"
+    // cas-97d58 F10: the half-open header's "Unsteady" is the banner's
+    // "unsteady — checking…", not "can't be reached".
+    : label === "Degraded" || label === UNSTEADY ? "degraded"
       : label === NEEDS_PAIRING ? "pairing"
         : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
           : "unreachable";
@@ -960,7 +963,9 @@ export class ConversationView {
     // cas-b00c: a run of unconfirmed messages repaints when Review opens or closes it.
     const review = settled === false ? [...this.reviewedRuns].join(",") : undefined;
     const earlierQuestion = reply?.reply_to_session ? this.earlierQuestion(reply) : undefined;
-    return JSON.stringify([turn.event, earlierQuestion, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
+    // cas-97d58 F18: a live send repaints when its confirmation cue is due.
+    const confirming = turn.event.kind === "send" && turn.event.value.state === "sending" ? this.history.awaitsConfirmation(turn.event.value) : undefined;
+    return JSON.stringify([turn.event, earlierQuestion, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review, confirming]);
   }
 
   /**
@@ -1235,11 +1240,13 @@ export class ConversationView {
       state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");
       // Held while the machine is unreachable (cas-0978): not on the wire yet,
       // and it will be sent by itself, once, when the machine is back.
-      state.textContent = send.held ? "Waiting for the connection — sends when it's back" : "Sending…";
+      state.textContent = send.held ? "Waiting for the connection — sends when it's back"
+        : this.history.awaitsConfirmation(send) ? `Waiting for ${(this.options.machine && machineName(this.options.machine)) || "the machine"} to confirm…`
+          : "Sending…";
       bubble.append(state);
       if (send.held && this.options.cancelMessage) {
         const cancel = document.createElement("button");
-        cancel.type = "button"; cancel.className = "conversation-edit";
+        cancel.type = "button"; cancel.className = "conversation-edit conversation-cancel";
         cancel.textContent = "Cancel"; cancel.setAttribute("aria-label", "Cancel waiting message");
         cancel.onclick = () => this.options.cancelMessage?.(send);
         bubble.append(cancel);
@@ -1470,11 +1477,20 @@ export class ConversationView {
       if (sheets.length && !bubble.textContent?.trim() && !bubble.querySelector(".evi")) bubble.classList.add("bub-empty");
     }
     bubble.dataset.kind = kind;
+    // cas-97d58 F05 (supersedes cas-e6d2's always-visible receipt): keeping a
+    // reply is the normal state, so it shows nothing and is not read out
+    // after every turn; data-stored carries it for tests and tooling. Only a
+    // reply this device has not kept says so, as a plain line in the card.
     if (reply.device_persisted !== undefined) {
-      const receipt = document.createElement("small");
-      receipt.className = "reply-storage-receipt";
-      receipt.textContent = reply.device_persisted ? "Stored on this device" : "Forwarded · not stored on this device";
-      bubble.append(receipt);
+      bubble.dataset.stored = reply.device_persisted ? "true" : "false";
+      // Only a reply whose storing failed, never one still being written (a
+      // line that appeared and vanished on every reply shifted the thread).
+      if (!reply.device_persisted && reply.device_store_failed) {
+        const receipt = document.createElement("small");
+        receipt.className = "reply-storage-receipt";
+        receipt.textContent = "Not kept on this device yet";
+        bubble.append(receipt);
+      }
     }
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
     // cas-e829: an answer to another session's turn stays in this thread and

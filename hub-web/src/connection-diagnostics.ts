@@ -10,9 +10,14 @@ export interface CauseEvidence {
   requestId?: string;
   reason_code?: ConnectionCause;
 }
-export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string }> = {
+/**
+ * Each cause in the operator's words: `title` names it, `action` is the next
+ * step, and `detail` (cas-97d58 F08) is the engineering note that belongs
+ * behind the Connection log's Technical details, never in its lead.
+ */
+export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string; detail?: string }> = {
   browser_offline: { title: "Browser reports offline", action: "Restore this device's network; Commander retries when it returns." },
-  network_or_browser_policy_unknown: { title: "Network or browser policy blocked the request", action: "Check Tailscale and browser site permissions. DNS, TLS, CORS and local-network policy are indistinguishable to this page." },
+  network_or_browser_policy_unknown: { title: "Network or browser policy blocked the request", action: "Check that Tailscale is connected on this device and that this site may reach local networks.", detail: "DNS, TLS, CORS and local-network policy are indistinguishable to this page." },
   health_http_unavailable: { title: "Health probe returned HTTP 503", action: "This browser received an unavailable response. Compare its network route with hub diagnostics; another device's successful health check does not prove this route works." },
   request_timeout: { title: "Request deadline exceeded", action: "Commander retries reads. A timed-out action may have reached the hub; check its result before repeating it." },
   auth_expired: { title: "Hub says access expired", action: "Refresh access or pair this device again." },
@@ -21,7 +26,7 @@ export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string
   auth_needs_pairing: { title: "Hub refused this credential", action: "Pair this device again." },
   proof_refused: { title: "Hub refused a fresh proof", action: "Commander retries with the hub's clock. Check this device's clock if it persists." },
   http_refused: { title: "HTTP request was refused", action: "Check the measured HTTP status and hub diagnostics." },
-  socket_closed: { title: "Terminal socket closed", action: "Commander reconnects the terminal; the HTTP hub may still be healthy." },
+  socket_closed: { title: "The live link to the machine dropped", action: "Commander reconnects it by itself.", detail: "Terminal socket closed; the HTTP hub may still be healthy." },
   session_upstream_unavailable: { title: "Session's upstream is unavailable", action: "Commander retries this session. Check that its supervisor is running." },
   event_sequence_gap: { title: "Event sequence gap detected", action: "Commander reopens retained events and refreshes the session catalog." },
   event_retention_gap: { title: "Some events are outside hub retention", action: "Commander refreshes current state. Expired events cannot be replayed." },

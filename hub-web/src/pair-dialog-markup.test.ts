@@ -14,7 +14,7 @@ describe("invitation scope ceiling in the actual pairing form", () => {
       relayOrigin: origin, pageOrigin: origin,
     });
     const doc = new DOMParser().parseFromString(html, "text/html");
-    expect(doc.querySelector(".pair-lead")?.textContent).toBe("This browser will be able to: Read sessions and terminals · Type, send messages and interrupt · Stop and restart workers and sessions");
+    expect(doc.querySelector(".pair-lead")?.textContent).toBe("This browser will be able to: See its sessions and raw output · Type, send messages and interrupt · Stop and restart workers and sessions");
     const manage = doc.querySelector<HTMLInputElement>('input[name="scope"][value="factory-manage"]');
     expect(manage?.checked).toBe(true);
     expect(manage?.disabled).toBe(false);
@@ -57,7 +57,7 @@ describe("invitation scope ceiling in the actual pairing form", () => {
     const withheld = doc.querySelector(".pair-withheld")!;
     expect(withheld.querySelector(".pair-lead")?.textContent).toBe("This link does not let it: Type, send messages and interrupt");
     // Straight after "This browser will be able to…", before any field, and not in the disclosure.
-    expect(withheld.previousElementSibling?.textContent).toBe("This browser will be able to: Read sessions and terminals");
+    expect(withheld.previousElementSibling?.textContent).toBe("This browser will be able to: See its sessions and raw output");
     expect(withheld.closest("details")).toBeNull();
     expect(withheld.compareDocumentPosition(doc.querySelector('input[name="url"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(withheld.querySelector("code")?.textContent).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt");

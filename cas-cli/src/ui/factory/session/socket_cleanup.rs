@@ -9,7 +9,7 @@ fn transition_lock(base: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let directory = fs::symlink_metadata(base)?;
     let uid = unsafe { libc::geteuid() };
-    if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o022 != 0 {
+    if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o002 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "factory socket directory is not owned",
@@ -78,7 +78,7 @@ fn remove_locked(path: &Path, sessions: &Path, binding: bool) -> io::Result<()> 
         let Ok(meta) = fs::symlink_metadata(directory) else {
             return Ok(());
         };
-        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o022 != 0 {
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o002 != 0 {
             return Ok(());
         }
     }

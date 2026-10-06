@@ -1,21 +1,27 @@
 # Brief: pairing feedback and browser identity (cas-2e77)
 
 ## Single idea
+
 Pairing must show what stopped it, and a revocation decision must name the browser the operator recognizes.
 
 ## Hero form
+
 Keep the existing pairing form and device list: focus and scroll the failed attempt's advice into the form's visible area; lead each installation row with its browser name, ownership and readable activity.
 
 ## Emotional register
+
 Calm and specific: retain Commander's existing dialog, ink and focus tokens, and give the failed attempt a reachable next action.
 
 ## Distinctive move
+
 The same hierarchy serves both decisions: human outcome first, exact engineering evidence in a closed Technical details disclosure.
 
 ## Deliberately omitted
+
 No extra confirmation, credential reset or new permission: pairing retry/cancel and exact-device revocation retain their existing protocol semantics.
 
 ## Critique
+
 Scored by rapid-lynx-72 on 2026-10-06 against native production-dist captures at a437b0fdf (product identical to 9adc93435). The supervisor independently confirmed 14/14 at c2310e249 with rebuilt dist; the worker capture pass retained 13 passing parts and one failed QA export, then the corrected enrollment export passed once.
 
 | Dimension | Score | Rendered evidence |

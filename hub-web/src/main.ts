@@ -802,13 +802,16 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
-    onMessageRejected: (session, clientRef, detail, rejection) => {
+    onMessageRejected: async (session, clientRef, detail, rejection) => {
       const key = sessionKey(machine.id, session);
       // cas-0653: the hub could not reach the session's daemon, so the
       // message never arrived there. It waits in the thread and goes out once
       // on the next live attach (the connection reattaches for it), instead
       // of reading "Not sent".
-      if (rejection?.retryable && reholdRefusedSend(machine, session, clientRef)) {
+      const settled = await sendJournal.refuse(deliveryScope(machine, session), clientRef, credentialFence(machine), detail, rejection?.retryable === true);
+      // A late refusal for a prior attempt cannot overwrite a Retry or receipt.
+      if (settled === "stale") return;
+      if (settled === "held" && reholdRefusedSend(machine, session, clientRef)) {
         if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
           messageDelivery = undefined;
           document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");

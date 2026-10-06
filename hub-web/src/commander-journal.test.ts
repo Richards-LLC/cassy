@@ -15,6 +15,70 @@ function journals(now = () => 1_000) {
 }
 
 describe("atomic Commander journal", () => {
+  it("an authoritative no-delivery refusal makes Cancel durable and strips the private payload", async () => {
+    const { a, b, make, db } = journals();
+    const item = send("refused");
+    await a.reconcile(scope, [], [item], fence);
+    expect(await a.dispatch(scope, item.id, fence, () => true)).toBe("written");
+    expect(await b.refuse(scope, item.id, fence, "upstream unavailable", true)).toBe("stale");
+    expect(await a.refuse(scope, item.id, fence, "upstream unavailable", true)).toBe("held");
+    expect((await b.read(scope)).sends[0].state).toBe("held");
+    expect(await b.cancel(scope, item.id)).toBe(true);
+    const request = db.open(DELIVERY_DB, 1);
+    const records = await new Promise<unknown[]>(resolve => { request.onsuccess = () => {
+      const database = request.result, tx = database.transaction("sends", "readonly"), read = tx.objectStore("sends").getAll();
+      tx.oncomplete = () => { database.close(); resolve(read.result); };
+    }; });
+    expect(JSON.stringify(records)).not.toContain(item.text);
+    expect(records).toHaveLength(1); // Retain the reference fence, never the text.
+    let writes = 0;
+    expect(await make().dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("unconfirmed");
+    expect(writes).toBe(0);
+  });
+  it("an old refusal cannot re-hold a newer same-tab Retry; the newer attempt can still be refused", async () => {
+    const { a, b } = journals();
+    const item = send("retried");
+    await a.reconcile(scope, [], [item], fence);
+    let writes = 0;
+    await a.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
+    await a.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    expect(await a.refuse(scope, item.id, fence, "late old refusal", true)).toBe("stale");
+    expect(await b.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("unconfirmed");
+    expect(writes).toBe(2);
+    expect(await a.refuse(scope, item.id, fence, "new refusal", true)).toBe("held");
+    expect(await b.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");
+    expect(writes).toBe(3);
+  });
+  it("receipts and cancellation beat late refusals and freshly observed stale private captions", async () => {
+    const { a, b } = journals();
+    const confirmed = send("confirmed"), cancelled = send("cancelled");
+    await a.reconcile(scope, [], [confirmed, cancelled], fence);
+    await a.dispatch(scope, confirmed.id, fence, () => true);
+    await a.acknowledge(scope, { client_ref: confirmed.id, notification_id: 99, target: confirmed.target, stamped: true }, fence);
+    expect(await a.refuse(scope, confirmed.id, fence, "late", true)).toBe("stale");
+    await a.dispatch(scope, cancelled.id, fence, () => true);
+    expect(await a.refuse(scope, cancelled.id, fence, "unavailable", true)).toBe("held");
+    expect(await a.cancel(scope, cancelled.id)).toBe(true);
+    // Even after reading the terminal revision, stale non-held captions must
+    // not restore the private payload or make a reference dispatchable.
+    await b.read(scope);
+    await b.reconcile(scope, [cancelled], [{ ...cancelled, state: "unconfirmed" }], fence);
+    expect((await b.read(scope)).sends).toEqual([]);
+    expect((await b.read(scope)).receipts[0].notification_id).toBe(99);
+  });
+  it("a nonretryable refusal stays Not sent, and consumes its attempt before a later Retry", async () => {
+    const { a } = journals();
+    const item = send("refused");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    expect(await a.refuse(scope, item.id, fence, "control required", false)).toBe("refused");
+    expect((await a.read(scope)).sends[0]).toMatchObject({ state: "error", error: "control required" });
+    expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
+    await a.dispatch(scope, item.id, fence, () => true);
+    expect(await a.refuse(scope, item.id, fence, "unavailable", true)).toBe("held");
+  });
+
   it("one confirmed ref settles both tab histories without retaining a private send payload (cas-9dc6)", async () => {
     const { a, b, db } = journals();
     const first = new ConversationHistory(), second = new ConversationHistory();

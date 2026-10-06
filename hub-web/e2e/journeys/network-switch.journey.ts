@@ -1008,7 +1008,7 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     const prior = Array.from({ length: 1021 }, (_, index) => ({ kind: "pane_added", sequence: 4180 + index, session: peer }));
     const tail = [
       { kind: "pane_exited", sequence: 5201, session: peer, pane_id: "worker" },
-      { kind: "daemon_disconnected", sequence: 5202, session: peer, diagnostic: { cause: "clean_exit", exit_code: 0 } },
+      { kind: "daemon_disconnected", sequence: 5202, session: peer, diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata; do not infer a cause from a closed socket alone." } },
       { kind: "session_removed", sequence: 5203, session: peer },
     ];
     await page.evaluate(({ prior, tail }) => {

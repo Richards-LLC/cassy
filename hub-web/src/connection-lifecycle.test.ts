@@ -500,7 +500,7 @@ describe("Commander live connection lifecycle", () => {
     const window = Array.from({ length: 1021 }, (_, index) => ({ kind: "pane_added", sequence: 4180 + index, session: "removed-peer" }));
     const tail = [
       { kind: "pane_exited", sequence: 5201, session: "removed-peer", pane_id: "worker" },
-      { kind: "daemon_disconnected", sequence: 5202, session: "removed-peer", diagnostic: { cause: "clean_exit", exit_code: 0 } },
+      { kind: "daemon_disconnected", sequence: 5202, session: "removed-peer", diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata; do not infer a cause from a closed socket alone." } },
       { kind: "session_removed", sequence: 5203, session: "removed-peer" },
     ];
     const metadata = { kind: "stream_metadata", epoch: "stable-hub", oldest_sequence: 4180, latest_sequence: 5203 };

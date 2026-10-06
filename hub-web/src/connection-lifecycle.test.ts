@@ -200,6 +200,59 @@ describe("Commander live connection lifecycle", () => {
       expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Kept across recovery", client_ref: "kept" } })).toBe(true);
     }
   });
+  it.each(["same pairing", "replaced pairing", "stopped"])("fences a resend receipt queued on a retired legacy socket: %s (cas-547a)", async (change) => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const machine = await storedMachine("retired-resend");
+    const history = new ConversationHistory(), queued = vi.fn((_session, receipt) => history.acknowledge(receipt));
+    const state = vi.fn(), error = vi.fn();
+    const connection = new HubConnectionSupervisor(machine, {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: state, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: error,
+      onMessageQueued: queued,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const writer = TransportSocket.instances[0]!;
+    const welcome = { Welcome: { state: { panes: [] }, protocol_version: 3 } };
+    writer.open(); writer.receive(welcome);
+    const message = { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "resend" } };
+    history.submit("resend", "supervisor", message.SendMessage.text, 1_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.unconfirmSilent(16_000);
+    history.reply({ notification_id: 98, reply_to: null, message: "Tests are running on the Mac.", summary: "", device_id: "phone" }, 17_000);
+    history.discardRefused("resend");
+    history.hold("resend", "supervisor", message.SendMessage.text, 18_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.release("resend", 18_000);
+    hub.event({ kind: "viewer_lagged" });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    connection.retry();
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    if (change === "replaced pairing") machine.credentialId = "new-pairing";
+    if (change === "stopped") connection.stop();
+    const phase = connection.attachSnapshot("session-a")?.phase;
+    const stateCount = state.mock.calls.length, errorCount = error.mock.calls.length;
+    // Retired traffic cannot re-open an attach, fail a newer send, or
+    // manufacture confirmation for a ref that socket never wrote.
+    writer.receive(welcome);
+    writer.receive({ Error: { code: "upstream_unavailable", client_ref: "resend" } });
+    writer.receive({ MessageQueued: { client_ref: "unknown", notification_id: 99, target: "supervisor", stamped: true } });
+    expect(queued).not.toHaveBeenCalled();
+    const receipt = { MessageQueued: { client_ref: "resend", notification_id: 99, target: "supervisor", stamped: true } };
+    writer.receive(receipt); writer.receive(receipt);
+    const accepted = change === "same pairing";
+    expect(queued).toHaveBeenCalledTimes(accepted ? 1 : 0);
+    const send = history.events.find(event => event.kind === "send");
+    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(accepted);
+    expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
+    expect(connection.attachSnapshot("session-a")?.phase).toBe(phase);
+    expect(state).toHaveBeenCalledTimes(stateCount);
+    expect(error).toHaveBeenCalledTimes(errorCount);
+  });
   it("delivers a stalled catalog's entire burst and joins manual refreshes to its flight (cas-b55b)", async () => {
     const hub = transport();
     const events: Record<string, unknown>[] = [];

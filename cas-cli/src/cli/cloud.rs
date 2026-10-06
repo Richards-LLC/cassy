@@ -2646,6 +2646,10 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
             return Ok(());
         }
 
+        if !stats.parked_by_reason.is_empty() {
+            fmt.write_raw(&format!("Retained intentionally: {}",stats.parked_by_reason.iter().map(|(reason,count)|format!("{reason} ×{count}")).collect::<Vec<_>>().join(", ")))?;
+            fmt.newline()?;
+        }
         let error_color = fmt.theme().palette.status_error;
         let warning_color = fmt.theme().palette.status_warning;
 
@@ -2853,6 +2857,8 @@ pub struct SyncSummary {
     pub errors: Vec<String>,
     pub team_backlog_pending: usize,
     pub team_backlog_failed: usize,
+    /// Safety parks retained locally, grouped separately from push failures.
+    pub intentional_parks: BTreeMap<String, usize>,
     pub team_configured: bool,
     pub task_transition: Option<String>,
     pub knowledge_pushed: usize,
@@ -2935,6 +2941,7 @@ impl SyncSummary {
                 .as_ref()
                 .map(|backlog| backlog.failed)
                 .unwrap_or_default(),
+            intentional_parks: BTreeMap::new(),
             team_configured: team_backlog.is_some(),
             task_transition: None,
             knowledge_pushed: result.pushed_knowledge_pages,
@@ -2994,6 +3001,7 @@ impl SyncSummary {
             errors: result.errors.clone(),
             team_backlog_pending: 0,
             team_backlog_failed: 0,
+            intentional_parks: BTreeMap::new(),
             team_configured,
             task_transition: task_transition_summary(result),
             knowledge_pushed: result.pushed_knowledge_pages,
@@ -3344,6 +3352,11 @@ pub(crate) fn render_sync_summary(
             let team_failed = summary.team_backlog_failed;
             let push_complete = summary.push_complete();
             let groups = grouped_push_failures(summary, verbose);
+            if !summary.intentional_parks.is_empty() {
+                let named=summary.intentional_parks.iter().map(|(reason,count)|format!("{reason} ×{count}")).collect::<Vec<_>>().join(", ");
+                fmt.write_raw(&format!("Retained intentionally: {named}"))?;
+                fmt.newline()?;
+            }
             if !verbose {
                 if push_complete {
                     let mut parts = vec![
@@ -4264,6 +4277,10 @@ pub(crate) fn refresh_team_linked_backlog(
     let max_retries = CloudSyncerConfig::default().max_retries;
     summary.team_backlog_pending = queue.pending_count_for_team(team_id, max_retries)?;
     summary.team_backlog_failed = queue.failed_count_for_team(team_id, max_retries)?;
+    summary.intentional_parks=queue.intentional_park_counts(Some(team_id),max_retries)?;
+    for (reason,count) in queue.intentional_park_counts(None,max_retries)? {
+        *summary.intentional_parks.entry(reason).or_default()+=count;
+    }
     summary.held_personal_pending = queue.pending_count_for_entity_type(None, max_retries)?;
     summary.held_personal_failed = queue.failed_count_for_entity_type(None, max_retries)?;
     summary.held_personal_rejected =
@@ -7931,6 +7948,54 @@ mod team_cmd_tests {
                 .unwrap();
         }
         (temp, queue)
+    }
+
+    #[test]
+    fn cas_fd42_team_summary_names_intentional_memory_parks() {
+        use crate::cloud::{EntityType, SyncOperation};
+        let temp = tempfile::tempdir().unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        for id in ["legacy-a", "legacy-b", "legacy-c"] {
+            queue
+                .enqueue_for_team(
+                    EntityType::Entry,
+                    id,
+                    SyncOperation::Upsert,
+                    Some("{}"),
+                    "team-1",
+                )
+                .unwrap();
+            let row = queue
+                .list_all(10)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.entity_id == id)
+                .unwrap();
+            queue
+                .park_intentionally(row.id, "unattributed_origin", 5)
+                .unwrap();
+        }
+        let mut summary = team_only_push_summary();
+        refresh_team_linked_backlog(&mut summary, temp.path(), "team-1", true).unwrap();
+        assert_eq!(summary.team_backlog_failed, 0);
+        assert_eq!(
+            summary.intentional_parks.get("unattributed_origin"),
+            Some(&3)
+        );
+        let stats = queue.stats(5).unwrap();
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.parked_by_reason.get("unattributed_origin"), Some(&3));
+        for verbose in [false, true] {
+            let mut rendered = crate::ui::components::test_helpers::TestFormatter::plain(400);
+            render_sync_summary(&mut rendered.fmt(), &summary, verbose).unwrap();
+            let output = rendered.output();
+            assert!(
+                output.contains("Retained intentionally: unattributed_origin ×3"),
+                "{output}"
+            );
+            assert!(!output.contains("3 rows failed"), "{output}");
+        }
     }
 
     /// cas-25c1: prowl's `cas cloud sync -v` printed "Push complete ·

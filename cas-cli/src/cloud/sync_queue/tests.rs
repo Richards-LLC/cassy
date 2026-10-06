@@ -1512,3 +1512,355 @@ fn row_outcome_columns_are_added_to_legacy_databases() {
     );
     assert_eq!(queue.retry_failed(5).unwrap(), 1);
 }
+
+#[test]
+fn cas_fd42_intentional_parks_are_not_team_push_failures() {
+    let (_temp, queue) = create_test_queue();
+    queue
+        .enqueue_for_team(
+            EntityType::Entry,
+            "legacy-memory",
+            SyncOperation::Upsert,
+            Some("{}"),
+            "fd42-team",
+        )
+        .unwrap();
+    let row = queue.list_all(10).unwrap().pop().unwrap();
+    queue
+        .record_row_outcome(row.id, "parked", Some("unattributed_origin"))
+        .unwrap();
+    queue
+        .park_failed(row.id, "no attributable origin; retained intentionally", 5)
+        .unwrap();
+    assert_eq!(queue.pending_count_for_team("fd42-team", 5).unwrap(), 0);
+    assert_eq!(
+        queue.failed_count_for_team("fd42-team", 5).unwrap(),
+        0,
+        "a named provenance park is not an attempted push failure"
+    );
+    assert_eq!(
+        queue.list_all(10).unwrap().len(),
+        1,
+        "retain the local diagnostic"
+    );
+}
+
+#[test]
+fn cas_fd42_endpoint_delete_is_not_overwritten_by_repair() {
+    let (_temp, queue) = create_test_queue();
+    let tasks = [
+        crate::types::Task::new("child".into(), "child".into()),
+        crate::types::Task::new("parent".into(), "parent".into()),
+    ];
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "parent",
+            SyncOperation::Delete,
+            None,
+            "fd42-team",
+        )
+        .unwrap();
+    assert!(
+        !queue
+            .stage_healed_dependency(
+                "child:parent:blocks",
+                "{}",
+                &tasks,
+                &tasks,
+                Some("fd42-team"),
+                "p",
+                None,
+                5
+            )
+            .unwrap()
+    );
+    let rows = queue.list_all(10).unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "no endpoint upsert may resurrect a pending deletion"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.entity_id == "parent" && row.operation == SyncOperation::Delete)
+    );
+    assert_eq!(
+        queue
+            .intentional_park_counts(Some("fd42-team"), 5)
+            .unwrap()
+            .get("dependency_endpoint_deleted"),
+        Some(&1)
+    );
+}
+
+#[test]
+fn cas_fd42_repair_preserves_newer_endpoint_write_and_other_failures() {
+    let (temp, queue) = create_test_queue();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id=\"p\"\n",
+    )
+    .unwrap();
+    let tasks = [
+        crate::types::Task::new("child".into(), "old child".into()),
+        crate::types::Task::new("parent".into(), "parent".into()),
+    ];
+    let newer = r#"{"id":"child","title":"newer edit","origin_project":"p"}"#;
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "child",
+            SyncOperation::Upsert,
+            Some(newer),
+            "fd42-team",
+        )
+        .unwrap();
+    let before = queue.list_all(10).unwrap();
+    assert_eq!(
+        before.len(),
+        1,
+        "the newer edit must actually be queued before repair"
+    );
+    assert_eq!(before[0].payload.as_deref(), Some(newer));
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 0);
+    assert!(
+        queue
+            .stage_healed_dependency(
+                "child:parent:blocks",
+                "{}",
+                &tasks,
+                &tasks,
+                Some("fd42-team"),
+                "p",
+                None,
+                5
+            )
+            .unwrap()
+    );
+    let rows = queue.list_all(10).unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.entity_id == "child")
+            .unwrap()
+            .payload
+            .as_deref(),
+        Some(newer)
+    );
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "unknown",
+            SyncOperation::Upsert,
+            Some("{}"),
+            "fd42-team",
+        )
+        .unwrap();
+    let row = queue
+        .list_all(10)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "unknown")
+        .unwrap();
+    queue
+        .record_row_outcome(row.id, "parked", Some("unknown_reason"))
+        .unwrap();
+    queue.park_failed(row.id, "unknown_reason", 5).unwrap();
+    assert_eq!(
+        queue.failed_count_for_team("fd42-team", 5).unwrap(),
+        1,
+        "unknown parks remain failures"
+    );
+    assert!(
+        queue
+            .intentional_park_counts(Some("fd42-team"), 5)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn cas_fd42_new_memory_creation_persists_project_origin() {
+    use cas_store::Store;
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id=\"fd42-project\"\n",
+    )
+    .unwrap();
+    let store = crate::store::open_store(temp.path()).unwrap();
+    let mut entry = crate::types::Entry::new("fresh-memory".into(), "new local memory".into());
+    entry.team_id = Some("fd42-team".into());
+    store.add(&entry).unwrap();
+    assert_eq!(
+        store.get(&entry.id).unwrap().origin_project.as_deref(),
+        Some("fd42-project")
+    );
+}
+
+#[test]
+fn cas_fd42_endpoint_move_preserves_routes_and_parks_edge() {
+    let (_temp, queue) = create_test_queue();
+    let tasks = [
+        crate::types::Task::new("child".into(), "child".into()),
+        crate::types::Task::new("parent".into(), "parent".into()),
+    ];
+    queue
+        .enqueue_team_move(
+            EntityType::Task,
+            "parent",
+            "p",
+            "other",
+            r#"{"id":"parent","origin_project":"other"}"#,
+            "fd42-team",
+        )
+        .unwrap();
+    let before = queue.list_all(10).unwrap();
+    assert!(
+        !queue
+            .stage_healed_dependency(
+                "child:parent:blocks",
+                "{}",
+                &tasks,
+                &tasks,
+                Some("fd42-team"),
+                "p",
+                None,
+                5
+            )
+            .unwrap()
+    );
+    let after = queue.list_all(10).unwrap();
+    assert_eq!(after.len(), before.len() + 1);
+    for row in before {
+        let kept = after
+            .iter()
+            .find(|candidate| candidate.id == row.id)
+            .unwrap();
+        assert_eq!(kept.payload, row.payload);
+        assert_eq!(kept.operation, row.operation);
+        assert_eq!(kept.project_id, row.project_id);
+    }
+    assert_eq!(
+        queue.pending_for_team("fd42-team", 10, 5).unwrap().len(),
+        2,
+        "only the move pair stays sendable"
+    );
+}
+
+#[test]
+fn cas_fd42_concurrent_dependency_delete_wins_over_healing() {
+    let (_temp, queue) = create_test_queue();
+    let tasks = [
+        crate::types::Task::new("child".into(), "child".into()),
+        crate::types::Task::new("parent".into(), "parent".into()),
+    ];
+    queue
+        .enqueue_for_team(
+            EntityType::TaskDependency,
+            "child:parent:blocks",
+            SyncOperation::Delete,
+            None,
+            "fd42-team",
+        )
+        .unwrap();
+    assert!(
+        !queue
+            .stage_healed_dependency(
+                "child:parent:blocks",
+                "{}",
+                &tasks,
+                &tasks,
+                Some("fd42-team"),
+                "p",
+                None,
+                5
+            )
+            .unwrap()
+    );
+    let rows = queue.list_all(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].operation, SyncOperation::Delete);
+}
+
+#[test]
+fn cas_fd42_concurrent_dependency_edit_with_stale_verdict_wins() {
+    let (_temp,queue)=create_test_queue();
+    let tasks=[crate::types::Task::new("child".into(),"child".into()),crate::types::Task::new("parent".into(),"parent".into())];
+    queue.enqueue_for_team(EntityType::TaskDependency,"child:parent:blocks",SyncOperation::Upsert,Some("old"),"fd42-team").unwrap();
+    let row=queue.list_all(10).unwrap().pop().unwrap();
+    queue.record_row_outcome(row.id,"rejected",Some("orphan_dependency")).unwrap();queue.park_failed(row.id,"orphan_dependency",5).unwrap();
+    queue.enqueue_for_team(EntityType::TaskDependency,"child:parent:blocks",SyncOperation::Upsert,Some("newer edit"),"fd42-team").unwrap();
+    assert!(!queue.stage_healed_dependency("child:parent:blocks","old",&tasks,&tasks,Some("fd42-team"),"p",None,5).unwrap());
+    let rows=queue.list_all(10).unwrap();assert_eq!(rows.len(),1);assert_eq!(rows[0].payload.as_deref(),Some("newer edit"));
+}
+#[test]
+fn cas_fd42_repair_preserves_existing_endpoint_routes_and_retry_metadata() {
+    for project_route in [None, Some("p")] {
+        let (temp, queue) = create_test_queue();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[project]\ncanonical_id=\"p\"\n",
+        )
+        .unwrap();
+        let mut tasks = [
+            crate::types::Task::new("child".into(), "old child".into()),
+            crate::types::Task::new("parent".into(), "parent".into()),
+        ];
+        for task in &mut tasks {
+            task.origin_project = Some("p".into());
+        }
+        let newer = r#"{"id":"child","title":"newer edit","origin_project":"p"}"#;
+        queue
+            .enqueue_for_team_project(
+                EntityType::Task,
+                "child",
+                SyncOperation::Upsert,
+                Some(newer),
+                "fd42-team",
+                project_route,
+            )
+            .unwrap();
+        let before = queue.list_all(10).unwrap();
+        assert_eq!(before.len(), 1, "setup must queue the edit");
+        queue
+            .record_row_outcome(before[0].id, "rejected", Some("scope_mismatch"))
+            .unwrap();
+        queue
+            .park_failed(before[0].id, "scope_mismatch", 5)
+            .unwrap();
+        let before = queue.list_all(10).unwrap().pop().unwrap();
+        assert!(
+            queue
+                .stage_healed_dependency(
+                    "child:parent:blocks",
+                    "{}",
+                    &tasks,
+                    &tasks,
+                    Some("fd42-team"),
+                    "p",
+                    None,
+                    5
+                )
+                .unwrap()
+        );
+        let rows = queue.list_all(10).unwrap();
+        assert_eq!(rows.len(), 3);
+        let after = rows.iter().find(|row| row.entity_id == "child").unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.payload, before.payload);
+        assert_eq!(after.project_id, before.project_id);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.retry_count, before.retry_count);
+        assert_eq!(after.last_error, before.last_error);
+        assert_eq!(after.last_outcome, before.last_outcome);
+        assert_eq!(after.last_reason, before.last_reason);
+        assert_eq!(after.failed_client_version, before.failed_client_version);
+        assert!(
+            queue
+                .dependency_endpoint_queued("child", "parent", "fd42-team")
+                .unwrap(),
+            "failed endpoint still withholds the edge"
+        );
+    }
+}

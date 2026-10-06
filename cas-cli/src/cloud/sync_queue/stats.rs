@@ -66,7 +66,7 @@ impl SyncQueue {
         )?;
 
         let failed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sync_queue WHERE retry_count >= ?1",
+            &format!("SELECT COUNT(*) FROM sync_queue WHERE retry_count >= ?1 AND NOT {}",super::dependency_repair::INTENTIONAL_PARK),
             params![max_retries],
             |row| row.get(0),
         )?;
@@ -96,10 +96,13 @@ impl SyncQueue {
             )
             .optional()?;
 
+        let mut parked_stmt=conn.prepare(&format!("SELECT last_reason,COUNT(*) FROM sync_queue WHERE retry_count>=?1 AND {} GROUP BY last_reason",super::dependency_repair::INTENTIONAL_PARK))?;
+        let parked_by_reason=parked_stmt.query_map(params![max_retries],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)? as usize)))?.collect::<Result<_,_>>()?;
         Ok(QueueStats {
             total: total as usize,
             pending: pending as usize,
             failed: failed as usize,
+            parked_by_reason,
             by_type,
             oldest_item,
         })

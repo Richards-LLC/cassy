@@ -126,6 +126,7 @@ impl CloudSyncer {
         self.queue.drop_queued_user_prompts()?;
 
         self.requeue_version_gated_items()?;
+        self.queue.classify_unattributed_origin_parks(team_id, self.config.max_retries)?;
 
         if !self.is_available() {
             return Ok(result);
@@ -347,9 +348,9 @@ impl CloudSyncer {
                             ) {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    let _ = self.queue.park_failed(
+                                    let _ = self.queue.park_intentionally(
                                         item.id,
-                                        "row has no attributable origin_project",
+                                        "unattributed_origin",
                                         self.config.max_retries,
                                     );
                                     continue;
@@ -383,6 +384,15 @@ impl CloudSyncer {
                                 self.config.max_retries,
                             );
                             continue;
+                        }
+                        if entity_type == EntityType::TaskDependency {
+                            if let (Some(from),Some(to)) = (value.get("from_id").and_then(|v|v.as_str()),value.get("to_id").and_then(|v|v.as_str())) {
+                                match self.queue.dependency_endpoint_queued(from,to,team_id) {
+                                    Ok(true) => { let _=self.queue.record_diagnostic(item.id,"waiting for endpoint task acknowledgment"); continue; }
+                                    Ok(false) => {}
+                                    Err(error) => { let _=self.queue.mark_failed(item.id,&error.to_string()); continue; }
+                                }
+                            }
                         }
                         upserts_by_project
                             .entry(target_project.to_string())

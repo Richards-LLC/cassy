@@ -769,7 +769,37 @@ impl CasCore {
         // cas-ce39: a new tip retires the round open for the old one. Report
         // which, so its work item is cancelled and a reviewer who had claimed
         // it is told to stop, instead of reviewing a dead head.
-        let opened = cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
+        let mut opened = cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
+        // cas-54b0: the round open for this tip may be linked to a work item
+        // nobody will run: cancelled by a runtime that did not withdraw it
+        // (before cas-7877), closed without a verdict, or gone. Reporting it as
+        // PENDING left the merge gated on a review that could never be
+        // recorded. Withdraw it, saying why, and open a live round.
+        let mut orphan_note = String::new();
+        if let Ok((QaPassOpen::AlreadyOpen(pass), _)) = &opened
+            && let Some((qa_task_id, gone)) = self.dead_qa_work_item(pass)
+        {
+            let reason =
+                format!("its QA task {qa_task_id} was {gone} before the round was withdrawn");
+            match cas_store::withdraw_qa_pass_for_qa_task(&self.cas_root, &qa_task_id, &reason, now)
+            {
+                Ok(Some(retired)) => {
+                    orphan_note = format!(
+                        "\n\nOrphaned QA round {} (pass {}) for {} @{} withdrawn: {reason}.",
+                        retired.round,
+                        retired.id,
+                        retired.task_id,
+                        retired.head8()
+                    );
+                    opened =
+                        cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(pass_id = %pass.id, error = %error, "cas-54b0: orphaned QA round could not be withdrawn");
+                }
+            }
+        }
         let (outcome, superseded) = match opened {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -848,6 +878,7 @@ impl CasCore {
                 )
             }
         };
+        status.push_str(&orphan_note);
         if let Some(retired) = superseded {
             // Read the new round back after materialization so its QA task
             // id (linked just above) is known.
@@ -872,6 +903,50 @@ impl CasCore {
             satisfied,
             withdrawn: false,
         })
+    }
+
+    /// cas-54b0: the round's linked work item can no longer produce a
+    /// verdict: cancelled, closed (a verdict would have resolved the round),
+    /// or missing. Returns its id and what happened to it.
+    ///
+    /// Only a definite answer withdraws a round. A store error that is not
+    /// "not found" (a locked database, an I/O fault, an unreadable row) leaves
+    /// the round alone: treating it as missing would withdraw a live, claimed
+    /// review mid-way and dispatch a duplicate.
+    fn dead_qa_work_item(&self, pass: &QaPass) -> Option<(String, &'static str)> {
+        let qa_task_id = pass.qa_task_id.clone()?;
+        let store = self.open_task_store().ok()?;
+        let gone = qa_work_item_gone(&qa_task_id, store.get(&qa_task_id))?;
+        Some((qa_task_id, gone))
+    }
+
+    /// cas-7877, cas-54b0: a cancelled QA work item's round will never be
+    /// reviewed. Withdraw it by the round's own link to the work item, not
+    /// by the item's label, and report what changed.
+    pub(crate) fn withdraw_round_of_cancelled_qa_task(
+        &self,
+        qa_task_id: &str,
+        reason: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        match cas_store::withdraw_qa_pass_for_qa_task(
+            &self.cas_root,
+            qa_task_id,
+            &format!("QA task {qa_task_id} cancelled: {reason}"),
+            now,
+        ) {
+            Ok(Some(pass)) => format!(
+                " Independent QA round {} (pass {}) for {} @{} withdrawn.",
+                pass.round,
+                pass.id,
+                pass.task_id,
+                pass.head8()
+            ),
+            Ok(None) => String::new(),
+            Err(error) => format!(
+                " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
+            ),
+        }
     }
 
     /// cas-7877: the re-parked tip is not user-facing and no earlier round
@@ -1485,6 +1560,30 @@ impl CasCore {
 /// not contain: an unmerged branch tip is sent back to park for merge and QA
 /// with its tip as the receipt, and only a missing branch is described as an
 /// out-of-band merge.
+/// cas-54b0: what happened to a QA round's work item, when that is certain.
+/// `None` means it can still produce a verdict, or Cassy could not tell.
+fn qa_work_item_gone(
+    qa_task_id: &str,
+    lookup: Result<Task, cas_store::StoreError>,
+) -> Option<&'static str> {
+    match lookup {
+        Ok(item) if item.status == TaskStatus::Cancelled => Some("cancelled"),
+        Ok(item) if item.status == TaskStatus::Closed => Some("closed without a verdict"),
+        Ok(_) => None,
+        Err(cas_store::StoreError::TaskNotFound(_) | cas_store::StoreError::NotFound(_)) => {
+            Some("missing")
+        }
+        Err(error) => {
+            tracing::warn!(
+                qa_task = %qa_task_id,
+                error = %error,
+                "cas-54b0: QA work item could not be read; its round is left open"
+            );
+            None
+        }
+    }
+}
+
 pub(crate) fn unresolved_delivery_refusal(
     task_id: &str,
     target_branch: &str,
@@ -1508,6 +1607,53 @@ pub(crate) fn unresolved_delivery_refusal(
              resolve here. If it merged into {target_branch}, close with \
              commit_receipt=<merged sha>. {remedy}."
         ),
+    }
+}
+
+#[cfg(test)]
+mod qa_work_item_tests {
+    use super::*;
+
+    fn item(status: TaskStatus) -> Result<Task, cas_store::StoreError> {
+        let mut task = Task::new("cas-qa1".to_string(), "QA pass".to_string());
+        task.status = status;
+        Ok(task)
+    }
+
+    /// cas-54b0: only a definite answer withdraws a round. A locked database
+    /// or an unreadable row must not read as a missing work item.
+    #[test]
+    fn only_not_found_reads_as_a_missing_work_item_cas_54b0() {
+        assert_eq!(
+            qa_work_item_gone("cas-qa1", item(TaskStatus::Cancelled)),
+            Some("cancelled")
+        );
+        assert_eq!(
+            qa_work_item_gone("cas-qa1", item(TaskStatus::Closed)),
+            Some("closed without a verdict")
+        );
+        for live in [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+        ] {
+            assert_eq!(qa_work_item_gone("cas-qa1", item(live)), None);
+        }
+        for missing in [
+            cas_store::StoreError::TaskNotFound("cas-qa1".to_string()),
+            cas_store::StoreError::NotFound("cas-qa1".to_string()),
+        ] {
+            assert_eq!(qa_work_item_gone("cas-qa1", Err(missing)), Some("missing"));
+        }
+        for unknown in [
+            cas_store::StoreError::Database(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("database is locked".to_string()),
+            )),
+            cas_store::StoreError::Other("I/O error".to_string()),
+        ] {
+            assert_eq!(qa_work_item_gone("cas-qa1", Err(unknown)), None);
+        }
     }
 }
 

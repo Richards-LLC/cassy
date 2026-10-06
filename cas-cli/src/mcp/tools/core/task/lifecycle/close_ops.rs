@@ -10569,8 +10569,16 @@ impl CasCore {
             )
         })?;
         if task.status == TaskStatus::Cancelled {
+            // cas-54b0: a runtime before cas-7877 cancelled QA work items
+            // without withdrawing their rounds. A retry repairs that.
+            let recorded = task
+                .close_reason
+                .clone()
+                .unwrap_or_else(|| reason.to_string());
+            let repaired =
+                self.withdraw_round_of_cancelled_qa_task(&task.id, &recorded, chrono::Utc::now());
             return Ok(Self::success(format!(
-                "Already cancelled: {} - {}. This call did not rewrite its reason or history.",
+                "Already cancelled: {} - {}. This call did not rewrite its reason or history.{repaired}",
                 task.id, task.title
             )));
         }
@@ -10648,28 +10656,8 @@ impl CasCore {
         // cas-7877: cancelling a QA work item is the supervisor deciding the
         // review will not happen. Withdraw its round too, so the delivery is
         // no longer gated on it and the next park does not re-open it.
-        let qa_withdrawn = if task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL) {
-            match cas_store::withdraw_qa_pass_for_qa_task(
-                &self.cas_root,
-                &task.id,
-                &format!("QA task {} cancelled: {reason}", task.id),
-                now,
-            ) {
-                Ok(Some(pass)) => format!(
-                    " Independent QA round {} (pass {}) for {} @{} withdrawn.",
-                    pass.round,
-                    pass.id,
-                    pass.task_id,
-                    pass.head8()
-                ),
-                Ok(None) => String::new(),
-                Err(error) => format!(
-                    " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
-                ),
-            }
-        } else {
-            String::new()
-        };
+        // cas-54b0: the round's own link decides, not the item's label.
+        let qa_withdrawn = self.withdraw_round_of_cancelled_qa_task(&task.id, reason, now);
 
         let pointer = superseded_by
             .as_deref()

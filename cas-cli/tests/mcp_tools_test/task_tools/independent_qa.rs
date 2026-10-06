@@ -2316,6 +2316,217 @@ async fn cancelling_a_qa_work_item_withdraws_its_round_cas_7877() {
     );
 }
 
+/// cas-54b0: a QA work item cancelled without withdrawing its round, the
+/// shape a runtime before cas-7877 left behind (cas-e641 on 2026-10-05). The
+/// round stays pending, linked to a task that will never run.
+fn orphan_cancelled_qa_task(cas_dir: &Path, qa_task: &str) {
+    let tasks = open_task_store(cas_dir).unwrap();
+    let mut item = tasks.get(qa_task).unwrap();
+    item.status = TaskStatus::Cancelled;
+    item.closed_at = Some(chrono::Utc::now());
+    item.close_reason = Some("bound to a stale anchor".into());
+    tasks.update(&item).unwrap();
+}
+
+/// cas-54b0: the supervisor's qa_request at the same tip reported "INDEPENDENT
+/// QA PENDING ... QA task <cancelled>" and opened nothing, so no reviewer could
+/// ever record a verdict. It now withdraws the orphaned round, saying why, and
+/// opens a fresh one with a live work item.
+#[tokio::test]
+async fn qa_request_replaces_a_round_whose_work_item_was_cancelled_cas_54b0() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let stale = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    let stale_qa_task = stale.qa_task_id.clone().expect("its work item");
+    orphan_cancelled_qa_task(&cas_dir, &stale_qa_task);
+
+    let _role = SupervisorRole::enter(&mut test_env);
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let requested = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_request",
+                "task_id": task_id,
+                "summary": "the previous QA task was cancelled",
+            }))))
+            .await
+            .expect("the supervisor's request opens a live round"),
+    );
+    assert!(
+        requested.contains("INDEPENDENT QA DISPATCHED"),
+        "{requested}"
+    );
+    assert!(!requested.contains("INDEPENDENT QA PENDING"), "{requested}");
+    assert!(
+        requested.contains(&stale_qa_task),
+        "names the cancelled work item: {requested}"
+    );
+
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    let retired = passes.iter().find(|pass| pass.id == stale.id).unwrap();
+    assert!(retired.is_withdrawn(), "{retired:?}");
+    assert!(
+        retired.summary.as_deref().is_some_and(
+            |summary| summary.contains(&stale_qa_task) && summary.contains("cancelled")
+        ),
+        "the withdrawal reason names the cancelled work item: {retired:?}"
+    );
+    let fresh = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_ne!(fresh.id, stale.id);
+    assert!(fresh.state.is_active());
+    assert_eq!(fresh.bound_head, stale.bound_head);
+    let fresh_qa_task = fresh.qa_task_id.expect("the fresh round's work item");
+    assert_ne!(fresh_qa_task, stale_qa_task);
+    assert_eq!(
+        open_task_store(&cas_dir)
+            .unwrap()
+            .get(&fresh_qa_task)
+            .unwrap()
+            .status,
+        TaskStatus::Open
+    );
+}
+
+/// cas-54b0 review: a work item Cassy cannot read is not a missing one. With
+/// the QA task's row unreadable (a store error that is not "not found"),
+/// qa_request leaves the open round and its reviewer alone instead of
+/// withdrawing it and dispatching a duplicate.
+#[tokio::test]
+async fn an_unreadable_qa_work_item_keeps_its_open_round_cas_54b0() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let open = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    let qa_task = open.qa_task_id.clone().expect("its work item");
+    // A text priority makes the row fail to decode: a database error, not
+    // TaskNotFound.
+    let db = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    db.execute(
+        "UPDATE tasks SET priority = 'unreadable' WHERE id = ?1",
+        rusqlite::params![qa_task],
+    )
+    .unwrap();
+    drop(db);
+    assert!(
+        !matches!(
+            open_task_store(&cas_dir).unwrap().get(&qa_task),
+            Ok(_)
+                | Err(cas_store::StoreError::TaskNotFound(_) | cas_store::StoreError::NotFound(_))
+        ),
+        "the fixture must produce a store error other than not found"
+    );
+
+    let _role = SupervisorRole::enter(&mut test_env);
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let requested = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_request",
+                "task_id": task_id,
+                "summary": "re-request while the store is unhealthy",
+            }))))
+            .await
+            .expect("the request answers"),
+    );
+    assert!(requested.contains("INDEPENDENT QA PENDING"), "{requested}");
+    assert!(!requested.contains("withdrawn"), "{requested}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1, "no duplicate round: {passes:?}");
+    assert_eq!(passes[0].id, open.id);
+    assert!(
+        passes[0].state.is_active() && !passes[0].is_withdrawn(),
+        "{:?}",
+        passes[0]
+    );
+    assert_eq!(passes[0].qa_task_id.as_deref(), Some(qa_task.as_str()));
+}
+
+/// cas-54b0: cancelling an already-cancelled QA work item returned "Already
+/// cancelled" and left its orphaned round pending. The retry now repairs it.
+#[tokio::test]
+async fn cancelling_an_already_cancelled_qa_work_item_withdraws_its_orphaned_round_cas_54b0() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    orphan_cancelled_qa_task(&cas_dir, &qa_task);
+
+    let supervisor = supervisor_core(&cas_dir);
+    let _role = SupervisorRole::enter(&mut test_env);
+    let retried = extract_text(
+        supervisor
+            .cas_task_cancel(Parameters(TaskCancelRequest {
+                id: qa_task.clone(),
+                reason: "bound to a stale anchor".into(),
+                superseded_by: None,
+            }))
+            .await
+            .expect("cancelling again is not an error"),
+    );
+    assert!(retried.contains("Already cancelled"), "{retried}");
+    assert!(retried.contains("withdrawn"), "{retried}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert!(passes[0].is_withdrawn(), "{:?}", passes[0]);
+    assert!(
+        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/test-agent")
+            .is_none(),
+        "the orphaned round no longer gates the merge"
+    );
+}
+
+/// cas-54b0: the cancel withdrew a round only when its work item still carried
+/// the qa-pass label. The round's own link to the work item now decides.
+#[tokio::test]
+async fn cancelling_an_unlabelled_qa_work_item_still_withdraws_its_round_cas_54b0() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut item = tasks.get(&qa_task).unwrap();
+    item.labels.clear();
+    tasks.update(&item).unwrap();
+
+    let supervisor = supervisor_core(&cas_dir);
+    let _role = SupervisorRole::enter(&mut test_env);
+    let cancelled = extract_text(
+        supervisor
+            .cas_task_cancel(Parameters(TaskCancelRequest {
+                id: qa_task.clone(),
+                reason: "stale round".into(),
+                superseded_by: None,
+            }))
+            .await
+            .expect("supervisor cancels the QA work item"),
+    );
+    assert!(cancelled.contains("withdrawn"), "{cancelled}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert!(passes[0].is_withdrawn(), "{:?}", passes[0]);
+}
+
 /// cas-3760 (GH #1066): the target gained an unrelated `.scss` commit that
 /// this checkout's local target branch has not caught up with. A CI-only
 /// delivery branched from the fresh target is classified against

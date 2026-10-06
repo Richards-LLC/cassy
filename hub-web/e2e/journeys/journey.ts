@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
 import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
-import { claimReceiptDirectory } from "./receipt-directory.mjs";
+import { claimReceiptDirectory, receiptPartName } from "./receipt-directory.mjs";
 
 export { expect };
 
@@ -90,10 +90,11 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
     if (!id) throw new Error(`journey test titles must start with a catalog id: "${testInfo.title}"`);
     // cas-1f7e: one catalog journey can run as several tests (HUB-J12's
     // network switches). Each extra test is marked with JOURNEY_PART and
-    // writes its receipts under <ID>/parts/<slug>/, so no test overwrites
+    // writes its receipts under <ID>/parts/<slug>-<identity>/, so no test overwrites
     // another's; journey-bundles.py folds the parts into the <ID> bundle.
+    const identity = { project: testInfo.project.name, titlePath: testInfo.titlePath };
     const part = testInfo.annotations.some((annotation) => annotation.type === JOURNEY_PART.type)
-      ? testInfo.title.replace(/^[A-Z]+-J[0-9]+\s*/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96)
+      ? receiptPartName(testInfo.title, identity)
       : undefined;
     // Concurrent repeats must keep their captures instead of clearing another
     // attempt's files through claimReceiptDirectory's retry cleanup.
@@ -101,7 +102,7 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
     // keeps the ordinary bundle path; every later repeat has its own root.
     const root = testInfo.repeatEachIndex > 0 ? join(RECEIPTS, `repeat-${testInfo.repeatEachIndex + 1}`) : RECEIPTS;
     const dir = part ? join(root, id, "parts", part) : join(root, id);
-    claimReceiptDirectory(dir, testInfo.title);
+    claimReceiptDirectory(dir, testInfo.title, identity);
     const stages: Stage[] = [];
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -156,6 +157,7 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
       status,
       label: "real-bundle, protocol-double",
       project: testInfo.project.name,
+      title_path: testInfo.titlePath,
       viewport,
       clock: { now: new Date(JOURNEY_NOW).toISOString(), timezone: JOURNEY_TIMEZONE },
       stages,

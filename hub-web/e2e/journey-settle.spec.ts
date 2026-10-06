@@ -6,6 +6,8 @@ import { JOURNEY_NOW } from "./journeys/clock";
 // A host timeout is insufficient if an evaluation still owns a frozen RAF.
 function observeEvaluations(page: Page) {
   let pending = 0;
+  let notifyHandleEvaluation!: () => void;
+  const handleEvaluationStarted = new Promise<void>((resolve) => { notifyHandleEvaluation = resolve; });
   function tracked<T>(work: Promise<T>): Promise<T> {
     pending++;
     return work.finally(() => pending--);
@@ -13,7 +15,11 @@ function observeEvaluations(page: Page) {
   function handle(value: JSHandle): JSHandle {
     return new Proxy(value, {
       get(target, key) {
-        if (key === "evaluate") return (...args: unknown[]) => tracked(Reflect.apply(target.evaluate, target, args));
+        if (key === "evaluate") return (...args: unknown[]) => {
+          const evaluation = tracked(Reflect.apply(target.evaluate, target, args));
+          notifyHandleEvaluation();
+          return evaluation;
+        };
         const member = Reflect.get(target, key, target);
         return typeof member === "function" ? member.bind(target) : member;
       },
@@ -22,12 +28,12 @@ function observeEvaluations(page: Page) {
   const observed = new Proxy(page, {
     get(target, key) {
       if (key === "evaluate") return (...args: unknown[]) => tracked(Reflect.apply(target.evaluate, target, args));
-      if (key === "evaluateHandle") return (...args: unknown[]) => tracked(Reflect.apply(target.evaluateHandle, target, args)).then(handle);
+      if (key === "evaluateHandle") return (...args: unknown[]) => tracked(Reflect.apply(target.evaluateHandle, target, args) as Promise<JSHandle>).then(handle);
       const member = Reflect.get(target, key, target);
       return typeof member === "function" ? member.bind(target) : member;
     },
   });
-  return { page: observed, pending: () => pending };
+  return { page: observed, pending: () => pending, handleEvaluationStarted };
 }
 
 test("frozen screenshot settle drains evaluations before page teardown", async ({ page }) => {
@@ -66,7 +72,7 @@ test("page closure during frozen settling rejects and drains the evaluation", as
   const settling = settle(observed.page);
   // Observe rejection before triggering closure, even if it wins the race.
   const rejected = expect(settling).rejects.toThrow(/closed/);
-  await expect.poll(observed.pending).toBe(1);
+  await observed.handleEvaluationStarted;
   await page.close();
   await rejected;
   expect(observed.pending()).toBe(0);

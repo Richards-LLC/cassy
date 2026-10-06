@@ -155,9 +155,28 @@ impl CasService {
         }
         let task_id = required(req.task_id.as_deref(), "task_id (the delivery to review)")?;
         let reason = required(req.summary.as_deref(), "summary (why this delivery needs independent QA)")?;
-        let supervisor = self.inner.resolve_live_supervisor_authority()
-            .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
-                "qa_request requires a live registered supervisor"))?.id;
+        let supervisor = if req.head_sha.is_some() {
+            // Recovering an explicit receipt can open review of an unparked
+            // delivery, so require the registered factory supervisor role.
+            self.inner.resolve_live_supervisor_authority()
+                .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                    "qa_request requires a live registered supervisor"))?.id
+        } else {
+            // Preserve the existing parked-request contract for a standalone
+            // Standard session running in supervisor mode. This does not grant
+            // workers, dead sessions, or explicit receipt recovery authority.
+            let id = self.inner.get_registered_agent_id_read_only()?;
+            let caller = self.inner.open_agent_store()?.get(&id)
+                .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                    "qa_request requires a live registered supervisor"))?;
+            if !caller.is_alive() || !matches!(caller.role,
+                cas_types::AgentRole::Supervisor | cas_types::AgentRole::Standard)
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "qa_request requires a live registered supervisor"));
+            }
+            caller.id
+        };
         let task = self
             .inner
             .open_task_store()?

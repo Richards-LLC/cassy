@@ -2441,23 +2441,33 @@ mod stale_anchor_rebind_tests_cas_00eb {
 
     #[test]
     fn explicit_qa_request_requires_live_registered_supervisor_cas_9ffa() {
-        for role in [cas_types::AgentRole::Worker, cas_types::AgentRole::Supervisor] {
+        for role in [cas_types::AgentRole::Standard, cas_types::AgentRole::Worker, cas_types::AgentRole::Supervisor] {
             let mut env = TestEnvGuard::temp_home();
-            let f = fixture(&mut env, TaskStatus::Open);
-            let agents = open_agent_store(&f.dir.path().join(".cas")).unwrap();
+            let mut f = fixture(&mut env, TaskStatus::Open);
+            let cas_dir = f.dir.path().join(".cas");
+            f.task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:cas-9ffa-fixture".into(),
+                target_branch: "main".into(),
+            });
+            open_task_store(&cas_dir).unwrap().update(&f.task).unwrap();
+            let agents = open_agent_store(&cas_dir).unwrap();
             let mut caller = Agent::new_with_role("receipt-caller".into(), "receipt-caller".into(), role);
+            agents.register(&caller).unwrap();
             if role == cas_types::AgentRole::Supervisor {
                 caller.status = cas_types::AgentStatus::Shutdown;
+                agents.update(&caller).unwrap();
             }
-            agents.register(&caller).unwrap();
-            f.core.set_agent_id_for_testing(caller.id);
-            // An environment claim does not grant registered authority.
+            // Server identities are immutable. A second bind on f.core would
+            // keep its original supervisor, so use a new core for this caller.
+            let caller_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+            caller_core.set_agent_id_for_testing(caller.id);
+            // An environment claim does not grant receipt recovery authority.
             env.set("CAS_AGENT_ROLE", "supervisor");
-            let refusal = f.core.request_independent_qa_at_receipt(&f.task,
+            let refusal = caller_core.request_independent_qa_at_receipt(&f.task,
                 "review correction", Some(&f.tip)).expect_err("no live supervisor authority");
             assert!(refusal.contains("live registered supervisor"), "{refusal}");
-            assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty());
-            assert_eq!(open_task_store(&f.dir.path().join(".cas")).unwrap().get(&f.task.id).unwrap().status, TaskStatus::Open);
+            assert!(cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap().is_empty());
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(&f.task.id).unwrap().status, TaskStatus::Open);
         }
     }
 

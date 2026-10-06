@@ -122,14 +122,17 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       { name: "more-contrast", width: 390, height: 844, scheme: "light" as const, media: { contrast: "more" as const }, query: "(prefers-contrast: more)" },
       { name: "reduced-motion", width: 390, height: 844, scheme: "light" as const, media: { reducedMotion: "reduce" as const }, query: "(prefers-reduced-motion: reduce)" },
     ];
-    for (const cell of cells) await journey.stage(`Machine observations and notices in ${cell.name}`, async () => {
-      await page.setViewportSize({ width: cell.width, height: cell.height });
-      await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {}) });
-      await page.evaluate((scheme) => { document.documentElement.dataset.scheme = scheme; }, cell.scheme);
-      if ("query" in cell) expect(await page.evaluate((query) => matchMedia(query).matches, cell.query!)).toBe(true);
-      await expect(row.getByText(/Serve: degraded/)).toBeVisible();
-      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await journey.stage("Machine observations and notices on phone, desktop and accessibility modes", async () => {
+      for (const cell of cells) {
+        await page.setViewportSize({ width: cell.width, height: cell.height });
+        await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {}) });
+        await page.evaluate((scheme) => { document.documentElement.dataset.scheme = scheme; }, cell.scheme);
+        if ("query" in cell) expect(await page.evaluate((query) => matchMedia(query).matches, cell.query!)).toBe(true);
+        await expect(row.getByText(/Serve: degraded/)).toBeVisible();
+        await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-${cell.name}.png` });
+      }
     });
     if (process.env.QA_ARTIFACTS) {
       const { readFile, writeFile } = await import("node:fs/promises");

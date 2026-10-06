@@ -4,6 +4,7 @@ import { replaceMachineConnection } from "./connection-lifecycle";
 import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
 import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
+import { ConversationHistory } from "./conversation-history";
 import type { StoredMachine } from "./types";
 
 const supervisors: HubConnectionSupervisor[] = [];
@@ -109,6 +110,56 @@ function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = (
 }
 
 describe("Commander live connection lifecycle", () => {
+  it("settles a resend receipt when an overlapping legacy attach's ticket finishes later (cas-547a)", async () => {
+    transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const fetchNow = globalThis.fetch;
+    const tickets: Array<() => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/auth/websocket-ticket") {
+        await new Promise<void>(resolve => tickets.push(resolve));
+      }
+      return fetchNow(input, init);
+    }));
+    const history = new ConversationHistory();
+    const connection = new HubConnectionSupervisor(await storedMachine("overlapping-attach"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onMessageQueued: (_session, receipt) => { history.acknowledge(receipt); },
+      onConversationHistory: (_session, page) => { page.messages.forEach(message => history.hydrateSend(message)); },
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const first = connection.attach("session-a"), second = connection.attach("session-a");
+    await vi.waitFor(() => expect(tickets).toHaveLength(2));
+    tickets[0]!();
+    await first;
+    const writer = TransportSocket.instances[0]!;
+    writer.open();
+    writer.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    const text = "Did the Mac tests start?", clientRef = "resend";
+    const message = { SendMessage: { target: "supervisor", text, client_ref: clientRef } };
+    history.submit(clientRef, "supervisor", text, 1_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.unconfirmSilent(16_000);
+    history.reply({ notification_id: 98, reply_to: null, message: "Tests are running on the Mac.", summary: "", device_id: "phone" }, 17_000);
+    expect(history.discardRefused(clientRef)).toBe(true);
+    history.hold(clientRef, "supervisor", text, 18_000);
+    expect(connection.send("session-a", message)).toBe(true);
+    history.release(clientRef, 18_000);
+    // A second caller passed the pre-ticket socket check while the first was
+    // still authenticating. It must not retire the socket that wrote Retry.
+    tickets[1]!();
+    await second;
+    writer.receive({ MessageQueued: { client_ref: clientRef, notification_id: 99, target: "supervisor", stamped: true } });
+    const send = history.events.find(event => event.kind === "send");
+    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(true);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
+    expect(writer.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === clientRef)).toHaveLength(2);
+  });
   it("delivers a stalled catalog's entire burst and joins manual refreshes to its flight (cas-b55b)", async () => {
     const hub = transport();
     const events: Record<string, unknown>[] = [];

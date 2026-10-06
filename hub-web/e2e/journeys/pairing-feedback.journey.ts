@@ -1,5 +1,6 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS } from "./world";
+import { showConversationList } from "./responsive-goals";
 import type { Page, TestInfo, Route } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 
@@ -76,6 +77,7 @@ for (const width of [390, 1280]) {
           await expect(dialog).toBeHidden();
         });
         await journey.stage("Recognize this browser without reading protocol fields", async () => {
+          await showConversationList(page);
           await page.locator("#paired-machines-toggle").click();
           await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
           const row = page.locator(".installation-inventory-row");

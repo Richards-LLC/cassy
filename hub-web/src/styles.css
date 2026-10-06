@@ -1580,6 +1580,8 @@ dialog form > *,
   border-bottom: var(--line-width) solid var(--line-subtle);
 }
 
+.pair-status:focus { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+
 /* Journey F12: toasts anchor at the top, never over the composer or the
    bottom rails where the operator is typing. */
 #toast {
@@ -2881,6 +2883,10 @@ button.chip:disabled { cursor: default; }
 .installation-inventory-row h3 { margin: 0; font-size: var(--fs-md); }
 .installation-inventory-row code, .installation-inventory-row dd { overflow-wrap: anywhere; }
 .installation-inventory-row button { justify-self: start; }
+.installation-inventory-row .pair-details dt { text-transform: none; letter-spacing: normal; }
+.installation-technical summary { min-height: calc(var(--button-height) + var(--space-1)); padding: var(--space-2) 0; cursor: pointer; }
+.installation-technical summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
+.installation-technical[open] { display: grid; gap: var(--space-2); }
 /* Conversation progress is prose in a narrow rail, including unbroken IDs. */
 #status-view, .status-row { min-width: 0; max-width: 100%; }
 .status-row { box-sizing: border-box; overflow-wrap: anywhere; }

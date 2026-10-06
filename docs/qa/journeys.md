@@ -65,7 +65,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Entry:** the `#pair=…&hub=…&scopes=…` link printed by `cas hub pair`, opened in a browser
 - **Goal:** the link pairs this browser and I reach the supervisor
 - **Touches:** `hub-web/src/fragment.ts`, `hub-web/src/pair*.ts`, `hub-web/src/pending-pairing.ts`, `hub-web/src/storage.ts`, `hub-web/src/connection.ts`
-- **Suite:** `hub-web/e2e/journeys/pair-link.journey.ts`
+- **Suite:** `hub-web/e2e/journeys/pair-link.journey.ts`, `pairing-deadline.journey.ts`, `installation.journey.ts`, `pairing-feedback.journey.ts`
 - **Gaps:** the exchange endpoint is doubled
 
 #### Steps
@@ -81,6 +81,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The invitation is recognised at once, with no extra click to start.
 - Scopes the link did not grant are visibly unavailable, with the command to get them.
 - The hub address field says what to type (the placeholder shows a real example).
+- A failed pairing focuses and reveals its advice above the action row; retry keeps the invitation.
+- Browser installations lead with the device name, ownership, access and readable activity; exact IDs, generations, UTC times and signing fingerprints are available in closed Technical details. Revocation still confirms the exact device ID.
 
 #### Edge paths
 

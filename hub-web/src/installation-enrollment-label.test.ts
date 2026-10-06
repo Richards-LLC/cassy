@@ -15,6 +15,6 @@ describe("installation inventory account row (cas-4634)", () => {
         epoch: "4",
         verified_at: "2026-10-05T21:00:00Z",
       }),
-    ).toBe("Operator inbox (key epoch 4)");
+    ).toBe("In your operator inbox");
   });
 });

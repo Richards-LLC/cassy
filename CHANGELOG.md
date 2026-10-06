@@ -120,6 +120,44 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A failed fleet action's note spans the full row at desktop widths and names
   its subject without squeezing to a narrow column.
 
+### Fixed — Commander sessions, recovery and layout
+
+- New session asks once: the first "Allow starting sessions on <machine>"
+  grants the permission and opens the project list, instead of leading to a
+  second confirmation sheet that asked for the same permission under another
+  name.
+- A half-open machine stays "Unsteady" until four heartbeats are missed. A
+  failed or timed-out catalog read triggered by an event is now left to the
+  heartbeat instead of ending the event stream, which had turned "Unsteady"
+  into "Reconnecting" after one missed beat. A refused pairing still ends the
+  stream at once.
+- A keyboard-focused or open conversation row shows the whole machine name,
+  wrapped clear of the time stamp; resting rows keep their one-line ellipsis.
+- On phones, the header's machine line no longer clips its glyphs, and a
+  conversation opened from search by touch lands focus on the reading region
+  instead of dropping it to the page, without raising the on-screen keyboard.
+- In a landscape phone pane (844×390) the connection-failure card scrolls
+  vertically, so Retry and Diagnose are no longer cut off.
+
+### Fixed — cloud sync
+
+- A team-linked sync's receipt counts the real queue: the team backlog, held
+  personal pending and failed rows with their rejection reasons, and a warning
+  when held rows failed. It had read "0 pending, 0 failed/parked" while
+  thousands of personal rows sat rejected as `team_owned_project`.
+- `cas cloud status` reports the team pull watermark, advanced on every
+  successful team pull including ones with nothing newer, and labels the
+  personal one. Status and `cas doctor` flag personal `team_owned_project`
+  rejections while `cloud.team_only` is off, with the exact fix command.
+- Healing a historical parent-child dependency stages its own-project endpoint
+  tasks that are missing on the cloud, insert-only so a pending newer write and
+  its retry metadata survive, and holds the edge until those tasks exist.
+  Deleted, moved and foreign endpoints are refused and parked with a reason
+  instead of burning retries as `orphan_dependency`. Legacy memories with no
+  origin project park as `unattributed_origin`, and intentional parks are
+  reported apart from failures. Existing stranded rows repair after an updated
+  runtime pulls, then pushes once.
+
 ### Fixed — Commander hub status
 
 - `cas hub status --json` adds a read-only `runtime_receipt` after a restart:
@@ -196,6 +234,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `hub-web/dist` bundles to the regenerated-artifact rule; one replay fell
   from about 60,000 git processes to about 1,300. A deadline after only an
   intermediate write reports IN_PROGRESS, not COMMITTED.
+- A registered supervisor can park and close a retired worker's corrected
+  delivery from its pushed commit, validated against the task's work target
+  rather than the retired worker's moved-on worktree, and `qa_request` accepts
+  an explicit head on a reopened task. Unmerged receipts are still refused.
+- A supervisor close whose `commit_receipt` is already an ancestor of the
+  task's work target succeeds without `supervisor_override` when the
+  assignee's checkout is detached on other work. It had failed with "expected
+  task worktree branch …, found ``". Worker self-close, non-supervisor callers
+  and unmerged receipts keep the existing checks.
+- Approving a changed snapshot line by its SHA-256 is now proven end to end
+  through the MCP notes and close path: a literal over the 1,500-character
+  note limit is refused, the correct hash closes, and a same-prefix wrong hash
+  is refused.
+- Close suggestions prescribe real Cargo test targets: modules that now live
+  inside combined targets such as `integration_contracts` are mapped to them,
+  and unknown suites fail closed, instead of a prescribed command failing with
+  "no test target named".
 
 ### Fixed — QA and release tooling
 
@@ -210,12 +265,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Worker browser and JS test suites (npm/npx, Playwright, Vitest and the
   hub-web build, typecheck and visual-QA entry points) now wait for shared
   host-memory admission through `scripts/worker-memory.py` instead of starving
-  the release proof: one suite runs per host, proofs take priority, waits print
+  the release proof. Admission uses weighted counting slots against the fresh
+  memory budget: two browser suites and a typecheck run side by side under a
+  normal budget, a low budget (8 GiB) still runs browser suites one at a time,
+  and light commands (typecheck, Vite build, capped Vitest) never wait behind a
+  browser suite. Proofs keep exclusive priority, waits print
   `waiting for host memory (proof running), N s` bounded by
   `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS` (default 600), and a running
   suite is stopped if free memory falls inside its headroom. A credential or
   other hook deny still wins over admission. Previously 125 headless browsers
-  pushed free memory below the proof's reserve and aborted it.
+  pushed free memory below the proof's reserve and aborted it, and a single
+  exclusive lock then made a 1-second build wait minutes behind a browser
+  suite.
+- Script-test fixtures, in-process and subprocess, use private admission pools,
+  so a fixture proof no longer holds or waits on the real host locks. Production
+  admission is unchanged, and no environment variable bypasses it.
+- Assembly link memory receipts also sample the forked `mold` workers of the
+  same link, not only the waited process.
+- Newly seeded worker `target/` directories carry CAS ownership provenance
+  (checkout, target and lease identity, a generation marker, and process start
+  and boot time) before any build data, so retirement can reclaim them even
+  when an unrelated unreadable process is present. A `target/` that git does
+  not ignore stays legacy, with no marker and no reclaim, and seeding still
+  succeeds.
+- Visual QA treats content the engine skips (`content-visibility: hidden`,
+  Chromium's closed `<details>`) as not drawn, and ellipsised one-line text
+  stops the inspector's horizontal clip walk, so neither raises a false
+  clipping finding; a real visible clip still fails.
+- Commander journey fixtures follow the real phone layout in a responsive
+  four-variant lane, and a journey's screenshot settling can no longer outlive
+  its page, with repeat captures isolated per run.
 - Each worktree's Rust proof builds into its own target directory
   (`scripts/proof_target.py`), and proof logs record the worktree, HEAD and
   target, so another worktree's build output can't produce a false result.

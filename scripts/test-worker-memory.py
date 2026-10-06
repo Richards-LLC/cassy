@@ -52,11 +52,12 @@ class AdmissionTests(unittest.TestCase):
 
     def start_counted_command(self, executable, name, budget):
         binary = self.root / executable
-        binary.write_text('#!' + sys.executable + '\n'
-                          'import pathlib,sys,time\n'
-                          'pathlib.Path(sys.argv[1]).write_text("started")\n'
-                          'while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n')
-        binary.chmod(0o755)
+        if not binary.exists():
+            binary.write_text('#!' + sys.executable + '\n'
+                              'import pathlib,sys,time\n'
+                              'pathlib.Path(sys.argv[1]).write_text("started")\n'
+                              'while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n')
+            binary.chmod(0o755)
         marker = self.root / (name + '-started')
         release = self.root / (name + '-release')
         launcher = (
@@ -67,7 +68,7 @@ class AdmissionTests(unittest.TestCase):
             f"sys.exit(m.run({[str(binary), str(marker), str(release)]!r},directory=pathlib.Path({str(self.pool)!r})))"
         )
         env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3',
-                   CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS='0.02')
+                   CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS='1')
         child = subprocess.Popen([sys.executable, '-c', launcher], env=env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         def cleanup():

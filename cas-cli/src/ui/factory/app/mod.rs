@@ -474,6 +474,10 @@ pub(crate) fn seed_worker_target_from_baseline(
     if std::fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         anyhow::bail!("worker target is a symlink; refusing baseline re-seed");
     }
+    // Reject invalid snapshots before creating target provenance or seed data.
+    let base_commit = git_head(worktree_path)?;
+    let skipped_crates =
+        changed_workspace_crates(worktree_path, &metadata.source_commit, &base_commit)?;
     #[cfg(unix)]
     let _target_lease = crate::factory_target_cache::owner::acquire(cas_dir, worktree_path)?;
     let staging = worktree_path.join(".target-seed-in-progress");
@@ -481,9 +485,6 @@ pub(crate) fn seed_worker_target_from_baseline(
         std::fs::remove_dir_all(&staging)?;
     }
 
-    let base_commit = git_head(worktree_path)?;
-    let skipped_crates =
-        changed_workspace_crates(worktree_path, &metadata.source_commit, &base_commit)?;
     let age_secs = target_seed_age(metadata.created_at_unix);
     let mut stats = TargetSeedStats {
         snapshot: snapshot_name.to_string(),
@@ -6786,6 +6787,8 @@ mod spawn_isolation_tests {
         let err = seed_worker_target_from_baseline(&cas_dir, &repo.join("worker"))
             .expect_err("a snapshot with no ancestry must be rejected");
         assert!(err.to_string().contains("not an ancestor"), "{err}");
+        assert!(!repo.join("worker/target").exists());
+        assert!(!cas_dir.join("worker-target-owners").exists());
         assert!(
             !repo
                 .join("worker/target/debug/deps/libwarm.rlib")

@@ -1487,7 +1487,10 @@ export class HubConnectionSupervisor {
     // sent into it could vanish, so it is refused here and the caller holds
     // it until the machine answers or the socket is replaced (cas-0978,
     // cas-a6f0, journey F9).
-    if (this.holdsMessages() && isSupervisorMessage(message)) return false;
+    // The journal's claim and credential reads are asynchronous. Recovery can
+    // begin after the caller checked live, while its old socket is still OPEN.
+    // Never write that pending send onto a socket recovery is about to replace.
+    if (isSupervisorMessage(message) && (this.lifecycle.phase !== "live" || this.holdsMessages())) return false;
     const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
       const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;

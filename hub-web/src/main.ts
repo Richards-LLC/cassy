@@ -10,6 +10,8 @@ import { projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
+// Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
+import "./glass.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
@@ -1095,12 +1097,15 @@ function conversationConnection(machineId: string, session: string | undefined):
   const machine = connectionStates.get(machineId);
   if (!session) return machine;
   const key = sessionKey(machineId, session);
-  return sessionConnection(machine, attachStates.get(key), sessionsEverLive.has(key));
+  return sessionConnection(machine, attachStates.get(key), sessionsEverLive.has(key), connections.get(machineId)?.hasLiveAttach(session));
 }
 
 function machineFooterConnection(machineId: string): ConnectionState | undefined {
   const prefix = `${machineId}:`;
-  const attached = [...attachStates].filter(([key]) => key.startsWith(prefix)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key) }));
+  // The catalog removes ended peers; their cached retry lifecycle must not
+  // keep a machine with a responding conversation labelled Reconnecting.
+  const listed = new Set((sessions.get(machineId) ?? []).map(session => session.name));
+  const attached = [...attachStates].filter(([key, attach]) => key.startsWith(prefix) && listed.has(attach.session)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key), responding: connections.get(machineId)?.hasLiveAttach(attach.session) }));
   return machineConnection(connectionStates.get(machineId), attached);
 }
 
@@ -3541,7 +3546,7 @@ function render(captureDraft = true): void {
   // Workers and tasks keep rendering the last snapshot while a hub is
   // unreachable. Presented unlabelled, that reads as current truth.
   const statusIsStale = Boolean(selected) && machineConnectionSnapshot !== undefined
-    && (machineConnectionSnapshot.phase !== "live" || machineConnectionSnapshot.degraded);
+    && ((machineConnectionSnapshot.phase !== "live" && headerConnection?.phase !== "live") || machineConnectionSnapshot.degraded);
   const lastLive = selected ? lastLiveAt.get(selected.id) : undefined;
   const staleStatusAge = lastLive === undefined ? undefined : relativeTimestamp(lastLive);
   const staleStatusTail = staleStatusAge === undefined

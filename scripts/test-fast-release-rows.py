@@ -33,7 +33,7 @@ class FastRows(unittest.TestCase):
         self.repo = Path(self.scratch.name) / "repo"
         self.repo.mkdir()
         self.write(".gitignore", "/cargo-called\n")
-        for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "cas-test-targets.py",
+        for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py",
                        "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py"):
@@ -79,6 +79,44 @@ class FastRows(unittest.TestCase):
                          "--base", self.base, env=env)
         self.assertFalse((self.repo / "cargo-called").exists(), result.stdout + result.stderr)
         return result
+
+    def integration_rows(self):
+        # This tier uses real make and a real environment-reading script.
+        self.write("scripts/check-test-shape.py", "print('fixture test-shape PASS')\n")
+        self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/env-child.py\n")
+        self.write("scripts/env-child.py", "import os\nassert not [k for k in os.environ if k.startswith(('CAS_RELEASE_TRAIN_', 'CAS_RELEASE_GATE_'))]\nassert os.environ['GIT_CONFIG_GLOBAL'] == '/dev/null'\nprint('1 script test passed')\n")
+        self.commit()
+        output = self.repo / ".git/no-build.json"
+        result = command(self.repo, "python3", "scripts/release-integration-gates.py", "--run",
+                         str(self.repo), self.base, str(output))
+        proof = json.loads(output.read_text())
+        self.assertEqual(proof["tip"], command(self.repo, "git", "rev-parse", "HEAD").stdout.strip())
+        self.assertFalse((self.repo / "cargo-called").exists(), result.stdout + result.stderr)
+        return result, proof
+
+    def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
+        result, proof = self.integration_rows()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(proof['rows']), 12)
+        self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
+
+    def test_integration_no_build_names_md022_before_assembly(self):
+        self.write('docs/bad.md', '# Bad\n## Missing blank lines\nbody\n')
+        result, proof = self.integration_rows()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(proof['rows']['markdown-lint'], 'FAIL')
+        self.assertEqual(proof['rows']['ci-script-tests'], 'PASS')
+        self.assertIn('markdown-lint', result.stdout)
+
+    def test_integration_train_env_leak_names_script_row(self):
+        # Mutation control: removing only the train prefix from the production
+        # scrub must turn the real environment-reading make child red.
+        path = self.repo / 'scripts/release-test-env.sh'
+        path.write_text(path.read_text().replace('CAS_RELEASE_TRAIN_*|', ''))
+        result, proof = self.integration_rows()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(proof['rows']['ci-script-tests'], 'FAIL')
+        self.assertIn('ci-script-tests', result.stdout)
 
     def test_complete_set_no_cargo_and_under_budget(self):
         start = time.monotonic()

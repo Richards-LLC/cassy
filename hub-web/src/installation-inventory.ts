@@ -57,7 +57,9 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
   const actions = doc.createElement("div"); actions.className = "dialog-actions";
   const close = doc.createElement("button"); close.type = "button"; close.textContent = "Close";
   close.onclick = () => dialog.close(); actions.append(close);
-  body.append(title, lead, status, list, actions); dialog.append(body); doc.body.append(dialog);
+  // The actions are the sheet's footer, after the scrolling body, so nothing
+  // (a wrapped intro's Revoke) can scroll under Close (cas-205e QA F01).
+  body.append(title, lead, status, list); dialog.append(body, actions); doc.body.append(dialog);
   dialog.addEventListener("close", () => { dialog.remove(); if (opener?.isConnected) opener.focus(); }, { once: true });
   dialog.showModal();
   try {

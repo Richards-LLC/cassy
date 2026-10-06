@@ -89,3 +89,33 @@ describe("a never-live conversation's first retry (cas-28df)", () => {
     expect(sessionConnection(live, attach("backoff", { attempt: 2 }), false)?.phase).toBe("backoff");
   });
 });
+
+
+describe("responding attaches during event recovery (cas-49cc)", () => {
+  it("keeps the conversation Live only with fresh responding transport evidence", () => {
+    const retrying = machine("backoff", { nextRetryAt: 10_000, reason: "event stream closed" });
+    const speaking = attach("live");
+    expect(sessionConnection(retrying, speaking, true, true)).toBe(speaking);
+    expect(sessionConnection(retrying, speaking, true, false)).toBe(retrying);
+    expect(sessionConnection(retrying, attach("attaching"), true, true)).toBe(retrying);
+    expect(sessionConnection(retrying, undefined, true, true)).toBe(retrying);
+  });
+  it("keeps auth, fatal, permission and degraded machine verdicts authoritative", () => {
+    for (const extra of [{ fatal: true }, { authFailure: "revoked" as const }, { networkAccessHelp: "Allow local network access" }, { degraded: true }]) {
+      const blocked = machine("failed", extra);
+      expect(sessionConnection(blocked, attach("live"), true, true)).toBe(blocked);
+      expect(machineConnection(blocked, [{ attach: attach("live"), wasLive: true, responding: true }])).toBe(blocked);
+    }
+    const stopped = machine("idle");
+    expect(sessionConnection(stopped, attach("live"), true, true)).toBe(stopped);
+  });
+  it("keeps the footer connected while a peer retries beside a responding attach", () => {
+    const retrying = machine("backoff");
+    const speaking = attach("live");
+    expect(machineConnection(retrying, [
+      { attach: speaking, wasLive: true, responding: true },
+      { attach: attach("backoff", { sessionOnly: true }), wasLive: true, responding: false },
+    ])).toBe(speaking);
+    expect(machineConnection(retrying, [{ attach: speaking, wasLive: true, responding: false }])).toBe(retrying);
+  });
+});

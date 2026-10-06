@@ -342,6 +342,14 @@ cut_preflight_check_integration() {
         cut_preflight_block integration-receipt "missing passing integration receipt $receipt"
         return $?
     }
+    local no_build_blockers
+    if ! no_build_blockers="$(python3 "$script_dir/release-integration-gates.py" --check "$receipt" 2>&1)"; then
+        local blocker_name="${no_build_blockers%%$'\n'*}"
+        [[ "$blocker_name" =~ ^integration-[a-z-]+$ ]] || blocker_name=integration-no-build-receipt
+        cut_preflight_block "$blocker_name" \
+            "integration no-build rows need PASS on the tested tip; $no_build_blockers; rerun cas factory integration-recover"
+        return $?
+    fi
     origin_main="$(git -C "$worktree" rev-parse --verify refs/remotes/origin/main 2>/dev/null || true)"
     [[ -n "$origin_main" ]] || {
         cut_preflight_block integration-base-stale "origin/main is not available for comparison"

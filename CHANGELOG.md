@@ -7,6 +7,85 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.48.0] - 2026-10-06
+
+### Added — Commander Glass look
+
+- Commander has a new look, Glass, in light and dark: a violet-to-teal aurora
+  behind frosted conversation list, heading, context and composer panels, a
+  glowing violet Send, and an amber-to-coral card for an open question. Glass
+  is the only look; Appearance and the system scheme still choose light or
+  dark. Layout, controls and the composer's width are unchanged.
+- Text on Glass keeps at least 4.5:1 contrast over every part of the aurora in
+  both schemes. A refused or unconfirmed message keeps its dashed, unfilled
+  record on a solid backdrop, so its recovery text, Edit, Retry and Review stay
+  readable instead of sitting on the violet message colour.
+- Forced colours, "more contrast" and "reduced transparency" get opaque,
+  unblurred panels; more contrast also flattens the aurora and darkens
+  secondary text. Glass adds no animation, so reduced motion needs nothing
+  extra. The aurora stays still and is painted from a small pre-rendered
+  image, and only the four main panels and dialogs are blurred, so long
+  threads scroll as smoothly as before.
+- `hub-web/scripts/build-preview.sh` builds a clickable preview of the
+  production bundle against a fixture hub into a gitignored `preview-dist/`.
+  A test proves the shipped bundle never carries the preview's shim.
+
+### Fixed — Commander connection
+
+- A dropped event stream no longer tears down machine connections that are
+  still answering, so the header no longer flickers "Reconnecting" while
+  conversations keep working. Only a connection that has gone quiet for four
+  heartbeats, or a proven machine outage, is replaced; a connection that is
+  still opening is left to its own deadlines.
+- Event-stream reconnects back off. The retry streak resets only after the
+  stream has stayed up for 10 seconds, not as soon as it answers, so a
+  flapping stream no longer reconnects at full speed.
+- While event delivery recovers, a conversation whose machine is still
+  talking reads Live in the header, the list and the footer, and the status
+  panel is not marked stale. A conversation that has ended no longer keeps its
+  machine labelled "Reconnecting".
+- Recovery refreshes the conversation list before going live, so the list
+  stays filled when short event streams keep cutting off the regular refresh.
+
+### Fixed — Commander sends
+
+- A message resent with "Send again" settles as Delivered instead of staying
+  on "Waiting for … to confirm". The replaced connection was closed before
+  its delivery receipt arrived. It now stays readable for up to 5 seconds,
+  accepting only receipts for messages it carried under the current pairing,
+  while the next send goes out on the new connection at once.
+
+### Fixed — release and factory tooling
+
+- Every epic integration runs the release gate's no-build rows (markdown
+  lint, failure log, version literals, changelog, procedure guardrails, test
+  shape and the rest) and the CI script tier under release-train conditions,
+  with every train control variable exported, and records each row as PASS or
+  FAIL against the integration tip. Train preflight refuses a missing, stale
+  or failed row before assembly, names it, and points to
+  `cas factory integration-recover`. In 3.47.1 a markdown-lint error and a
+  script-tier failure surfaced only during the cut.
+- Release gate suite children run through `scripts/release-test-env.sh`. It
+  removes factory identity, train and gate control variables and receipt
+  destinations, gives them a clean temporary HOME and disables global Git
+  configuration. In 3.47.1 a test that matched `LEASE` in an inherited
+  `CAS_RELEASE_TRAIN_*` variable failed the script tier inside the train.
+  Host memory admission and linker context (now `CAS_ASSEMBLY_LINK_CONTEXT`)
+  still reach nested suites.
+- The lane compile proof (`scripts/check-lane-compile.py --prove`) works again
+  from a worker's private checkout. Its preview checkout sat one level too
+  deep, so private target ownership refused it before Cargo ran. Previews are
+  now direct children of `.cas/worktrees`, with a sibling metadata directory
+  bound to the exact checkout path; cleanup still recognises older nested
+  previews and refuses unowned ones.
+- Capped worker checks and named tests no longer leave a compiler-cache
+  daemon holding the worker's build lease. A cold sccache client passed the
+  inherited private target lease to its long-lived server, so the next capped
+  test failed with "Resource temporarily unavailable". The capped runner now
+  clears `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` for its Cargo child,
+  while real builder processes keep the lease until they exit. Supervisor and
+  CI builds keep sccache.
+
 ## [3.47.1] - 2026-10-06
 
 ### Fixed — Commander

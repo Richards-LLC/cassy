@@ -29,6 +29,27 @@ class GuardTests(unittest.TestCase):
         self.env = {"PATH": os.environ["PATH"], "CARGO_HOME": str(self.root / "cargo-home")}
         self.high = {"total_bytes": 64 * guard.proof.GIB, "available_bytes": 60 * guard.proof.GIB, "source": "fixture"}
 
+    def test_compile_scrub_preserves_linker_resource_context_cas_09f25(self):
+        # A real shell boundary removes every release control while the
+        # compiler's linker policy/receipt remain usable by the staged guard.
+        child = self.root / 'child.json'
+        scrub = Path(__file__).with_name('release-test-env.sh')
+        program = ("import json,os,pathlib; assert not [k for k in os.environ if k.startswith(('CAS_RELEASE_TRAIN_', 'CAS_RELEASE_GATE_'))]; "
+                   "pathlib.Path(" + repr(str(child)) + ").write_text(os.environ['CAS_ASSEMBLY_LINK_CONTEXT'])")
+        env = dict(self.env, CAS_RELEASE_TRAIN_STAGE='gate')
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(guard.proof, 'memory_snapshot', return_value=self.high):
+            self.assertEqual(guard.compile_guard(['bash', str(scrub), sys.executable, '-c', program],
+                                                '{"CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS":"1"}', self.events, self.root), 0)
+        context = json.loads(child.read_text())
+        self.assertEqual(context['policy']['CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS'], '1')
+        self.assertEqual(context['receipt'], str(self.events.with_name('link-rss.jsonl')))
+        with mock.patch.dict(os.environ, dict(self.env, CAS_ASSEMBLY_LINK_CONTEXT=json.dumps(context)), clear=True), \
+                mock.patch.object(guard, 'LINK_LEASE_ROOT', self.root), \
+                mock.patch.object(guard.proof, 'memory_snapshot', return_value=self.high):
+            self.assertEqual(guard.link([sys.executable, '-c', 'print("linker child PASS")']), 0)
+        self.assertTrue(Path(context['receipt']).is_file())
+
     def test_native_flags_and_linker_overrides_survive_wrapping(self):
         config = self.root / ".cargo/config.toml"
         config.parent.mkdir()

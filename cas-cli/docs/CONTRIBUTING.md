@@ -610,6 +610,21 @@ instead of its worktree path; ignored local environment/config files are keyed
 by contents too. New exclusions require confirming that they cannot change the
 compiled candidate or test behavior.
 
+Rolling integration runs the release gate's no-build rows before builder
+admission, plus `ci-script-tests` with every declared release-train control
+exported. `integration.json` records each named row as PASS or FAIL under
+`no_build`, bound to the integration tip. Train preflight refuses a missing,
+stale or failed row before assembly and names the blocker; rerun
+`cas factory integration-recover` after fixing the tip. Generic projects
+without Cassy's release gate keep their existing runner.
+
+All gate suite children use `scripts/release-test-env.sh`: it removes harness
+identity, train/gate control namespaces and receipt destinations, provides a
+clean temporary HOME and disables global Git configuration. Cargo and Rustup
+locations remain explicit. The parent retains its orchestration environment;
+validated host memory admission and compiler linker resource context survive
+so nested suites and linkers remain admitted without inheriting release knobs.
+
 For daemon-initiated sweeps, persist the scratch base with
 `cas config set factory.release_gate_home_dir /home/cas-release-gate/base`
 in the project's `.cas/config.toml`. The daemon passes this key to assembly
@@ -714,6 +729,13 @@ not serialize. An existing `RUSTC_WRAPPER` wins; set
 `CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
 cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
 
+Capped worker checks and named tests override both `RUSTC_WRAPPER` and
+`RUSTC_WORKSPACE_WRAPPER` with empty strings, including Cargo-config and
+`CARGO_BUILD_*` fallbacks. Their Cargo/rustc descendants inherit a private target
+lifetime lease; a compiler-cache daemon must not retain it after Cargo exits.
+Prestarting sccache cannot prevent its client from spawning another daemon if
+the server exits. Supervisor and CI builds keep their configured wrappers.
+
 When a worker delivery parks awaiting merge or closes, Cassy keeps only
 `factory.target_cache_retention_count` warm parked check caches (default: 1).
 It prunes the other private `target/debug` outputs under the same per-worktree
@@ -806,12 +828,16 @@ after confirming no Cargo process is running and no cache lease is held. It was
 29 GB at discovery; use the inventory receipt for its current byte count.
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
-Lane compile previews carry provenance and a lifetime owner lock. Explicit
-`gc_cleanup force=true dry_run=false` removes stale owned detached previews,
+Lane compile previews carry provenance and a lifetime owner lock.
+Previews are direct children of `.cas/worktrees` so the existing private target
+ownership check admits them. Their sibling metadata directory binds the exact
+checkout path, Git common directory and commit and holds the lifetime lock.
+GC also recognizes older nested `lane-compile-*/preview` checkouts.
+Explicit `gc_cleanup force=true dry_run=false` removes stale owned detached previews,
 including their Git registration, after revalidating ownership, process liveness
 and `factory.target_cache_min_idle_secs`. Recent or live previews survive;
 previews created before provenance was recorded remain inventory-only. The
-`TARGET_CACHE_STATUS_JSON` report includes nested preview target sizes and
+`TARGET_CACHE_STATUS_JSON` report includes preview target sizes and
 `lane_previews` dispositions. The existing high/low watermark configuration
 controls cache pressure warnings; preview cleanup does not need disk pressure.
 On macOS, liveness uses NUL-delimited `lsof` field output and fails closed if
@@ -859,9 +885,10 @@ the floor reserves space for subsequent worker writes and builds.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with
-`--remap-path-prefix`). Keep sccache enabled for same-path/CI reuse and for when
+`--remap-path-prefix`). Supervisor and CI builds keep sccache enabled for when
 [upstream path normalization](https://github.com/mozilla/sccache/pull/2678)
-lands; hardlink seeding is the current cross-worktree mechanism.
+lands; hardlink seeding is the current cross-worktree mechanism. Capped worker
+builds reuse their private Cargo target without a compiler-cache daemon.
 
 ### CI-load policy
 

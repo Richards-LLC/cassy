@@ -18,7 +18,7 @@ class WebGate(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.repo = Path(self.scratch.name) / 'repo'
         self.repo.mkdir()
-        for name in ('release-gate.sh', 'release_scratch.py', 'release-portable.sh', 'classify-ci-diff.sh', 'classify-fast-admission.sh'):
+        for name in ('release-gate.sh', 'release_scratch.py', 'release-portable.sh', 'release-test-env.sh', 'release-integration-gates.py', 'classify-ci-diff.sh', 'classify-fast-admission.sh'):
             self.write('scripts/' + name, (ROOT / 'scripts' / name).read_text())
             (self.repo / 'scripts' / name).chmod(0o755)
         self.write('cas-cli/Cargo.toml', '[package]\nversion = "9.99.7"\n')

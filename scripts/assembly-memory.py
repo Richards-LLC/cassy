@@ -35,7 +35,8 @@ def append(path, event):
 
 
 def settings(env):
-    return json.loads(env.get("CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY", "{}"))
+    context = json.loads(env.get("CAS_ASSEMBLY_LINK_CONTEXT", "{}"))
+    return context.get("policy", json.loads(env.get("CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY", "{}")))
 
 
 def deadline(env):
@@ -249,7 +250,8 @@ def link(command):
     # Validate before waiting, including under a busy admission lock.
     proof.positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_LINK_JOBS")
     started = time.monotonic()
-    receipt = os.environ["CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG"]
+    context = json.loads(os.environ.get("CAS_ASSEMBLY_LINK_CONTEXT", "{}"))
+    receipt = context.get("receipt") or os.environ["CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG"]
     while True:
         elapsed = time.monotonic() - started
         try:
@@ -367,7 +369,12 @@ def compile_guard(command, policy, events, root):
     env = dict(os.environ, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLICY=policy,
                CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG=str(events.with_name("link-rss.jsonl")))
     linker, flags = native_configuration(root, env)
-    env["CAS_RELEASE_GATE_ASSEMBLY_REAL_LINKER"] = linker
+    # Linker resource context survives the suite environment boundary without
+    # exposing train/gate orchestration knobs to Cargo or its test children.
+    env["CAS_ASSEMBLY_LINK_CONTEXT"] = json.dumps({
+        "linker": linker, "policy": json.loads(policy),
+        "receipt": str(events.with_name("link-rss.jsonl")),
+    })
     env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags + ["-C", "linker=" + str(stable_wrapper(root, env))])
     policy = json.loads(policy)
     admission = {"phases": []}
@@ -438,6 +445,9 @@ def compile_guard(command, policy, events, root):
 
 def main():
     # rustc invokes its linker with positional arguments, without a CLI verb.
+    if "CAS_ASSEMBLY_LINK_CONTEXT" in os.environ:
+        context = json.loads(os.environ["CAS_ASSEMBLY_LINK_CONTEXT"])
+        return link([context["linker"], *sys.argv[1:]])
     if "CAS_RELEASE_GATE_ASSEMBLY_REAL_LINKER" in os.environ:
         return link([os.environ["CAS_RELEASE_GATE_ASSEMBLY_REAL_LINKER"], *sys.argv[1:]])
     parser = argparse.ArgumentParser(description=__doc__)

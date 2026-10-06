@@ -1,3 +1,4 @@
 e2e/.results/
 .playwright-mcp/
 .playwright-cli/
+preview-dist/

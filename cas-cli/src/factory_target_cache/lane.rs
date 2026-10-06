@@ -10,6 +10,8 @@ struct Provenance {
     version: u32,
     git_common_dir: PathBuf,
     head: String,
+    #[serde(default)]
+    worktree: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,27 +26,40 @@ pub struct LanePreviewRecord {
     head: Option<String>,
 }
 
+// Legacy previews are metadata/preview; new previews are metadata's sibling.
+// Derive metadata from the checkout name, never from an untrusted marker path.
+fn metadata_dir(worktree: &Path) -> Option<PathBuf> {
+    let name = worktree.file_name()?.to_str()?;
+    if name == "preview" {
+        let parent = worktree.parent()?;
+        return parent
+            .file_name()?
+            .to_str()?
+            .starts_with("lane-compile-")
+            .then(|| parent.to_path_buf());
+    }
+    let metadata = name.strip_suffix("-preview")?;
+    (!metadata.strip_prefix("lane-compile-")?.is_empty()).then(|| worktree.with_file_name(metadata))
+}
+
 pub(super) fn is_preview_path(cas_root: &Path, worktree: &Path) -> bool {
-    worktree.file_name().is_some_and(|name| name == "preview")
-        && worktree.parent().is_some_and(|parent| {
-            parent
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("lane-compile-"))
-                && parent.parent().and_then(|path| path.canonicalize().ok())
-                    == cas_root.join("worktrees").canonicalize().ok()
-        })
+    let Some(metadata) = metadata_dir(worktree) else {
+        return false;
+    };
+    let Some(parent) = metadata.parent().and_then(|path| path.canonicalize().ok()) else {
+        return false;
+    };
+    Some(parent) == cas_root.join("worktrees").canonicalize().ok()
 }
 
 fn owned(cas_root: &Path, worktree: &Path) -> Option<GitWorktreeCandidate> {
-    let parent = worktree.parent()?;
-    if worktree.file_name()? != "preview"
-        || !parent
-            .file_name()?
-            .to_string_lossy()
-            .starts_with("lane-compile-")
-        || parent.parent()?.canonicalize().ok()?
-            != cas_root.join("worktrees").canonicalize().ok()?
-        || fs::symlink_metadata(parent).ok()?.file_type().is_symlink()
+    let parent = metadata_dir(worktree)?;
+    if !is_preview_path(cas_root, worktree)
+        || fs::symlink_metadata(worktree)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        || fs::symlink_metadata(&parent).ok()?.file_type().is_symlink()
         || fs::symlink_metadata(parent.join(MARKER))
             .ok()?
             .file_type()
@@ -56,6 +71,10 @@ fn owned(cas_root: &Path, worktree: &Path) -> Option<GitWorktreeCandidate> {
         serde_json::from_slice(&fs::read(parent.join(MARKER)).ok()?).ok()?;
     if provenance.version != 1
         || Some(provenance.git_common_dir) != git_common_dir(cas_root.parent()?)
+        || match provenance.worktree {
+            Some(bound) => bound != worktree,
+            None => worktree.file_name()? != "preview",
+        }
     {
         return None;
     }
@@ -70,7 +89,9 @@ fn owned(cas_root: &Path, worktree: &Path) -> Option<GitWorktreeCandidate> {
 }
 
 fn owner_lock(worktree: &Path) -> io::Result<Option<fs::File>> {
-    let path = worktree.parent().unwrap().join(LOCK);
+    let path = metadata_dir(worktree)
+        .ok_or_else(|| io::Error::other("invalid lane preview layout"))?
+        .join(LOCK);
     if fs::symlink_metadata(&path)?.file_type().is_symlink() {
         return Ok(None);
     }
@@ -109,7 +130,12 @@ pub(super) fn inspect(
     entries
         .flatten()
         .filter_map(|entry| {
-            let worktree = entry.path().join("preview");
+            let path = entry.path();
+            let worktree = if is_preview_path(cas_root, &path) {
+                path
+            } else {
+                path.join("preview")
+            };
             let candidate = owned(cas_root, &worktree)?;
             let bytes = scan_cache(&worktree, &worktree.join("target"), false)
                 .map(|scan| scan.bytes)
@@ -203,7 +229,7 @@ pub(super) fn cleanup(
             Ok(output) if output.status.success() => {
                 record.disposition = CacheDisposition::Reclaimed;
                 record.reason = "removed stale lane checkout and Git registration".into();
-                let parent = record.worktree.parent().unwrap();
+                let parent = metadata_dir(&record.worktree).unwrap();
                 let _ = fs::remove_file(parent.join(MARKER));
                 let _ = fs::remove_file(parent.join(LOCK));
                 let _ = fs::remove_dir(parent); // Preserve any parent-level evidence.

@@ -821,12 +821,16 @@ after confirming no Cargo process is running and no cache lease is held. It was
 29 GB at discovery; use the inventory receipt for its current byte count.
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
-Lane compile previews carry provenance and a lifetime owner lock. Explicit
-`gc_cleanup force=true dry_run=false` removes stale owned detached previews,
+Lane compile previews carry provenance and a lifetime owner lock.
+Previews are direct children of `.cas/worktrees` so the existing private target
+ownership check admits them. Their sibling metadata directory binds the exact
+checkout path, Git common directory and commit and holds the lifetime lock.
+GC also recognizes older nested `lane-compile-*/preview` checkouts.
+Explicit `gc_cleanup force=true dry_run=false` removes stale owned detached previews,
 including their Git registration, after revalidating ownership, process liveness
 and `factory.target_cache_min_idle_secs`. Recent or live previews survive;
 previews created before provenance was recorded remain inventory-only. The
-`TARGET_CACHE_STATUS_JSON` report includes nested preview target sizes and
+`TARGET_CACHE_STATUS_JSON` report includes preview target sizes and
 `lane_previews` dispositions. The existing high/low watermark configuration
 controls cache pressure warnings; preview cleanup does not need disk pressure.
 On macOS, liveness uses NUL-delimited `lsof` field output and fails closed if

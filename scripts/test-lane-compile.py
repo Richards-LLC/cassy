@@ -45,15 +45,17 @@ assert args[:2] == ['factory', 'worker-check']
 assert args[2] == '--cas-root' and args[4] == '--'
 root = pathlib.Path(args[3]).resolve()
 cwd = pathlib.Path.cwd().resolve()
-assert cwd.is_relative_to(root / 'worktrees')
+assert cwd.parent == root / 'worktrees'
 assert args[-1] in ['--lib', '--tests']
 owner_verified = False
 if os.environ.get('LANE_FIXTURE_OWNER_PROBE'):
-    marker = json.loads((cwd.parent / '.cas-lane-compile.json').read_text())
+    metadata = cwd.with_name(cwd.name.removesuffix('-preview'))
+    marker = json.loads((metadata / '.cas-lane-compile.json').read_text())
     assert marker['version'] == 1
     assert marker['head'] == subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     assert marker['git_common_dir'] == str((root.parent / '.git').resolve())
-    with (cwd.parent / '.cas-lane-compile.lock').open('a') as owner:
+    assert marker['worktree'] == str(cwd)
+    with (metadata / '.cas-lane-compile.lock').open('a') as owner:
         try:
             fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

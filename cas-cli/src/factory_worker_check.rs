@@ -1434,6 +1434,28 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
 
     #[cfg(unix)]
     #[test]
+    fn unignored_target_refuses_marker_without_shared_git_mutation_cas_f96d() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fixture_commit(&source);
+        std::fs::write(source.join(".gitignore"), "").unwrap();
+        git(&source, &["add", ".gitignore"]).unwrap();
+        git(&source, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "unignored output"]).unwrap();
+        let root = dir.path().join(".cas");
+        let worker = root.join("worktrees/worker");
+        git(&source, &["worktree", "add", "-q", "--detach", worker.to_str().unwrap()]).unwrap();
+        let config = std::fs::read(source.join(".git/config")).unwrap();
+        let exclude = std::fs::read(source.join(".git/info/exclude")).unwrap();
+        let error = crate::factory_target_cache::owner::acquire(&root, &worker).err().unwrap();
+        assert!(error.to_string().contains("target/ must be ignored"), "{error}");
+        assert!(!worker.join("target").exists(), "refusal must precede marker placement");
+        assert!(git(&worker, &["status", "--porcelain", "--untracked-files=all"]).unwrap().is_empty());
+        assert_eq!(std::fs::read(source.join(".git/config")).unwrap(), config);
+        assert_eq!(std::fs::read(source.join(".git/info/exclude")).unwrap(), exclude);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn runner_checks_clean_commit_and_invalidates_failed_retry() {
         use std::os::unix::fs::PermissionsExt;
         let _env =
@@ -1443,6 +1465,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         let repo = root.join("worktrees/worker");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join(".gitignore"), "/target/\n").unwrap();
+        git(&repo, &["add", ".gitignore"]).unwrap();
         git(
             &repo,
             &[
@@ -1463,39 +1487,11 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let args = vec!["-p".into(), "cas".into(), "--tests".into()];
         let head = fixture_head(&repo);
-        std::fs::write(
-            repo.join(".git/info/exclude"),
-            "# retained fixture comment\nfixture-admin\n",
-        )
-        .unwrap();
         for target in ["--lib", "--tests"] {
             let args = vec!["-p".into(), "cas".into(), target.into()];
             execute_at(&root, &args, &repo, &fake).unwrap();
             assert!(passing_receipt(&root, &repo, &head).is_some());
         }
-        // No project .gitignore: acquiring ownership must not dirty source,
-        // and repeated acquisition must preserve existing Git exclusions.
-        assert!(!repo.join(".gitignore").exists());
-        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
-        assert_eq!(
-            exclude
-                .lines()
-                .filter(|line| *line == "/target/.cas-worker-target-owner")
-                .count(),
-            1
-        );
-        assert!(
-            exclude.contains("# retained fixture comment\nfixture-admin\n"),
-            "existing Git exclusions remain"
-        );
-        std::fs::write(repo.join("target/dirty.rs"), "// actual source change").unwrap();
-        assert!(
-            execute_at(&root, &args, &repo, &fake)
-                .unwrap_err()
-                .to_string()
-                .contains("Commit the worker change")
-        );
-        std::fs::remove_file(repo.join("target/dirty.rs")).unwrap();
         std::fs::write(&fake, "#!/bin/sh\nexit 12\n").unwrap();
         assert!(
             execute_at(&root, &args, &repo, &fake)

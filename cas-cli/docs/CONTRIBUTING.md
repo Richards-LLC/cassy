@@ -719,9 +719,9 @@ the target and ownership directory are created privately, and the marker,
 record and lease files reject group or world writes. The runner passes the
 lease to descendants; lane and slot locks remain private to the
 runner. A held lease or matching live owner prevents retirement, including after
-the runner dies. Git's local `info/exclude` ignores only the administrative
-`/target/.cas-worker-target-owner` marker; other untracked source still fails
-the clean-commit check when the project does not ignore its target directory.
+the runner dies. Git checkouts must already ignore `target/` and its ownership
+marker; creation refuses otherwise before placing the marker. CAS never edits
+the operator's Git configuration or shared exclusions to make a checkout clean.
 Retirement holds the same lease through evidence copying and
 quarantine, revalidating ownership before deletion. On Linux only, verified
 lease-managed targets tolerate opaque unrelated processes while still checking

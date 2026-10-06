@@ -1327,52 +1327,30 @@ impl CasService {
                 )
             })?;
             let reply = queue
-                .enqueue_urgent_with_outcome(
-                    "supervisor",
-                    "operator",
-                    &payload,
-                    Some(factory_session),
-                    Some(summary.as_str()),
-                    Some(cas_store::NotificationPriority::Normal),
-                    false,
-                    Some(&cas_store::QueueOrigin::Daemon),
-                )
+                .record_operator_turn(&cas_store::OperatorTurn {
+                    source: "supervisor",
+                    target: "operator",
+                    prompt: &payload,
+                    factory_session: Some(factory_session),
+                    metadata: cas_store::OperatorTurnMetadata {
+                        summary: Some(summary.as_str()),
+                        priority: Some(cas_store::NotificationPriority::Normal),
+                        origin: Some(&cas_store::QueueOrigin::Daemon),
+                        recipient_device_id: device_id.as_deref(),
+                        kind: Some(kind.as_str()),
+                        attachments: &attachments,
+                        acknowledge_prompt_id: req.in_reply_to,
+                        ..Default::default()
+                    },
+                })
                 .map_err(|error| {
                     Self::error(
                         ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to queue Commander reply: {error}"),
+                        format!("Failed to atomically record Commander reply: {error}"),
                     )
                 })?;
             let reply_id = reply.id();
             crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
-            if let Some(device_id) = device_id.as_deref() {
-                queue.stamp_recipient_device(reply_id, device_id).map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!(
-                            "Commander turn {reply_id} queued but device receipt could not be stamped: {error}"
-                        ),
-                    )
-                })?;
-            }
-            queue
-                .stamp_operator_reply(reply_id, kind.as_str(), &attachments)
-                .map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("Commander turn {reply_id} metadata could not be stamped: {error}"),
-                    )
-                })?;
-            if let Some(notification_id) = req.in_reply_to {
-                queue.ack(notification_id).map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!(
-                            "Commander turn {reply_id} queued but notification {notification_id} could not be confirmed: {error}"
-                        ),
-                    )
-                })?;
-            }
             return Ok(Self::success(format!(
                 "Commander {} queued\n\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: queued for {wire_device_id}",
                 kind.as_str(),
@@ -3147,6 +3125,7 @@ impl CasService {
                 // and say the reason out loud once it is terminal.
                 let pending_deadline_line = pending_deadline_narrative(
                     r.stage,
+                    r.pending_reason,
                     r.pending_detail.as_deref(),
                     undelivered_after_secs,
                 );
@@ -3291,10 +3270,22 @@ const PROMPT_ABANDON_DEADLINE_SECS: i64 = 15 * 60;
 /// `abandoned`, which is the whole "pending forever with no reason" complaint.
 fn pending_deadline_narrative(
     stage: cas_store::DeliveryStage,
+    pending_reason: Option<cas_store::PendingReason>,
     pending_detail: Option<&str>,
     undelivered_after_secs: Option<i64>,
 ) -> String {
     use cas_store::DeliveryStage;
+    // cas-d1659: a row parked for a busy recipient is neither doomed nor on
+    // the 15-minute selection deadline. Say what will actually happen to it.
+    if stage == DeliveryStage::Gated
+        && pending_reason == Some(cas_store::PendingReason::AwaitingBusyRecipient)
+    {
+        return format!(
+            "busy recipient: still pending — wake retries stopped while the recipient works; \
+             the message surfaces at its next turn start or tool call — {}\n",
+            pending_detail.unwrap_or("no detail was recorded")
+        );
+    }
     match stage {
         DeliveryStage::Abandoned => format!(
             "undeliverable: this row was abandoned and will never be delivered — {}\n",
@@ -3400,8 +3391,11 @@ mod pending_deadline_tests {
     /// now say how much of the budget is left.
     #[test]
     fn a_pending_row_states_how_long_before_it_is_abandoned() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, Some(60));
-        assert!(line.contains("abandoned as undeliverable in 840s"), "{line}");
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60));
+        assert!(
+            line.contains("abandoned as undeliverable in 840s"),
+            "{line}"
+        );
         assert!(line.contains("waited 60s of 900s"), "{line}");
     }
 
@@ -3409,7 +3403,7 @@ mod pending_deadline_tests {
     /// pending" there is the claimed-green shape this task exists to remove.
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, Some(1200));
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200));
         assert!(line.contains("PAST"), "{line}");
         assert!(line.contains("not still in flight"), "{line}");
     }
@@ -3418,6 +3412,7 @@ mod pending_deadline_tests {
     fn an_abandoned_row_names_its_reason_instead_of_reporting_progress() {
         let line = pending_deadline_narrative(
             DeliveryStage::Abandoned,
+            None,
             Some("target no longer belongs to factory session"),
             Some(1800),
         );
@@ -3431,14 +3426,30 @@ mod pending_deadline_tests {
 
     #[test]
     fn an_abandoned_row_without_a_recorded_reason_says_so() {
-        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None);
+        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None);
         assert!(line.contains("no reason was recorded"), "{line}");
+    }
+
+    /// cas-d1659: a busy recipient's parked row is still pending and will
+    /// surface; it is neither abandoned nor on the selection deadline.
+    #[test]
+    fn a_busy_recipient_row_says_it_is_pending_for_the_next_turn() {
+        let line = pending_deadline_narrative(
+            DeliveryStage::Gated,
+            Some(cas_store::PendingReason::AwaitingBusyRecipient),
+            Some("recipient busy: wake budget spent after 3 attempts"),
+            Some(1200),
+        );
+        assert!(line.contains("busy recipient: still pending"), "{line}");
+        assert!(line.contains("next turn start or tool call"), "{line}");
+        assert!(!line.contains("never be delivered"), "{line}");
+        assert!(!line.contains("PAST"), "{line}");
     }
 
     #[test]
     fn a_delivered_row_adds_no_deadline_noise() {
         assert!(
-            pending_deadline_narrative(DeliveryStage::Delivered, None, Some(30)).is_empty()
+            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30)).is_empty()
         );
     }
 }
@@ -4723,6 +4734,15 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
         assert!(payload.attachments.is_empty());
         assert_eq!(payload.reply_to_session, None, "same-session answer quotes nothing");
+        let local = cas_store::SqlitePromptQueueStore::open(&cas_root).unwrap();
+        let event = local.operator_delivery_event(reply.id).unwrap().unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&event.payload_snapshot).unwrap();
+        assert_eq!(snapshot["prompt"], reply.prompt);
+        assert_eq!(snapshot["recipient_device_id"], "phone-7");
+        assert_eq!(snapshot["kind"], "answer");
+        assert_eq!(snapshot["acknowledge_prompt_id"], commander);
+        assert_eq!(event.audience_state, "unenrolled");
+        assert!(queue.queued_prompt(commander).unwrap().unwrap().acked_at.is_some());
     }
 
     /// cas-e829: an answer belongs to the session it is sent from. A row from

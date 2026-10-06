@@ -109,24 +109,19 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(closes).toHaveLength(1);
   });
 
-  // Contract: names the remedy when an observer-only credential disables control.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Contract: names the remedy when a credential cannot interrupt (cas-0546, was: observer-only control).
+  // Consumer: Commander application render and event handlers (main.ts), operating the conversation header.
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("names the remedy when an observer-only credential disables control", async () => {
+  it("names the remedy when a credential cannot interrupt", async () => {
     const source = await readSource("main.ts");
-    expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
-    expect(source).toContain("cas hub pair --origin ${location.origin}");
-    expect(source).toContain("Pairings are specific to each Cassy Cloud origin.");
+    expect(source).toContain("This browser was paired without permission to interrupt. Run cas hub pair --origin ${location.origin} on ${machine.label}");
     expect(source).toContain('detailRow("Cassy Cloud origin", ');
-    expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
-    expect(source).toContain('class="control-disabled-reason"');
-    // A phone cannot hover, so an unavailable control keeps its reason in the DOM
-    // and says it out loud when tapped instead of hiding it in a title attribute.
-    expect(source).toContain('aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}"');
-    expect(source).toContain('aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"');
-    expect(source).toContain("const reason = button.dataset.disabledReason;");
-    expect(source).toContain("toast(reason);");
-    expect(source).not.toContain('disabled aria-describedby="control-disabled-reason"');
+    // A phone cannot hover, so an unavailable action keeps its reason in the
+    // DOM, is described by it, and says it out loud when tapped.
+    expect(source).toContain('applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());');
+    expect(source).toContain('button.setAttribute("aria-disabled", "true");');
+    expect(source).toContain("if (reason) { toast(reason); return; }");
+    expect(source).not.toContain('disabled aria-describedby="conversation-interrupt-reason"');
   });
 
   // Contract: answers a supervisor ask through the leased send path with in_reply_to and pins it above the composer (cas-43f9).
@@ -149,12 +144,12 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("preview: conversationHistories.get(key)?.preview(),");
     // Retry of a refused send (cas-b1ee): same leased path, the refused send's own in_reply_to.
     expect(source).toContain("retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },");
-    expect(source).toContain("if (retryOf) history.discardRefused(retryOf);");
-    expect(source).toContain("supervisorMessage(supervisor, text, clientRef, replyTo)");
-    expect(source).toContain("history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);");
+    expect(source).toMatch(/if \(retryOf\) \{[\s\S]*?history\.discardRefused\(retryOf\);/);
+    expect(source).toContain("supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)");
+    expect(source).toContain("holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);");
     expect(source).toContain("composerSlot.prepend(conversation.pinned);");
     // The list's waiting affordance is driven by unanswered asks and blockers.
-    expect(source).toContain("const waiting = conversationHistories.get(key)?.waiting().length ?? 0;");
+    expect(source).toContain("const waiting = waitingOnOperator(conversationHistories.get(key));");
     expect(source).toContain("attention: waiting,");
   });
 
@@ -166,45 +161,19 @@ describe("binding Cassy Cloud browser invariants", () => {
     // A rotated Pixel 7 is 915px wide, so a width-only breakpoint handed a
     // 412px-tall screen the three-column desktop console (report defect D5).
     // CSS and JS must ask the identical question, or rotation puts the layout
-    // and the pane-mounting logic in different modes.
-    expect(main).toContain('import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";');
+    // and the phone sheets in different modes.
+    expect(main).toContain('import { PHONE_MEDIA_QUERY } from "./viewport";');
     expect(main).toContain("function phoneLayout(): boolean { return window.matchMedia(PHONE_MEDIA_QUERY).matches; }");
-    expect(main).toContain("let attentionPanelCollapsed = window.matchMedia(PHONE_MEDIA_QUERY).matches;");
-    expect(main).toContain("function compactViewport(): boolean { return window.matchMedia(COMPACT_MEDIA_QUERY).matches; }");
     // Every viewport question is asked with a shared query string, so no literal
     // breakpoint can drift out of step with the stylesheet again.
     expect(main).not.toContain("max-width: 850px");
     expect(main).not.toContain('matchMedia("(max-width');
-    // Rotation flips the layout in CSS instantly; pane composition and the PTY
-    // column floor are decided in JS at render time and must follow it.
-    expect(main).toContain("for (const query of [PHONE_MEDIA_QUERY, COMPACT_MEDIA_QUERY]) {");
-    expect(main).toContain('window.matchMedia(query).addEventListener("change", () => render());');
+    // Rotation flips the layout in CSS instantly; the phone sheets are decided
+    // in JS at render time and must follow it.
+    expect(main).toContain('window.matchMedia(PHONE_MEDIA_QUERY).addEventListener("change", () => render());');
     expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {");
-    expect(css).toContain("@media (max-height: 30rem) and (pointer: coarse) {");
-    // Closed drawers remain inert on every input modality; only the control opens them.
-    expect(css).not.toContain(".machine-navigation:hover .machine-drawer");
-    expect(main).toContain('aria-hidden="${!machineDrawerOpen}"${machineDrawerOpen ? "" : " inert"}');
     expect(design).toContain("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
     expect(design).toContain("landscape");
-  });
-
-  // Contract: gives a landscape phone the long edges and the full-height terminal.
-  // Consumer: Browser CSS layout engine consumes styles.css landscape phone media rules.
-  // Structural contract retained.
-  it("gives a landscape phone the long edges and the full-height terminal", async () => {
-    const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
-    const landscape = css.slice(css.indexOf("@media (max-height: 30rem) and (pointer: coarse) {"));
-    expect(landscape.length).toBeGreaterThan(0);
-    // One row: the terminal keeps every one of the 412 pixels it has, instead of
-    // giving a third of them to a bottom rail and an attention row.
-    expect(landscape).toContain("grid-template-rows: minmax(0, 1fr);");
-    expect(landscape).toContain(".shell main { grid-column: 2; grid-row: 1; }");
-    // The rail returns to a column on the long edge rather than eating height.
-    expect(landscape).toContain("  .machine-rail {\n    flex-direction: column;");
-    // An expanded panel floats over the terminal instead of taking a row from it.
-    expect(landscape).toContain("  .context-panel:not(.collapsed) {\n    position: fixed;");
-    expect(landscape).toContain("env(safe-area-inset-left)");
-    expect(landscape).toContain("env(safe-area-inset-right)");
   });
 
   // Contract: sends the supervisor message from Enter and from the button, through one path.
@@ -295,17 +264,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       expect(fixture, `${selector} is missing from the live-regions fixture`).toContain(selector.replace(/^[.#]/, ""));
     }
     for (const marker of [
-      'class="connection-summary ',
-      'data-machine-latency="',
-      'class="connection-dot"',
-      'class="mode-badge ',
-      'id="lease"',
-      'class="control-action"',
-      'id="control-disabled-reason"',
-      'id="interrupt"',
-      '<p id="session-controls-reason" class="session-controls-reason" role="note"',
       'class="status-stale" role="status"',
-      'class="control-disabled-reason" role="note"',
       'id="message-send"',
       'id="message-status"',
       'id="message-delivery"',
@@ -332,7 +291,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
     // A reconnecting refusal clears when the session is live again (cas-b789).
     // In the banner's words (journey F9).
-    expect(main).toContain(": outageRefusal(machine.label);\n    showComposerStatus(refused, \"error\", true);");
+    expect(main).toContain('Your message is kept; re-pair, then send it.` : outageRefusal(machine.label), "error", true);');
     expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
@@ -347,8 +306,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // (hub/server.rs handle_client_message), so observe-mode sends need the
     // lease the operator would otherwise have to take by hand.
     expect(source).toContain('if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {');
-    expect(source).toContain("async function takeControlForMessage(machine: StoredMachine, session: string): Promise<boolean> {");
-    expect(source).toContain("await connections.get(machine.id)?.requestControl(session, false);");
+    expect(source).toContain("async function takeControlForMessage(machine: StoredMachine, session: string, force = false): Promise<boolean> {");
+    expect(source).toContain("await connections.get(machine.id)?.requestControl(session, force);");
     expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
     expect(source).toContain("Could not take control of ${session}");
     // cas-3433: the conversation header has no Take control, so no copy may
@@ -390,20 +349,6 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".status-stale {");
   });
 
-  // Contract: derives the header mode and terminal cursor from the real session lease.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("derives the header mode and terminal cursor from the real session lease", async () => {
-    const [main, terminal] = await Promise.all([
-      readSource("main.ts"),
-      readFile(new URL("terminal/ghostty/surface.ts", import.meta.url), "utf8"),
-    ]);
-    expect(main).toContain('const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER"');
-    expect(main).toContain('class="mode-badge ${mode.toLowerCase()}"');
-    expect(main).toContain("setControlMode(leases.get(selectedKey)?.held_by_me === true)");
-    expect(terminal).toContain("state.controlMode && state.focused");
-  });
-
   // Contract: keeps palette rows project-led while indexing project names and optional session summaries.
   // Consumer: Commander application render and event handlers (main.ts), operating the command palette.
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
@@ -424,10 +369,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       readSource("main.ts"),
       readFile(new URL("attention-view.ts", import.meta.url), "utf8"),
     ]);
-    expect(main).toContain('<p class="empty-title">No session open</p>');
-    expect(main).toContain('<button id="open-machines" class="primary" type="button">Open machines</button>');
-    expect(main).toContain('openMachines.onclick = () => { machineDrawerOpen = true; render(); }');
-    expect(main).toContain('emptyTitle.textContent = "No panes in this session yet"');
+    expect(main).toContain('emptyTitle.textContent = "The supervisor hasn\'t started yet"');
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
     // Cassy Cloud has no pane drag-and-drop, so the empty slot must not promise one.
     expect(main).not.toContain("drag it here");
@@ -447,9 +389,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('"Loading paired machines…"');
     // An unpaired Cassy Cloud offers pairing instead of naming a glyph, and the
     // machine being paired is the one running the sessions, not this device.
-    expect(source).toContain('"No machines paired yet. Pair the machine your sessions run on."');
-    expect(source).toContain('pair.textContent = "Pair a machine";');
-    expect(source).toContain('<p class="empty-title">No machine paired yet</p>');
+    expect(source).toContain('"Pair a machine to start your first conversation."');
     expect(source).toContain('<button id="empty-pair" class="primary" type="button">Pair a machine</button>');
     expect(source).not.toContain("press + to pair this machine");
     expect(source).toContain("render(false);");
@@ -460,21 +400,13 @@ describe("binding Cassy Cloud browser invariants", () => {
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("gives an unpaired phone one pairing path and no empty-state debris", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
-    expect(main).toContain("const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;");
-    expect(main).toContain('fleetEmpty ? " fleet-empty" : ""');
-    expect(main).toContain("const showSessionControls = selected !== undefined && selectedSession !== undefined;");
-    expect(main).toContain("${showSessionControls ?");
+    // First run: the welcome carries the one primary Pair a machine; the list
+    // header's chip is its only other way in (cas-0546: no machine rail).
+    expect(main).toContain("const welcomePairs = !model.selected && model.loaded && !model.paired;");
     expect(main).toContain('if (paletteToggle) paletteToggle.onclick = openCommandPalette;');
-    expect(main).toContain('if (leaseButton) leaseButton.onclick = () =>');
-    expect(main).toContain('<span class="commander-mark-label">Machines</span>');
-    // cas-e503: no separator is drawn before the fleet summary or its time.
-    expect(css).not.toMatch(/\.fleet-(?:board-summary|catalog-time)::before/);
-    expect(css).toContain(".shell.fleet-empty .machine-navigation,");
-    expect(css).toContain(".shell.fleet-empty .context-panel");
-    expect(css).toContain(".shell.fleet-empty .session-header");
+    expect(main).not.toContain('class="commander-mark-label"');
     expect(css).toContain(".attention-last-event {\n  font-family: var(--font-ui);");
-    expect(css).toContain(".machine-chip, .mode-badge, .connection-summary { display: none; }");
-    expect(css).toContain(".machine-rail .commander-mark-label { display: inline; }");
+    expect(css).not.toMatch(/\.shell\.fleet-empty|\.machine-rail|\.fleet-board/);
   });
 
   // Contract: names the ticket from the card's derived attention content.
@@ -571,12 +503,6 @@ describe("binding Cassy Cloud browser invariants", () => {
     }
     expect(await readFile(new URL("storage.ts", import.meta.url), "utf8")).not.toContain("session" + "Storage");
     expect(joined).toContain("indexedDB.open");
-
-    // Layout is an intentionally non-secret, per-device preference. It must
-    // remain isolated from the IndexedDB credential catalog.
-    const layout = await readFile(new URL("pane-layout.ts", import.meta.url), "utf8");
-    expect(layout).toContain("cas-commander:pane-layout:");
-    for (const secretField of ["credential", "privateKey", "deviceKey"]) expect(layout).not.toContain(secretField);
   });
 
   // Contract: feature-detects hub versions and keeps controls disabled on skew.
@@ -587,18 +513,31 @@ describe("binding Cassy Cloud browser invariants", () => {
     const joined = source.join("\n");
     expect(joined).toContain('"/v1/machine"');
     expect(joined).toContain("Compatibility check unavailable");
-    expect(joined).toContain('hubSupports(machineId, "daemon_attach")');
+    expect(joined).toContain('hubSupports(machine.id, "daemon_attach")');
     expect(joined).toContain("unsupported controls are disabled");
   });
 
-  // Contract: targets interrupt at the explicitly selected pane rather than render order.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("targets interrupt at the explicitly selected pane rather than render order", async () => {
+  // Contract: targets Interrupt at the session's supervisor pane, chosen deterministically (cas-0546).
+  // Consumer: Commander application render and event handlers (main.ts), operating the conversation header.
+  // Historical regression retained (was: the Terminal view's selected pane); see cas-9d89 inventory.
+  it("targets interrupt at the session's supervisor pane rather than render order or focus", async () => {
     const source = await readSource("main.ts");
-    expect(source).toContain("selectedPanes.get(sessionKey(selected.id, selectedSession))");
-    expect(source).toContain("{ InterruptPane: { pane_id: pane } }");
+    expect(source).toContain('return (visible.find((pane) => pane.kind === "Supervisor") ?? visible[0])?.id;');
+    expect(source).toContain("const paneId = supervisorPane(machine.id, session);");
+    expect(source).toContain("{ InterruptPane: { pane_id: paneId } }");
     expect(source).not.toContain("[...surfaces.keys()].find");
+    expect(source).not.toContain("selectedPanes");
+  });
+
+  // Contract: Interrupt takes control the way a send does, and never silently from another device (cas-0546).
+  // Consumer: Commander application render and event handlers (main.ts), operating the conversation header.
+  it("takes control for an interrupt as a send does, and says when it took it from another device", async () => {
+    const source = await readSource("main.ts");
+    expect(source).toContain('const force = Boolean(holder && machine.scopes.includes("hub-admin"));');
+    expect(source).toContain("if (!await takeControlForMessage(machine, session, force)) {");
+    expect(source).toContain('const took = holder ? `Took control from ${holder}. ` : "";');
+    expect(source).toContain("toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`);");
+    expect(source).toContain("Interrupt works once it releases control.");
   });
 
   // Contract: never caches an asynchronously-created terminal against a detached render.
@@ -616,10 +555,8 @@ describe("binding Cassy Cloud browser invariants", () => {
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("preserves the active pane grid across lease and status renders", async () => {
     const source = await readSource("main.ts");
-    expect(source).toContain("currentGrid?.dataset.sessionKey === terminalSessionKey");
-    expect(source).toContain("replaceWith(preservedGrid)");
-    expect(source).toContain('document.activeElement?.matches(".t3-ghostty-input")');
-    expect(source).toContain('if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());');
+    expect(source).toContain("currentGrid?.dataset.sessionKey === selectedThreadKey");
+    expect(source).toContain("const grid = preservedGrid ?? build(");
     expect(source).toContain("data-session-key");
   });
 
@@ -691,89 +628,14 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).not.toContain("border: var(--line-width) dashed var(--line-strong);");
   });
 
-  // Contract: D7 gives every control in the phone rail one container treatment.
-  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("D7 gives every control in the phone rail one container treatment", async () => {
-    const [main, css, view, design] = await Promise.all(
-      ["main.ts", "styles.css", "attention-view.ts", "../DESIGN.md"]
-        .map((path) => readSource(path)),
-    );
-
-    // One rule, one surface, one radius, one minimum target for Machines, each
-    // machine chip, Pair, the attention summary and the envelope. Three
-    // container treatments in one 48px row is the defect, not a style choice.
-    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain("--rail-item-min: 44px");
-    expect(css).toContain(`  .machine-rail .commander-mark,
-  .machine-rail .machine-icon,
-  .machine-rail .pair-machine,
-  .context-panel.collapsed .attention-rail-counts,
-  .context-panel.collapsed .mobile-message-toggle {`);
-    expect(css).toContain("    min-width: var(--rail-item-min);\n    min-height: var(--rail-item-min);");
-    expect(design).toContain("--rail-item-min");
-
-    // --line-strong is the focused-pane border. Pair is not a pane, and the
-    // compact layout has no focusable pane chrome of its own, so the whole
-    // phone block must be free of it.
-    expect(css).toContain(".pane.selected { border-color: var(--line-strong); }");
-    const compact = css.slice(css.indexOf("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"), css.indexOf("/* Cassy Cloud:"));
-    expect(compact).not.toContain("var(--line-strong)");
-
-    // The collapsed pill floats over the rail, so it must not paint a second
-    // surface there: the seam in fig a1 is --bg-raised over --bg-panel.
-    expect(css).toContain(`  .context-panel,
-  .context-panel.collapsed {
-    position: fixed;`);
-    expect(css).toContain("    background: var(--color-transparent);\n    overflow: hidden;");
-    expect(css).toContain(".context-panel.collapsed .attention-rail {\n    display: flex;");
-
-    // The machine chip carries a readable name on a phone and an unclipped
-    // status dot, instead of two initials with the dot on the corner radius.
-    expect(main).toContain('<span class="machine-state ${state}"></span><span class="machine-initials">');
-    expect(main).toContain('<span class="machine-name">');
-    expect(css).toContain(".machine-icon .machine-name { display: none; }");
-    expect(css).toContain("  .machine-rail .machine-icon .machine-initials { display: none; }");
-    expect(css).toContain("  .machine-rail .machine-icon .machine-name {");
-    expect(css).toContain("  .machine-rail .machine-icon .machine-state { position: static; }");
-
-    // D8: one badge treatment. State lives in the text and the dot, never in a
-    // fill that only two of the three severities receive.
-    expect(css).not.toContain(".attention-count--critical { color: var(--state-crit); background: var(--tint-crit); }");
-    expect(css).toContain(".attention-count--critical { color: var(--state-crit); }");
-    expect(css).toContain(".attention-count--info { color: var(--text-mid); }");
-    expect(view).toContain("export function renderAttentionSummary(");
-    expect(main).toContain("renderAttentionSummary(context.counts)");
-  });
-
-  // Contract: keeps supervisor messaging reachable from the collapsed phone rail.
-  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
-    expect(main).toContain('id="mobile-message-toggle"');
-    expect(main).toContain("function openSupervisorComposer(): void {");
-    expect(main).toContain('activeContextTab = "status";');
-    expect(main).toContain("attentionPanelCollapsed = false;");
-    expect(css).toContain(".mobile-message-toggle { display: none; }");
-    expect(css).toContain(".mobile-message-toggle {");
-    // The collapsed pill holds the attention summary and the envelope on one
-    // row. A pill narrower than the two rail items it renders lets the summary
-    // overflow left across the Pair button (D7/fig b1a).
-    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain("--mobile-context-pill-width: 152px");
-    expect(css).toContain(".context-panel.collapsed .attention-rail .rail-control { display: none; }");
-    expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
-    // Tapping the envelope must land on the composer it advertises.
-    expect(main).toContain('document.querySelector<HTMLTextAreaElement>("#message-text")');
-    expect(main).toContain("composer?.focus();");
-  });
-
   // Contract: keeps a dedicated one-handed supervisor action and voice-first phone composer.
   // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("keeps a dedicated one-handed supervisor action and voice-first phone composer", async () => {
+  it("keeps a voice-first phone composer", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
-    expect(main).toContain('id="talk-supervisor"');
-    expect(main).toContain("Talk to supervisor");
+    // cas-0546: the side composer ("Talk to supervisor") is gone; the
+    // conversation's composer is the one way to write to the supervisor.
+    expect(main).not.toContain('id="talk-supervisor"');
     expect(main).toContain('id="message-mic"');
     expect(main).toContain('id="message-keyboard"');
     expect(main).toContain('aria-description="Checking voice input support…"');
@@ -785,58 +647,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Enter toggled dictation (operator report, cas-0d61). Voice stays one
     // labelled tap away.
     expect(main).not.toContain("if (phoneLayout() && mic && !mic.hidden) mic.focus();");
-    expect(main).toContain("// Voice is one labelled tap away; focus belongs in the field that accepts text.");
-    expect(css).toContain(".talk-supervisor {");
+    expect(css).not.toContain(".talk-supervisor {");
     expect(css).toContain("#message-mic {");
     expect(css).toContain(".conversation-composer #message-mic {");
     expect(css).toContain(".conversation-composer #message-mic.listening {");
-  });
-
-  // Contract: keeps a focused terminal focused across steady-state renders.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("keeps a focused terminal focused across steady-state renders", async () => {
-    const source = await readSource("main.ts");
-    // Re-inserting a pane card blurs its hidden textarea, which closes a phone
-    // keyboard on every five-second heartbeat render. Panes move only when their
-    // slot or position genuinely changed.
-    expect(source).toContain("const placePane = (slot: HTMLElement, card: HTMLElement): void => {");
-    expect(source).toContain("if (slot.children[index] === card) return;");
-    expect(source).toContain("placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);");
-    expect(source).not.toContain("(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card)");
-  });
-
-  // Contract: colours connection dots from the phases the supervisor actually emits.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("colours connection dots from the phases the supervisor actually emits", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
-    // connectionClass emits lifecycle phases, so styling legacy names such as
-    // "connected" or "offline" leaves every dot stuck on idle grey.
-    expect(main).toContain('function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }');
-    expect(css).toContain(".machine-state.live,");
-    expect(css).toContain(".machine-state.backoff,");
-    expect(css).toContain(".machine-state.failed,");
-    expect(css).not.toContain(".machine-state.connected");
-    expect(css).not.toContain(".machine-state.offline");
-    expect(css).not.toContain(".machine-state.auth-blocked");
-  });
-
-  // Contract: renders phone secondary panes as tappable rows instead of empty terminal wells.
-  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("renders phone secondary panes as tappable rows instead of empty terminal wells", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
-    // Only the primary pane mounts a surface on a phone, so every other pane has
-    // to read as a compact row and open on tap rather than reserve empty space.
-    expect(main).toContain("const secondaryOnPhone = phone && pane.id !== layout.primaryPaneId;");
-    expect(main).toContain('card.classList.toggle("collapsed", secondaryOnPhone || (pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key)));');
-    expect(main).toContain("if (phoneLayout() && !card?.classList.contains(\"primary\")) {");
-    expect(main).toContain("updateLayout((current) => promotePane(current, pane.id));");
-    expect(main).toContain('const hint = secondaryOnPhone\n        ? "Tap to open this pane"');
-    expect(css).toContain("grid-template-rows: minmax(0, 1fr) auto;");
-    expect(css).toContain('.pane-grid.pane-layout .pane-search::after { content: "⌕"');
-    expect(css).toContain("min-width: var(--space-8);\n    min-height: var(--space-8);");
   });
 
   // Contract: keeps the section 2 visual system tokenized and machine copy mono.
@@ -857,9 +671,6 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).not.toMatch(/#[0-9a-f]{3,8}\b/i);
     expect(html).not.toMatch(/#[0-9a-f]{3,8}\b/i);
 
-    expect(main).toContain('class="session-name"');
-    expect(main).toContain('class="session-meta"');
-    expect(main).toContain('"toolbar-session-title"');
     expect(main).toContain('span.className = "status-identifier"');
     expect(css).toContain("font-family: var(--font-mono)");
     expect(css).not.toContain("border-right:");
@@ -877,99 +688,35 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(surface).not.toContain('"italic 700"');
   });
 
-  // Contract: encodes the supervisor-first Cassy Cloud shell at desktop and phone widths.
-  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("encodes the supervisor-first Cassy Cloud shell at desktop and phone widths", async () => {
-    const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readSource(path)));
-    expect(main).toContain('class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}"');
-    expect(main).toContain('id="pair-toggle" class="rail-control pair-machine"');
-    expect(main).toContain('class="session-header"');
-    expect(main).toContain('data-context-tab="status"');
-    expect(main).toContain('Workers &amp; Tasks');
-    expect(main).toContain('visiblePanes.find((pane) => pane.kind === "Supervisor")?.id');
-    expect(main).toContain('data-machine-latency');
-    expect(main).toContain('state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`');
-    expect(main).not.toContain("state.latencyMs ?? 0");
-    expect(connection).toContain('onLatency?(latencyMs: number)');
-    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--machine-rail-width: 48px');
-    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--context-panel-width: 320px');
-    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--session-header-height: 44px');
-    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--pane-header-height: 32px');
-    expect(css).toContain('grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--context-panel-width)');
-    expect(css).toContain('flex: 0 0 var(--session-header-height)');
-    expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr)');
-    expect(css).toContain('.secondary-pane-strip .pane.collapsed');
-    expect(css).toContain('grid-template-rows: minmax(0, 1fr) calc(var(--machine-rail-width) + env(safe-area-inset-bottom))');
-    expect(css).toContain('grid-template-rows: minmax(0, 1fr) minmax(0, min(45dvh, var(--mobile-drawer-max-height))) calc(var(--machine-rail-width) + env(safe-area-inset-bottom))');
-    expect(css).toContain('/* Full words or no chip: OBS / Ctrl / Int made a first-time Pixel pass read');
-    expect(css).toContain('.machine-chip, .mode-badge, .connection-summary { display: none; }');
-    expect(main).not.toContain('class="toolbar"');
-    expect(main).not.toContain('class="machines"');
-    expect(main).not.toContain('class="sessions"');
-  });
-
-  // Contract: puts a session picker and a back control in the primary chrome on both layouts.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("puts a session picker and a back control in the primary chrome on both layouts", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
-    // The session name in the header is the switch. It is the only chrome that
-    // is always visible on a phone, where the ⌘K palette is display:none.
-    expect(main).toContain('id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog"');
-    expect(main).toContain('<dialog id="session-picker" class="command-palette session-picker">');
-    expect(main).toContain('document.querySelector<HTMLButtonElement>("#session-picker-toggle")!.onclick = openSessionPicker;');
-    expect(main).toContain('if (back) back.onclick = goBack;');
-    expect(main).toContain('backTarget ? `<button id="session-back" class="session-back"');
-    // Every session the hub exposes, with its role and status — a bare animal
-    // name does not distinguish one supervisor from another.
-    expect(main).toContain("escapeHtml(sessionPickerHeadline(entry))");
-    expect(main).toContain("escapeHtml(sessionPickerRowMeta(entry))");
-    // cas-5d94: the hub derives the roster from the live agent registry, so the
-    // count is stated — including a real zero — instead of being suppressed.
-    expect(main).not.toContain("const workers = entry.workerCount > 0 ?");
-    // The drawer row states it through the picker's row meta (workerCountLabel), project first (journey F1).
-    expect(main).toContain("workerCount: session.workers.length, status: sessionStatusLabel(");
-    expect(main).toContain('<small class="session-meta">${escapeHtml(sessionPickerRowMeta(entry))}</small>');
-    expect(main).toContain('if (entry.current) button.setAttribute("aria-current", "true");');
-    // A five-second heartbeat render must not close the picker mid-choice.
-    expect(main).toContain('if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();');
-    expect(css).toContain(".session-identity {");
-    expect(css).toContain(".session-back {");
-    expect(css).toContain('.session-picker-entry[aria-current="true"]');
-    expect(css).toContain(".session-back { min-width: var(--button-height); }");
-    // Journey F2: the back control says "Back" on screen, inside its accessible name.
-    expect(main).toContain('<span class="session-back-label" aria-hidden="true">Back</span>');
-  });
-
   // Contract: keeps palette and picker states readable and distinct in every colour mode (cas-78c81).
   // Consumer: Browser forced-colors and normal CSS engines consume palette/picker state rules.
   // Structural contract retained.
-  it("keeps palette and picker states readable and distinct in every colour mode (cas-78c81)", async () => {
+  it("keeps palette states readable and distinct in every colour mode (cas-78c81)", async () => {
     const css = await readSource("styles.css");
     const forced = css.slice(css.indexOf("@media (forced-colors: active) {\n  dialog {"));
     // Unavailable rows are not faded below a readable contrast in either mode.
     expect(css).toContain(".palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }");
     expect(forced).toContain(".palette-command:disabled { border-color: GrayText; opacity: 1; }");
     // The system Highlight can carry alpha (0.8 in Chromium's emulation); the
-    // focus ring and the open session's fill restate it at full strength.
+    // focus ring and the open conversation's fill restate it at full strength.
     expect(forced).toContain("outline-color: color(from Highlight srgb r g b / 1);");
-    expect(forced).toContain('.session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1);');
+    expect(forced).toContain('.conversation-row[aria-current="true"]:is(:hover, :active, :focus-visible):not(:disabled) { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1); }');
     // Relative colour is newer than the support floor (Chrome/Edge 110,
     // Firefox 115): every restatement is preceded by the plain system colour
     // on the same property, which older engines keep (QA round 1, F1).
     const relative = [...forced.matchAll(/([a-z-]+): color\(from Highlight srgb r g b \/ 1\);/g)];
-    expect(relative.length).toBeGreaterThanOrEqual(4);
+    expect(relative.length).toBeGreaterThanOrEqual(3);
     for (const match of relative) {
       const before = forced.slice(0, match.index);
       expect(before.endsWith(`${match[1]}: Highlight; `), `${match[1]} has a plain Highlight fallback`).toBe(true);
     }
-    // Only the open session opts out of the opaque ring; the current
-    // Appearance row (aria-current since cas-479a) keeps it.
-    expect(forced).toContain('.palette-commands .palette-command:not(.session-picker-entry[aria-current="true"]):focus-visible {');
+    // Every focused row keeps the opaque ring, the current Appearance row
+    // (aria-current since cas-479a) included.
+    expect(forced).toContain(".palette-commands .palette-command:focus-visible {");
     // Hover is a pointer cue distinct from the focus ring and the open fill.
     expect(forced).toContain(".palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }");
-    expect(css).toContain('.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }');
+    // cas-0546: the session picker is gone with Terminal view.
+    expect(css).not.toContain(".session-picker-entry");
   });
 
   // Contract: routes every navigation through one recorded selection and restores the last session on reopen.
@@ -982,11 +729,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("function commitSelection(next: SessionSelection): void {");
     expect(main).toContain("selection = selectSelection(selection, next);");
     expect(main).toContain("saveStoredSelection(selectionStorage(), next);");
-    expect(main).toContain("commitSelection({ machineId: machine.id });");
     expect(main).toContain("commitSelection({ machineId, session });");
-    // Back re-attaches without recording a new step forward.
-    expect(main).toContain("selection = goBackSelection(selection);");
-    expect(main).toContain("if (previous.session) void attachSelectedSession(previous.machineId, previous.session);");
+    expect(main).toContain("commitSelection({ machineId: item.machineId });");
     // D14: reopening landed on "No session open" because boot only restored a
     // machine. The session is claimed against the hub's own list.
     expect(main).toContain("const lastSelection = loadStoredSelection(selectionStorage());");
@@ -1012,33 +756,17 @@ describe("binding Cassy Cloud browser invariants", () => {
     }
   });
 
-  // Contract: lets unleased observers size panes but preserves controller-owned geometry.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("lets unleased observers size panes but preserves controller-owned geometry", async () => {
+  // cas-37f8, cas-0546: Commander never sizes a pane. Its hidden surface is
+  // pinned to the pane's real grid and no ResizePane is ever sent.
+  // Consumer: Commander application render and event handlers (main.ts), operating the hidden pane host.
+  it("never sends a pane size and pins the hidden surface to the pane's real grid", async () => {
     const source = await readSource("main.ts");
-    expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
-    expect(source).toContain("return !lease?.controller_label || lease.held_by_me");
-    expect(source).toContain("if (becameGeometryOwner) resizeViewablePanes(machineId, session)");
-    expect(source).toContain("if (!canResizePanes(machineId, session)) return;");
-    expect(source).toContain("{ ResizePane: { pane_id: paneId, cols, rows } }");
-  });
-
-  // cas-37f8: a phone-sized viewer must never shrink the operator's console.
-  // Contract: stops asking for a pane size once the local dashboard claims that pane.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("stops asking for a pane size once the local dashboard claims that pane", async () => {
-    const source = await readSource("main.ts");
-    expect(source).toContain('const local = authority === "LocalDashboard";');
-    expect(source).toContain("if (!ownsPaneGeometry(machineId, session, paneId)) return;");
-    expect(source).toContain(
-      "surfaces.get(key)?.setAuthoritativeSize(local ? { cols, rows } : null)",
-    );
-    // Every ResizePane the viewer can send goes through the one suppression gate.
-    const sends = source.match(/ResizePane: \{/g) ?? [];
-    expect(sends).toHaveLength(1);
-    expect(source).toContain("onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows)");
+    expect(source).not.toContain("ResizePane");
+    expect(source).not.toMatch(/\bInput: \{ pane_id/);
+    expect(source).toContain("onResize: () => undefined,");
+    expect(source).toContain("onData: () => undefined,");
+    expect(source).toContain("surfaces.get(key)?.setAuthoritativeSize({ cols, rows });");
+    expect(source).toContain("surface.setAuthoritativeSize(paneGrid(key, state));");
   });
 
   // Contract: keeps retrying opaque authenticated reads without claiming a pairing refusal.
@@ -1134,7 +862,6 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("const browserNotice = unsupportedBrowserNotice(browserSupport());");
     expect(main).toContain('<p class="browser-unsupported" role="alert">');
     expect(css).toContain(".browser-unsupported {");
-    expect(css).toContain(".shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }");
     // No spinner, no rising counter, and no "reconnecting" claim over a
     // failure that will never resolve.
     expect(connectionView).toContain('? "Connection failed — not retrying."');
@@ -1314,12 +1041,12 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)), connectionStates.get(machine.id))) return;");
     expect(source).not.toContain('headline: "Terminal transport problem"');
     // While the session is known to be down the banner says so; no toast repeats it over the banner (cas-00cc).
-    expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");');
+    expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("The conversation is reconnecting");');
     expect(source).toContain("if (shown) placeToastClearOfBanner(shown);");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");
-    // Only the terminal dims; the conversation reading view stays readable (cas-3446).
-    expect(styles).toContain(".terminal-disconnected .terminal-mount:not(.conversation-active) { opacity: .4; }");
+    // Nothing dims the conversation during an outage (cas-3446): the banner
+    // and the header already mark it as not live.
     expect(styles).not.toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
   });
 
@@ -1332,7 +1059,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("const key = sessionKey(machine.id, session);\n      const attachWasLive = attachStates.get(key)?.phase === \"live\";\n      attachStates.set(key, state);");
     expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
     expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
-    expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");
+    expect(source).toContain("const connectionSnapshot = attachSnapshot ?? machineConnectionSnapshot");
     expect(source).toContain("connections.get(machineId)?.attach(session)");
   });
 
@@ -1347,16 +1074,18 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toMatch(/grid\.querySelector(<HTMLElement>)?\("\.empty"\)/);
   });
 
-  // Contract: puts the conversation over the pane before its terminal surface loads (cas-04ee).
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("puts the conversation over the pane before its terminal surface loads (cas-04ee)", async () => {
-    const [main, surface] = await Promise.all(["main.ts", "terminal/ghostty/surface.ts"].map((path) => readSource(path)));
-    const premount = main.indexOf('if (hubPresentation === "conversation" && !surfaces.has(key)) mountConversation(key, mount);');
+  // Contract: puts the conversation up before its pane surface loads (cas-04ee), in its own
+  // visible slot beside the hidden pane host, never inside it (cas-0546).
+  // Consumer: Commander application render and event handlers (main.ts), operating the conversation surface.
+  it("puts the conversation up before its pane surface loads, outside the hidden host (cas-04ee, cas-0546)", async () => {
+    const main = await readSource("main.ts");
+    const premount = main.indexOf("mountConversation(key, slot);");
     expect(premount).toBeGreaterThan(-1);
     expect(premount).toBeLessThan(main.indexOf("const surface = await createTerminalSurface(mount, {"));
-    // The surface keeps a reading overlay in place instead of wiping the mount.
-    expect(surface).toContain("mount.replaceChildren(canvas, input, scrollbar, ...overlays);");
+    // The thread mounts in the stage's slot; only the surface mounts in the host.
+    expect(main).toContain("const { slot, host } = ensureConversationStage(grid);");
+    expect(main).not.toMatch(/mountConversation\([^)]*mount\)/);
+    expect(main).toContain("surface.setCanvasPainting(false);");
   });
 
   // Contract: requests an authoritative supervisor keyframe before lazily mounted workers.
@@ -1368,10 +1097,9 @@ describe("binding Cassy Cloud browser invariants", () => {
       connection.indexOf("this.callbacks.onSessionState(session, welcome.state, undefined, true)"),
     );
     expect(connection).not.toContain("welcome.scrollback, true");
-    expect(main).toContain("const collapsedOnPhone = phoneLayout() && secondaryOnPhone;");
-    expect(main.indexOf("if (collapsedOnPhone) continue;")).toBeLessThan(
-      main.indexOf("requestPaneKeyframe(session, pane.id)"),
-    );
+    // cas-0546: only the supervisor's pane is mounted, so only it asks for a keyframe.
+    expect(main).toContain("connections.get(machineId)?.requestPaneKeyframe(session, paneId);");
+    expect(main).not.toContain("requestPaneKeyframe(session, pane.id)");
   });
 
   it("multiplexes sessions on one proto-2 socket and routes raw PTY binary frames", async () => {
@@ -1455,7 +1183,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       has_earlier: false,
     };
     socket.receive(JSON.stringify({ channel: "pty:factory-a", message: { ConversationHistory: historyPage } }));
-    expect(callbacks.onConversationHistory).toHaveBeenCalledWith("factory-a", historyPage);
+    expect(callbacks.onConversationHistory).toHaveBeenCalledWith("factory-a", historyPage, { credentialId: "credential-id", generation: 0 });
     const session = new TextEncoder().encode("factory-a");
     const pane = new TextEncoder().encode("supervisor");
     const payload = new Uint8Array([0x1b, 0x5b, 0x48, 0x4f, 0x4b]);
@@ -1575,13 +1303,16 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     const firstGroupEnd = conversations.indexOf("</section>");
     expect(conversations.slice(0, firstGroupEnd)).not.toContain("data-palette-action");
     expect(conversations.slice(0, firstGroupEnd)).not.toContain("palette-paired-machines");
-    expect(conversations).toContain('${showSessionControls ? `<section class="palette-group" data-palette-group="session"');
-    expect(conversations).toContain('<h3 id="palette-group-session" class="palette-group-heading">This conversation</h3>');
+    // cas-0546: no control command (Take control is implicit) and no Terminal view entry.
+    expect(main).not.toContain('data-palette-group="session"');
+    expect(main).not.toContain('data-palette-action="control"');
+    expect(main).not.toContain('data-palette-action="terminal-view"');
+    expect(main).not.toContain('data-palette-action="workers"');
     expect(conversations).toContain('<h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>');
     expect(conversations).toContain('${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info">');
     // A new info item brings the command back: the shell rebuilds on that change.
     // So does a machine starting (or stopping) to grant session launch (cas-0f51).
-    expect(main).toContain("JSON.stringify([hubPresentation, selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()])");
+    expect(main).toContain("JSON.stringify([selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()])");
   });
 
   // Contract: moves a visible toast with the layout and uses the thread's clock and plain words in Paired machines (F8, F10).

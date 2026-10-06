@@ -193,6 +193,8 @@ pub struct QueueStats {
     pub pending: usize,
     /// Items that have failed (at max retries)
     pub failed: usize,
+    /// Named safety parks, retained locally rather than counted as failures.
+    pub parked_by_reason: std::collections::BTreeMap<String,usize>,
     /// Count by entity type
     pub by_type: HashMap<String, usize>,
     /// Oldest item timestamp

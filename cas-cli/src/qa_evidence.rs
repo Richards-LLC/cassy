@@ -15,6 +15,9 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+#[path = "qa_journeys.rs"]
+pub mod journeys;
+
 /// Note token that cites a bundle manifest: `qa-bundle: <abs>/bundle.json`.
 pub const BUNDLE_CITATION: &str = "qa-bundle:";
 /// Same-line (or preceding-line) escape for a deliberate skip marker.
@@ -89,6 +92,8 @@ struct Manifest {
     #[serde(default)]
     producer: String,
     head_sha: String,
+    #[serde(default)]
+    executed_head_sha: String,
     created_at: String,
     #[serde(default)]
     visual_change: bool,
@@ -445,6 +450,16 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             "push the delivery commit, then retry close".to_string(),
         )
     })?;
+    // A documented rebind preserves the execution revision. Only unchanged
+    // product/journey inputs across documentation-only commits can reuse it.
+    let delivered_time = if manifest.executed_head_sha.is_empty() {
+        delivered_time
+    } else if journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
+        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
+            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
+    } else {
+        return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
+    };
     let head_covers_delivery = manifest.head_sha == ctx.delivered_head
         || git(
             ctx.repo,
@@ -648,8 +663,8 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
 /// `visual_qa_status` is only a claim; this is the run's own record.
 #[derive(Debug, Deserialize)]
 struct VisualQaRun {
-    /// Every unsuppressed finding, as visual-qa.mjs records it (type,
-    /// selector or elementPath, url, scheme, viewport). A scoped comparison
+    /// Every unsuppressed finding, as visual-qa.mjs records it (type, rule,
+    /// semantic/text geometry or legacy selector, url, scheme, viewport). A scoped comparison
     /// needs it; the pass check does not.
     #[serde(default)]
     findings: Option<Vec<serde_json::Value>>,
@@ -901,33 +916,189 @@ fn normalize_random_ids(text: &str) -> String {
     out
 }
 
-/// What a finding is compared by across two runs: its type, element, the
-/// element it collides with, page, scheme and viewport. Per-render random
-/// ids are normalised first ([`normalize_random_ids`], cas-7c15).
-fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
-    let text = |pointer: &str| {
-        finding
-            .pointer(pointer)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string()
+/// Finding context is independent of DOM class names. Rule/reason and render
+/// state stay separate so a new defect on a renamed element is still added.
+fn visual_qa_finding_text(finding: &serde_json::Value, field: &str) -> String {
+    finding
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn visual_qa_finding_context(finding: &serde_json::Value) -> String {
+    serde_json::json!([
+        visual_qa_finding_text(finding, "type"),
+        visual_qa_finding_text(finding, "rule"),
+        visual_qa_finding_text(finding, "reason"),
+        visual_qa_page(&visual_qa_finding_text(finding, "url")),
+        visual_qa_finding_text(finding, "scheme"),
+        visual_qa_finding_text(finding, "state"),
+        finding.get("viewport")
+    ])
+    .to_string()
+}
+
+fn visual_qa_finding_path(finding: &serde_json::Value, field: &str) -> String {
+    // Whitespace inside quoted CSS attribute values is significant.
+    normalize_random_ids(finding.get(field).and_then(serde_json::Value::as_str)
+        .unwrap_or_default())
+}
+
+fn visual_qa_selector(finding: &serde_json::Value) -> String {
+    let selector = visual_qa_finding_path(finding, "selector");
+    if selector.is_empty() {
+        visual_qa_finding_path(finding, "elementPath")
+    } else {
+        selector
+    }
+}
+
+/// Newer producers may report textBounds or box. Historical canonical clipping
+/// reports carry textSample plus ancestorBox (the text's clipping rectangle).
+/// Never use an incomplete/non-finite/negative box as identity evidence.
+fn visual_qa_finding_bounds(finding: &serde_json::Value, field: &str) -> Option<[f64; 4]> {
+    let bounds = finding.get(field)?;
+    let coordinates = ["x", "y", "width", "height"]
+        .map(|field| bounds.get(field).and_then(serde_json::Value::as_f64));
+    let [Some(x), Some(y), Some(width), Some(height)] = coordinates else {
+        return None;
     };
-    let element = Some(text("/selector"))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| text("/elementPath"));
-    let viewport = Some(text("/viewport/name"))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| text("/viewport"));
-    [
-        text("/type"),
-        element,
-        text("/otherElementPath"),
-        visual_qa_page(&text("/url")),
-        text("/scheme"),
-        viewport,
-    ]
-    .map(|part| normalize_random_ids(&part))
-    .join(" | ")
+    let bounds = [x, y, width, height];
+    (bounds.iter().all(|value| value.is_finite()) && width > 0.0 && height > 0.0).then_some(bounds)
+}
+
+/// Half a CSS pixel allows subpixel report rounding (cas-a286: 34.48 vs 34.50),
+/// below the canonical inspector's 1px BOX_TOLERANCE. It is not a defect waiver:
+/// text, rule, viewport and scheme must agree as well.
+const VISUAL_QA_IDENTITY_BOUNDS_TOLERANCE: f64 = 0.5;
+
+fn visual_qa_same_bounds(left: [f64; 4], right: [f64; 4]) -> bool {
+    left.into_iter()
+        .zip(right)
+        .all(|(left, right)| (left - right).abs() <= VISUAL_QA_IDENTITY_BOUNDS_TOLERANCE)
+}
+
+/// Compare the same kind of rectangle across report versions. A new textBounds
+/// field must not be compared to an old clipping ancestor's different box.
+fn visual_qa_common_bounds(left: &serde_json::Value, right: &serde_json::Value) -> Option<bool> {
+    ["textBounds", "box", "ancestorBox"]
+        .into_iter()
+        .find_map(|field| {
+            Some(visual_qa_same_bounds(
+                visual_qa_finding_bounds(left, field)?,
+                visual_qa_finding_bounds(right, field)?,
+            ))
+        })
+}
+
+fn visual_qa_same_element(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    let semantic = |finding: &serde_json::Value| {
+        let role = visual_qa_finding_text(finding, "role");
+        let name = visual_qa_finding_text(finding, "accessibleName");
+        (!role.is_empty() && !name.is_empty()).then_some((role, name))
+    };
+    if let (Some(left_id), Some(right_id)) = (semantic(left), semantic(right)) {
+        if left_id != right_id {
+            return false;
+        }
+        return visual_qa_common_bounds(left, right).unwrap_or(true);
+    }
+    let left_text = visual_qa_finding_text(left, "textSample");
+    let right_text = visual_qa_finding_text(right, "textSample");
+    if !left_text.is_empty() && !right_text.is_empty() {
+        if left_text != right_text {
+            return false;
+        }
+        if let Some(same_bounds) = visual_qa_common_bounds(left, right) {
+            return same_bounds;
+        }
+    }
+    // Older minimal reports do not identify text or accessible elements. Retain
+    // exact selectors (including UUID normalization) only for that fallback;
+    // never erase classes or let this override a stable identity mismatch.
+    let selector = visual_qa_selector(left);
+    !selector.is_empty() && selector == visual_qa_selector(right)
+}
+
+fn visual_qa_findings_match(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    visual_qa_finding_context(left) == visual_qa_finding_context(right)
+        && visual_qa_same_element(left, right)
+        // Overlap findings must identify the same second element too. Legacy
+        // reports have its selector, not enough evidence to pair its rename.
+        && visual_qa_finding_path(left, "otherElementPath")
+            == visual_qa_finding_path(right, "otherElementPath")
+        && visual_qa_finding_text(left, "otherTextSample")
+            == visual_qa_finding_text(right, "otherTextSample")
+}
+
+/// Reserve each baseline finding once. Geometry tolerance may produce multiple
+/// candidates, so an augmenting path avoids a greedy/order-dependent refusal.
+fn pair_visual_qa_findings(
+    tip: &[serde_json::Value],
+    baseline: &[serde_json::Value],
+) -> Vec<usize> {
+    let candidates: Vec<Vec<usize>> = tip
+        .iter()
+        .map(|finding| {
+            baseline
+                .iter()
+                .enumerate()
+                .filter_map(|(index, base)| {
+                    visual_qa_findings_match(finding, base).then_some(index)
+                })
+                .collect()
+        })
+        .collect();
+    fn assign(
+        index: usize,
+        candidates: &[Vec<usize>],
+        owners: &mut [Option<usize>],
+        visited: &mut [bool],
+    ) -> bool {
+        for &base in &candidates[index] {
+            if visited[base] {
+                continue;
+            }
+            visited[base] = true;
+            let previous = owners[base];
+            let paired = match previous {
+                None => true,
+                Some(previous) => assign(previous, candidates, owners, visited),
+            };
+            if paired {
+                owners[base] = Some(index);
+                return true;
+            }
+        }
+        false
+    }
+    let mut owners = vec![None; baseline.len()];
+    let mut introduced = Vec::new();
+    for index in 0..tip.len() {
+        if !assign(
+            index,
+            &candidates,
+            &mut owners,
+            &mut vec![false; baseline.len()],
+        ) {
+            introduced.push(index);
+        }
+    }
+    introduced
+}
+
+/// Selectors are retained in diagnostics so the reviewer can locate added
+/// findings, but no longer govern pairing when stable identity is available.
+fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
+    format!(
+        "{} | {} | {}",
+        visual_qa_finding_context(finding),
+        visual_qa_selector(finding),
+        visual_qa_finding_path(finding, "otherElementPath")
+    )
 }
 
 /// A scoped visual-QA check that passed.
@@ -994,19 +1165,10 @@ pub fn check_visual_qa_scoped_at(
             missing.join(", ")
         ));
     }
-    let mut available: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
-    for finding in base_findings {
-        *available.entry(visual_qa_finding_key(finding)).or_default() += 1;
-    }
-    let mut introduced = Vec::new();
-    for finding in tip_findings {
-        let key = visual_qa_finding_key(finding);
-        match available.get_mut(&key) {
-            Some(count) if *count > 0 => *count -= 1,
-            _ => introduced.push(key),
-        }
-    }
+    let introduced: Vec<String> = pair_visual_qa_findings(tip_findings, base_findings)
+        .into_iter()
+        .map(|index| visual_qa_finding_key(&tip_findings[index]))
+        .collect();
     if !introduced.is_empty() {
         let shown: Vec<&str> = introduced.iter().take(5).map(String::as_str).collect();
         return Err(format!(
@@ -1949,6 +2111,11 @@ pub fn run_close_gate_with_write_dir(
             command = command,
         )
     };
+    if let Some(selection) = journeys::check_close_journeys(ctx, reasons)
+        .map_err(|refusal| reject(refusal, "affected journey receipt"))?
+    {
+        pass.notes.push(selection);
+    }
     match tier {
         EvidenceTier::None => {}
         EvidenceTier::Bundle => {

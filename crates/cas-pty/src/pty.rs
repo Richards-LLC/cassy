@@ -401,7 +401,13 @@ action=remind remind_delay_secs=<n> remind_message=\"...\"` and end the turn so 
 No foreground gh run watch or CI poll loops. For Rust checks, use capped cargo check: \
 `--lib` for lib-only edits or `--tests` when test files changed; choose one target flag. \
 Read cas-worker references/discipline.md before checks or targeted tests; full Rust builds \
-and suites stay at supervisor assembly. Below 20% context headroom, CHECKPOINT: commit, \
+and suites stay at supervisor assembly. Browser checks use vitest, tsc and affected \
+journeys: `scripts/journey-eval.sh <task-artifact-dir>` defaults to task-target selection \
+and four workers. Workers and QA cannot launch --full or an unfiltered Playwright suite. \
+The supervisor runs --full once per epic at assembly; the merge queue runs it too. \
+Reuse same-tip receipts; do not rerun browsers for doc/ledger-only commits. A failing \
+spec may be rerun alone at one worker, preserving the original failure. \
+Below 20% context headroom, CHECKPOINT: commit, \
 push unless local_merge, handoff note, request respawn before auto-compaction. \
 Write facts, not narration: answer first, then at most two bullets at a glance. Put detail \
 in task notes and close reasons. Brevity never trims evidence: SHAs, file:line causes, \

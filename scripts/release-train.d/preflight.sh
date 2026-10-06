@@ -250,6 +250,17 @@ cut_preflight_check_toolchain() {
     cut_preflight_block toolchain "missing on this host: ${joined%; }"
 }
 
+cut_preflight_check_publish_toolchain() {
+    [[ "${CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN:-}" == 1 ]] && return 0
+    if ! python3 "$script_dir/check-release-publish-toolchain.py" "$worktree" \
+        >"$run_dir/preflight-publish-toolchain.log" 2>&1; then
+        cat "$run_dir/preflight-publish-toolchain.log" >&2
+        cut_preflight_block publish-toolchain \
+            "zigbuild cannot load the publisher Cargo config/toolchain; inspect $run_dir/preflight-publish-toolchain.log"
+        return 1
+    fi
+}
+
 cut_preflight_check_changelog() {
     local changelog="$worktree/CHANGELOG.md" date_stamp
     date_stamp="$(release_train_date_stamp)"
@@ -377,6 +388,10 @@ cut_preflight_check_receipts() {
     done < <(release_train_receipts_unmerged_records)
 }
 
+cut_preflight_check_unreleased_tooling() {
+    python3 "$script_dir/release-learning.py" --warn-tooling "$worktree"
+}
+
 cut_stage_preflight() {
     local branch
     branch="$(git -C "$worktree" branch --show-current)"
@@ -395,11 +410,13 @@ cut_stage_preflight() {
     cut_preflight_check_scratch || return 1
     cut_preflight_check_zig || return 1
     cut_preflight_check_toolchain || return 1
+    cut_preflight_check_publish_toolchain || return 1
     cut_preflight_check_changelog || return 1
     cut_preflight_check_changelog_lint || return 1
     cut_preflight_check_draft || return 1
     cut_preflight_check_announce_token || return 1
     cut_preflight_check_integration || return 1
     cut_preflight_check_receipts
+    cut_preflight_check_unreleased_tooling
     printf 'preflight passed version=%s worktree=%s\n' "$version" "$worktree"
 }

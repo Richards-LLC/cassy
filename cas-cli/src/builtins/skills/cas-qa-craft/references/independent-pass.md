@@ -21,12 +21,22 @@ serve it through `cas-servers`. For hub-web, run `npm run build`, then serve
 `hub-web/dist`. A build or serve failure is a **Blocking** finding. Record the
 command, the URL, and `npx playwright --version` in the ledger header.
 
-## 2. Walk the journeys the change touches
+## 2. Cover the source-impact-selected journeys
 
 ```bash
 scripts/journeys-for-diff.py <base> <bound_head>   # JSON: id, title, suite, reason
-scripts/journey-eval.sh <ledger-dir> --grep <ID>   # receipts in <ledger-dir>/journeys/<ID>/
+scripts/journey-eval.sh <ledger-dir> --affected <base> --workers=4
 ```
+
+For hub-web source or dist changes, derive selection at the exact bound tip
+from `journeys-for-diff`, then cover every selected ID. Include
+`journey_receipt` in the round bundle per
+[evidence-bundle.md](evidence-bundle.md). A hand-picked subset that omits a
+selected ID refuses QA. Reuse the implementer's receipt when it covers the
+same tip and selection; walk independent cells and inspect actual pixels.
+Workers and reviewers use affected journeys; the supervisor owns the one
+full-suite run per epic assembly and the merge queue. If a test fails, retain
+that run and rerun only its spec at one worker to distinguish a flake.
 
 Ports: hub-web's Playwright config never reuses a running server. Each
 checkout gets its own default port pair in 20000–32767, derived from its
@@ -85,8 +95,12 @@ Run the same script against a local serve of the base build, over the same
 pages, into `<ledger-dir>/visual-qa-baseline/`. Then set
 `visual_qa_status: "scoped"` and list the base report as
 `files.visual_qa_baseline_json`. Cassy accepts the pair when every finding of
-the reviewed tip also appears in the base run, compared by type, element, page,
-scheme and viewport. A finding only the tip has is one the delivery introduced,
+the reviewed tip pairs once with a base finding by type, rule/reason, page,
+render state, scheme, full viewport and stable element identity. Identity uses
+role + accessible name when supplied, or matching text + shared bounds within
+0.5 CSS pixels. A CSS class rename alone does not add a finding; a new rule,
+text or geometry still does. Historical reports lacking identity evidence
+require matching selectors. A finding only the tip has is one the delivery introduced,
 and `qa_record` refuses the pair.
 
 This captures desktop 1280 and phone 390, each in light and dark. Then score

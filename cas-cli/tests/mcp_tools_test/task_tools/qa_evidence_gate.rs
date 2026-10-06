@@ -202,6 +202,175 @@ impl Fx {
     }
 }
 
+/// The cas-8cfe incident had a commit-time anchor at A, a clean delivery at B,
+/// and a fresh B bundle before the first park. Exercise the public close path
+/// both with the incident's explicit receipt and with branch discovery.
+#[tokio::test]
+async fn first_park_binds_fresh_bundle_and_receipt_to_current_tip_cas_8cfe() {
+    for explicit_receipt in [false, true] {
+        let mut test_env = TestEnvGuard::temp_home();
+        let fx = fixture(
+            &mut test_env,
+            &[("web/composer.css", ".composer{gap:8px}\n")],
+            "Open the composer; spacing is even",
+        );
+        let cas_dir = fx.repo.join(".cas");
+        let config = cas_dir.join("config.toml");
+        let body = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            body.replace("independent_pass = false", "independent_pass = true"),
+        )
+        .unwrap();
+        let branch = format!("factory/test-agent-{TASK}");
+        git(&fx.repo, &["checkout", "-q", "-b", &branch]);
+        std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+        let old_head = git(&fx.repo, &["rev-parse", "HEAD"]);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.deliverables.factory_branch_anchor = Some(old_head.clone());
+        tasks.update(&task).unwrap();
+        fx.write_bundle(&old_head);
+        let head = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
+        assert_ne!(head, old_head);
+        assert!(git(&fx.repo, &["status", "--porcelain"]).is_empty());
+
+        let request = || {
+            let mut request = close_req(TASK);
+            if explicit_receipt {
+                request.commit_receipt = Some(head.clone());
+            }
+            request
+        };
+        let stale = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
+        assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
+        assert_eq!(fx.status(), TaskStatus::InProgress);
+        assert!(
+            cas_store::list_qa_passes(&cas_dir, TASK)
+                .unwrap()
+                .is_empty()
+        );
+
+        let bundle = fx.write_bundle(&head);
+        let parked = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+        assert!(fx.notes().contains(&format!(
+            "QA evidence bundle accepted: {}",
+            bundle.canonicalize().unwrap().display()
+        )));
+        let stored = tasks.get(TASK).unwrap();
+        assert_eq!(stored.status, TaskStatus::AwaitingMerge);
+        assert_eq!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            stored.deliverables.parked_branch.as_deref(),
+            Some(branch.as_str())
+        );
+        let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(passes.len(), 1);
+        let pass = &passes[0];
+        assert_eq!(
+            pass.bound_head, head,
+            "fresh evidence must dispatch the current bytes"
+        );
+        let qa = tasks.get(pass.qa_task_id.as_deref().unwrap()).unwrap();
+        assert!(qa.description.contains(&head), "{}", qa.description);
+        let refusal = cas::qa_pass::branch_merge_refusal(&cas_dir, &fx.repo, &branch)
+            .expect("the newly dispatched current tip still needs independent approval");
+        assert!(refusal.contains(&head[..8]), "{refusal}");
+    }
+}
+
+/// An older approval must not authorize a later clean tip, even after the
+/// implementer replaces its evidence with a fresh commit-bound bundle.
+#[tokio::test]
+async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_cas_8cfe() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut test_env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        body.replace("independent_pass = false", "independent_pass = true"),
+    )
+    .unwrap();
+    let branch = format!("factory/test-agent-{TASK}");
+    git(&fx.repo, &["checkout", "-q", "-b", &branch]);
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+    let old_head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    fx.write_bundle(&old_head);
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    // Seed the prior independent verdict through the durable store; the
+    // behavior under test is subsequent MCP close and the real merge guard.
+    cas_store::claim_qa_pass(&cas_dir, TASK, "reviewer", chrono::Utc::now()).unwrap();
+    let approved = cas_store::resolve_qa_pass(
+        &cas_dir,
+        TASK,
+        "reviewer",
+        cas::types::QaVerdict::Approved,
+        "the previous bytes passed",
+        None,
+        fx.artifacts
+            .join(TASK)
+            .join("old-review/LEDGER.md")
+            .to_str()
+            .unwrap(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(approved.bound_head, old_head);
+    assert!(cas::qa_pass::branch_merge_refusal(&cas_dir, &fx.repo, &branch).is_none());
+
+    let head = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
+    fx.write_bundle(&head);
+    assert!(git(&fx.repo, &["status", "--porcelain"]).is_empty());
+    let before = cas::qa_pass::branch_merge_refusal(&cas_dir, &fx.repo, &branch)
+        .expect("approval of A cannot authorize B before re-close");
+    assert!(before.contains(&head[..8]), "{before}");
+    let mut request = close_req(TASK);
+    request.commit_receipt = Some(head.clone());
+    let refreshed = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
+    assert!(
+        refreshed.contains("INDEPENDENT QA DISPATCHED"),
+        "{refreshed}"
+    );
+    let current = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_ne!(current.id, approved.id);
+    assert_eq!(current.bound_head, head);
+    assert_eq!(current.state, cas::types::QaPassState::Pending);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(
+        tasks
+            .get(TASK)
+            .unwrap()
+            .deliverables
+            .factory_branch_anchor
+            .as_deref(),
+        Some(head.as_str())
+    );
+    let after = cas::qa_pass::branch_merge_refusal(&cas_dir, &fx.repo, &branch)
+        .expect("a fresh implementer bundle cannot substitute for approval of B");
+    assert!(after.contains(&head[..8]), "{after}");
+    let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+    let prior = passes.iter().find(|pass| pass.id == approved.id).unwrap();
+    assert_eq!(prior.state, cas::types::QaPassState::Passed);
+    assert_eq!(
+        prior.bound_head, old_head,
+        "prior verdict remains immutable"
+    );
+}
+
 #[tokio::test]
 async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() {
     let mut test_env = TestEnvGuard::temp_home();

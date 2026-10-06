@@ -488,10 +488,22 @@ impl CasCore {
     /// supervisor's reason recorded as the eligibility reason, so the merge
     /// gates wait for a verdict from then on. Returns the dispatch text, or
     /// why no round could be opened.
+    #[cfg(test)]
     pub(crate) fn request_independent_qa(
         &self,
         task: &Task,
         reason: &str,
+    ) -> Result<String, String> {
+        self.request_independent_qa_at_receipt(task, reason, None)
+    }
+
+    /// An explicit live pushed tip permits independent review of reopened
+    /// work without projecting it as parked, merged, or closed.
+    pub(crate) fn request_independent_qa_at_receipt(
+        &self,
+        task: &Task,
+        reason: &str,
+        head_sha: Option<&str>,
     ) -> Result<String, String> {
         let config = crate::config::Config::load(&self.cas_root)
             .map_err(|error| format!("could not load config: {error}"))?;
@@ -501,9 +513,30 @@ impl CasCore {
                     .to_string(),
             );
         }
+        if let Some(receipt) = head_sha {
+            self.resolve_live_supervisor_authority()
+                .map_err(|_| "explicit QA receipt requires a live registered supervisor".to_string())?;
+            if !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress | TaskStatus::AwaitingMerge) {
+                return Err(format!("{} is {:?}; explicit QA receipts require Open, InProgress, or AwaitingMerge", task.id, task.status));
+            }
+            let parent_epic = self.open_task_store().ok()
+                .and_then(|store| store.get_parent_epic(&task.id).ok().flatten());
+            let target = super::close_ops::effective_close_work_target(task, parent_epic.as_ref())
+                .ok_or("explicit QA receipt requires the task's declared WorkTarget")?;
+            let context = super::super::repo_context::resolve_repo_context(&self.cas_root, &target)?;
+            let (branch, head) = super::close_ops::validate_pushed_task_receipt(task, &context, receipt)?;
+            super::close_ops::run_declared_pre_close_hook(task, &context, None, Some(&head), true)?;
+            let changed = changed_paths_for_delivery(&context.repo_root,
+                &freshest_target_ref(&context.repo_root, &context.target_branch), &head).ok();
+            return self.independent_qa_for_paths(task, &context.repo_root, &context.target_branch,
+                &branch, Some(&head), changed,
+                close_delivery_location(&context.repo_root, &head, &context.target_branch), Some(reason))
+                .map(|status| status.text)
+                .ok_or_else(|| format!("Cassy could not open a round for {} @{head}", task.id));
+        }
         if task.status != TaskStatus::AwaitingMerge {
             return Err(format!(
-                "{} is {:?}, not parked awaiting merge. A round binds a parked delivery tip;                  the worker's close parks it (and dispatches QA itself when the diff is user-facing).",
+                "{} is {:?}, not parked awaiting merge. A round binds a parked delivery tip;                  the worker's close parks it (and dispatches QA itself when the diff is user-facing). A live supervisor can request review of reopened work with head_sha=<full pushed task SHA>.",
                 task.id, task.status
             ));
         }
@@ -551,11 +584,45 @@ impl CasCore {
                 }
             };
         let branch = super::close_ops::close_measured_factory_branch(&repo_root, task, implementer);
-        let head = task
-            .deliverables
-            .factory_branch_anchor
-            .clone()
-            .or_else(|| super::close_ops::resolve_branch_sha(&repo_root, &branch))
+        // cas-00eb: a parked anchor behind the branch tip is re-anchored first
+        // when every commit since it is this task's (the guarded advance a
+        // worker's close retry runs). Binding the requested round to the
+        // stale anchor re-found the very pass the supervisor asked to
+        // replace; at the tip, opening the round supersedes it (cas-ce39).
+        let tip = super::close_ops::resolve_branch_sha(&repo_root, &branch);
+        let mut rebound_from = None;
+        if let (Some(recorded), Some(tip)) = (
+            task.deliverables.factory_branch_anchor.clone(),
+            tip.as_deref(),
+        ) && !recorded.eq_ignore_ascii_case(tip)
+            && let Ok(store) = self.open_task_store()
+            && self.tip_is_own_task_lineage(
+                store.as_ref(),
+                task,
+                &repo_root,
+                Some(&branch),
+                &recorded,
+                Some(tip),
+            )
+        {
+            self.advance_awaiting_merge_anchor(
+                store.as_ref(),
+                task,
+                &repo_root,
+                &target_branch,
+                Some(tip),
+            );
+            if let Ok(fresh) = store.get(&task.id)
+                && fresh.deliverables.factory_branch_anchor.as_deref() == Some(tip)
+            {
+                rebound_from = Some(recorded);
+            }
+        }
+        let head = match rebound_from.as_ref() {
+            Some(_) => tip.clone(),
+            None => task.deliverables.factory_branch_anchor.clone(),
+        }
+            .or(tip)
             .ok_or_else(|| {
                 format!(
                     "the parked tip of {} could not be resolved ({branch} does not resolve and no anchor is recorded)",
@@ -568,6 +635,14 @@ impl CasCore {
             &head,
         )
         .ok();
+        let reason = match rebound_from.as_deref() {
+            Some(previous) => format!(
+                "{reason} (cas-00eb: rebound from the stale anchor {} to the branch tip {})",
+                &previous[..previous.len().min(9)],
+                &head[..head.len().min(9)]
+            ),
+            None => reason.to_string(),
+        };
         self.independent_qa_for_paths(
             task,
             &repo_root,
@@ -576,7 +651,7 @@ impl CasCore {
             Some(&head),
             changed,
             QaDeliveryLocation::ParkedForMerge,
-            Some(reason),
+            Some(reason.as_str()),
         )
         .map(|status| status.text)
         .ok_or_else(|| format!("Cassy could not open a round for {} @{head}", task.id))
@@ -989,8 +1064,7 @@ impl CasCore {
     /// a review for code already on trunk, and `qa_waive` then refused for
     /// lack of a parked tip. Now:
     /// - the delivered commit is the parked anchor, the close's
-    ///   `commit_receipt`, or the implementer's branch tip only when that tip
-    ///   is itself merged;
+    ///   `commit_receipt`, or a merged tip on this task's own per-task branch;
     /// - a live supervisor's override with a reason records a waiver against
     ///   that commit;
     /// - code already on trunk is never sent for review.
@@ -1014,11 +1088,7 @@ impl CasCore {
         }
         let classification_target = freshest_target_ref(repo, target_branch);
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-        let branch = task
-            .deliverables
-            .parked_branch
-            .clone()
-            .unwrap_or_else(|| format!("factory/{implementer}"));
+        let branch = super::close_ops::close_measured_factory_branch(repo, task, implementer);
         // A commit the task itself stands behind: the parked anchor or the
         // close's receipt.
         let recorded_head = task
@@ -1026,11 +1096,29 @@ impl CasCore {
             .factory_branch_anchor
             .clone()
             .or_else(|| commit_receipt.and_then(|receipt| resolve_commit(repo, receipt)));
+        let branch_tip = super::close_ops::resolve_branch_sha(repo, &branch);
+        // cas-de60: target containment proves integration, not ownership. A
+        // merged shared lane can still be a different task's old delivery.
+        // With no recorded head there is no anchor advance: check this tip
+        // against itself under the same per-task lineage rule as park/QA
+        // requests. Recorded anchors and explicit receipts remain authoritative.
+        let own_tip = recorded_head.is_some()
+            || branch_tip.as_deref().is_some_and(|tip| {
+                self.open_task_store().is_ok_and(|store| {
+                    self.tip_is_own_task_lineage(
+                        store.as_ref(),
+                        task,
+                        repo,
+                        Some(&branch),
+                        tip,
+                        Some(tip),
+                    )
+                })
+            });
         let head = recorded_head.clone().or_else(|| {
-            // The live branch tip is the delivery only while it is itself
-            // merged: months later it carries unrelated work.
-            super::close_ops::resolve_branch_sha(repo, &branch)
-                .filter(|tip| is_ancestor(repo, tip, &classification_target))
+            branch_tip
+                .clone()
+                .filter(|tip| own_tip && is_ancestor(repo, tip, &classification_target))
         });
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
@@ -1126,6 +1214,16 @@ impl CasCore {
         let remedy = "A live supervisor closes it with supervisor_override=true, a reason and \
              commit_receipt=<merged sha>; the waiver is recorded against that commit";
         let Some(head) = head else {
+            if branch_tip.is_some() && !own_tip {
+                return QaCloseGate::Refuse(format!(
+                    "INDEPENDENT QA REQUIRED: {} has no recorded delivery commit, and {branch} \
+                     is not this task's own per-task lineage. A shared worker lane cannot identify \
+                     this delivery, even when its tip is merged into {target_branch}. No QA round \
+                     was opened. Retry close with commit_receipt=<this task's delivered SHA>, \
+                     or restore its per-task delivery branch. {remedy}.",
+                    task.id,
+                ));
+            }
             return QaCloseGate::Refuse(unresolved_delivery_refusal(
                 &task.id,
                 target_branch,
@@ -1884,5 +1982,536 @@ mod squash_close_tests {
         git(repo, &["commit", "-q", "-m", "changed delivery after squash"]);
         let changed = git(repo, &["rev-parse", "HEAD"]);
         assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", Some(&changed), None), QaCloseGate::Refuse(_)), "a matching older patch must not prove the supplied changed receipt");
+    }
+}
+
+/// cas-00eb: cas-6e3a recorded anchor `b65630c82`, pushed a test fix and a
+/// docs commit, and parked at `847104e36`. The round was bound to `b656`, and
+/// the supervisor's `qa_request` re-found that same pass. These tests rebuild
+/// that shape: anchor A, two task-owned commits, tip C.
+#[cfg(test)]
+mod stale_anchor_rebind_tests_cas_00eb {
+    use super::*;
+    use crate::store::{
+        open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+    };
+    use crate::test_support::TestEnvGuard;
+    use cas_types::{Agent, AgentRole, QaPassState, TaskRisk, TaskStatus};
+    use std::process::Command;
+
+    /// The task's own per-task branch (`factory/<assignee>-<task>`).
+    const WORKER_TASK_BRANCH: &str = "factory/worker-cas-ui02";
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "cas@example.test")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        core: CasCore,
+        task: Task,
+        anchor: String,
+        tip: String,
+    }
+
+    /// A user-facing commit A (the recorded anchor), then a test fix and a
+    /// docs commit, all claiming the task, on its per-task branch.
+    fn fixture(env: &mut TestEnvGuard, status: TaskStatus) -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let cas_dir = repo.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+        )
+        .unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        tasks.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "test-supervisor-session".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("test-supervisor-session".into());
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-q", "-m", "seed"]);
+        git(repo, &["checkout", "-q", "-b", WORKER_TASK_BRANCH]);
+        std::fs::create_dir_all(repo.join("web")).unwrap();
+        std::fs::write(repo.join("web/roster.css"), ".roster{gap:8px}\n").unwrap();
+        git(repo, &["add", "web/roster.css"]);
+        git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "build(cas-ui02): rebuild roster on the new base",
+            ],
+        );
+        let anchor = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(repo.join("e2e")).unwrap();
+        std::fs::write(
+            repo.join("e2e/roster.test.ts"),
+            "test('roster', () => {});\n",
+        )
+        .unwrap();
+        git(repo, &["add", "e2e/roster.test.ts"]);
+        git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "test(cas-ui02): align roster journeys",
+            ],
+        );
+        std::fs::write(repo.join("roster.brief.md"), "# Roster\n").unwrap();
+        git(repo, &["add", "roster.brief.md"]);
+        git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "docs(cas-ui02): record the integrated base",
+            ],
+        );
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+
+        let mut task = Task::new("cas-ui02".into(), "Roster polish".into());
+        task.assignee = Some("worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.demo_statement = "Open the roster and see every worker".into();
+        task.status = status;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.parked_branch = Some(WORKER_TASK_BRANCH.into());
+        tasks.add(&task).unwrap();
+        Fixture {
+            dir,
+            core,
+            task,
+            anchor,
+            tip,
+        }
+    }
+
+    /// AC1: the fresh park advances a commit-time anchor to the tip when the
+    /// commits since it are the task's own, so the round binds the tip.
+    #[test]
+    fn park_binds_the_round_to_the_tip_not_the_commit_time_anchor() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &f.task,
+            repo,
+            "main",
+            Some(WORKER_TASK_BRANCH),
+            Some(&f.tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.tip.as_str())
+        );
+        assert_eq!(
+            parking.status,
+            TaskStatus::InProgress,
+            "the park reports the real transition"
+        );
+        assert!(parking.notes.contains(&f.anchor), "the advance is audited");
+
+        let dispatch = f
+            .core
+            .dispatch_independent_qa(&parking, repo, "main", Some(&f.tip))
+            .expect("a user-facing delivery dispatches a round");
+        assert!(dispatch.contains("INDEPENDENT QA DISPATCHED"), "{dispatch}");
+        let passes = cas_store::list_qa_passes(&repo.join(".cas"), &f.task.id).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(
+            passes[0].bound_head, f.tip,
+            "bound_head equals the branch tip"
+        );
+    }
+
+    /// cas-ba4a still holds: a commit claiming another task stops the advance.
+    /// (Task ids are hex: `cas-f0a6` is recognised as foreign, `cas-zz99` is not.)
+    #[test]
+    fn park_keeps_the_anchor_when_a_later_commit_is_another_tasks() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        std::fs::write(repo.join("other.txt"), "x\n").unwrap();
+        git(repo, &["add", "other.txt"]);
+        git(
+            repo,
+            &["commit", "-q", "-m", "fix(cas-f0a6): someone else's change"],
+        );
+        let foreign_tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &f.task,
+            repo,
+            "main",
+            Some(WORKER_TASK_BRANCH),
+            Some(&foreign_tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.anchor.as_str())
+        );
+    }
+
+    /// cas-f1f4 shape: on the worker's plain `factory/<assignee>` lane the
+    /// commits after the anchor may be the next task stacked on this one,
+    /// even when their messages name no other task. The anchor stays.
+    #[test]
+    fn park_keeps_the_anchor_on_a_shared_worker_lane() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        git(repo, &["branch", "factory/worker", &f.tip]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &f.task,
+            repo,
+            "main",
+            Some("factory/worker"),
+            Some(&f.tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.anchor.as_str())
+        );
+    }
+
+    /// Another open task's anchor between ours and the tip is that task's
+    /// delivery boundary: the anchor never walks over it.
+    #[test]
+    fn park_keeps_the_anchor_when_another_task_is_anchored_in_between() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        let middle = git(repo, &["rev-parse", &format!("{}~1", f.tip)]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let mut other = Task::new("cas-ui03".into(), "Stacked task".into());
+        other.assignee = Some("worker".into());
+        other.status = TaskStatus::AwaitingMerge;
+        other.deliverables.factory_branch_anchor = Some(middle);
+        tasks.add(&other).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &f.task,
+            repo,
+            "main",
+            Some(WORKER_TASK_BRANCH),
+            Some(&f.tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.anchor.as_str())
+        );
+    }
+
+    // A task merged out of band, while its plain worker lane still names a
+    // different delivery. Neither an anchor nor a receipt was recorded.
+    fn shared_lane_close_fixture(
+        env: &mut TestEnvGuard,
+        keep_task_branch: bool,
+    ) -> (Fixture, String) {
+        let mut f = fixture(env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        git(repo, &["checkout", "-q", "-b", "epic", "main"]);
+        git(repo, &["checkout", "-q", "-b", "factory/worker", "main"]);
+        std::fs::create_dir_all(repo.join("hub-web/dist")).unwrap();
+        std::fs::write(repo.join("hub-web/dist/app.css"), ".foreign{color:red}\n").unwrap();
+        git(repo, &["add", "hub-web/dist/app.css"]);
+        git(
+            repo,
+            &["commit", "-q", "-m", "feat(cas-5e53): foreign shared lane"],
+        );
+        let foreign = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "epic"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge foreign delivery",
+            ],
+        );
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                WORKER_TASK_BRANCH,
+                "-m",
+                "merge own delivery",
+            ],
+        );
+        if !keep_task_branch {
+            git(repo, &["branch", "-D", WORKER_TASK_BRANCH]);
+        }
+        f.task.deliverables.factory_branch_anchor = None;
+        f.task.deliverables.parked_branch = None;
+        open_task_store(&repo.join(".cas"))
+            .unwrap()
+            .update(&f.task)
+            .unwrap();
+        (f, foreign)
+    }
+
+    #[test]
+    fn cas_de60_close_without_receipt_uses_own_task_branch_not_shared_lane() {
+        let mut env = TestEnvGuard::temp_home();
+        let (f, foreign) = shared_lane_close_fixture(&mut env, true);
+        let result = f
+            .core
+            .independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
+        assert!(
+            matches!(result, QaCloseGate::Refuse(_)),
+            "new unreviewed delivery needs QA"
+        );
+        let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(
+            passes[0].bound_head, f.tip,
+            "a target-contained shared tip is not this task's delivery"
+        );
+        assert_ne!(passes[0].bound_head, foreign);
+        assert_eq!(passes[0].branch, WORKER_TASK_BRANCH);
+        let qa_task = open_task_store(&f.dir.path().join(".cas"))
+            .unwrap()
+            .get(passes[0].qa_task_id.as_deref().unwrap())
+            .unwrap();
+        assert!(
+            !qa_task.description.contains("hub-web/dist/app.css"),
+            "foreign paths must not dispatch unrelated journeys: {}",
+            qa_task.description
+        );
+    }
+
+    #[test]
+    fn cas_de60_close_without_task_delivery_refuses_instead_of_binding_shared_lane() {
+        let mut env = TestEnvGuard::temp_home();
+        let (f, _) = shared_lane_close_fixture(&mut env, false);
+        let result = f
+            .core
+            .independent_qa_close_gate(&f.task, f.dir.path(), "epic", None, None);
+        let QaCloseGate::Refuse(text) = result else {
+            panic!("a foreign lane cannot identify this delivery");
+        };
+        assert!(text.contains("commit_receipt"), "{text}");
+        assert!(
+            cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id)
+                .unwrap()
+                .is_empty(),
+            "unknown delivery opens no foreign QA round"
+        );
+    }
+
+    #[test]
+    fn cas_de60_shared_lane_with_older_own_commits_still_requires_delivery_receipt() {
+        let mut env = TestEnvGuard::temp_home();
+        let (f, foreign) = shared_lane_close_fixture(&mut env, false);
+        let repo = f.dir.path();
+        git(repo, &["branch", "-f", "factory/worker", &f.tip]);
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["cherry-pick", &foreign]);
+        let shared_tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "epic"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge reused lane",
+            ],
+        );
+        let result = f
+            .core
+            .independent_qa_close_gate(&f.task, repo, "epic", None, None);
+        let QaCloseGate::Refuse(text) = result else {
+            panic!("a reused lane is not a task delivery tip");
+        };
+        assert!(text.contains("commit_receipt"), "{text}");
+        assert!(
+            !text.contains(&format!("commit_receipt={shared_tip}")),
+            "do not recommend a foreign receipt: {text}"
+        );
+        assert!(
+            cas_store::list_qa_passes(&repo.join(".cas"), &f.task.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cas_de60_recorded_anchor_and_receipt_remain_valid_with_foreign_shared_lane() {
+        for recorded_anchor in [true, false] {
+            let mut env = TestEnvGuard::temp_home();
+            let (mut f, foreign) = shared_lane_close_fixture(&mut env, false);
+            if recorded_anchor {
+                f.task.deliverables.factory_branch_anchor = Some(f.tip.clone());
+            }
+            let receipt = (!recorded_anchor).then_some(f.tip.as_str());
+            let result =
+                f.core
+                    .independent_qa_close_gate(&f.task, f.dir.path(), "epic", receipt, None);
+            assert!(
+                matches!(result, QaCloseGate::Refuse(_)),
+                "unreviewed own delivery needs QA"
+            );
+            let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
+            assert_eq!(passes.len(), 1);
+            assert_eq!(passes[0].bound_head, f.tip);
+            assert_ne!(passes[0].bound_head, foreign);
+        }
+    }
+
+    /// cas-24d8: a checkout holding only `origin/<epic>` (no local epic
+    /// branch) classifies the delivery against origin. A missing local ref
+    /// must not make the eligibility diff fail and degrade to the demo alone.
+    #[test]
+    fn only_an_origin_epic_ref_is_resolved_cas_24d8() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-q", "-m", "seed"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", "refs/remotes/origin/epic/v35", &base]);
+        std::fs::write(repo.join("roster.css"), ".roster{}\n").unwrap();
+        git(repo, &["add", "roster.css"]);
+        git(repo, &["commit", "-q", "-m", "feat(cas-ui02): roster"]);
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let target = freshest_target_ref(repo, "epic/v35");
+        assert_eq!(target, "origin/epic/v35");
+        let changed =
+            changed_paths_for_delivery(repo, &target, &head).expect("diff against origin");
+        assert!(
+            changed.iter().any(|path| path == "roster.css"),
+            "{changed:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_qa_request_requires_live_registered_supervisor_cas_9ffa() {
+        for role in [cas_types::AgentRole::Standard, cas_types::AgentRole::Worker, cas_types::AgentRole::Supervisor] {
+            let mut env = TestEnvGuard::temp_home();
+            let mut f = fixture(&mut env, TaskStatus::Open);
+            let cas_dir = f.dir.path().join(".cas");
+            f.task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:cas-9ffa-fixture".into(),
+                target_branch: "main".into(),
+            });
+            open_task_store(&cas_dir).unwrap().update(&f.task).unwrap();
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let mut caller = Agent::new_with_role("receipt-caller".into(), "receipt-caller".into(), role);
+            agents.register(&caller).unwrap();
+            if role == cas_types::AgentRole::Supervisor {
+                caller.status = cas_types::AgentStatus::Shutdown;
+                agents.update(&caller).unwrap();
+            }
+            // Server identities are immutable. A second bind on f.core would
+            // keep its original supervisor, so use a new core for this caller.
+            let caller_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+            caller_core.set_agent_id_for_testing(caller.id);
+            // An environment claim does not grant receipt recovery authority.
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let refusal = caller_core.request_independent_qa_at_receipt(&f.task,
+                "review correction", Some(&f.tip)).expect_err("no live supervisor authority");
+            assert!(refusal.contains("live registered supervisor"), "{refusal}");
+            assert!(cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap().is_empty());
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(&f.task.id).unwrap().status, TaskStatus::Open);
+        }
+    }
+
+    /// AC2: qa_request on a parked task whose pending pass is bound to the
+    /// stale anchor retires that pass and opens one at the tip, with the
+    /// rebind on record.
+    #[test]
+    fn qa_request_rebinds_a_stale_pending_pass_to_the_tip() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::AwaitingMerge);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let now = chrono::Utc::now();
+        cas_store::open_qa_pass(
+            &cas_dir,
+            &NewQaPass {
+                task_id: &f.task.id,
+                implementer_agent_id: "worker",
+                branch: WORKER_TASK_BRANCH,
+                bound_head: &f.anchor,
+                deadline_at: now + chrono::Duration::minutes(30),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap();
+
+        let text = f
+            .core
+            .request_independent_qa(&f.task, "bind round 2 to the branch tip")
+            .expect("a round opens");
+        assert!(text.contains(&f.tip[..8]), "{text}");
+        let passes = cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap();
+        let stale = passes
+            .iter()
+            .find(|pass| pass.bound_head == f.anchor)
+            .unwrap();
+        assert_eq!(stale.state, QaPassState::Superseded);
+        let open = passes.iter().find(|pass| pass.bound_head == f.tip).unwrap();
+        assert_eq!(open.state, QaPassState::Pending);
+        let stored = open_task_store(&cas_dir).unwrap().get(&f.task.id).unwrap();
+        assert_eq!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.tip.as_str())
+        );
     }
 }

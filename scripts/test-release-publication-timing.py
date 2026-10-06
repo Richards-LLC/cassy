@@ -40,17 +40,21 @@ class PublicationTimingTests(unittest.TestCase):
         self.receipt = Path(self.tmp.name) / "latency.receipt"
         self.receipt.write_text("TAG=v9.99.1\nTAG_PUSHED_AT=2026-08-20T12:00:00Z\n"
                                 "PUBLISHED_AT=2026-08-20T12:21:00Z\nPUBLISH_LATENCY_SECONDS=1260\n"
-                                "BUDGET_SECONDS=600\nWITHIN_BUDGET=false\n")
+                                "BUDGET_SECONDS=600\nWITHIN_BUDGET=false\nINTERVENTIONS=8\n")
 
     def record(self):
         announce.record_latency("v9.99.1", str(self.receipt), str(self.draft))
 
-    def test_overrun_is_in_dev_trailer_only_and_idempotent(self):
+    def test_timing_and_interventions_are_receipt_backed_and_idempotent(self):
         original = announce.extract_bodies(self.draft)
         self.record()
         after = self.draft.read_text()
         bodies = announce.extract_bodies(self.draft)
-        self.assertEqual(bodies[:3], original[:3])
+        self.assertEqual(bodies[0], original[0])
+        self.assertEqual(bodies[2], original[2])
+        for body in (bodies[1], bodies[3]):
+            self.assertIn("8 manual interventions", body)
+        self.assertIn("INTERVENTIONS=8", bodies[3])
         self.assertIn("1260s; over budget (600s); WITHIN_BUDGET=false", bodies[3])
         self.assertIn("Other prose retained.", after)
         self.assertEqual(self.draft.stat().st_mode & 0o777, 0o640)
@@ -67,6 +71,9 @@ class PublicationTimingTests(unittest.TestCase):
         original = self.receipt.read_text()
         for source in ("", original.replace("false", "true"), original.replace("1260", "1259"),
                        original.replace("v9.99.1", "v9.99.2"), original.replace("600", "-1"),
+                       original.replace("INTERVENTIONS=8\n", ""),
+                       original.replace("INTERVENTIONS=8", "INTERVENTIONS=-1"),
+                       original.replace("INTERVENTIONS=8", "INTERVENTIONS=unknown"),
                        original + "WITHIN_BUDGET=true\n"):
             with self.subTest(source=source):
                 self.receipt.write_text(source)

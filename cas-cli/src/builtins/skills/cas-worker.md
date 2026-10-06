@@ -47,6 +47,18 @@ use assigned work; `ready` and `available` are backlog
   context runs low.
 - When close says verification required, quote its guidance in `need:`.
 
+## Browser checks
+
+For projects with `scripts/journey-eval.sh`, run vitest, tsc and affected
+journeys while iterating. `scripts/journey-eval.sh <task-artifact-dir>` resolves
+the task target and runs every selected ID at four workers; `--affected <base>`
+sets an explicit base. Retain the final code tip receipt. Workers and QA cannot
+run `--full` or unfiltered Playwright; the supervisor owns one full run at epic
+assembly and the merge queue runs it again. Reuse exact-tip receipts, and do
+not rerun browsers after doc/ledger-only commits when evaluated inputs are
+unchanged. For a failure control, rerun only that spec at one worker and retain
+the original failure. A hand-picked subset cannot replace selected proof.
+
 ## Conditional references
 
 - Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)

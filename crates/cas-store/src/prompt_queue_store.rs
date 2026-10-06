@@ -13,7 +13,23 @@ use std::sync::{Arc, Mutex};
 use crate::recording_store::capture_message_event;
 use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::NotificationPriority;
+mod device_receipts;
+pub use device_receipts::OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS;
 use crate::{Result, StoreError};
+
+mod operator_cloud;
+pub use operator_cloud::{
+    AdmissionOutcome, OperatorCommandAdmission,
+    OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
+    OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
+    session_routing_id,
+};
+mod operator_delivery;
+pub use operator_delivery::{
+    OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OperatorDeliveryClaim, OperatorDeliveryEvent,
+    OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorRelayReceipt,
+    OperatorTurn, OperatorTurnMetadata,
+};
 
 /// Retry policy for daemon-owned prompt delivery.
 ///
@@ -922,6 +938,11 @@ pub enum PendingReason {
     /// The row was surfaced as undelivered rather than waiting for silence
     /// forever.
     UndeliveredAfterWakeDeclines,
+    /// cas-d1659: the wake budget is spent while the recipient is busy. Cassy
+    /// stopped offering wakes, but the row stays pending and surfaceable: the
+    /// recipient's next turn start or tool boundary injects it. Not terminal
+    /// and not processed until it is surfaced or acknowledged.
+    AwaitingBusyRecipient,
     /// Terminal non-delivery: dead worker source dropped.
     DroppedDeadSource,
     /// Terminal non-delivery: duplicate idle suppression.
@@ -975,6 +996,7 @@ impl PendingReason {
             Self::AwaitingDelivery => "awaiting_delivery",
             Self::AwaitingAck => "awaiting_ack",
             Self::UndeliveredAfterWakeDeclines => "undelivered_after_wake_declines",
+            Self::AwaitingBusyRecipient => "awaiting_busy_recipient",
             Self::DroppedDeadSource => "dropped_dead_source",
             Self::SuppressedIdle => "suppressed_idle",
             Self::SupersededStale => "superseded_stale",
@@ -995,6 +1017,7 @@ impl PendingReason {
             "awaiting_delivery" => Some(Self::AwaitingDelivery),
             "awaiting_ack" => Some(Self::AwaitingAck),
             "undelivered_after_wake_declines" => Some(Self::UndeliveredAfterWakeDeclines),
+            "awaiting_busy_recipient" => Some(Self::AwaitingBusyRecipient),
             "dropped_dead_source" => Some(Self::DroppedDeadSource),
             "suppressed_idle" => Some(Self::SuppressedIdle),
             "superseded_stale" => Some(Self::SupersededStale),
@@ -1010,7 +1033,9 @@ impl PendingReason {
 
     fn implied_stage(self) -> DeliveryStage {
         match self {
-            Self::GatedNotReady | Self::TargetUnavailable => DeliveryStage::Gated,
+            Self::GatedNotReady | Self::TargetUnavailable | Self::AwaitingBusyRecipient => {
+                DeliveryStage::Gated
+            }
             Self::DroppedDeadSource => DeliveryStage::Dropped,
             Self::SuppressedIdle | Self::SupersededStale | Self::ShutdownCancelled => {
                 DeliveryStage::Suppressed
@@ -1055,6 +1080,7 @@ impl PendingReason {
             Self::GatedNotReady
             | Self::SessionIneligible
             | Self::AwaitingDelivery
+            | Self::AwaitingBusyRecipient
             | Self::NoIntendedRecipients => false,
             // cas-94a1 decided against the POST-cas-78d3 machine, not the
             // pre-fix corpse data: now that hook surfacing really acks, a row
@@ -1621,6 +1647,10 @@ pub trait PromptQueueStore: Send + Sync {
         urgent: bool,
         origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue>;
+
+    /// Record a complete operator turn and its immutable local outbox event in
+    /// one transaction. Display labels never establish a cloud audience.
+    fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome>;
 
     /// Queue one Commander message with its hub-authenticated operator stamp
     /// (cas-e8df). The origin is derived from the stamp — `PairedDevice` when
@@ -2211,6 +2241,9 @@ pub trait PromptQueueStore: Send + Sync {
     /// Atomically sets `transport_delivered_at` + stage Delivered + `processed_at`.
     fn mark_transport_delivered(&self, prompt_id: i64) -> Result<()>;
 
+    /// One authenticated device committed the reply locally. Never marks read.
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
+
     /// Broadcast outcome for `all_workers` (attempted/succeeded/failed counts).
     ///
     /// - all succeeded → Delivered + transport_delivered_at
@@ -2278,6 +2311,22 @@ pub trait PromptQueueStore: Send + Sync {
         &self,
         prompt_id: i64,
         detail: Option<&str>,
+    ) -> Result<()>;
+
+    /// cas-d1659: park a row whose wake budget ran out while the recipient was
+    /// busy. The daemon stops offering wakes, but the message is not lost:
+    /// the row stays `Gated` with [`PendingReason::AwaitingBusyRecipient`],
+    /// `processed_at` stays NULL, and the recipient's turn-start or
+    /// tool-boundary surfacing injects it. `recheck_at` holds the row out of
+    /// daemon selection until then, so a recheck costs one evaluation instead
+    /// of one per poll tick. The daemon's own transport claim is released so
+    /// the hooks may take the row. A row already acked or processed is left
+    /// as is.
+    fn park_for_busy_recipient(
+        &self,
+        prompt_id: i64,
+        detail: Option<&str>,
+        recheck_at: DateTime<Utc>,
     ) -> Result<()>;
 
     /// Pending rows that have burned at least `min_attempts` transport
@@ -3038,6 +3087,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(PROMPT_QUEUE_SCHEMA)?;
+            for sql in OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS {
+                conn.execute(sql, [])?;
+            }
             let first_lifecycle_migration =
                 !crate::shared_db::column_exists(&conn, "prompt_queue", "highest_stage");
 
@@ -3162,6 +3214,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
             conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
             conn.execute_batch(PROMPT_QUEUE_SESSION_HISTORY_INDEX)?;
+            for statement in OPERATOR_DELIVERY_SCHEMA_STATEMENTS {
+                conn.execute_batch(statement)?;
+            }
+            for statement in OPERATOR_CLOUD_SCHEMA_STATEMENTS {
+                conn.execute_batch(statement)?;
+            }
             Ok(())
         })
     }
@@ -3380,6 +3438,17 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(enqueued)
     }
 
+    fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome> {
+        if !turn.target.trim().eq_ignore_ascii_case("operator") && turn.metadata.operator.is_none()
+        {
+            return Err(StoreError::Other(
+                "operator recording requires an operator recipient or authenticated operator stamp"
+                    .into(),
+            ));
+        }
+        self.record_complete_operator_turn(turn)
+    }
+
     fn enqueue_operator_message(
         &self,
         source: &str,
@@ -3392,38 +3461,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         attribution: Option<&serde_json::Value>,
         operator: &OperatorStamp,
     ) -> Result<EnqueueOutcome> {
-        let origin = operator.origin();
-        let outcome = self.enqueue_attributed_urgent_with_outcome(
+        self.record_operator_turn(&OperatorTurn {
             source,
             target,
             prompt,
             factory_session,
-            summary,
-            priority,
-            urgent,
-            attribution,
-            Some(&origin),
-        )?;
-        let EnqueueOutcome::Created(id) = outcome else {
-            return Ok(outcome);
-        };
-        let scopes = serde_json::to_string(&operator.scopes)?;
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            conn.execute(
-                "UPDATE prompt_queue SET operator_label = ?, operator_device_id = ?, operator_device_label = ?, operator_scopes = ?, operator_verified = ? WHERE id = ?",
-                params![
-                    operator.operator,
-                    operator.device_id,
-                    operator.device_label,
-                    scopes,
-                    i64::from(operator.verified),
-                    id
-                ],
-            )?;
-            Ok(())
-        })?;
-        Ok(outcome)
+            metadata: OperatorTurnMetadata {
+                summary,
+                priority,
+                urgent,
+                attribution,
+                operator: Some(operator),
+                ..Default::default()
+            },
+        })
     }
 
     fn enqueue_attributed_urgent_with_outcome(
@@ -3439,6 +3490,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
         require_operator_session(target, factory_session)?;
+        if target.trim().eq_ignore_ascii_case("operator") {
+            return self.record_operator_turn(&OperatorTurn {
+                source,
+                target,
+                prompt,
+                factory_session,
+                metadata: OperatorTurnMetadata {
+                    summary,
+                    priority,
+                    urgent,
+                    attribution,
+                    origin,
+                    ..Default::default()
+                },
+            });
+        }
         let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
@@ -3515,6 +3582,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
         require_operator_session(target, factory_session)?;
+        if target.trim().eq_ignore_ascii_case("operator") {
+            return self
+                .record_operator_turn(&OperatorTurn {
+                    source,
+                    target,
+                    prompt,
+                    factory_session,
+                    metadata: OperatorTurnMetadata {
+                        summary,
+                        priority,
+                        origin,
+                        dedupe_key: Some(dedupe_key),
+                        ..Default::default()
+                    },
+                })
+                .map(|outcome| match outcome {
+                    EnqueueOutcome::Created(id) => EnqueueIdempotentResult::Created(id),
+                    EnqueueOutcome::SuppressedDuplicate(id) => {
+                        EnqueueIdempotentResult::AlreadyExists(id)
+                    }
+                });
+        }
+
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
@@ -5278,37 +5368,58 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         device_id: &str,
         kind: &str,
     ) -> Result<Option<i64>> {
-        crate::shared_db::with_write_retry(|| {
+        require_operator_session("operator", Some(factory_session))?;
+        let event_id = operator_delivery::new_event_identity();
+        let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let changed = conn.execute(
-                "INSERT OR IGNORE INTO prompt_queue
-                   (source, target, prompt, created_at, factory_session, summary,
-                    priority, urgent, dedupe_key, origin_kind, recipient_device_id, kind)
-                 SELECT 'supervisor', 'operator', ?1, ?2, ?3, ?4, 2, 0, ?5,
-                        'daemon', ?6, ?7
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM prompt_queue
-                   WHERE factory_session = ?3 AND lower(target) = 'operator'
-                     AND source = 'supervisor' AND dedupe_key IS NULL
-                     AND created_at >= ?8 AND created_at <= ?9
-                     AND CASE WHEN json_valid(prompt)
-                       THEN json_extract(prompt, '$.message') = json_extract(?1, '$.message')
-                       ELSE 0 END
-                 )",
+            let tx = ImmediateTx::new(&conn)?;
+            let explicit: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM prompt_queue
+                    WHERE factory_session = ?1 AND lower(target) = 'operator'
+                      AND source = 'supervisor' AND dedupe_key IS NULL
+                      AND created_at >= ?2 AND created_at <= ?3
+                      AND CASE WHEN json_valid(prompt)
+                          THEN json_extract(prompt, '$.message') = json_extract(?4, '$.message')
+                          ELSE 0 END)",
                 params![
-                    payload,
-                    Utc::now().to_rfc3339(),
                     factory_session,
-                    summary,
-                    turn_key,
-                    device_id,
-                    kind,
                     started_at.to_rfc3339(),
                     completed_at.to_rfc3339(),
+                    payload
                 ],
+                |row| row.get(0),
             )?;
-            Ok((changed > 0).then(|| conn.last_insert_rowid()))
-        })
+            if explicit {
+                return Ok(None);
+            }
+            let outcome = Self::insert_complete_operator_turn(
+                &tx,
+                &OperatorTurn {
+                    source: "supervisor",
+                    target: "operator",
+                    prompt: payload,
+                    factory_session: Some(factory_session),
+                    metadata: OperatorTurnMetadata {
+                        summary: Some(summary),
+                        origin: Some(&QueueOrigin::Daemon),
+                        recipient_device_id: Some(device_id),
+                        kind: Some(kind),
+                        dedupe_key: Some(turn_key),
+                        ..Default::default()
+                    },
+                },
+                &event_id,
+            )?;
+            tx.commit()?;
+            Ok(match outcome {
+                EnqueueOutcome::Created(id) => Some(id),
+                EnqueueOutcome::SuppressedDuplicate(_) => None,
+            })
+        })?;
+        if outcome.is_some() {
+            self.signal_inbox("operator");
+        }
+        Ok(outcome)
     }
 
     fn latest_verified_operator_message(
@@ -5430,6 +5541,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 },
             )
         })
+    }
+
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
+        self.persist_operator_reply_receipt(prompt_id, factory_session, device_id)
     }
 
     fn mark_broadcast_outcome(
@@ -5678,6 +5793,52 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     broadcast_failed: None,
                 },
             )
+        })
+    }
+
+    fn park_for_busy_recipient(
+        &self,
+        prompt_id: i64,
+        detail: Option<&str>,
+        recheck_at: DateTime<Utc>,
+    ) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let open: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM prompt_queue
+                     WHERE id = ? AND processed_at IS NULL AND acked_at IS NULL",
+                    params![prompt_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if open.is_none() {
+                // Surfaced, acked or terminal meanwhile: nothing to park.
+                return Ok(());
+            }
+            Self::atomic_stage_stamp_in_tx(
+                &tx,
+                prompt_id,
+                PendingReason::AwaitingBusyRecipient.implied_stage(),
+                AtomicStampOpts::reason(PendingReason::AwaitingBusyRecipient, detail),
+            )?;
+            tx.execute(
+                "UPDATE prompt_queue SET next_attempt_at = ? WHERE id = ?",
+                params![recheck_at.to_rfc3339(), prompt_id],
+            )?;
+            // The daemon claims a row before writing it to a Claude inbox and
+            // keeps the claim while the wake is deferred. Hooks skip claimed
+            // rows, so a parked row that kept its claim would be as hidden as
+            // an abandoned one. Release it here, atomically with the park.
+            tx.execute(
+                "DELETE FROM prompt_queue_recipient_seen
+                 WHERE prompt_id = ?1 AND source = 'transport_claimed'
+                   AND recipient = (SELECT target FROM prompt_queue WHERE id = ?1)",
+                params![prompt_id],
+            )?;
+            tx.commit()?;
+            Ok(())
         })
     }
 
@@ -5968,10 +6129,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let pruned = tx.execute(
                 "DELETE FROM prompt_queue
                  WHERE processed_at IS NOT NULL AND processed_at < ?
-                   AND dedupe_key IS NULL",
+                   AND dedupe_key IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM operator_delivery_outbox o
+                       WHERE o.prompt_id = prompt_queue.id AND o.retained_at IS NULL)",
                 params![cutoff],
             )?;
-            for table in ["prompt_queue_recipient_seen", "prompt_queue_recipient_transport"] {
+            for table in [
+                "prompt_queue_recipient_seen",
+                "prompt_queue_recipient_transport",
+            ] {
                 tx.execute(
                     &format!(
                         "DELETE FROM {table}
@@ -5994,6 +6160,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // Explicit clear is a local purge, unlike automatic retention.
+            tx.execute("DELETE FROM operator_delivery_outbox", [])?;
             let rows = tx.execute("DELETE FROM prompt_queue", [])?;
             tx.execute("DELETE FROM prompt_queue_recipient_seen", [])?;
             tx.commit()?;
@@ -6014,7 +6182,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "DELETE FROM prompt_queue
                  WHERE processed_at IS NOT NULL
                    AND processed_at < ?
-                   AND (dedupe_key IS NULL OR dedupe_key NOT LIKE 'ci-red-run:%')",
+                   AND (dedupe_key IS NULL OR dedupe_key NOT LIKE 'ci-red-run:%')
+                   AND NOT EXISTS (SELECT 1 FROM operator_delivery_outbox o
+                       WHERE o.prompt_id = prompt_queue.id AND o.retained_at IS NULL)",
                 params![cutoff],
             )?;
             tx.execute(
@@ -8399,6 +8569,120 @@ mod tests {
                 .is_some_and(|detail| detail.contains("3 consecutive"))
         );
         assert_eq!(report.wake_gate_declines, 3);
+    }
+
+    /// cas-d1659 (AC3): a busy worker's wake was declined three times, which
+    /// spends the wake budget. The message must NOT be abandoned: it stays
+    /// pending, out of daemon selection until its recheck, and the worker's
+    /// next turn start surfaces it.
+    #[test]
+    fn cas_d1659_busy_recipient_row_is_surfaced_at_next_turn_start() {
+        let (_temp, store) = create_test_store();
+        let message = store
+            .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
+            .unwrap();
+        // The daemon claimed the row and wrote it to the Claude inbox, then
+        // the busy pane declined every wake. While claimed, hooks skip it.
+        assert!(
+            store
+                .claim_recipient_transport(message, "busy-worker")
+                .unwrap()
+        );
+        for _ in 0..3 {
+            store
+                .record_wake_gate_decline(message, "pane has not been silent long enough")
+                .unwrap();
+        }
+        assert!(
+            store
+                .surface_unseen_for_recipient("busy-worker", None, 10)
+                .unwrap()
+                .is_empty(),
+            "a claimed row is the daemon's to deliver"
+        );
+        store
+            .park_for_busy_recipient(
+                message,
+                Some("wake budget spent while the recipient stayed busy"),
+                Utc::now() + chrono::Duration::minutes(2),
+            )
+            .unwrap();
+
+        let parked = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(parked.stage, DeliveryStage::Gated, "busy is not terminal");
+        assert_eq!(
+            parked.pending_reason,
+            Some(PendingReason::AwaitingBusyRecipient)
+        );
+        assert_eq!(
+            parked.legacy_status,
+            MessageStatus::Pending,
+            "a parked row is not processed until it is surfaced or acked"
+        );
+        assert!(
+            !store
+                .peek_for_targets(&["busy-worker"], None, 10)
+                .unwrap()
+                .iter()
+                .any(|row| row.id == message),
+            "the daemon stops offering wakes until the recheck"
+        );
+
+        let surfaced = store
+            .surface_unseen_for_recipient("busy-worker", None, 10)
+            .unwrap();
+        assert_eq!(
+            surfaced.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![message],
+            "the next turn start injects the parked message"
+        );
+        let after = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(after.stage, DeliveryStage::Confirmed);
+        assert_eq!(after.legacy_status, MessageStatus::Confirmed);
+        assert!(
+            store
+                .surface_unseen_for_recipient("busy-worker", None, 10)
+                .unwrap()
+                .is_empty(),
+            "surfaced once, not again"
+        );
+    }
+
+    /// cas-d1659: the old terminal stamp is what lost the message. Kept as a
+    /// contrast so the regression above cannot pass by accident.
+    #[test]
+    fn cas_d1659_abandoned_wake_starved_row_is_not_surfaceable() {
+        let (_temp, store) = create_test_store();
+        let message = store
+            .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
+            .unwrap();
+        store
+            .mark_undelivered_after_wake_declines(message, Some("budget spent"))
+            .unwrap();
+        assert!(
+            store
+                .surface_unseen_for_recipient("busy-worker", None, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// cas-d1659: parking never revives a row the recipient already has.
+    #[test]
+    fn cas_d1659_park_leaves_an_acked_row_alone() {
+        let (_temp, store) = create_test_store();
+        let message = store
+            .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
+            .unwrap();
+        store.ack(message).unwrap();
+        let before = store.message_delivery_report(message).unwrap().unwrap();
+        store
+            .park_for_busy_recipient(message, Some("late park"), Utc::now())
+            .unwrap();
+        let after = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(after.stage, before.stage);
+        assert_eq!(after.pending_reason, before.pending_reason);
+        assert_eq!(after.legacy_status, before.legacy_status);
     }
 
     /// cas-99d2 (GH #126, AC2): a reply enqueued BEFORE the message was

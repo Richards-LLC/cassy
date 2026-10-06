@@ -58,7 +58,22 @@ new_fixture() {
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
+    cp "$script_dir/proof_target.py" "$repo/scripts/proof_target.py"
     cp "$script_dir/assembly-memory.py" "$repo/scripts/assembly-memory.py"
+    cp "$script_dir/host_memory.py" "$repo/scripts/host_memory.py"
+    # Only copied fixture code selects a private pool. Keep real locking and
+    # inherited-lease validation in subprocesses and clones; production has no
+    # environment knob that redirects its host/user admission directory.
+    python3 - "$repo/scripts/host_memory.py" "$tmp/host-memory" <<'PY_HOST_MEMORY_FIXTURE' || return 1
+from pathlib import Path
+import sys
+path, pool = map(Path, sys.argv[1:])
+body = path.read_text()
+selector = "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'"
+if body.count(selector) != 1:
+    raise SystemExit('host memory fixture selector changed; refusing production pool')
+path.write_text(body.replace(selector, f'DIRECTORY = Path({str(pool)!r})'))
+PY_HOST_MEMORY_FIXTURE
     # The producer and its guard share deterministic physical-memory fixtures.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_MEMORY_GUARD_FIXTURE'
 from pathlib import Path
@@ -66,6 +81,15 @@ import sys
 path = Path(sys.argv[1])
 path.write_text(path.read_text().replace("def memory_snapshot():", "def memory_snapshot():\n    return {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_MEMORY_GUARD_FIXTURE
+    cp "$script_dir/release_scratch.py" "$repo/scripts/release_scratch.py"
+    # Sweeper integration has isolated real-filesystem regressions; these gate
+    # fixtures must never reclaim the host's production scratch.
+    python3 - "$repo/scripts/release_scratch.py" <<'PY_SCRATCH_SWEEP_FIXTURE'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("def sweep(repo, base, clean=False, env=None):", "def sweep(repo, base, clean=False, env=None):\n    return {'entries': [], 'reclaimable_bytes': 0, 'reclaimed_bytes': 0}"))
+PY_SCRATCH_SWEEP_FIXTURE
     # Cargo is fake here: bypass only durable-location classification in the
     # copied producer. Production guard behavior has its own Python regressions.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_SCRATCH'
@@ -134,6 +158,15 @@ jobs:
 EOF
     cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
     cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
+    cp "$script_dir/release-learning.py" "$repo/scripts/release-learning.py"
+    cat >"$repo/scripts/check-release-publish-toolchain.py" <<'PY_ZIG_FIXTURE'
+import os, sys
+if os.environ.get('GATE_FIXTURE_ZIGBUILD_FAIL') == '1':
+    print('zigbuild rejects build.jobs config')
+    sys.exit(1)
+print('zigbuild config parsed (gate dispatch fixture)')
+PY_ZIG_FIXTURE
+
     cp -R "$script_dir/release-train.d" "$repo/scripts/"
     cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
     # The nested integration fixtures have their own release version. Keep it
@@ -148,6 +181,7 @@ PY_NESTED_VERSION
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
 .cas/
+target/
 __pycache__/
 EOF
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$repo/.context/zig/zig"
@@ -396,6 +430,70 @@ run_scenario() {
     output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
     assert_named_failure "$3" "$output"
 }
+
+# cas-728e: copied producers must use real admission in a private pool. The
+# wait case also proves that isolation did not become an admission bypass.
+repo="$(new_fixture host-memory-admission)"
+if python3 - "$repo/scripts" "$script_dir" "$tmp/host-memory" <<'PY_HOST_MEMORY_REGRESSION'
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+fixture, production, pool = map(Path, sys.argv[1:])
+def load(path):
+    spec = importlib.util.spec_from_file_location('host_memory', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+host = load(fixture / 'host_memory.py')
+original = load(production / 'host_memory.py')
+assert original.DIRECTORY == Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'
+assert host.DIRECTORY == pool, (host.DIRECTORY, pool)
+assert host.DIRECTORY != original.DIRECTORY
+command = [sys.executable, '-c', """
+import importlib.util
+from pathlib import Path
+import os
+import sys
+spec = importlib.util.spec_from_file_location('proof', Path(sys.argv[1]) / 'assembly-proof.py')
+p = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(p)
+p._run_contexts = lambda *args: print('fixture contexts started')
+p.run_contexts(None, None, dict(os.environ), None, None, {})
+""", str(fixture)]
+env = dict(os.environ, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='1',
+           CAS_HOST_MEMORY_DIRECTORY=str(pool / 'operator-override'))
+env.pop(host.LEASE_ENV, None)
+high = {'total_bytes': 64 * 1024**3, 'available_bytes': 60 * 1024**3,
+        'reserve_bytes': 16 * 1024**3, 'budget_bytes': 44 * 1024**3, 'source': 'fixture'}
+with host.admission('worker', env, lambda _: high, report=lambda _: None):
+    blocked = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+    assert blocked.returncode != 0, blocked.stdout + blocked.stderr
+    assert 'worker suite running' in blocked.stdout + blocked.stderr
+    assert 'fixture contexts started' not in blocked.stdout
+admitted = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+assert 'fixture contexts started' in admitted.stdout
+assert not (pool / 'operator-override').exists()
+PY_HOST_MEMORY_REGRESSION
+then
+    ok 'fixture subprocess proofs use a private pool and still wait for its worker budget'
+else
+    bad 'fixture subprocess proof admission pool is not isolated or does not enforce leases'
+fi
+
+repo="$(new_fixture publish-toolchain)"
+output="$(GATE_FIXTURE_ZIGBUILD_FAIL=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only publish-toolchain 2>&1 || true)"
+assert_named_failure publish-toolchain "$output"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only publish-toolchain 2>&1)"
+if grep -qF 'PASS publish-toolchain' <<<"$output"; then
+    ok 'publish-toolchain is independently selectable and fail closed'
+else
+    bad "publish-toolchain row failed: $output"
+fi
 
 # 1-7. Each mechanical or command-backed failure is isolated in its own repo.
 repo="$(new_fixture release-notes-shell-injection)"

@@ -1,13 +1,24 @@
+import { activate, showConversationList, openConversation } from "./responsive-goals";
 import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN } from "./world";
 
+// cas-4ce5: recovery is driven by the app's next scheduled attach, which is at
+// most MACHINE_RETRY_CEILING_MS (10 s) away however long the outage lasted.
+// Wait for that attach to reach the double (bounded by the retry contract plus
+// a loaded runner's handshake), then for the screen to follow it.
+const RETRY_CONTRACT_MS = 10_000;
+const RECOVERY_TIMEOUT_MS = RETRY_CONTRACT_MS + 20_000;
+
 test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page, journey }) => {
+  // Three outages, each bounded by RECOVERY_TIMEOUT_MS on a loaded runner (cas-4ce5).
+  test.setTimeout(150_000);
+  const originalViewport = page.viewportSize()!;
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const composer = page.getByRole("textbox", { name: "Your message" });
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await openConversation(page, "cas-src");
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
@@ -15,25 +26,6 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
   const footer = page.locator("#hub-footer-badges");
   const banner = page.locator(".terminal-disconnected-banner");
-  // cas-846c/45ca: output provenance stays in the tooltip; reading/AX text
-  // appears only when the complete caption fits beside the name and controls.
-  const expectOutputActivity = async () => {
-    const caption = page.locator("#pane-grid .pane").first().locator(".pane-last-activity");
-    await expect.poll(() => caption.evaluate((element) => {
-      const text = element.textContent ?? "";
-      const title = element.getAttribute("title") ?? "";
-      const earlier = title === "Output from before this page opened; nothing new since";
-      const truthful = earlier ? text === "" || text === "Earlier output"
-        : Number.isFinite(Date.parse(title)) && (text === "" || /^(now|\d+[smhd])$/.test(text));
-      if (!text) return { truthful, wholeOrAbsent: element.getAttribute("aria-hidden") === "true" };
-      const box = element.getBoundingClientRect();
-      const range = document.createRange(); range.selectNodeContents(element);
-      const words = range.getBoundingClientRect();
-      const whole = words.left >= box.left - 0.02 && words.right <= box.right + 0.02
-        && words.top >= box.top - 0.02 && words.bottom <= box.bottom + 0.02;
-      return { truthful, wholeOrAbsent: !element.hasAttribute("aria-hidden") && whole };
-    }), { message: "output activity is truthful and either wholly readable or absent from reading/AX content" }).toEqual({ truthful: true, wholeOrAbsent: true });
-  };
   /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
   /** The journey's own turns as painted, top to bottom (cas-eb4b). */
   const SAID = ["Are you there?", "Are we back?", "Back. Nothing was lost."];
@@ -87,7 +79,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const together = await page.waitForFunction(() => {
       const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText ?? "";
       const seen = {
-        banner: text(".terminal-disconnected-banner"),
+        banner: text(".terminal-disconnected-banner .banner-text"),
         header: text("#conversation-connection"),
         row: text('#conversation-list [data-thread-key="atlas:patient-pelican-9"]'),
         footer: text("#hub-footer-badges"),
@@ -103,6 +95,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await page.waitForTimeout(1_500);
     expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
     await expect(header).toHaveAttribute("aria-live", "off");
+    await expect(banner.getByRole("status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.getByRole("button", { name: "Connection details" })).toBeVisible();
     // Two machines, one of them down: the footer names it (cas-0739) and its dot is not all-clear (cas-b789).
     expect(seen.footer).toContain("Reconnecting to Atlas");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
@@ -119,7 +113,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // A send during the outage is held, not refused: it waits in the thread
     // and goes out by itself, once, when the session is back (cas-0978).
     await composer.fill("Are you there?");
-    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     await expect(composer).toHaveValue("");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — sends when it's back");
@@ -146,14 +140,16 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   });
 
   await journey.stage("It reconnects on its own", async () => {
-    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect(header).toHaveText(" · Live");
     // The header speaks again for the return to Live.
     await expect(header).toHaveAttribute("aria-live", "polite");
     // The row previews the held message now, so it no longer shows the Live
     // status line; it must not say Reconnecting either.
+    await showConversationList(page);
     await expect(row).not.toContainText("Reconnecting");
+    await openConversation(page, "cas-src");
     await expect(footer).toContainText("Connected");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot connected");
     // The held message went out on its own, exactly once, and the waiting
@@ -172,17 +168,17 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await page.waitForTimeout(1_000);
     expect(hub.sends.filter((m) => m.text === "Are you there?"), "sent once, not again").toHaveLength(1);
     // The transport alarm resolved itself with the reconnect.
-    await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
+    await expect(page.locator("#attention-panel")).not.toContainText(/transport/i);
   });
 
   await journey.stage("Sending works again", async () => {
     await composer.fill("Are we back?");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     expect((await sent).text).toBe("Are we back?");
     hub.answerLatest(PELICAN, "Back. Nothing was lost.");
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
-    await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
+    await expect(page.locator("#attention-panel")).not.toContainText(/transport/i);
     beforeOutage = await threadOrder();
     // cas-eb4b: a session's own thread has no "session … started" line
     // (cas-55a4), so the order is anchored on lines that exist: the day line
@@ -214,7 +210,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     });
     hub.hold(PELICAN);
     hub.drop(PELICAN);
-    await expect(banner).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.locator(".banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // Turning the phone resizes the terminal, which tries to tell the hub: that
     // send fails while the connection is down, which used to raise a toast.
     await page.setViewportSize({ width: 390, height: 760 });
@@ -228,114 +224,68 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     }
     expect(await page.evaluate(() => (window as unknown as { __covered: string[] }).__covered), "a toast covered the banner").toEqual([]);
     hub.release(PELICAN);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await page.emulateMedia({ colorScheme: null });
     // cas-1f13: the reconnect re-hydrates the thread from history, and every
     // turn keeps its place: the day line still heads the thread and the held
     // message stays above the ones sent after it (cas-eb4b).
-    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect.poll(threadOrder, { message: "thread order after the reconnect" }).toEqual(beforeOutage);
     await expect.poll(turnOrder, { message: "turns in the order they were said, after the reconnect" }).toEqual(SAID);
   });
 
-  await journey.stage("In Terminal view, nothing claims all clear or live during an outage", async () => {
-    // cas-edcd / cas-4a93: beside "Lost connection … Reconnecting…" the
-    // Attention rail used to say "All clear", the machine rail "live · 8ms",
-    // and the header kept "CONTROL" and a latency chip.
-    await page.setViewportSize({ width: 1280, height: 720 });
-    await page.locator("#conversation-terminal").click();
-    const atlas = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "Atlas" });
-    const read = () => page.evaluate(() => {
-      const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText.trim() ?? "";
-      const mode = document.querySelector<HTMLElement>(".mode-badge");
-      return {
-        banner: text(".terminal-disconnected-banner"),
-        rail: text("#attention-panel .attention-empty p"),
-        machine: [...document.querySelectorAll<HTMLElement>("#machine-rail-list .machine-icon")].map((button) => button.getAttribute("aria-label") ?? "").find((label) => label.startsWith("Atlas")) ?? "",
-        mode: mode && !mode.hidden && mode.getClientRects().length > 0 ? mode.innerText : "",
-        latency: text("[data-machine-latency]"),
-      };
-    });
-    await expect(atlas).toHaveAttribute("aria-label", /^Atlas · Linux, live/);
-    const before = await read();
-    expect(before.rail).toBe("All clear");
-    expect(before.mode).toBe("CONTROL");
-    // Journey F42: the pane opened on the supervisor's "The supervisor is
-    // ready." (drawn in the terminal canvas), so its tooltip names that
-    // output or its time, never "No output yet"; the caption may not fit.
-    await expectOutputActivity();
+  await journey.stage("During an outage, Interrupt and Raw output say why they wait", async () => {
+    // cas-edcd / cas-4a93: beside "Lost connection … Reconnecting…" nothing
+    // says all clear. cas-1730, cas-0546: the conversation header's Interrupt
+    // and Raw output stay in place, say why they wait in the banner's words,
+    // to the eye and to a screen reader, and come back with the connection.
+    await page.setViewportSize(originalViewport);
+    const interrupt = page.getByRole("button", { name: "Interrupt the cas-src supervisor", exact: true });
+    const raw = page.getByRole("button", { name: "Raw output", exact: true });
+    const rail = () => page.evaluate(() => document.querySelector<HTMLElement>("#attention-panel .attention-empty p")?.innerText.trim() ?? "");
+    for (const action of [interrupt, raw]) await expect(action).not.toHaveAttribute("aria-disabled", "true");
+    await expect.poll(rail).toBe("All clear");
     await listen();
     hub.hold(PELICAN);
     hub.drop(PELICAN);
-    const together = await page.waitForFunction(() => {
-      const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner")?.innerText ?? "";
-      const rail = document.querySelector<HTMLElement>("#attention-panel .attention-empty p")?.innerText ?? "";
-      return banner.includes("Reconnecting") && rail !== "All clear";
-    });
-    expect(await together.jsonValue()).toBe(true);
-    const during = await read();
-    expect(during.banner).toBe("Lost connection to Atlas · Linux. Reconnecting…");
-    expect(during.rail).toBe("Not all clear. Atlas · Linux is reconnecting.");
-    expect(during.machine).toBe("Atlas · Linux, Reconnecting");
-    expect(during.mode, "no control is claimed while the session is down").toBe("");
-    expect(during.latency).toBe("Reconnecting");
-    // cas-1730: controls that need the machine say why instead of acting, and
-    // the drawer's session row does not call the session live.
-    // Journey F9: in the banner's words, and on screen rather than only in a
-    // tooltip a touch screen cannot show.
-    const outage = "Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.";
-    await expect(page.locator("#lease")).toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator("#lease")).toHaveAttribute("data-disabled-reason", outage);
-    await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", outage);
-    const reason = page.locator("#session-controls-reason");
-    await expect(reason).toBeVisible();
-    // Journey F42: the banner says what was lost; the line under the header
-    // says only what that means for the controls, so the outage reads once
-    // on screen and is announced once.
-    await expect(reason).toHaveText("Control and interrupts return when it reconnects.");
-    const outageLines = await page.locator("main").evaluate((main) => [...main.querySelectorAll<HTMLElement>("*")].filter((element) => element.childElementCount === 0 && element.getBoundingClientRect().width > 2 && /Lost connection to Atlas/.test(element.innerText)).map((element) => element.innerText));
-    expect(outageLines, "one outage line in Terminal view").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
-    expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
-    await expectOutputActivity();
-    // cas-71af (6929 QA F01): a click on the greyed Interrupt calls attention
-    // to that line instead of adding a toast that repeats it a third time;
-    // the line is also the button's description.
-    await expect(page.locator("#interrupt")).toHaveAttribute("aria-describedby", "session-controls-reason");
-    // Playwright will not click an aria-disabled control; a person can.
-    await page.locator("#interrupt").dispatchEvent("click");
-    await expect(reason).toHaveClass(/\bcalled\b/);
-    await expect(page.locator("#toast.visible")).toHaveCount(0);
-    // The drawer's machine status reads whole, at a desktop and a phone width.
+    // The sentence is the banner's live words; its Details button sits beside them (cas-2b3a5).
+    await expect(banner.locator(".banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(banner.getByRole("button", { name: "Connection details", exact: true })).toBeVisible();
+    await expect(header).toContainText("Reconnecting");
+    await expect.poll(rail).toBe("Not all clear. Atlas · Linux is reconnecting.");
+    const outage = "Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.";
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 720 });
-      await expect(reason, `the reason is on screen at ${width}`).toBeVisible();
-      await page.getByRole("button", { name: "Open machines and sessions" }).click();
-      const drawerSession = page.locator("#machine-tree .session-meta").first();
-      await expect(drawerSession).toContainText("Reconnecting");
-      await expect(drawerSession).not.toContainText("live");
-      const status = page.locator("#machine-tree .machine-row small").first();
-      await expect(status).toHaveText("Reconnecting");
-      expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth), `drawer status not clipped at ${width}`).toBe(true);
-      // cas-bad9: every row of the open drawer is on top where it is drawn.
-      // On a phone the expanded Attention panel used to paint over all but
-      // the first, and a tap there landed in the panel.
-      await expect.poll(() => page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#machine-tree .machine-row, #machine-tree .nav-item")].flatMap((row) => {
-        const box = row.getBoundingClientRect();
-        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
-        return hit && row.contains(hit) ? [] : [`${row.innerText.split("\n")[0]} under ${hit ? `${hit.tagName.toLowerCase()}.${[...hit.classList].join(".")} in ${hit.closest("aside, main, section")?.className ?? "?"}` : "nothing"}`];
-      })), { message: `every drawer row is topmost at ${width}` }).toEqual([]);
-      await page.getByRole("button", { name: "Close machines and sessions" }).click();
+      for (const action of [interrupt, raw]) {
+        await expect(action, `on screen at ${width}`).toBeVisible();
+        await expect(action).toHaveAttribute("aria-disabled", "true");
+        await expect(action).toHaveAccessibleDescription(outage);
+      }
     }
-    await page.setViewportSize({ width: 1280, height: 720 });
+    // Journey F42: the reasons are descriptions, not live regions: the
+    // outage is still announced once, by the banner.
+    await page.waitForTimeout(1_000);
+    expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
+    // Playwright will not click an aria-disabled control; a person can. A
+    // press says why instead of acting: nothing reaches the hub and no drawer
+    // opens over the thread.
+    const interruptsBefore = hub.frames.filter((frame) => frame.kind === "InterruptPane").length;
+    await interrupt.dispatchEvent("click");
+    await expect(page.locator("#toast")).toHaveText(outage);
+    await raw.dispatchEvent("click");
+    await expect(page.getByRole("dialog", { name: "Raw output" })).toBeHidden();
+    expect(hub.frames.filter((frame) => frame.kind === "InterruptPane"), "no interrupt during the outage").toHaveLength(interruptsBefore);
+    await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
+    await page.setViewportSize(originalViewport);
     hub.release(PELICAN);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
-    await expect.poll(async () => (await read()).rail, { timeout: 15_000 }).toBe("All clear");
-    const after = await read();
-    expect(after.machine).toMatch(/^Atlas · Linux, live/);
-    expect(after.mode).toBe("CONTROL");
-    expect(after.latency).toMatch(/^\d+ms$/);
-    await expect(page.locator("#lease")).not.toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator("#interrupt")).not.toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator("#session-controls-reason")).toBeHidden();
+    await expect(header).toHaveText(" · Live");
+    await expect.poll(rail, { timeout: 15_000 }).toBe("All clear");
+    for (const action of [interrupt, raw]) {
+      await expect(action).not.toHaveAttribute("aria-disabled", "true");
+      await expect(action).toHaveAccessibleDescription("");
+    }
   });
 });

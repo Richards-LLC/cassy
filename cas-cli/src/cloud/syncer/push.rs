@@ -612,6 +612,14 @@ impl CloudSyncer {
                             );
                             continue;
                         }
+                        if entity_type == "task_dependencies" {
+                            if let (Some(from),Some(to))=(v.get("from_id").and_then(|v|v.as_str()),v.get("to_id").and_then(|v|v.as_str())) {
+                                if self.queue.dependency_endpoint_queued(from,to,"")? {
+                                    self.queue.record_diagnostic(item.id,"waiting for endpoint task acknowledgment")?;
+                                    continue;
+                                }
+                            }
+                        }
                         upsert_entries.push((*item, self.with_base_revision(item, v)))
                     }
                     Err(_) => {

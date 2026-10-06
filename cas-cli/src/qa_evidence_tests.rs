@@ -1844,3 +1844,468 @@ fn scoped_visual_qa_ignores_per_render_random_ids_but_still_reports_new_findings
         "{refusal:?}"
     );
 }
+
+// cas-f290: captured cas-a286 Atlas findings, including the ancestor class
+// rename and the 0.02px width difference in the independently built reports.
+fn cas_f290_atlas_finding(origin: &str, scheme: &str, base: bool) -> serde_json::Value {
+    let class = if base {
+        "os-dropped"
+    } else {
+        "codename-squeezed"
+    };
+    let element = format!(
+        "div > div.conversation-shell.thread-open > main.conversation-main > header.conversation-heading.thead > div.conversation-identity:nth-of-type(2) > div.id > span.conversation-host > span.host-where.{class}:nth-of-type(1) > span.host-machine:nth-of-type(1)"
+    );
+    serde_json::json!({
+        "type": "clipped-content", "reason": "text-bounds-exceed-overflow-ancestor",
+        "selector": element, "elementPath": element, "ancestorPath": element,
+        "textSample": "Atlas",
+        "ancestorBox": {"x":94.0,"y":32.31,"width":if base {34.48} else {34.5},"height":14.38,"right":if base {128.48} else {128.5},"bottom":46.69},
+        "url":format!("{origin}/commander/?conversation=1"), "scheme":scheme,
+        "viewport":{"name":"phone","width":390,"height":844}
+    })
+}
+
+fn cas_f290_reports(fx: &Fixture, tip: serde_json::Value, base: serde_json::Value) {
+    for (origin, directory, findings) in
+        [(TIP, "visual-qa", tip), (BASE, "visual-qa-baseline", base)]
+    {
+        scoped_report(
+            &fx.bundle_dir().join(directory).join("visual-qa.json"),
+            "FAIL",
+            chrono::Utc::now(),
+            &[&format!("{origin}/commander/?conversation=1")],
+            findings,
+        );
+    }
+}
+
+#[test]
+fn scoped_visual_qa_pairs_exact_cas_a286_renamed_atlas_findings_cas_f290() {
+    let fx = scoped_fixture();
+    cas_f290_reports(
+        &fx,
+        serde_json::json!([
+            cas_f290_atlas_finding(TIP, "light", false),
+            cas_f290_atlas_finding(TIP, "dark", false)
+        ]),
+        serde_json::json!([
+            cas_f290_atlas_finding(BASE, "light", true),
+            cas_f290_atlas_finding(BASE, "dark", true)
+        ]),
+    );
+    fx.validate(&fx.notes())
+        .expect("same Atlas clipping survives the ancestor class rename");
+    // A fresh producer adds glyph bounds; the old producer has only the
+    // clipping ancestor. Compare the shared ancestorBox, not different kinds.
+    let mut enriched = cas_f290_atlas_finding(TIP, "light", false);
+    enriched["textBounds"] = serde_json::json!({"x":94,"y":31.31,"width":34.5,"height":15});
+    cas_f290_reports(
+        &fx,
+        serde_json::json!([enriched]),
+        serde_json::json!([cas_f290_atlas_finding(BASE, "light", true)]),
+    );
+    fx.validate(&fx.notes())
+        .expect("old and new producers pair shared bounds");
+}
+
+#[test]
+fn scoped_visual_qa_keeps_new_renamed_findings_added_cas_f290() {
+    let fx = scoped_fixture();
+    let original = cas_f290_atlas_finding(TIP, "light", false);
+    for (pointer, value) in [
+        ("/type", serde_json::json!("contrast")),
+        ("/reason", serde_json::json!("text-outside-scroll-range")),
+        ("/textSample", serde_json::json!("Borealis")),
+        ("/ancestorBox/x", serde_json::json!(300.0)),
+        ("/ancestorBox/width", serde_json::json!(12.0)),
+        ("/viewport/width", serde_json::json!(412)),
+        ("/scheme", serde_json::json!("dark")),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        cas_f290_reports(
+            &fx,
+            serde_json::json!([changed]),
+            serde_json::json!([cas_f290_atlas_finding(BASE, "light", true)]),
+        );
+        let refusal = fx.validate(&fx.notes()).unwrap_err();
+        assert!(
+            refusal.problem.contains("introduced 1"),
+            "{pointer}: {refusal:?}"
+        );
+    }
+}
+
+#[test]
+fn scoped_visual_qa_matches_semantic_identity_but_preserves_rules_cas_f290() {
+    let fx = scoped_fixture();
+    let mut tip = cas_f290_atlas_finding(TIP, "light", false);
+    let mut base = cas_f290_atlas_finding(BASE, "light", true);
+    for finding in [&mut tip, &mut base] {
+        finding.as_object_mut().unwrap().remove("ancestorBox");
+        finding["role"] = serde_json::json!("button");
+        finding["accessibleName"] = serde_json::json!("Send for review");
+    }
+    cas_f290_reports(
+        &fx,
+        serde_json::json!([tip.clone()]),
+        serde_json::json!([base.clone()]),
+    );
+    fx.validate(&fx.notes())
+        .expect("a renamed button retains role and accessible name");
+    for (field, value) in [
+        ("accessibleName", "Discard"),
+        ("role", "link"),
+        ("reason", "text-outside-scroll-range"),
+    ] {
+        let mut changed = tip.clone();
+        changed[field] = serde_json::json!(value);
+        cas_f290_reports(
+            &fx,
+            serde_json::json!([changed]),
+            serde_json::json!([base.clone()]),
+        );
+        assert!(
+            fx.validate(&fx.notes())
+                .unwrap_err()
+                .problem
+                .contains("introduced 1")
+        );
+    }
+}
+
+#[test]
+fn scoped_visual_qa_does_not_pair_renames_without_identity_cas_f290() {
+    let fx = scoped_fixture();
+    assert_ne!(
+        visual_qa_selector(&backlog_finding(TIP, r#"button[aria-label="Open  log"]"#)),
+        visual_qa_selector(&backlog_finding(BASE, r#"button[aria-label="Open log"]"#)),
+        "legacy CSS identity preserves significant quoted spaces",
+    );
+    for invalid_bounds in [
+        serde_json::Value::Null,
+        serde_json::json!({"x":94,"y":32.31,"width":-1,"height":14.38}),
+    ] {
+        let mut tip = cas_f290_atlas_finding(TIP, "light", false);
+        let mut base = cas_f290_atlas_finding(BASE, "light", true);
+        tip["ancestorBox"] = invalid_bounds.clone();
+        base["ancestorBox"] = invalid_bounds;
+        cas_f290_reports(&fx, serde_json::json!([tip]), serde_json::json!([base]));
+        assert!(
+            fx.validate(&fx.notes())
+                .unwrap_err()
+                .problem
+                .contains("introduced 1")
+        );
+    }
+}
+
+#[test]
+fn scoped_visual_qa_uses_each_base_finding_once_without_order_bias_cas_f290() {
+    let fx = scoped_fixture();
+    let make = |origin, base, x| {
+        let mut finding = cas_f290_atlas_finding(origin, "light", base);
+        finding["ancestorBox"]["x"] = serde_json::json!(x);
+        finding
+    };
+    // First head can pair with either base (within 0.5px); second only with first.
+    // An arbitrary first-match loop incorrectly reports the second as added.
+    let tip = serde_json::json!([make(TIP, false, 94.2), make(TIP, false, 93.8)]);
+    let base = serde_json::json!([make(BASE, true, 94.0), make(BASE, true, 94.6)]);
+    cas_f290_reports(&fx, tip.clone(), base);
+    fx.validate(&fx.notes())
+        .expect("one-to-one pairing finds the complete matching");
+    cas_f290_reports(&fx, tip, serde_json::json!([make(BASE, true, 94.0)]));
+    assert!(
+        fx.validate(&fx.notes())
+            .unwrap_err()
+            .problem
+            .contains("introduced 1")
+    );
+}
+
+/// cas-1ca0: a valid pixel/trace bundle cannot cover a journey it never ran.
+#[test]
+fn cas_1ca0_close_refuses_a_hand_picked_journey_subset() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    let notes = fx.notes();
+    let ctx = EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes: &notes,
+        deployed_origins: &[],
+    };
+    let error = run_close_gate(
+        &ctx, EvidenceTier::Bundle,
+        &["affected-journeys".into(), "journeys:HUB-J7".into()], &[],
+    ).expect_err("selected HUB-J7 is missing even though the hand-picked evidence passes");
+    assert!(error.contains("HUB-J7"), "{error}");
+    assert!(error.contains("scripts/journey-eval.sh"), "{error}");
+}
+
+fn write_journey_receipt(
+    fx: &Fixture,
+    ids: &[&str],
+    scope: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> PathBuf {
+    let path = fx.task_dir.join("journey-receipt.json");
+    let mut value = serde_json::json!({
+        "schema": 1, "producer": "journey-eval", "kind": "local", "scope": scope,
+        "base_sha": fx.head, "head_sha": fx.head, "selection_ids": ids,
+        "tool_version": "playwright 1.63.0", "suite_exit": 0,
+        "results": ids.iter().map(|id| serde_json::json!({
+            "id": id, "status": "PASS", "passed": 2, "failed": 0, "skipped": 0,
+        })).collect::<Vec<_>>()
+    });
+    edit(&mut value);
+    std::fs::write(&path, value.to_string()).unwrap();
+    path
+}
+
+fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
+    EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes,
+        deployed_origins: &[],
+    }
+}
+
+#[test]
+fn cas_1ca0_close_accepts_complete_affected_receipt_and_ci_receipt() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |_| {});
+    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let reasons = vec![journeys::selection_reason(
+        &fx.head,
+        &["HUB-J1".into(), "HUB-J7".into()],
+    )];
+    let pass = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap();
+    assert!(
+        pass.notes
+            .iter()
+            .any(|n| n.contains("JOURNEY_SELECTION:") && n.contains("HUB-J7"))
+    );
+    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
+        v["kind"] = serde_json::json!("ci");
+        v["ci_run_url"] = serde_json::json!("https://github.com/org/repo/actions/runs/42");
+    });
+    run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap();
+}
+
+#[test]
+fn cas_1ca0_missing_selected_failed_skipped_and_stale_receipts_refuse() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &["HUB-J1"], "affected", |_| {});
+    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let reasons = vec![journeys::selection_reason(
+        &fx.head,
+        &["HUB-J1".into(), "HUB-J7".into()],
+    )];
+    let error = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap_err();
+    assert!(error.contains("missing selected IDs [HUB-J7]"), "{error}");
+    assert!(error.contains("scripts/journey-eval.sh"), "{error}");
+    for key in ["failed", "skipped"] {
+        write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
+            v["results"][1][key] = serde_json::json!(1)
+        });
+        let error = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap_err();
+        assert!(error.contains("nonpassing IDs [HUB-J7]"), "{error}");
+    }
+    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
+        v["head_sha"] = serde_json::json!("0".repeat(40))
+    });
+    assert!(
+        run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[])
+            .unwrap_err()
+            .contains("exact delivered tip")
+    );
+}
+
+#[test]
+fn cas_1ca0_receipt_provenance_and_task_namespace_are_required() {
+    let fx = Fixture::new();
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let ids = vec!["HUB-J7".into()];
+    for key in ["suite_exit", "schema"] {
+        let path = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
+            v[key] = serde_json::json!(99)
+        });
+        assert!(journeys::validate_journey_receipt(&ctx, &path, &fx.head, &ids, false).is_err());
+    }
+    let path = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
+        v["tool_version"] = serde_json::json!("")
+    });
+    assert!(journeys::validate_journey_receipt(&ctx, &path, &fx.head, &ids, false).is_err());
+    let outside = fx.repo.join("foreign-receipt.json");
+    std::fs::copy(path, &outside).unwrap();
+    assert!(
+        journeys::validate_journey_receipt(&ctx, &outside, &fx.head, &ids, false)
+            .unwrap_err()
+            .problem
+            .contains("escapes")
+    );
+}
+
+#[test]
+fn cas_1ca0_independent_qa_reuses_exact_tip_implementer_receipt() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &["HUB-J7"], "affected", |_| {});
+    let manifest = fx.write_bundle(|v| {
+        v["producer"] = serde_json::json!("independent-qa");
+        v["journey_receipt"] = serde_json::json!(receipt);
+    });
+    let recorded = format!(
+        "JOURNEY_SELECTION: head={} base={} ids=HUB-J7",
+        fx.head, fx.head
+    );
+    let ctx = journey_context(&fx, &recorded);
+    let reused = journeys::check_round_journeys(&ctx, &manifest, &recorded, &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(reused, receipt.canonicalize().unwrap());
+    write_journey_receipt(&fx, &["HUB-J1"], "affected", |_| {});
+    assert!(
+        journeys::check_round_journeys(&ctx, &manifest, &recorded, &[])
+            .unwrap_err()
+            .problem
+            .contains("HUB-J7")
+    );
+    assert!(
+        journeys::check_round_journeys(&ctx, &manifest, "", &["hub-web/src/main.ts".into()])
+            .unwrap_err()
+            .problem
+            .contains("no affected-journey selection")
+    );
+}
+
+#[test]
+fn cas_1ca0_epic_requires_full_catalog_receipt_and_selector_errors_refuse() {
+    let mut fx = Fixture::new();
+    assert!(journeys::select_journeys(&fx.repo, &fx.head, &fx.head, None).is_err());
+    std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
+    // Real Python call validates reviewed revision/base env; this fixture
+    // selector stands in for the source-graph owner's separate implementation.
+    std::fs::write(
+        fx.repo.join("scripts/journeys-for-diff.py"),
+        r#"
+import json, os
+assert len(os.environ['CAS_JOURNEYS_HEAD']) == 40
+assert len(os.environ['CAS_JOURNEYS_BASE']) == 40
+print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J7'}]}))
+"#,
+    )
+    .unwrap();
+    git_ok(&fx.repo, &["add", "scripts/journeys-for-diff.py"]);
+    git_ok(&fx.repo, &["commit", "-q", "-m", "fixture selector"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    let path = write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |_| {});
+    let notes = format!("journey-receipt: {}", path.display());
+    let ctx = journey_context(&fx, &notes);
+    let error = journeys::check_epic_journeys(&ctx).unwrap_err();
+    assert!(error.problem.contains("full-suite"), "{error:?}");
+    assert!(error.command.contains("no journey filter"), "{error:?}");
+    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "full", |_| {});
+    journeys::check_epic_journeys(&ctx).unwrap();
+    write_journey_receipt(&fx, &["HUB-J1"], "full", |_| {});
+    assert!(
+        journeys::check_epic_journeys(&ctx)
+            .unwrap_err()
+            .problem
+            .contains("HUB-J7")
+    );
+    std::fs::write(
+        fx.repo.join("scripts/journeys-for-diff.py"),
+        "raise SystemExit(2)\n",
+    )
+    .unwrap();
+    assert!(
+        journeys::check_epic_journeys(&ctx)
+            .unwrap_err()
+            .problem
+            .contains("selection failed")
+    );
+}
+
+#[test]
+fn cas_1ca0_empty_impact_does_not_require_browser_run() {
+    let fx = Fixture::new();
+    let receipt = write_journey_receipt(&fx, &[], "affected", |_| {});
+    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    let selection =
+        journeys::check_close_journeys(&ctx, &[journeys::selection_reason(&fx.head, &[])])
+            .unwrap()
+            .unwrap();
+    assert!(selection.contains("no affected journeys"));
+}
+
+#[test]
+fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_refuse() {
+    let mut fx = Fixture::new();
+    let executed = fx.head.clone();
+    std::fs::create_dir_all(fx.repo.join("docs")).unwrap();
+    fx.head = commit(&fx.repo, "docs/QA.md", 0);
+    assert!(journeys::doc_only_rebind(&fx.repo, &executed, &fx.head));
+    let receipt = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
+        v["base_sha"] = serde_json::json!(executed);
+        v["executed_head_sha"] = serde_json::json!(executed);
+    });
+    fx.write_bundle(|v| {
+        v["journey_receipt"] = serde_json::json!(receipt);
+        v["executed_head_sha"] = serde_json::json!(executed);
+        v["created_at"] =
+            serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339());
+    });
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "PASS",
+        chrono::Utc::now() - chrono::Duration::seconds(90),
+        "http://localhost:31000",
+    );
+    for key in [
+        "trace.zip",
+        "trace-actions.txt",
+        "receipt.webm",
+        "final.aria.yml",
+        "final.aria.json",
+        "M01.png",
+    ] {
+        set_mtime_secs_ago(&fx.bundle_dir().join(key), 90);
+    }
+    let notes = fx.notes();
+    let ctx = journey_context(&fx, &notes);
+    run_close_gate(
+        &ctx,
+        EvidenceTier::Bundle,
+        &[journeys::selection_reason(&executed, &["HUB-J7".into()])],
+        &[],
+    )
+    .unwrap();
+    std::fs::create_dir_all(fx.repo.join("docs/qa")).unwrap();
+    let catalog_change = commit(&fx.repo, "docs/qa/journeys.md", 0);
+    assert!(!journeys::doc_only_rebind(
+        &fx.repo,
+        &fx.head,
+        &catalog_change
+    ));
+    let source_change = commit(&fx.repo, "changed.ts", 0);
+    assert!(!journeys::doc_only_rebind(
+        &fx.repo,
+        &executed,
+        &source_change
+    ));
+}

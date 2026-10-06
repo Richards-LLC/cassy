@@ -66,6 +66,26 @@ describe("Ghostty terminal resize after a collapsed pane", () => {
   });
 });
 
+describe("Ghostty terminal in Commander's hidden pane host (cas-0546)", () => {
+  it("takes the pane's pinned grid when its mount has no box, and never reports a size", () => {
+    const { surface, onResize } = resizeHarness(0, 0);
+    expect(surface.fit()).toBe(false);
+    surface.authoritativeGrid = { cols: 120, rows: 40 };
+
+    expect(surface.fit()).toBe(true);
+
+    expect(surface.cols).toBe(120);
+    expect(surface.rows).toBe(40);
+    expect(surface.core.resize).toHaveBeenCalledWith(120, 40, 10, 20);
+    expect(surface.renderFrame).toHaveBeenCalledTimes(1);
+    // A hidden viewer renders the pane; it never drives its size.
+    expect(onResize).not.toHaveBeenCalled();
+    // Re-fitting the same grid does nothing more.
+    expect(surface.fit()).toBe(true);
+    expect(surface.renderFrame).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("Ghostty terminal minimum columns", () => {
   function stubWindow() {
     Object.defineProperty(globalThis, "window", {

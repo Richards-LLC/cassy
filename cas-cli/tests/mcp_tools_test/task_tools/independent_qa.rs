@@ -755,6 +755,11 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
 async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatched() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
+    // cas-de60: an unparked merged delivery needs its own lineage; the
+    // shared worker lane is not authoritative delivery evidence.
+    let branch = format!("factory/test-agent-{task_id}");
+    git(&repo, &["checkout", "-q", "-b", &branch]);
+    let delivered = git(&repo, &["rev-parse", "HEAD"]);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -777,8 +782,8 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     // worker closed.
     git(&repo, &["branch", "epic/ui", "main"]);
     git(&repo, &["checkout", "-q", "epic/ui"]);
-    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "factory/test-agent"]);
-    git(&repo, &["checkout", "-q", "factory/test-agent"]);
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", &branch]);
+    git(&repo, &["checkout", "-q", &branch]);
 
     let refused = close_text(&core, &task_id).await;
     assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
@@ -787,6 +792,8 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert_eq!(passes.len(), 1);
+    assert_eq!(passes[0].branch, branch);
+    assert_eq!(passes[0].bound_head, delivered);
     let handoff = open_prompt_queue_store(&cas_dir)
         .unwrap()
         .peek_all(50)
@@ -807,7 +814,7 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     let guard = cas::qa_pass::supervisor_merge_refusal(
         &cas_dir,
         &repo,
-        "git merge --no-ff --no-commit factory/test-agent",
+        &format!("git merge --no-ff --no-commit {branch}"),
     )
     .expect("the backstop's InProgress round must block a raw merge");
     assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
@@ -847,6 +854,9 @@ impl SupervisorRole {
 async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_cas_5c38() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
+    // cas-de60: identify the delivery before its first (post-merge) close.
+    let branch = format!("factory/test-agent-{task_id}");
+    git(&repo, &["checkout", "-q", "-b", &branch]);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -855,9 +865,9 @@ async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_c
     tasks.update(&task).unwrap();
 
     git(&repo, &["checkout", "-q", "main"]);
-    git(&repo, &["merge", "-q", "--no-ff", "-m", "merged in May", "factory/test-agent"]);
-    let merged = git(&repo, &["rev-parse", "factory/test-agent"]);
-    git(&repo, &["checkout", "-q", "factory/test-agent"]);
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merged in May", &branch]);
+    let merged = git(&repo, &["rev-parse", &branch]);
+    git(&repo, &["checkout", "-q", &branch]);
 
     let refused = close_text(&core, &task_id).await;
     assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
@@ -1852,6 +1862,48 @@ async fn per_task_branch_park_without_a_demo_dispatches_from_its_own_diff_cas_74
         .unwrap()
         .expect("the park opened a round");
     assert_eq!(pass.bound_head, head, "the round binds the per-task tip");
+}
+
+/// The parked-request compatibility path accepts a live Standard supervisor
+/// session, not a worker or dead identity; explicit receipts remain stricter.
+#[tokio::test]
+async fn parked_qa_request_compatibility_does_not_authorize_worker_or_dead_caller_cas_9ffa() {
+    for (role, shutdown, receipt) in [
+        (AgentRole::Worker, false, false),
+        (AgentRole::Supervisor, true, false),
+        (AgentRole::Standard, true, false),
+        (AgentRole::Standard, false, true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let (_temp, _core, repo, task_id) = fixture(&mut env);
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(&task_id).unwrap();
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.update(&task).unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut caller = Agent::new_with_role("qa-caller".into(), "qa-caller".into(), role);
+        agents.register(&caller).unwrap();
+        if shutdown {
+            caller.status = cas::types::AgentStatus::Shutdown;
+            agents.update(&caller).unwrap();
+        }
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(caller.id);
+        let service = CasService::new(core, None);
+        let _role = SupervisorRole::enter(&mut env);
+        let mut request = serde_json::json!({
+            "action": "qa_request", "task_id": task_id, "summary": "inspect delivery",
+        });
+        if receipt {
+            request["head_sha"] = serde_json::json!(git(&repo, &["rev-parse", "HEAD"]));
+        }
+        let refusal = service.verification(Parameters(verification(request))).await
+            .expect_err("supervisor environment alone must not authorize this caller");
+        assert!(refusal.message.contains("live registered supervisor"), "{}", refusal.message);
+        assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty());
+        assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
+    }
 }
 
 /// cas-74284: a task labelled per `qa.user_facing_labels` (now including

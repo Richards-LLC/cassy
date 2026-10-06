@@ -175,7 +175,7 @@ request/response shapes, and the existing MCP tests stay the regression net.
 - After a successful operation the hub emits a `FleetChanged { session }`
   machine event. Every connected device refetches status. There is no new
   polling.
-- **Lease:** a structured operation does not need the terminal lease. It is
+- **Lease:** a structured operation does not need the session control lease. It is
   not typing into a pane. It still needs the scope and a live device
   credential, which are rechecked at execution time as launch does
   (`server.rs:1049`).
@@ -397,6 +397,6 @@ both hubs."
 2. **Should Restart (O6) require `factory:manage`, or is it closer to Pause?**
    This brief treats it as destructive, because it drops the worker's
    in-flight context.
-3. **Should the operations endpoint require the terminal lease?** This brief
+3. **Should the operations endpoint require the session control lease?** This brief
    says no: it is not pane input. Requiring it would serialize operators in a
    way the CLI and MCP do not.

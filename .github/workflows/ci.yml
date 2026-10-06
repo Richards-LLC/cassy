@@ -766,6 +766,8 @@ jobs:
           npm ci
           npm run typecheck
           npm test
+          # cas-4ce5: the failure upload below really matches files in the hidden .results dir.
+          bash ../scripts/test-ci-journey-evidence-upload.sh
           npm run build
           if sudo -n true 2>/dev/null; then
             npm exec --yes --package=playwright -- playwright install --with-deps chromium
@@ -775,13 +777,29 @@ jobs:
           npm run visual-qa
           git diff --exit-code -- dist
           # User journeys (docs/qa/journeys.md) against the committed bundle,
-          # on the Chromium build pinned by @playwright/test.
+          # on the Chromium build pinned by @playwright/test. Four workers, the
+          # journey cap: one worker ran 115 journeys in 26.5 min and pushed the
+          # queue run past its check timeout.
           if sudo -n true 2>/dev/null; then
             npx playwright install --with-deps chromium
           else
             npx playwright install chromium
           fi
-          npm run journeys
+          npm run journeys -- --workers=4
+
+      # cas-4ce5: a journey flake in the queue left no trace to diagnose.
+      # Keep Playwright's traces, error-context.md and screenshots on failure.
+      - name: Upload Commander journey evidence on failure
+        if: failure() && steps.classify-diff.outputs.web-check-needed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-web-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: hub-web/e2e/.results/
+          # .results is a dot-directory: upload-artifact@v4 skips hidden files
+          # unless told otherwise, which shipped an empty artifact (cas-4ce5 QA).
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Check
         if: steps.classify-diff.outputs.rust-unaffected != 'true'

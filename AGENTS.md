@@ -18,7 +18,7 @@ Release notes: when a merge reaches `staging` or `main` and docs/release-notes/R
 
 `CLAUDE.md` imports this canonical file. Rust 1.88+, edition 2024.
 
-- Build/check/test work: read [CONTRIBUTING](cas-cli/docs/CONTRIBUTING.md#build-assembly-and-ci-policy). Workers use capped checks and named targeted tests on clean commits; the supervisor owns full assembly. Keep `panic = "unwind"`.
+- Build/check/test work: read [CONTRIBUTING](cas-cli/docs/CONTRIBUTING.md#build-assembly-and-ci-policy). Workers use capped checks and named targeted tests on clean commits; the supervisor owns full assembly. Browser workers and QA run vitest, tsc and `scripts/journey-eval.sh <task-artifact-dir>` (affected selection, four workers). The hook denies worker/reviewer `--full` or unfiltered Playwright. Supervisor runs `--full --workers=4` once per epic at assembly; the merge queue runs it again. Reuse exact-tip receipts and unchanged-input doc/ledger rebinds. Keep `panic = "unwind"`.
 - Module/store/hook work: [ARCHITECTURE](cas-cli/docs/ARCHITECTURE.md); navigation: [.claude/CODEMAP.md](.claude/CODEMAP.md).
 - CLI/MCP/migration/skill changes: [CONTRIBUTING](cas-cli/docs/CONTRIBUTING.md).
 - Bug diagnosis: trace the real handler or data and cite the confirming line or reproduced behavior before fixing; use `cas-diagnosing-bugs` for the loop.

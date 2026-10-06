@@ -28,6 +28,10 @@ then ok "Markdown subheadings preserve legacy catalog blocks"; else bad "catalog
 grep -q 'check-journey-evaluation.sh' "$repo/scripts/release-train.d/prep.sh" \
     && ok "release-train prep calls the journey gate" || bad "prep.sh no longer calls check-journey-evaluation.sh"
 
+if out="$(python3 "$repo/scripts/test-journey-selection.py" 2>&1)"; then
+    ok "source/import/CSS/fixture selection regressions: $out"
+else bad "source selection regressions: $out"; fi
+
 # --- fixture repository -----------------------------------------------------
 fx="$tmp/repo"
 mkdir -p "$fx/docs/qa/journey-evaluations" "$fx/hub-web/dist" "$fx/hub-web/src" "$fx/hub-web/e2e"
@@ -93,7 +97,7 @@ ids() { python3 -c 'import json,sys; print(",".join(j["id"]+":"+j["reason"] for 
 if out="$(run_helper --check 2>&1)"; then ok "fixture catalog validates"; else bad "fixture catalog: $out"; fi
 [[ "$(run_helper --paths hub-web/src/composer-markup.ts | ids)" == "HUB-J1:hub-web/src/composer*.ts" ]] \
     && ok "a touched file selects its journey" || bad "touched file mapping"
-[[ "$(run_helper --paths hub-web/src/main.ts | ids)" == "HUB-J1:surface-wide:hub-web/src/main.ts,HUB-J2:surface-wide:hub-web/src/main.ts" ]] \
+[[ "$(run_helper --paths hub-web/src/main.ts | ids)" == "HUB-J1:surface-wide:composition-without-base,HUB-J2:surface-wide:composition-without-base" ]] \
     && ok "a surface-wide file selects every journey of the surface" || bad "surface-wide mapping"
 [[ "$(run_helper --paths hub-web/e2e/reply.journey.ts | ids)" == "HUB-J1:suite" ]] \
     && ok "a journey's own spec selects it" || bad "suite mapping"

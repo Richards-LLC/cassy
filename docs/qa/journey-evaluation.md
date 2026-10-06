@@ -88,7 +88,7 @@ A release that changes a user-facing surface must carry a journey evaluation
 of exactly the UI it ships.
 
 1. **Run.** Before the cut, the supervisor runs
-   `scripts/journey-eval.sh <artifact-dir>` on the release candidate, which is
+   `scripts/journey-eval.sh <artifact-dir> --full --workers=4` on the release candidate, which is
    the assembled epic tip, with `npm ci` done in `hub-web/`. It runs the
    `journeys` project against the committed `hub-web/dist` and copies each
    journey's receipts, including its trace, to

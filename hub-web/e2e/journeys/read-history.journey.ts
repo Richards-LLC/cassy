@@ -89,7 +89,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // The pointer now rests on the thread: its surface stays the cream canvas,
     // not brightened to white by the main-action button hover (journey F11).
     await log.hover();
-    await expect(page.locator("#pane-grid .pane.primary")).toHaveCSS("filter", "none");
+    await expect(page.locator("#pane-grid .conversation-thread-slot")).toHaveCSS("filter", "none");
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 20 });
   });
 
@@ -302,7 +302,7 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
 // the thread. Tall enough history that the two positions differ, on a desktop
 // and a phone.
 // The reader rests either in the composer (the thread follows its tail) or on
-// the header's Terminal view (the thread stays on their earlier page).
+// the header's Raw output (the thread stays on their earlier page).
 for (const [name, viewport, rest] of [
   ["following desktop", { width: 1280, height: 800 }, "composer"],
   ["following phone", { width: 390, height: 844 }, "composer"],
@@ -353,7 +353,7 @@ for (const [name, viewport, rest] of [
       await expect(loadEarlier).toBeEnabled();
       if (rest === "composer") await page.getByRole("textbox", { name: "Your message" }).focus();
       // A header control outside the thread: the thread keeps the earlier page.
-      else await page.locator("#conversation-terminal").focus();
+      else await page.locator("#conversation-raw-output").focus();
     });
 
     await journey.stage(`The reader tabs to Load earlier as the machine comes back, and sees it (${name})`, async () => {

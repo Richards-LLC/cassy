@@ -355,8 +355,6 @@ export function terminalLinkAtColumn(row: GhosttySnapshot["rowData"][number], co
   return terminalLinkAtPosition([row], 0, column);
 }
 
-/** The terminal's own keys, in the words its escape hint uses (cas-d1fa). */
-export const TERMINAL_ESCAPE_HINT = "Tab goes to the terminal. Ctrl+Alt+M leaves it.";
 /** The element, outside the drawing area, that says so (the session header's). */
 export const TERMINAL_ESCAPE_HINT_ID = "terminal-escape-hint";
 
@@ -828,7 +826,7 @@ export class GhosttyTerminalSurface {
     if (this.disposed) return false;
     const width = this.mount.clientWidth;
     const height = this.mount.clientHeight;
-    if (width <= 0 || height <= 0) return false;
+    if (width <= 0 || height <= 0) return this.fitHidden();
     const ratio = window.devicePixelRatio || 1;
     const measured = terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
     // A pinned grid is the pane's real PTY geometry as the daemon reports it, so
@@ -885,6 +883,27 @@ export class GhosttyTerminalSurface {
     // layout change: ResizeObserver fires before paint, so the browser never
     // composites the old backing store stretched into the new element box.
     if (shouldRender) this.renderFrame();
+    return true;
+  }
+
+  /**
+   * A mount with no box (Commander's hidden pane host, cas-0546) has nothing
+   * to measure, so it takes the pinned grid, the pane's real PTY size, as is:
+   * the emulator wraps lines where the supervisor's terminal wrapped them,
+   * and the transcript reads them back. Nothing is painted or reported
+   * upstream. Without a pinned grid it waits for a real box.
+   */
+  private fitHidden(): boolean {
+    const pinned = this.authoritativeGrid;
+    if (!pinned) return false;
+    if (pinned.cols !== this.cols || pinned.rows !== this.rows) {
+      this.cols = pinned.cols;
+      this.rows = pinned.rows;
+      this.core.resize(pinned.cols, pinned.rows, this.metrics.width, this.metrics.height);
+      this.forceFullRender = true;
+      this.scrollbarDirty = true;
+      this.renderFrame();
+    }
     return true;
   }
 
@@ -1694,8 +1713,8 @@ export class GhosttyTerminalSurface {
     this.snapshot = this.core.snapshot();
     if (!this.canvasPainting) {
       // The transcript reads this snapshot; nothing else on screen is showing
-      // the grid, so the paint, the input caret and the scrollbar can wait
-      // until the terminal view is asked for again.
+      // the grid, so the paint, the input caret and the scrollbar wait until
+      // canvas painting is turned back on.
       this.options.onRender?.();
       this.scheduleCursorBlink();
       return;

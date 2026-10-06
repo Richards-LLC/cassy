@@ -21,5 +21,5 @@ The terminal adapter is pinned from `pingdotgg/t3code` commit
 - `ghostty-vt.wasm`: `6b1df1a96d59adc26360c312924898dbc122f980c17a32eb1624e48795b83f7e`
 - `ghostty-write-pty.wasm`: `75cb147e98ede3f85f3cd6236a30f6d12565b0b237e1d8db941f5f3e8ad3d903`
 
-`TerminalSurface` and `TerminalSurfaceFactory` in `src/terminal.ts` are the swappable renderer boundary.
+`TerminalSurface` and `TerminalSurfaceFactory` in `src/terminal.ts` are the swappable renderer boundary. Since the Terminal view was removed (cas-0546) the surface runs only as the hidden emulator behind the conversation's read-only Raw output drawer.
 The vendored T3 Code, Ghostty, and symbols-font MIT notices are retained alongside their assets.

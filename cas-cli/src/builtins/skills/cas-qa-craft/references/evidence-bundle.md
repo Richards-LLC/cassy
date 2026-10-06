@@ -55,10 +55,21 @@ journey evaluation scores polish for it.
   needs `files.visual_qa_baseline_json`: the same strict script run against a
   local build of the base commit (`git merge-base <target> <head>`) over the
   same pages. Close accepts it when every finding in the delivered build's
-  report also appears in the base report, compared by type, element, page,
-  scheme and viewport, so the delivery added none. The delivered run must
+  report pairs once with a base finding by type, rule/reason, page, render
+  state, scheme and full viewport. Element identity uses role + accessible
+  name when supplied, or matching text + shared bounds within 0.5 CSS pixels.
+  CSS class renames do not add a finding when that identity agrees. Historical
+  reports without identity evidence require matching selectors; keep them
+  fail-closed. The delivered run must
   still be fresh, strict and local. List the base build's findings as
   follow-ups in the ledger; they are not this delivery's defects.
+- `journey_receipt` for hub-web source or dist deliveries: the path to the
+  `journey-eval` receipt under this task's artifact directory. An independent
+  round may cite the implementer's receipt for the same tip; keep independent
+  browser cells and pixel evidence in the round directory. Close recomputes
+  `journeys-for-diff` selection at the delivered tip and refuses any selected
+  journey absent from the receipt or lacking a passing result. A manually
+  chosen subset is sufficient only when it covers that computed selection.
 - `files`: the keys above, with paths relative to the bundle
 - `critique_score`: `distinctiveness`, `fit`, `hierarchy`, `craft`, and `accessibility`, each 0–5, matching `critique.md`
 - `deployed` (optional): use it only when a local build cannot
@@ -85,6 +96,60 @@ journey evaluation scores polish for it.
   value of 8 or more characters is refused. A placeholder embedded in a real
   value does not exempt it. Saved storage-state files, session JWTs, bearer
   tokens and API tokens remain refused.
+
+## Affected journey receipt
+
+For hub-web deliveries, run vitest, tsc and the source-impact-selected journeys
+while iterating. At the final code tip, retain a receipt with every selected
+journey passing. Workers and independent QA use affected journeys; the
+supervisor runs the full suite once on the assembled epic at four workers,
+and the merge queue runs it again. A failure control may rerun the failing
+spec at one worker, retaining the original failure.
+
+Produce it with `scripts/journey-eval.sh <task-artifact-dir>` (default affected,
+four workers), or `--affected <base>`. No arguments resolve the single active
+task and its configured artifact namespace; when assignment is ambiguous,
+provide the delivery artifact directory or `--task <id>`. The producer calls
+the selector itself and owns the native filters. Empty impact writes explicit
+empty `selection_ids` and `results` without a browser run. Full epic proof uses
+`--full --workers=4`, reserved for supervisor/CI. The hook denies factory worker
+and QA full/unfiltered runs.
+
+The receipt uses this shape:
+
+```json
+{
+  "schema": 1,
+  "producer": "journey-eval",
+  "kind": "local",
+  "scope": "affected",
+  "base_sha": "<full 40-hex selection base>",
+  "head_sha": "<full 40-hex evaluated tip>",
+  "selection_ids": ["HUB-J7"],
+  "results": [{"id": "HUB-J7", "status": "PASS", "passed": 1, "failed": 0, "skipped": 0}],
+  "tool_version": "playwright 1.63.0",
+  "suite_exit": 0
+}
+```
+
+`kind` is `local` or `ci`; a CI receipt also records `ci_run_url` for the run
+that evaluated `head_sha`. `scope` is `affected` or `full`. Fold every native
+test part into its catalog ID and preserve failures and skips. A nonzero
+suite exit, an empty tool version, a stale tip, or a missing/nonpassing
+selected ID refuses the receipt. Supplemental specs belong to their catalog
+IDs even when their spec path differs from the catalog's main suite.
+
+A QA reviewer may reuse the implementer's affected receipt for the same tip
+and spend the round on independent cells and real-pixel checks. Documentation
+or ledger edits do not require a browser rerun: rebind only after Git proves
+the evaluated product and journey inputs unchanged; retain execution provenance.
+Set optional `executed_head_sha` in both the receipt and the QA bundle when
+rebinding; `head_sha` remains the final reviewed tip. Gates prove ancestor
+history, documentation-only changes and unchanged hub-web, selector, runner,
+bundler, catalog and build inputs. A catalog edit is not exempt documentation.
+At epic assembly, cite `journey-receipt: <absolute receipt path>` in an epic
+note. The assembly gate requires `scope: "full"`, the exact assembled tip and
+passing results for every catalog journey.
 
 ## Config
 

@@ -79,13 +79,14 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   await journey.stage("Open a session that has not written yet", async () => {
     await row("calm-puma-34").click();
     const empty = page.locator(".thread .empty");
-    // cas-010f: plain words, no product codename or queue jargon, and
-    // Terminal view named as the header names it.
+    // cas-010f: plain words, no product codename or queue jargon. The card
+    // offers no way out of the conversation (cas-0546): the header carries
+    // Raw output and Interrupt.
     await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
     await expect(empty.locator(".empty-activity")).toHaveText("Last active 2m ago");
     await expect(empty).not.toContainText("Commander");
     await expect(empty).not.toContainText("→");
-    await expect(empty.getByRole("button")).toHaveText(["Terminal view"]);
+    await expect(empty.getByRole("button")).toHaveCount(0);
     await expect(page.locator(".thread .msgs")).not.toContainText("Mixdown preview rendered");
     await expect(page.locator(".pinned-ask")).toBeHidden();
     // The older session's thread is a collapsed, labelled section, with dates.
@@ -103,61 +104,74 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await noble.locator("summary").click();
   });
 
-  await journey.stage("Open Terminal view from the empty session", async () => {
-    await page.locator(".thread .empty").getByRole("button", { name: "Terminal view" }).click();
-    await expect(page.locator("#conversation-return")).toBeVisible();
-    // The pane header says what it has seen, not "No activity" beside a
-    // session that was active two minutes ago (cas-010f).
-    for (const stamp of await page.locator(".pane-last-activity").filter({ visible: true }).allTextContents()) expect(stamp).not.toBe("No activity yet");
-    await page.locator("#conversation-return").click();
+  await journey.stage("Read the empty session's raw output", async () => {
+    // The session has not written to the operator, but its supervisor is
+    // running: Raw output shows what its terminal shows (cas-0546).
+    const raw = page.locator("#conversation-raw-output");
+    await raw.click();
+    const drawer = page.getByRole("dialog", { name: "Raw output" });
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toContainText("The supervisor is ready.");
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+    await expect(raw).toBeFocused();
     await expect(page.locator(".thread .empty .said")).toBeVisible();
   });
 
   await journey.stage("The empty thread follows the connection", async () => {
-    // cas-010f: off the network, the card says why nothing new can arrive and
-    // stops offering Terminal view; back on, it is the plain live copy again.
+    // cas-010f: off the network, the card says why nothing new can arrive;
+    // back on, it is the plain live copy again.
     const empty = page.locator(".thread .empty");
     const header = page.locator("#conversation-connection");
-    const headerTerminal = page.locator("#conversation-terminal");
-    await expect(headerTerminal).not.toHaveAttribute("aria-disabled", "true");
+    // cas-0546: the header's Raw output and Interrupt stay in place and say
+    // why they wait, to the eye (dashed, title) and to a screen reader
+    // (description); pressing one explains instead of acting.
+    const raw = page.locator("#conversation-raw-output");
+    const interrupt = page.locator("#conversation-interrupt");
+    for (const action of [raw, interrupt]) await expect(action).not.toHaveAttribute("aria-disabled", "true");
     await hub.down("atlas", { sockets: "close" });
     await expect(header).toContainText("Reconnecting");
     await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
-    await expect(empty.getByRole("button", { name: "Terminal view" })).toHaveCount(0);
-    // cas-6b75 (F03): the header doesn't offer the terminal either; it says
-    // why, to the eye (dimmed, title) and to a screen reader (description),
-    // and pressing it explains instead of opening a terminal it can't reach.
-    const unavailable = "Reconnecting to Atlas · Linux — Terminal view opens once it's back.";
-    await expect(headerTerminal).toHaveAttribute("aria-disabled", "true");
-    await expect(headerTerminal).toHaveAccessibleName("Terminal view");
-    await expect(headerTerminal).toHaveAccessibleDescription(unavailable);
-    await expect(headerTerminal).toHaveAttribute("title", unavailable);
-    await headerTerminal.focus();
+    await expect(empty.getByRole("button")).toHaveCount(0);
+    const unavailable = "Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.";
+    for (const action of [raw, interrupt]) {
+      await expect(action).toHaveAttribute("aria-disabled", "true");
+      await expect(action).toHaveAccessibleDescription(unavailable);
+      await expect(action).toHaveAttribute("title", unavailable);
+    }
+    await expect(raw).toHaveAccessibleName("Raw output");
+    await expect(interrupt).toHaveAccessibleName("Interrupt the gabber-studio supervisor");
+    await raw.focus();
     await page.keyboard.press("Enter");
     await expect(page.locator("#toast")).toHaveText(unavailable);
-    await expect(page.locator("#conversation-return")).toBeHidden();
+    await expect(page.getByRole("dialog", { name: "Raw output" })).toBeHidden();
     await expect(empty.locator(".said")).toBeVisible();
     await hub.up("atlas");
     await expect(header).toContainText("Live", { timeout: 20_000 });
     await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
-    await expect(empty.getByRole("button", { name: "Terminal view" })).toBeVisible();
-    await expect(headerTerminal).not.toHaveAttribute("aria-disabled", "true");
-    await expect(headerTerminal).toHaveAccessibleDescription("");
+    for (const action of [raw, interrupt]) {
+      await expect(action).not.toHaveAttribute("aria-disabled", "true");
+      await expect(action).toHaveAccessibleDescription("");
+    }
   });
 
-  await journey.stage("On a phone, Terminal view on the empty card is a full-size target", async () => {
-    // cas-6b75 (F01): at 390 the card's Terminal view is at least 44 px each
-    // way, the coarse-pointer minimum, and still opens Terminal view.
+  await journey.stage("On a phone, the header's Raw output and Interrupt are full-size targets", async () => {
+    // cas-6b75 (F01), carried to the header actions (cas-0546): at 390 each
+    // is at least 44 px each way, the coarse-pointer minimum, and Raw output
+    // still opens.
     const viewport = page.viewportSize()!;
     await page.setViewportSize({ width: 390, height: 844 });
-    const open = page.locator(".thread .empty").getByRole("button", { name: "Terminal view" });
-    await expect(open).toBeVisible();
-    const box = (await open.boundingBox())!;
-    expect(box.height, "Terminal view is at least 44 px tall").toBeGreaterThanOrEqual(44);
-    expect(box.width, "Terminal view is at least 44 px wide").toBeGreaterThanOrEqual(44);
-    await open.click();
-    await expect(page.locator("#conversation-return")).toBeVisible();
-    await page.locator("#conversation-return").click();
+    for (const action of [page.locator("#conversation-raw-output"), page.locator("#conversation-interrupt")]) {
+      await expect(action).toBeVisible();
+      const box = (await action.boundingBox())!;
+      expect(box.height, "at least 44 px tall").toBeGreaterThanOrEqual(44);
+      expect(box.width, "at least 44 px wide").toBeGreaterThanOrEqual(44);
+    }
+    await page.locator("#conversation-raw-output").click();
+    const drawer = page.getByRole("dialog", { name: "Raw output" });
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole("button", { name: "Close raw output" }).click();
+    await expect(drawer).toBeHidden();
     await expect(page.locator(".thread .empty .said")).toBeVisible();
     await page.setViewportSize(viewport);
   });

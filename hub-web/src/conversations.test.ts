@@ -11,7 +11,28 @@ import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
+it('another tab settles adjacent held sends without manufacturing unsent chips', () => {
+  const history = new ConversationHistory();
+  history.hold('a', 'supervisor', 'first', 1_000);
+  history.hold('b', 'supervisor', 'second', 1_001);
+  history.synchronizePending([]);
+  expect(history.pendingSends()).toEqual([]);
+  expect(history.dismissedSends()).toEqual([]);
+  expect(history.visibleEvents()).toEqual([]);
+});
 describe('conversation evidence', () => {
+  it('a later reply keeps explicit Send again available until that send is confirmed (cas-9dc6)', () => {
+    const history = new ConversationHistory();
+    history.submit('unknown', 'supervisor', 'Did the Mac tests start?', 1_000);
+    history.unconfirmSilent(16_000);
+    history.reply({ ...reply, reply_to: null }, 17_000, undefined, undefined, 17_000);
+    const event = history.events.find(event => event.kind === 'send')!;
+    if (event.kind !== 'send') throw new Error('Missing send');
+    expect(history.isFailedSend(event.value)).toBe(false);
+    expect(history.canRetrySend(event.value)).toBe(true);
+    history.acknowledge({ client_ref: 'unknown', notification_id: 99, target: 'supervisor', stamped: true });
+    expect(history.canRetrySend(event.value)).toBe(false);
+  });
   it('shows both paired devices and terminal input in the same history', () => {
     const history = new ConversationHistory();
     const row = (notification_id: number, text: string, device_id: string, operator_label: string, stamped = true) => ({
@@ -438,20 +459,24 @@ describe('conversation evidence', () => {
       expect(shell.querySelector('#pair-toggle')?.classList.contains('primary')).toBe(false);
     }
   });
-  it('renders one Pebble header above the thread with the back link, Terminal view, avatar, badge and connection slot', () => {
+  it('renders one Pebble header above the thread with the back link, Raw output, Interrupt, avatar, badge and connection slot', () => {
     const shell = document.createElement('div');
     shell.innerHTML = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
     const main = shell.querySelector('.conversation-main')!;
     expect(main.querySelectorAll('header')).toHaveLength(1);
     const header = main.querySelector('header.conversation-heading.thead')!;
     expect(header.querySelector('#conversation-back')?.textContent).toBe('‹ Conversations');
-    expect(header.querySelector('#conversation-terminal')?.textContent).toBe('Terminal view');
-    // Phone folds to "‹" and "Terminal" (cas-1776); the aria-labels keep the full names at every width.
+    // cas-0546: the conversation's own actions replace Terminal view; the
+    // phone folds Raw output to its icon, and the aria-labels keep the full
+    // names at every width.
+    expect(header.querySelector('#conversation-terminal')).toBeNull();
+    expect(header.querySelector('#conversation-raw-output')?.textContent).toBe('Raw output');
+    expect(header.querySelector('#conversation-raw-output')?.getAttribute('aria-label')).toBe('Raw output');
+    expect(header.querySelector('#conversation-interrupt')?.textContent).toBe('Interrupt');
+    expect(header.querySelector('#conversation-interrupt')?.getAttribute('aria-label')).toBe('Interrupt the cas-src supervisor');
     expect(header.querySelector('#conversation-back')?.getAttribute('aria-label')).toBe('‹ Conversations');
-    expect(header.querySelector('#conversation-terminal')?.getAttribute('aria-label')).toBe('Terminal view');
     expect(header.querySelector('#conversation-back .back-glyph')?.textContent).toBe('‹');
     expect(header.querySelector('#conversation-back .back-label')?.textContent).toBe(' Conversations');
-    expect(header.querySelector('#conversation-terminal .terminal-suffix')?.textContent).toBe(' view');
     expect(header.querySelector('.conversation-avatar')?.textContent).toBe('A');
     // Journey F7: the project is the title, once; machine and codename sit beneath it.
     expect(header.querySelector('h1')?.textContent).toBe('cas-src');
@@ -475,11 +500,15 @@ describe('conversation evidence', () => {
   });
   it('dresses the composer as Pebble: pill field, no dead attach clip, send in the accent naming the supervisor', () => {
     const app = document.createElement('div');
-    app.innerHTML = '<div class="shell"><div id="pane-grid"></div><div class="message"><h2><label for="message-text">Talk to x</label></h2><div class="operator-thread"></div><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div><div id="status-view"></div><section id="attention-panel" hidden></section></div>';
-    arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', machineId: 'atlas-linux', loaded: true, paired: true });
+    const template = document.createElement('template');
+    template.innerHTML = '<div class="message"><h2><label for="message-text">Talk to x</label></h2><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div>';
+    const grid = document.createElement('section'); grid.id = 'pane-grid';
+    const attention = document.createElement('section'); attention.id = 'attention-panel'; attention.hidden = true;
+    app.append(arrangeConversationShell(document, { selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', machineId: 'atlas-linux', loaded: true, paired: true }, { grid, composer: template.content.firstElementChild as HTMLElement, attention }));
+    expect(app.querySelector('#conversation-pane-slot > #pane-grid')).toBe(grid);
+    expect(app.querySelector<HTMLElement>('#conversation-attention-slot > #attention-panel')?.hidden).toBe(false);
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
-    expect(composer.querySelector('.operator-thread')).toBeNull();
     // cas-17e3: attaching has no transport yet, so the clip is not offered at all.
     expect(ATTACH_SUPPORTED).toBe(false);
     expect(composer.querySelector('.composer-clip')).toBeNull();
@@ -582,8 +611,9 @@ describe("hostMarkup (journey F14)", () => {
     expect(css).toContain(".conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }");
     expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }");
     // The OS word goes whenever the line is short of room, not only on a phone.
-    // cas-8526: hidden from sight only, so the OS word is still heard.
-    expect(css).toContain(".conversation-identity .host-where.os-dropped .host-os { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
+    // cas-8526: hidden from sight only, so the OS word is still heard; since
+    // cas-0546 fitMachineLine marks it .sr-only (the house accessibility helper).
+    expect(css).toMatch(/\n\.sr-only \{/);
     expect(css).not.toContain("  .conversation-identity .host-os { display: none; }");
   });
 });
@@ -597,13 +627,13 @@ describe("fitMachineLine (cas-766c)", () => {
     const machine = where.querySelector<HTMLElement>(".host-machine")!;
     codename.style.fontSize = "10px";
     Object.defineProperty(codename, "scrollWidth", { configurable: true, get: () => sizes.codename });
-    Object.defineProperty(machine, "scrollWidth", { configurable: true, get: () => (where.classList.contains("os-dropped") ? sizes.machineNoOs ?? sizes.machine : sizes.machine) });
+    Object.defineProperty(machine, "scrollWidth", { configurable: true, get: () => (where.querySelector(".host-os")!.classList.contains("sr-only") ? sizes.machineNoOs ?? sizes.machine : sizes.machine) });
     const separator = where.querySelector<HTMLElement>(".host-sep")!;
     separator.getBoundingClientRect = () => ({ width: sizes.separator ?? 18 } as DOMRect);
     document.body.append(where);
     return where;
   };
-  const state = (where: HTMLElement) => ["os-dropped", "machine-long", "codename-squeezed"].filter((name) => where.classList.contains(name));
+  const state = (where: HTMLElement) => ["os-dropped", "machine-long", "codename-squeezed"].filter((name) => name === "os-dropped" ? where.querySelector(".host-os")!.classList.contains("sr-only") : where.classList.contains(name));
 
   it("leaves a line that fits whole alone", () => {
     const where = line({ machine: 80, codename: 100 });

@@ -1712,7 +1712,12 @@ fn suggested_scoped_proof_command(
     target_repo: &std::path::Path,
     base: Option<&str>,
 ) -> String {
-    let mut targets = required_targets.to_vec();
+    // A persisted requirement or older caller may still name source suites.
+    // Resolve those against the delivered checkout before printing Cargo flags.
+    let Some(mut targets) = canonical_scoped_proof_targets(proof_repo, required_targets.to_vec())
+    else {
+        return "SCOPED PROOF SURFACE UNRESOLVED: required integration suites cannot be mapped to existing Cargo test targets; repair the checkout's test inventory before requesting a proof".to_string();
+    };
     for target in proof_validation_targets(proof_repo, target_repo, base).unwrap_or_default() {
         if !targets.contains(&target) {
             targets.push(target);
@@ -3997,6 +4002,86 @@ mod risk_proof_tests {
         );
     }
 
+    /// cas-728e: old suite names must never escape in the close suggestion.
+    /// Check the real checkout against Cargo's target inventory, rather than a
+    /// fixture whose default auto-discovery accidentally makes stale names valid.
+    #[test]
+    fn builtin_suggestion_uses_cargo_metadata_targets_cas_728e() {
+        let repo = crate::test_paths::workspace_root();
+        let target = tempfile::tempdir().unwrap();
+        let aliases = [
+            "agent_definition_contract_test",
+            "builtin_doc_hygiene_test",
+            "builtin_skill_description_test",
+            "factory_codex_skill_guardrails",
+        ]
+        .map(str::to_string);
+        let command = suggested_scoped_proof_command(&aliases, &repo, target.path(), None);
+        let prescribed = parse_scoped_proof_target_args(&format!(
+            "SCOPED_PROOF_TARGET_ARGS: {}",
+            command.split_once("--lib ").unwrap().1,
+        ))
+        .unwrap();
+        assert_eq!(prescribed, ["integration_contracts"], "{command}");
+
+        let output = std::process::Command::new("cargo")
+            .args(["metadata", "--no-deps", "--offline", "--format-version", "1"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let package = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "cas")
+            .unwrap();
+        let cargo_targets: std::collections::BTreeSet<&str> = package["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|target| target["kind"].as_array().unwrap().iter().any(|kind| kind == "test"))
+            .map(|target| target["name"].as_str().unwrap())
+            .collect();
+        for name in &prescribed {
+            assert!(cargo_targets.contains(name.as_str()), "nonexistent target in {command}");
+        }
+        let all_aliases = scoped_proof_test_inventory(&repo).into_keys().collect::<Vec<_>>();
+        assert!(!all_aliases.is_empty());
+        let all_command = suggested_scoped_proof_command(&all_aliases, &repo, target.path(), None);
+        let all_prescribed = parse_scoped_proof_target_args(&format!(
+            "SCOPED_PROOF_TARGET_ARGS: {}",
+            all_command.split_once("--lib ").unwrap().1,
+        ))
+        .unwrap();
+        assert_eq!(
+            all_prescribed.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+            cargo_targets,
+            "every suite must prescribe its existing Cargo harness: {all_command}",
+        );
+        let required = canonical_scoped_proof_targets(&repo, aliases.to_vec()).unwrap();
+        assert!(scoped_proof_note_covers(
+            "SCOPED_PROOF: targets=lib,test:integration_contracts result=PASS",
+            &required,
+        ).is_empty());
+        assert_eq!(scoped_proof_note_covers(
+            "SCOPED_PROOF: targets=lib,test:agent_definition_contract_test result=PASS",
+            &required,
+        ), ["integration_contracts"]);
+    }
+
+    #[test]
+    fn unknown_suggestion_target_fails_closed_cas_728e() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (repo, target) = consolidated_inventory_fixture(&mut env);
+        let command = suggested_scoped_proof_command(
+            &["missing_suite".into()], repo.path(), target.path(), None,
+        );
+        assert!(command.starts_with("SCOPED PROOF SURFACE UNRESOLVED"), "{command}");
+        assert!(!command.contains("--test"), "{command}");
+    }
+
     #[test]
     fn draining_checker_returns_consolidated_targets_after_the_child_is_ready() {
         use std::io::{BufRead, BufReader, Read, Write};
@@ -5974,7 +6059,118 @@ impl CasCore {
             .map(|claimed| claimed.timestamp())
     }
 
-    fn advance_awaiting_merge_anchor(
+    /// cas-00eb (cas-f1f4 regression): a recorded anchor may only move along
+    /// this task's own lineage. Commit messages alone cannot tell (cas-ba4a
+    /// catches only messages that name another task), so two structural
+    /// stops apply:
+    /// - the measured branch must be this task's per-task branch
+    ///   (`factory/<assignee>-<task>`). A plain `factory/<assignee>` is a
+    ///   mutable lane where the worker stacks the next task on this one;
+    /// - no other open task's anchor may sit between the recorded anchor and
+    ///   the tip, because that commit is another delivery's boundary.
+    pub(crate) fn tip_is_own_task_lineage(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        measured_branch: Option<&str>,
+        recorded: &str,
+        tip: Option<&str>,
+    ) -> bool {
+        let (Some(branch), Some(tip), Some(assignee)) =
+            (measured_branch, tip, task.assignee.as_deref())
+        else {
+            return false;
+        };
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        if branch != crate::factory_isolation::worker_task_branch(assignee, &task.id) {
+            return false;
+        }
+        let Ok(others) = task_store.list(None) else {
+            return false;
+        };
+        !others.iter().any(|other| {
+            other.id != task.id
+                && other.status != TaskStatus::Closed
+                && other
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref()
+                    .is_some_and(|anchor| {
+                        !commit_ids_match(anchor, recorded)
+                            && git_commit_is_ancestor(repo_path, recorded, anchor)
+                            && git_commit_is_ancestor(repo_path, anchor, tip)
+                    })
+        })
+    }
+
+    /// cas-00eb: the fresh-park counterpart of
+    /// [`Self::advance_awaiting_merge_anchor`]. cas-6e3a recorded `b65630c82`
+    /// mid-cycle, then pushed two more commits; the park kept `b656`, so its
+    /// QA round was bound two commits behind the tip that the accepted
+    /// evidence bundle named. Same attribution rule as the AwaitingMerge
+    /// advance (cas-ba4a: every commit since the anchor is this task's, none
+    /// after a sibling's lease), same container and already-integrated guards.
+    /// Returns the task to park; status is untouched so the park's lifecycle
+    /// push still reports the real transition.
+    pub(crate) fn advance_commit_time_anchor_before_park(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        parent_branch: &str,
+        measured_branch: Option<&str>,
+        measured_tip: Option<&str>,
+    ) -> Task {
+        let mut parking = task.clone();
+        let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
+            return parking;
+        };
+        if !self.tip_is_own_task_lineage(
+            task_store,
+            task,
+            repo_path,
+            measured_branch,
+            recorded,
+            measured_tip,
+        ) {
+            return parking;
+        }
+        let Some(tip) = measured_tip
+            .and_then(|tip| resolve_branch_sha(repo_path, &format!("{tip}^{{commit}}")))
+        else {
+            return parking;
+        };
+        let foreign_since = self.sibling_lease_boundary(task_store, task);
+        if !parked_anchor_advance_is_attributable(
+            repo_path,
+            recorded,
+            &tip,
+            &task.id,
+            foreign_since,
+        ) {
+            return parking;
+        }
+        let mut advanced = task.clone();
+        advanced.status = TaskStatus::AwaitingMerge;
+        if Self::apply_awaiting_merge_anchor_advance(
+            &mut advanced,
+            &tip,
+            chrono::Utc::now(),
+            Some(repo_path),
+            Some(parent_branch),
+        )
+        .is_some()
+        {
+            parking.deliverables.factory_branch_anchor =
+                advanced.deliverables.factory_branch_anchor;
+            parking.notes = advanced.notes;
+            parking.updated_at = advanced.updated_at;
+        }
+        parking
+    }
+
+    pub(crate) fn advance_awaiting_merge_anchor(
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
@@ -6899,23 +7095,47 @@ impl CasCore {
                 &context.target_branch,
             )
         });
-        // cas-f01b (GH #1068): the same holds for a delivery that never
-        // parked, merged by a batch squash and named by the supervisor's
-        // commit_receipt. The worker may already be on its next task's
-        // branch; the receipt on the declared target is the delivery, so the
-        // worker checkout is not consulted. A worker's own close, or one
-        // without the override, still validates its branch.
-        let supervisor_closing_merged_receipt = declared_repo_context.as_ref().is_some_and(|context| {
-            supervisor_merged_anchor_close(
-                supervisor_override,
-                req.commit_receipt.as_deref().map(str::trim),
-                &context.repo_root,
-                &context.target_branch,
-            )
-        });
+        // cas-258f: an authenticated supervisor's explicit merged receipt
+        // identifies this delivery independently of the assignee's mutable
+        // checkout. This is repository evidence, not a review-gate waiver:
+        // no supervisor_override is needed, and every normal close gate still
+        // runs. Workers and unknown/stale callers retain checkout validation.
+        let supervisor_closing_merged_receipt = req
+            .commit_receipt
+            .as_deref()
+            .filter(|_| self.resolve_live_supervisor_authority().is_ok())
+            .zip(declared_repo_context.as_ref())
+            .is_some_and(|(receipt, context)| {
+                fetch_parent_branch_best_effort(&context.repo_root, &context.target_branch);
+                resolve_task_commit_receipt_sha(&context.repo_root, receipt).is_ok_and(|sha| {
+                    commit_is_merged_into_parent(&context.repo_root, &sha, &context.target_branch)
+                })
+            });
+        // cas-9ffa: after request_changes a retired implementer's checkout
+        // can belong to another task. A live supervisor may recover the
+        // exact pushed correction through its declared WorkTarget instead.
+        // This identifies code to lint/park; it never proves integration.
+        let retired_receipt = if supervisor_override
+            && !supervisor_closing_merged_receipt
+            && !supervisor_closing_merged_anchor
+            && matches!(self.compute_verification_skip_reason(&task, &req),
+                VerificationSkipReason::AssigneeInactive { .. } | VerificationSkipReason::AssigneeUnknown)
+        {
+            match (declared_repo_context.as_ref(), req.commit_receipt.as_deref()) {
+                (Some(context), Some(receipt)) => {
+                    match validate_pushed_task_receipt(&task, context, receipt) {
+                        Ok(boundary) => Some(boundary),
+                        Err(message) => return Ok(Self::tool_error(message)),
+                    }
+                }
+                _ => None,
+            }
+        } else { None };
+        let recovery_branch = retired_receipt.as_ref().map(|(branch, _)| format!("origin/{branch}"));
         let worker_worktree_path = if matches!(close_disposition, TaskCloseDisposition::Decision | TaskCloseDisposition::EvidenceOnly)
             || supervisor_closing_merged_anchor
             || supervisor_closing_merged_receipt
+            || retired_receipt.is_some()
         {
             None
         } else {
@@ -6924,6 +7144,15 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(message)),
             }
         };
+        if retired_receipt.is_some() {
+            let context = declared_repo_context.as_ref().expect("recovery requires WorkTarget");
+            match run_declared_pre_close_hook(&task, context, None,
+                req.commit_receipt.as_deref(), true)
+            {
+                Ok(evidence) => task.deliverables.pre_close_hook = Some(evidence),
+                Err(message) => return Ok(Self::tool_error(format!("PRE-CLOSE HOOK FAILED: {message}"))),
+            }
+        }
         let standalone_target_repo = if close_repo_verified {
             close_project_root.clone()
         } else {
@@ -7328,6 +7557,28 @@ impl CasCore {
         // independent reviewer spawned (cas-619f). A live supervisor's
         // override (already validated above) waives it with a logged reason.
         if close_disposition.requires_delivery_gates()
+            && task.task_type == TaskType::Epic
+            && close_repo_verified
+            && close_project_root.join("hub-web/src").is_dir()
+            && close_project_root.join("docs/qa/journeys.md").is_file()
+        {
+            let Some(head) = epic_close_tip(&task, req.commit_receipt.as_deref(), &close_project_root) else {
+                return Ok(Self::tool_error("EPIC ASSEMBLY REJECTED: epic journey tip is unreadable"));
+            };
+            let assembly_config = self.load_config();
+            let paths = crate::config::resolved_factory_artifact_paths(&self.cas_root, assembly_config.factory().artifacts_root.as_deref());
+            let artifacts = paths.task_dirs(&task.id)[0].clone();
+            let ctx = crate::qa_evidence::EvidenceContext {
+                task_id: &task.id, task_artifacts_dir: &artifacts, repo: &close_project_root,
+                delivered_head: &head, notes: &task.notes, deployed_origins: &[],
+            };
+            match crate::qa_evidence::journeys::check_epic_journeys(&ctx) {
+                Ok(receipt) => append_close_decision_note(task_store.as_ref(), &mut task,
+                    &format!("Epic full-suite journey receipt accepted: {} (head {head})", receipt.display())),
+                Err(refusal) => return Ok(Self::tool_error(format!("EPIC ASSEMBLY REJECTED: {}. Next: {}", refusal.problem, refusal.command))),
+            }
+        }
+        if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && task.assignee.is_some()
             && (close_repo_verified || worker_worktree_path.is_some())
@@ -7352,13 +7603,17 @@ impl CasCore {
                     delivery_receipt,
                 )
             });
-            match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+            let journey_base = commit_receipt_window.as_ref().and_then(|window| {
+                task_attribution::delivery_base(&evidence_repo, &resolved_parent_branch, window, delivery_receipt)
+            });
+            match super::qa_evidence_gate::qa_evidence_close_gate_for_delivery(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
                 delivery_receipt,
                 attributed_paths.as_deref(),
+                journey_base.as_deref(),
             ) {
                 Ok(notes) => {
                     for note in notes {
@@ -7384,7 +7639,7 @@ impl CasCore {
             && task.assignee.is_some()
             && (close_repo_verified || worker_worktree_path.is_some())
         {
-            match run_factory_branch_merge_gate_with_attribution(
+            match run_factory_branch_merge_gate_for_delivery(
                 &task,
                 &req,
                 &resolved_parent_branch,
@@ -7393,6 +7648,7 @@ impl CasCore {
                     receipt: req.commit_receipt.as_deref(),
                     window: commit_receipt_window.as_ref(),
                 },
+                recovery_branch.as_deref(),
             ) {
                 MergeStateGateOutcome::Proceed => {}
                 // cas-e74c: the delivery is proven integrated (or nothing on
@@ -7421,11 +7677,8 @@ impl CasCore {
                             factory_branch_merge_conflict_paths(
                                 &close_project_root,
                                 &resolved_parent_branch,
-                                &close_measured_factory_branch(
-                                    &close_project_root,
-                                    &task,
-                                    assignee,
-                                ),
+                                &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(
+                                    &close_project_root, &task, assignee)),
                             )
                         })
                         .unwrap_or_else(|| Ok(Vec::new()));
@@ -7469,23 +7722,40 @@ impl CasCore {
                     let anchor = task.assignee.as_deref().and_then(|assignee| {
                         resolve_branch_sha(
                             &close_project_root,
-                            &close_measured_factory_branch(&close_project_root, &task, assignee),
+                            &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee)),
                         )
                     });
                     if task.status != TaskStatus::AwaitingMerge {
+                        // cas-00eb: a commit-time anchor recorded earlier in
+                        // this cycle survives the park (`record_park`). When
+                        // the measured tip descends from it through this
+                        // task's own commits only, the tip is the delivery:
+                        // advance first, so the park, its QA round and its
+                        // merge request all name the tip.
+                        let measured_branch = task.assignee.as_deref().map(|assignee| {
+                            recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
+                        });
+                        let parking = self.advance_commit_time_anchor_before_park(
+                            task_store.as_ref(),
+                            &task,
+                            &close_project_root,
+                            &resolved_parent_branch,
+                            measured_branch.as_deref(),
+                            anchor.as_deref(),
+                        );
                         // cas-4b3f: snapshot the factory branch's current
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
                         self.park_task_awaiting_merge(
                             task_store.as_ref(),
-                            &task,
+                            &parking,
                             "MERGE REQUIRED",
                             &msg,
                             anchor.clone(),
                             merge_conflicted,
                             task.assignee.as_deref().map(|assignee| {
-                                close_measured_factory_branch(&close_project_root, &task, assignee)
+                                recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
                             }),
                         );
                     } else {
@@ -8988,6 +9258,12 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(message)),
             };
             let has_delivery_window = task.task_type != TaskType::Epic || delivered_tip.is_some();
+            let tip_is_task_delivery = (task.task_type == TaskType::Epic && delivered_tip.is_some())
+                || req.commit_receipt.is_some()
+                || (supervisor_closing_merged_anchor
+                    && task.deliverables.factory_branch_anchor.is_some())
+                || parked_head.is_some()
+                || worker_worktree_path.is_some();
             // cas-b36b: an epic answers for its own resolved tip even when
             // the supervisor checkout holds an unrelated branch. cas-f0a6:
             // a merged child's anchor similarly replaces the checkout HEAD.
@@ -9007,6 +9283,20 @@ impl CasCore {
                 .as_ref()
                 .filter(|_| has_delivery_window)
                 .and_then(|window| {
+                    // cas-2d27: no-code ops have external proof, not the
+                    // supervisor checkout's unclaimed Rust delivery. Keep
+                    // positively identified task commits and every recorded
+                    // or explicitly supplied delivery on the ordinary path.
+                    if task.execution_note.as_deref() == Some("no-code")
+                        && !tip_is_task_delivery
+                        && !has_recorded_code_delivery(&task)
+                    {
+                        return task_attribution::identified_paths(
+                            proof_repo,
+                            &resolved_parent_branch,
+                            window,
+                        );
+                    }
                     task_attribution::paths(
                         proof_repo,
                         &resolved_parent_branch,
@@ -9073,12 +9363,6 @@ impl CasCore {
                 )));
             }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
-            let tip_is_task_delivery = (task.task_type == TaskType::Epic && delivered_tip.is_some())
-                || req.commit_receipt.is_some()
-                || (supervisor_closing_merged_anchor
-                    && task.deliverables.factory_branch_anchor.is_some())
-                || parked_head.is_some()
-                || worker_worktree_path.is_some();
             if let Some(range) = snapshot_gate_range(
                 proof_repo,
                 &resolved_parent_branch,
@@ -11984,6 +12268,52 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
         })
 }
 
+/// cas-baf7: the delivery's own non-artifact paths (its source), measured
+/// against the anchor's first parent, or its second for a merge anchor.
+/// `None` when Git cannot say.
+pub(super) fn delivery_source_paths(
+    repo_path: &std::path::Path,
+    anchor: &str,
+) -> Option<Vec<String>> {
+    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
+        format!("{anchor}^2")
+    } else {
+        format!("{anchor}^1")
+    };
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "--no-renames", &base, anchor, "--"])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty() && !regenerable_build_artifact(repo_path, path))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// cas-24d8: a regenerable artifact need not be walked line by line when the
+/// delivery carries source. If it is dropped, cas-baf7's rule
+/// ([`regenerated_artifact_drop_note`]) accepts it exactly when every other
+/// dropped path is an artifact too. Walking a minified bundle through
+/// hundreds of rebuilt epic commits was most of a 35s+ child close (cas-cee5
+/// replay). Callers record the path as dropped and let that rule decide.
+pub(super) fn artifact_left_to_regeneration_rule(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    path: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) -> bool {
+    regenerable_build_artifact(repo_path, path)
+        && *carries_source.get_or_init(|| {
+            delivery_source_paths(repo_path, anchor).is_some_and(|source| !source.is_empty())
+        })
+}
+
 /// cas-baf7: when the only "dropped" paths are regenerable build artifacts,
 /// the integration rebuilt them from the merged source of several deliveries
 /// (the standard fix for bundle merge conflicts), so minified output can never
@@ -12002,23 +12332,7 @@ fn regenerated_artifact_drop_note(
     {
         return None;
     }
-    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
-        format!("{anchor}^2")
-    } else {
-        format!("{anchor}^1")
-    };
-    let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", "--no-renames", &base, anchor, "--"])
-        .current_dir(repo_path)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    let delivered = String::from_utf8_lossy(&output.stdout);
-    let source: Vec<&str> = delivered
-        .lines()
-        .map(str::trim)
-        .filter(|path| !path.is_empty() && !regenerable_build_artifact(repo_path, path))
-        .collect();
+    let source = delivery_source_paths(repo_path, anchor)?;
     if source.is_empty() {
         return None;
     }
@@ -12396,7 +12710,65 @@ fn validated_delivery_content_review(
     )))
 }
 
+/// cas-24d8: the child-close content gate's share of the 55s tool deadline.
+/// Its ownership walks are memoized and skip unchanged edges, but a long
+/// epic history under host load can still exceed this; then the close
+/// returns a typed, retryable refusal instead of timing out with an unknown
+/// outcome.
+const CHILD_CONTENT_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
+
 fn anchored_delivery_content_gate(
+    task: &Task,
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    content_window: Option<&TaskCommitReceiptWindow>,
+    content_identity: &TaskCommitIdentity,
+    commit_receipt: Option<&str>,
+    supervisor_override_reason: Option<&str>,
+) -> Option<MergeStateGateOutcome> {
+    // cas-24d8: an outer epic collection may already own a shorter deadline.
+    let budget = epic_measurement::deadline()
+        .map(|deadline| deadline.remaining())
+        .unwrap_or(std::time::Duration::MAX)
+        .min(CHILD_CONTENT_GATE_BUDGET);
+    let _scope = epic_measurement::Scope::new(budget);
+    let started = std::time::Instant::now();
+    let outcome = anchored_delivery_content_gate_unbounded(
+        task,
+        repo_path,
+        anchor,
+        parent_branch,
+        content_window,
+        content_identity,
+        commit_receipt,
+        supervisor_override_reason,
+    );
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let expired = epic_measurement::expired();
+    tracing::info!(
+        target: "cas::close",
+        stage = "delivery_content_gate",
+        task_id = %task.id,
+        anchor = %anchor,
+        elapsed_ms,
+        expired,
+        "cas-24d8: delivery content gate finished"
+    );
+    if expired {
+        // An expired probe surfaces as an error, and some callers read an
+        // error as dropped content. Never report a verdict measured past the
+        // budget: refuse with the retry instead.
+        return Some(MergeStateGateOutcome::Reject(format!(
+            "DELIVERY CONTENT CHECK TIMED OUT: proving task {}'s delivery {anchor} on {parent_branch} took longer than {}s ({elapsed_ms} ms measured), so Cassy made no decision and changed nothing. Retry the close when the host is less loaded; if it keeps timing out, the epic history is too long to measure inside one tool call — report it with this message.",
+            task.id,
+            budget.as_secs()
+        )));
+    }
+    outcome
+}
+
+fn anchored_delivery_content_gate_unbounded(
     task: &Task,
     repo_path: &std::path::Path,
     anchor: &str,
@@ -12471,6 +12843,13 @@ fn anchored_delivery_content_gate(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
+            // before the byte-identity proof walks those bundles again.
+            if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                )));
+            }
             let (identical, paths) = match target_identical_delivered_paths(
                 task,
                 repo_path,
@@ -13095,10 +13474,21 @@ fn landed_anchor_receipt_rejection(
 
 pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     task: &Task,
+    req: &TaskCloseRequest,
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    attribution: TaskCommitAttribution<'_>,
+) -> MergeStateGateOutcome {
+    run_factory_branch_merge_gate_for_delivery(task, req, parent_branch, repo_path, attribution, None)
+}
+
+fn run_factory_branch_merge_gate_for_delivery(
+    task: &Task,
     _req: &TaskCloseRequest,
     parent_branch: &str,
     repo_path: &std::path::Path,
     attribution: TaskCommitAttribution<'_>,
+    validated_recovery_branch: Option<&str>,
 ) -> MergeStateGateOutcome {
     if task.task_type == TaskType::Epic {
         return MergeStateGateOutcome::Proceed;
@@ -13145,7 +13535,8 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // holds the task's commits.
     // cas-93db: never measure another task's delivery as this one. A valid
     // receipt still proves an integrated delivery after its branch is gone.
-    let factory_branch = match resolve_close_delivery_branch(repo_path, task, assignee) {
+    let factory_branch = match validated_recovery_branch.map(str::to_string)
+        .map(Ok).unwrap_or_else(|| resolve_close_delivery_branch(repo_path, task, assignee)) {
         Ok(branch) => branch,
         Err(reason)
             if !attribution.receipt.is_some_and(|receipt| {
@@ -20382,6 +20773,70 @@ fn parked_anchor_delivery_ref(
     None
 }
 
+/// Validate an explicit recovery boundary against the live remote in the
+/// task's declared repository. Local branches and cached origin refs cannot
+/// authorize a retired-worker close or a reopened QA request.
+/// Callers must establish live registered supervisor authority first.
+pub(crate) fn validate_pushed_task_receipt(
+    task: &Task,
+    context: &crate::mcp::tools::core::task::repo_context::RepoContext,
+    receipt: &str,
+) -> Result<(String, String), String> {
+    let receipt = receipt.trim();
+    if !matches!(receipt.len(), 40 | 64)
+        || !receipt.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("PUSHED TASK RECEIPT REJECTED: supply the full hexadecimal commit SHA".into());
+    }
+    let own_task = task.assignee.as_deref()
+        .map(|assignee| crate::factory_isolation::worker_task_branch(assignee, &task.id));
+    let candidates = task_delivery_branch_candidates(task);
+    for branch in candidates {
+        // A shared worker lane is not task identity without a durable record.
+        if own_task.as_deref() != Some(branch.as_str())
+            && task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
+            && !task.deliverables.handoff_branches.contains(&branch)
+        {
+            continue;
+        }
+        let Some(pushed) = crate::qa_pass::pushed_branch_tip(&context.repo_root, &branch) else {
+            continue;
+        };
+        if !pushed.eq_ignore_ascii_case(receipt) {
+            continue;
+        }
+        let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+        if run_bounded_git_fetch(&context.repo_root, &["fetch", "--quiet", "--no-tags", "origin", &refspec])
+            != BoundedFetch::Succeeded
+        {
+            return Err(format!("PUSHED TASK RECEIPT REJECTED: cannot fetch live task branch {branch}"));
+        }
+        let remote = format!("refs/remotes/origin/{branch}");
+        let tip = resolve_task_commit_receipt_sha(&context.repo_root, receipt)?;
+        if resolve_branch_sha(&context.repo_root, &remote).as_deref() != Some(tip.as_str()) {
+            return Err("PUSHED TASK RECEIPT REJECTED: remote task tip changed during validation; retry with its current SHA".into());
+        }
+        fetch_parent_branch_best_effort(&context.repo_root, &context.target_branch);
+        let (target, _) = preferred_live_target_ref_for_delivery(
+            &context.repo_root, &context.target_branch, task.delivery_mode);
+        if git_merge_base(&context.repo_root, &target, &tip).is_none() {
+            return Err("PUSHED TASK RECEIPT REJECTED: delivery has no common history with the declared target".into());
+        }
+        let attributed = task_tip_has_non_empty_attributed_diff(
+            &context.repo_root, task, &tip, task.deliverables.factory_branch_anchor.as_deref());
+        let correction = task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
+            parked_anchor_advance_is_attributable(&context.repo_root, anchor, &tip, &task.id, None)
+        });
+        if !attributed && !correction {
+            return Err(format!("PUSHED TASK RECEIPT REJECTED: {tip} is not attributable to task {}", task.id));
+        }
+        return Ok((branch, tip));
+    }
+    Err(format!(
+        "PUSHED TASK RECEIPT REJECTED: {receipt} is not the live pushed tip of task {}'s per-task or recorded delivery branch in {}. Push that branch and retry; a local ref, stale origin ref, or unrelated branch is insufficient.",
+        task.id, context.repo_root.display()))
+}
+
 fn pre_close_unreachable_rejection(
     task_id: &str,
     commit: &str,
@@ -20589,8 +21044,13 @@ pub(crate) fn run_declared_pre_close_hook(
                     && derived_epic_anchor.is_none()
                     && parked_anchor_delivery_ref(&repo_context.repo_root, task, tip).is_some()
             };
+            let receipt_is_pushed_recovery = supervisor_override
+                && !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref)
+                && normalized_receipt.is_some()
+                && validate_pushed_task_receipt(task, repo_context, tip).is_ok();
             if !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref)
                 && !anchor_is_unmerged_delivery()
+                && !receipt_is_pushed_recovery
             {
                 return Err(pre_close_unreachable_rejection(
                     &task.id,
@@ -20607,9 +21067,9 @@ pub(crate) fn run_declared_pre_close_hook(
                     supervisor_override,
                 ));
             }
-            let lint_parent = if normalized_receipt.is_some()
+            let lint_parent = if (normalized_receipt.is_some() && !receipt_is_pushed_recovery)
                 || derived_epic_anchor.is_some()
-                || (supervisor_override
+                || (supervisor_override && !receipt_is_pushed_recovery
                     && task.deliverables.factory_branch_anchor.as_deref() == Some(tip))
             {
                 target_only_receipt_lint_parent(&repo_context.repo_root, tip)?
@@ -24336,7 +24796,7 @@ mod merge_state_gate_tests {
     /// real handler. A worker delivers on its recorded System-A branch, the
     /// delivery lands on the target by squash, and the worker starts its next
     /// task on a per-task branch in the same checkout. The task never parked.
-    /// A close without override is still refused on the branch mismatch; a
+    /// A worker self-close is still refused on the branch mismatch; a
     /// supervisor override close naming the merged commit closes it.
     #[tokio::test]
     async fn override_close_with_merged_receipt_ignores_workers_next_branch_cas_f01b() {
@@ -24435,13 +24895,24 @@ mod merge_state_gate_tests {
                 .join("\n")
         };
 
-        // Without the override the worktree branch mismatch still refuses.
+        // A worker's own close still validates the current checkout even
+        // when a merged receipt exists; supervisor authority is required.
+        agents
+            .register(&Agent::new_with_role(
+                "rapid-cobra-76".into(),
+                "rapid-cobra-76".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        let worker_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        worker_core.set_agent_id_for_testing("rapid-cobra-76".into());
+        let worker_service = CasService::new(worker_core, None);
         let request = serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "reason": "delivered",
             "commit_receipt": squash,
         }))
         .unwrap();
-        let refused = text(service.task(Parameters(request)).await.unwrap());
+        let refused = text(worker_service.task(Parameters(request)).await.unwrap());
         assert!(
             refused.contains("expected task worktree branch `factory/rapid-cobra-76`")
                 && refused.contains("factory/rapid-cobra-76-1ae5"),
@@ -24462,6 +24933,370 @@ mod merge_state_gate_tests {
         assert!(!is_error, "{closed}");
         assert!(!closed.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{closed}");
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
+    }
+
+    /// A live worker is legitimately detached at another QA task's bound tip.
+    /// The supervisor receipt names the old delivery on its declared target;
+    /// closing it must not require a review-gate override.
+    async fn detached_assignee_close_cas_258f(supervisor: bool, self_close: bool, merged: bool) {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+            open_worktree_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget, Worktree};
+
+        let mut env = TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.md"), "seed\n").unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", "seed.md", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        let seed = rev_parse_local(p, "HEAD");
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-258f-fixture\"\n\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+
+        let worker = "active-raven-258f";
+        let branch = "factory/active-raven-258f";
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join(worker);
+        git(
+            p,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(wt.join("report.md"), "delivered report\n").unwrap();
+        git(&wt, &["add", "report.md"]);
+        git(
+            &wt,
+            &["commit", "-q", "-m", "docs(cas-258f): delivered report"],
+        );
+        let receipt = rev_parse_local(&wt, "HEAD");
+        if merged {
+            git(p, &["merge", "-q", "--ff-only", branch]);
+        }
+        git(
+            &wt,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "factory/active-raven-258f-cas-other",
+                &seed,
+            ],
+        );
+        std::fs::write(wt.join("other.md"), "another QA task\n").unwrap();
+        git(&wt, &["add", "other.md"]);
+        git(
+            &wt,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "docs(cas-other): unrelated QA bound tip",
+            ],
+        );
+        let qa_tip = rev_parse_local(&wt, "HEAD");
+        git(&wt, &["checkout", "-q", "--detach"]);
+        assert!(!git_commit_is_ancestor(&wt, &receipt, "HEAD"));
+        assert_eq!(git_commit_is_ancestor(p, &receipt, "main"), merged);
+
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        // A role string cannot authorize the receipt-only path for a worker.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let worktree_store = open_worktree_store(&cas_dir).unwrap();
+        worktree_store.init().unwrap();
+        worktree_store
+            .add(&Worktree::new(
+                "wt-258f".into(),
+                branch.into(),
+                "main".into(),
+                wt.clone(),
+            ))
+            .unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                worker.into(),
+                worker.into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        let actor = if self_close {
+            worker
+        } else {
+            "cas-258f-caller"
+        };
+        if !self_close {
+            agents
+                .register(&Agent::new_with_role(
+                    actor.into(),
+                    actor.into(),
+                    if supervisor {
+                        AgentRole::Supervisor
+                    } else {
+                        AgentRole::Worker
+                    },
+                ))
+                .unwrap();
+        }
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task(worker);
+        task.id = "cas-258f".into();
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.worktree_id = Some("wt-258f".into());
+        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-258f-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "close the target-bound delivery",
+            "commit_receipt": receipt,
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let is_error = response.is_error == Some(true);
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let after = store.get(&task.id).unwrap();
+        if supervisor && merged {
+            assert!(
+                !is_error,
+                "merged receipt must close without override: {text}"
+            );
+            assert_eq!(after.status, TaskStatus::Closed, "{text}");
+            let hook = after
+                .deliverables
+                .pre_close_hook
+                .as_ref()
+                .expect("target-bound hook evidence");
+            assert_eq!(hook.task_tip.as_deref(), Some(receipt.as_str()));
+            assert!(
+                hook.worktree_branch.is_none(),
+                "assignee checkout must not supply proof"
+            );
+        } else {
+            assert!(is_error, "unsafe receipt/actor must be refused: {text}");
+            assert_ne!(after.status, TaskStatus::Closed, "{text}");
+            assert!(text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
+            assert!(text.contains("expected task worktree branch"), "{text}");
+            assert!(
+                after.deliverables.pre_close_hook.is_none(),
+                "no hook may run on unrelated checkout"
+            );
+        }
+        assert_eq!(
+            rev_parse_local(&wt, "HEAD"),
+            qa_tip,
+            "close must leave QA checkout untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_merged_receipt_ignores_detached_assignee_without_override_cas_258f() {
+        detached_assignee_close_cas_258f(true, false, true).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_unmerged_receipt_cannot_skip_detached_assignee_cas_258f() {
+        detached_assignee_close_cas_258f(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn worker_self_close_still_validates_detached_checkout_cas_258f() {
+        detached_assignee_close_cas_258f(false, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn non_supervisor_close_cannot_skip_detached_assignee_cas_258f() {
+        detached_assignee_close_cas_258f(false, false, true).await;
+    }
+    /// A reopened delivery remains on origin after its retired author's
+    /// checkout switches to unrelated work. Exercise the public close entry,
+    /// rather than manufacturing pre-close hook evidence directly.
+    async fn retired_worker_receipt_close_cas_9ffa(status: TaskStatus, published: bool, qa_request: bool) {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, AgentStatus, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", "seed.txt", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+
+        let worker = "retired-raven-9ffa";
+        let branch = "factory/retired-raven-9ffa-cas-9ffa";
+        let wt = p.join(".cas/worktrees").join(worker);
+        git(p, &["worktree", "add", "-q", "-b", branch, wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-9ffa): original delivery"]);
+        let original = rev_parse_local(&wt, "HEAD");
+        std::fs::write(wt.join("delivery.rs"), "pub fn corrected_delivery() {}\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "fix(cas-9ffa): requested correction"]);
+        let corrected = rev_parse_local(&wt, "HEAD");
+        if published {
+            git(&wt, &["push", "-q", "origin", branch]);
+        }
+        git(&wt, &["checkout", "-q", "-b", "factory/retired-raven-9ffa-cas-other", "main"]);
+        std::fs::write(wt.join("other.rs"), "pub fn unrelated() {}\n").unwrap();
+        git(&wt, &["add", "other.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-other): unrelated task"]);
+        git(&wt, &["checkout", "-q", "--detach"]);
+        // No local delivery branch can authorize this close. Only the pushed
+        // per-task ref may establish the supervisor's explicit boundary.
+        git(p, &["branch", "-D", branch]);
+        if status == TaskStatus::InProgress && published && !qa_request {
+            git(p, &["branch", branch, &original]);
+        }
+        assert!(!git_commit_is_ancestor(p, &corrected, "main"));
+        assert!(!git_commit_is_ancestor(&wt, &corrected, "HEAD"));
+
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-9ffa-fixture\"\n\n[verification]\nenabled = false\n").unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let mut retired = Agent::new_with_role(worker.into(), worker.into(), AgentRole::Worker);
+        retired.status = AgentStatus::Shutdown;
+        agents.register(&retired).unwrap();
+        let actor = "cas-9ffa-supervisor";
+        agents.register(&Agent::new_with_role(actor.into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task(worker);
+        task.id = "cas-9ffa".into();
+        task.status = status;
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.demo_statement = "Corrected delivery can receive an independent QA round".into();
+        task.deliverables.factory_branch_anchor = Some(original.clone());
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-9ffa-fixture".into(), target_branch: "main".into(),
+        });
+        task.notes = "Reopened after request_changes; assignee retired before re-parking".into();
+        store.add(&task).unwrap();
+        let response = if qa_request {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "qa_request", "task_id": task.id, "head_sha": corrected,
+                "summary": "Inspect the reopened corrected delivery of the retired worker",
+            })).unwrap();
+            service.verification(Parameters(request)).await.unwrap_or_else(|error| {
+                CasCore::tool_error(error.message.to_string())
+            })
+        } else {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "close", "id": task.id, "supervisor_override": true,
+                "commit_receipt": corrected, "reason": "Inspected the pushed corrected delivery of the retired worker",
+            })).unwrap();
+            service.task(Parameters(request)).await.unwrap()
+        };
+        let text = response.content.into_iter().filter_map(|content| match content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        let after = store.get(&task.id).unwrap();
+        let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
+        if published {
+            assert!(!text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
+            if qa_request {
+                assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
+                assert_eq!(after.status, status, "QA request must not waive the close gates: {text}");
+            } else {
+                assert!(text.contains("MERGE REQUIRED"), "{text}");
+                assert_eq!(after.status, TaskStatus::AwaitingMerge, "{text}");
+                assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(corrected.as_str()), "{text}");
+            }
+            assert_eq!(after.deliverables.parked_branch.as_deref(), Some(branch), "{text}");
+            assert_eq!(rounds.len(), 1, "{text}");
+            assert_eq!(rounds[0].bound_head, corrected, "{text}");
+            assert_eq!(rounds[0].branch.strip_prefix("origin/").unwrap_or(&rounds[0].branch), branch, "{text}");
+        } else {
+            assert_eq!(response.is_error, Some(true), "{text}");
+            assert_eq!(after.status, status, "unpublished delivery must not be parked: {text}");
+            assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(original.as_str()));
+            assert!(rounds.is_empty(), "unpublished delivery must not dispatch QA: {text}");
+        }
+        assert_eq!(rev_parse_local(&wt, "HEAD"), rev_parse_local(&wt, "factory/retired-raven-9ffa-cas-other"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_parks_reopened_retired_workers_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_parks_inprogress_retired_workers_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::InProgress, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_refuses_unpublished_retired_workers_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_requests_qa_for_reopened_pushed_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_qa_request_refuses_unpublished_receipt_cas_9ffa() {
+        retired_worker_receipt_close_cas_9ffa(TaskStatus::Open, false, true).await;
     }
 
     /// cas-f1f4 (GH #1087): the gabber-studio cas-4c7d sequence through the
@@ -28040,6 +28875,113 @@ mod merge_state_gate_tests {
         git(p, &["commit", "-qm", "delete delivered line"]);
         assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    /// cas-24d8: a content gate that runs out of its budget refuses with a
+    /// typed, retryable message. A probe that expired surfaces as an error,
+    /// which some callers read as dropped content, so no verdict measured past
+    /// the deadline may be reported.
+    #[test]
+    fn content_gate_past_its_budget_refuses_instead_of_guessing_cas_24d8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(delivery.clone());
+        let window = window_at(0, "expired budget");
+        let _outer = crate::git_evidence::measurement::Scope::new(std::time::Duration::ZERO);
+        let outcome = anchored_delivery_content_gate(
+            &task,
+            p,
+            &delivery,
+            "main",
+            Some(&window),
+            &window.identity,
+            None,
+            None,
+        );
+        assert!(
+            matches!(&outcome, Some(MergeStateGateOutcome::Reject(message))
+                if message.contains("DELIVERY CONTENT CHECK TIMED OUT")),
+            "{outcome:?}"
+        );
+    }
+
+    /// cas-24d8: the cas-cee5 shape. A delivered line followed by a long
+    /// ancestry of commits that never touch its file (built with one
+    /// fast-import) is proven present well inside a tight measurement budget.
+    /// Before the fix every edge spawned `git show` and `git diff`, about 2k
+    /// processes here, which exhausts the budget.
+    #[test]
+    fn long_unrelated_ancestry_is_measured_inside_a_tight_budget_cas_24d8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        let parent = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", &format!("{delivery}^")])
+                .current_dir(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let mut stream = String::new();
+        for index in 0..1000 {
+            let message = format!("unrelated {index}\n");
+            let content = format!("{index}\n");
+            stream.push_str("commit refs/heads/long-target\n");
+            stream.push_str("committer fixture <fixture@example.test> 1767225600 +0000\n");
+            stream.push_str(&format!("data {}\n{message}", message.len()));
+            if index == 0 {
+                stream.push_str(&format!("from {delivery}\n"));
+            }
+            stream.push_str(&format!(
+                "M 100644 inline other.txt\ndata {}\n{content}\n",
+                content.len()
+            ));
+        }
+        let mut import = std::process::Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(p)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            import
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stream.as_bytes())
+                .unwrap();
+        }
+        assert!(import.wait().unwrap().success(), "fast-import failed");
+        let _budget =
+            crate::git_evidence::measurement::Scope::new(std::time::Duration::from_secs(5));
+        let presence = super::delivery_evolution::line_content_presence(
+            p,
+            &parent,
+            &delivery,
+            "long-target",
+            "work.rs",
+        );
+        assert!(
+            !crate::git_evidence::measurement::expired(),
+            "the walk exhausted its budget"
+        );
+        assert_eq!(
+            presence.unwrap(),
+            Some(DeliveryContentPresence::Present {
+                paths: vec!["work.rs".into()]
+            })
+        );
     }
 
     /// Replays immutable production delivery anchors. Run explicitly in a
@@ -34594,6 +35536,83 @@ mod zero_change_close_tests {
 
         assert_eq!(evidence.task_tip.as_deref(), Some(merge_tip.as_str()));
         assert_ne!(epic_tip, old_epic_tip);
+    }
+
+    fn pushed_receipt_fixture_cas_9ffa() -> (TempDir, TempDir, Task, String) {
+        let (dir, origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        let branch = "factory/test-worker-cas-9ffa";
+        git(p, &["checkout", "-q", "-b", branch]);
+        std::fs::write(p.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-9ffa): corrected delivery"]);
+        let receipt = head_sha(p);
+        git(p, &["push", "-q", "origin", branch]);
+        git(p, &["checkout", "-q", "main"]);
+        let mut task = Task::new("cas-9ffa".into(), "retired delivery".into());
+        task.assignee = Some("test-worker".into());
+        task.deliverables.parked_branch = Some(branch.into());
+        (dir, origin, task, receipt)
+    }
+
+    #[test]
+    fn pre_close_validates_pushed_receipt_without_retired_checkout_cas_9ffa() {
+        let (dir, _origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        let evidence = run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), true).expect("supervisor identifies the pushed correction");
+        assert_eq!(evidence.task_tip.as_deref(), Some(receipt.as_str()));
+        assert!(evidence.worktree_branch.is_none());
+        assert_eq!(evidence.target_branch, "main");
+        assert!(!git_commit_is_ancestor(dir.path(), &receipt, "origin/main"),
+            "pre-close proof must not imply integration");
+    }
+
+    #[test]
+    fn pre_close_still_refuses_unmerged_worker_receipt_cas_9ffa() {
+        let (dir, _origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), false).expect_err("ordinary receipt must still be integrated");
+        assert!(error.contains("not reachable") && error.contains("live target_branch"), "{error}");
+    }
+
+    #[test]
+    fn pre_close_rejects_deleted_remote_with_stale_cache_cas_9ffa() {
+        let (dir, origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        let branch = task.deliverables.parked_branch.as_deref().unwrap();
+        git(origin.path(), &["update-ref", "-d", &format!("refs/heads/{branch}")]);
+        assert!(git_ref_exists(dir.path(), &format!("origin/{branch}")), "keep stale cache");
+        run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), true).expect_err("cached remote or local branch cannot authorize recovery");
+    }
+
+    #[test]
+    fn pre_close_rejects_receipt_pushed_only_to_foreign_branch_cas_9ffa() {
+        let (dir, origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
+        git(dir.path(), &["push", "-q", "origin", &format!("{receipt}:refs/heads/factory/foreign-cas-other")]);
+        let branch = task.deliverables.parked_branch.as_deref().unwrap();
+        git(origin.path(), &["update-ref", "-d", &format!("refs/heads/{branch}")]);
+        run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
+            None, Some(&receipt), true).expect_err("an unrelated pushed branch is insufficient");
+    }
+
+    #[test]
+    fn pre_close_lints_whole_unmerged_delivery_cas_9ffa() {
+        let (dir, _origin, task, _receipt) = pushed_receipt_fixture_cas_9ffa();
+        let p = dir.path();
+        let branch = task.deliverables.parked_branch.as_deref().unwrap();
+        git(p, &["checkout", "-q", branch]);
+        std::fs::write(p.join("unfinished.rs"), concat!("pub fn unfinished() { to", "do!(); }\n")).unwrap();
+        git(p, &["add", "unfinished.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-9ffa): unfinished work"]);
+        std::fs::write(p.join("correction.rs"), "pub fn correction() {}\n").unwrap();
+        git(p, &["add", "correction.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-9ffa): later correction"]);
+        let receipt = head_sha(p);
+        git(p, &["push", "-q", "origin", branch]);
+        git(p, &["checkout", "-q", "main"]);
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(p),
+            None, Some(&receipt), true).expect_err("last-commit-only lint hides earlier unfinished work");
+        assert!(error.contains(concat!("to", "do!()")) && error.contains("unfinished.rs"), "{error}");
     }
 
     #[test]

@@ -1367,6 +1367,9 @@ const LIFECYCLE_RENUDGE_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// from the longer lifecycle re-nudge budget, which protects supervisor
 /// lifecycle traffic from transient absence.
 const MAX_CONSECUTIVE_WAKE_GATE_DECLINES: u32 = 3;
+/// cas-d1659: dedupe key prefix for the one supervisor notice about a
+/// wake-starved row; the suffix is the row's `prompt_queue.id`.
+const WAKE_STARVED_DEDUPE_PREFIX: &str = "wake-starved:";
 
 /// cas-d732: what to do with a lifecycle row that is up for (re)delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1581,6 +1584,20 @@ pub(super) const CLAUDE_ACTIVE_TRANSCRIPT_WINDOW: std::time::Duration =
 /// transcript yet is treated as still booting its TUI rather than unreachable.
 pub(super) const CLAUDE_FIRST_PROMPT_GRACE: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
+/// cas-d1659: how long a row parked for a busy recipient stays out of daemon
+/// selection before the daemon looks at it again. The recheck offers nothing
+/// to a busy pane; it only re-parks the row, or escalates once the recipient
+/// has gone silent for [`CLAUDE_ACTIVE_TRANSCRIPT_WINDOW`].
+pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2 * 60);
+
+/// cas-d1659: whether a wake-starved row is escalated to the supervisor. A
+/// recipient still writing its transcript (or holding a tool call open, or
+/// still booting) is busy, not failed: its next turn start or tool call
+/// surfaces the row, so "reassign or recycle" would be false advice.
+pub(super) fn wake_starved_needs_supervisor(evidence: RecipientWakeEvidence) -> bool {
+    !evidence.recently_active && !evidence.awaiting_first_prompt
+}
 
 /// cas-5129: evidence about a Claude recipient beyond its turn boundary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2151,21 +2168,25 @@ pub(super) fn escalate_undelivered_supervisor_relays(
                 continue;
             }
         };
-        match queue.enqueue_idempotent(
-            "relay-watchdog",
-            "operator",
-            &payload,
-            Some(factory_session),
-            Some(summary.as_str()),
-            Some(cas_store::NotificationPriority::High),
-            &format!(
-                "{}{}",
-                cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX,
-                queued.id
-            ),
-            Some(&cas_store::QueueOrigin::Daemon),
-        ) {
-            Ok(cas_store::EnqueueIdempotentResult::Created(alert_id)) => {
+        match queue.record_operator_turn(&cas_store::OperatorTurn {
+            source: "relay-watchdog",
+            target: "operator",
+            prompt: &payload,
+            factory_session: Some(factory_session),
+            metadata: cas_store::OperatorTurnMetadata {
+                summary: Some(summary.as_str()),
+                priority: Some(cas_store::NotificationPriority::High),
+                origin: Some(&cas_store::QueueOrigin::Daemon),
+                kind: Some("blocker"),
+                dedupe_key: Some(&format!(
+                    "{}{}",
+                    cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX,
+                    queued.id
+                )),
+                ..Default::default()
+            },
+        }) {
+            Ok(cas_store::EnqueueOutcome::Created(alert_id)) => {
                 alerts.push(RelayOperatorAlert {
                     relay_id: queued.id,
                     alert_id,
@@ -3279,6 +3300,69 @@ impl FactoryDaemon {
     /// wake/redelivery budget. Keep the notice short: forwarding the original
     /// dispatch is exactly how a prompt-overflow failure becomes another
     /// prompt-overflow failure (GH #751).
+    /// cas-d1659: the wake budget for `queued` is spent. Stop offering wakes
+    /// but keep the row pending and surfaceable, so the recipient's next turn
+    /// start or tool call injects it instead of the row being abandoned. The
+    /// supervisor is told only when `escalate` is set and the recipient's
+    /// transcript has been silent for [`CLAUDE_ACTIVE_TRANSCRIPT_WINDOW`].
+    /// Returns whether the supervisor was (or already had been) told.
+    fn park_wake_starved_row(
+        &mut self,
+        queue: &dyn cas_store::PromptQueueStore,
+        queued: &cas_store::QueuedPrompt,
+        pane_target: &str,
+        attempts: u32,
+        escalate: bool,
+    ) -> bool {
+        let silent =
+            escalate && wake_starved_needs_supervisor(self.recipient_wake_evidence(pane_target));
+        let detail = if silent {
+            format!(
+                "wake budget spent after {attempts} attempts and the recipient's transcript has been \
+                 silent for {}+ minutes; escalated to the supervisor. Wake retries stopped; the message \
+                 stays queued and surfaces at the recipient's next turn start or tool call",
+                CLAUDE_ACTIVE_TRANSCRIPT_WINDOW.as_secs() / 60
+            )
+        } else {
+            format!(
+                "recipient busy: wake budget spent after {attempts} attempts, so wake retries \
+                 stopped. The message stays queued and surfaces at the recipient's next turn \
+                 start or tool call"
+            )
+        };
+        let recheck_at = chrono::Utc::now()
+            + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL)
+                .unwrap_or_else(|_| chrono::Duration::minutes(2));
+        if let Err(error) =
+            queue.park_for_busy_recipient(queued.id, Some(detail.as_str()), recheck_at)
+        {
+            tracing::warn!(
+                target: "cas::coordination",
+                message_id = queued.id,
+                %error,
+                "cas-d1659: could not park a wake-starved row; it stays pending"
+            );
+        }
+        // Live probes would keep acting on a row Cassy decided to stop
+        // waking. The redelivery counters stay, so the recheck lands on the
+        // same exhausted budget instead of starting a fresh one.
+        self.urgent_wake_probes.remove(&queued.id);
+        self.normal_delivery_probes.remove(&queued.id);
+        if silent {
+            self.notify_wake_starved_supervisor(queue, queued, pane_target, attempts);
+        }
+        tracing::info!(
+            target: "cas::coordination",
+            stage = "wake_starved_parked",
+            message_id = queued.id,
+            target_agent = %pane_target,
+            attempts,
+            escalated = silent,
+            "cas-d1659: wake budget spent; row parked for the recipient's next turn"
+        );
+        silent
+    }
+
     fn notify_wake_starved_supervisor(
         &self,
         queue: &dyn cas_store::PromptQueueStore,
@@ -3294,18 +3378,30 @@ impl FactoryDaemon {
             .take(240)
             .collect();
         let notice = format!(
-            "<system-notice>Claude worker wake failed: notification_id={}; target='{}'; attempts={}; summary='{}'. The bounded redelivery budget was exhausted without a transcript reaction. Reassign or recycle the worker; Cassy stopped retrying this dispatch to protect its context.</system-notice>",
-            queued.id, pane_target, attempts, summary
+            "<system-notice>Claude worker wake failed: notification_id={}; target='{}'; attempts={}; summary='{}'. The bounded redelivery budget was exhausted and the worker's transcript has been silent for {}+ minutes. Reassign or recycle the worker; Cassy stopped retrying wakes to protect its context. The message stays queued and surfaces if the worker takes another turn.</system-notice>",
+            queued.id,
+            pane_target,
+            attempts,
+            summary,
+            CLAUDE_ACTIVE_TRANSCRIPT_WINDOW.as_secs() / 60
         );
         let summary_line = format!("Claude wake budget exhausted: {}", pane_target);
-        match queue.enqueue_with_summary(
+        // cas-d1659: the starved row now stays pending and is rechecked, so
+        // the notice is keyed to it: one escalation per message, however many
+        // rechecks find the recipient still silent.
+        let dedupe_key = format!("{WAKE_STARVED_DEDUPE_PREFIX}{}", queued.id);
+        match queue.enqueue_idempotent(
             "daemon",
             self.app.supervisor_name(),
             &notice,
             Some(self.session_name.as_str()),
             Some(&summary_line),
+            None,
+            &dedupe_key,
+            None,
         ) {
-            Ok(id) => {
+            Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => {}
+            Ok(cas_store::EnqueueIdempotentResult::Created(id)) => {
                 super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
                 tracing::warn!(
                     target: "cas::coordination",
@@ -5682,6 +5778,16 @@ impl FactoryDaemon {
                     );
                 }
                 let decision = match turn_aware {
+                    // cas-d1659: a spent budget stays parked whatever the
+                    // turn state. Without this a busy recipient's recheck
+                    // fell into the cooldown below, which re-labels the row
+                    // and re-polls it every tick instead of waiting for the
+                    // recipient's next turn.
+                    _ if queued.acked_at.is_none()
+                        && attempts >= CLAUDE_REDELIVERY_MAX_ATTEMPTS =>
+                    {
+                        ClaudeRedelivery::StopUndelivered
+                    }
                     TurnAwareRetry::Wait if queued.acked_at.is_none() => ClaudeRedelivery::Cooldown,
                     TurnAwareRetry::OfferNow => claude_redelivery_decision_after_turn(
                         queued.acked_at.is_some(),
@@ -5719,20 +5825,15 @@ impl FactoryDaemon {
                         continue;
                     }
                     ClaudeRedelivery::StopUndelivered => {
-                        let detail = format!(
-                            "Claude inbox wake/redelivery budget exhausted after {attempts} attempts; escalated to supervisor"
-                        );
-                        let _ = queue.mark_undelivered_after_wake_declines(
-                            queued.id,
-                            Some(detail.as_str()),
-                        );
-                        self.notify_wake_starved_supervisor(
+                        // cas-d1659: stop waking, keep the message.
+                        let pane_target = pane_target.to_string();
+                        self.park_wake_starved_row(
                             queue.as_ref(),
                             &queued,
-                            pane_target,
+                            &pane_target,
                             attempts,
+                            true,
                         );
-                        self.forget_row_delivery_state(queued.id);
                         continue;
                     }
                 }
@@ -5890,15 +5991,18 @@ impl FactoryDaemon {
                             let _ = queue
                                 .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
                         } else {
-                            let detail = format!(
-                                "wake gate declined {} consecutive re-offers while the recipient remained busy; \
-                                 flagged undelivered_after instead of waiting indefinitely for pane silence",
+                            // cas-d1659: an ordinary message is not a relay
+                            // whose premise expires. Stop re-nudging, keep the
+                            // row for the recipient's next turn.
+                            let pane_target = pane_target.to_string();
+                            self.park_wake_starved_row(
+                                queue.as_ref(),
+                                &queued,
+                                &pane_target,
                                 LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+                                false,
                             );
-                            let _ = queue.mark_undelivered_after_wake_declines(
-                                queued.id,
-                                Some(detail.as_str()),
-                            );
+                            continue;
                         }
                         self.forget_row_delivery_state(queued.id);
                         tracing::error!(
@@ -6454,30 +6558,15 @@ impl FactoryDaemon {
                         )
                         {
                             Ok(Some(declines)) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
-                                let detail = format!(
-                                    "wake gate declined {declines} consecutive re-offers while the recipient remained busy; \
-                                     flagged undelivered_after instead of waiting indefinitely for pane silence"
-                                );
-                                let _ = queue.mark_undelivered_after_wake_declines(
-                                    queued.id,
-                                    Some(detail.as_str()),
-                                );
-                                if claude_inbox_target {
-                                    self.notify_wake_starved_supervisor(
-                                        queue.as_ref(),
-                                        &queued,
-                                        &pane_target,
-                                        declines,
-                                    );
-                                }
-                                self.forget_row_delivery_state(queued.id);
-                                tracing::warn!(
-                                    target: "cas::coordination",
-                                    stage = "wake_starved_undelivered",
-                                    message_id = queued.id,
-                                    target_agent = %pane_target,
+                                // cas-d1659: a busy recipient keeps the row;
+                                // only a silent Claude recipient escalates.
+                                let pane = pane_target.to_string();
+                                self.park_wake_starved_row(
+                                    queue.as_ref(),
+                                    &queued,
+                                    &pane,
                                     declines,
-                                    "cas-dcf2: normal message exhausted consecutive busy wake declines"
+                                    claude_inbox_target,
                                 );
                                 queue.release_recipient_transport(queued.id, &queued.target)?;
                                 continue;
@@ -9552,6 +9641,12 @@ mod tests {
         );
         let payload: crate::ui::factory::OperatorReplyPayload =
             serde_json::from_str(&operator_rows[0].prompt).unwrap();
+        let local = cas_store::SqlitePromptQueueStore::open(&cas_dir).unwrap();
+        let event = local.operator_delivery_event(operator_rows[0].id).unwrap().unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&event.payload_snapshot).unwrap();
+        assert_eq!(snapshot["prompt"], operator_rows[0].prompt);
+        assert_eq!(snapshot["kind"], "blocker");
+        assert_eq!(event.audience_state, "unenrolled");
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
         assert_eq!(payload.device_id, "*");
         assert_eq!(
@@ -14470,10 +14565,30 @@ mod declined_wake_retry_tests_cas_913c {
         ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome, claude_redelivery_decision_after_turn,
         RecipientWakeEvidence, claude_turn_aware_retry, claude_turn_aware_retry_with_evidence,
         deferred_inbox_drain_phase, deferred_inbox_outcome,
-        idle_unacked_relay_due, wake_retry_due_to_turn_end,
+        idle_unacked_relay_due, wake_retry_due_to_turn_end, wake_starved_needs_supervisor,
     };
     use chrono::{Duration as Chrono, TimeZone, Utc};
     use std::time::Duration;
+
+    /// cas-d1659 (AC2): "wake failed: reassign or recycle" is for a silent
+    /// recipient only. A worker still writing its transcript, holding a tool
+    /// call open, or still booting is busy, and its message waits for its
+    /// next turn instead of paging the supervisor.
+    #[test]
+    fn cas_d1659_only_a_silent_recipient_escalates_a_spent_wake_budget() {
+        let busy = RecipientWakeEvidence {
+            recently_active: true,
+            awaiting_first_prompt: false,
+        };
+        let booting = RecipientWakeEvidence {
+            recently_active: false,
+            awaiting_first_prompt: true,
+        };
+        let silent = RecipientWakeEvidence::default();
+        assert!(!wake_starved_needs_supervisor(busy));
+        assert!(!wake_starved_needs_supervisor(booting));
+        assert!(wake_starved_needs_supervisor(silent));
+    }
 
     fn pane(silent_for: Duration) -> PaneWakeState {
         PaneWakeState {

@@ -1,4 +1,5 @@
-import { test, expect } from "./journey";
+import { phoneLayout, phoneReply } from "./responsive-goals";
+import { test, expect, journeyPart } from "./journey";
 import type { Machine } from "./hub-double";
 import { expectDraft, installDraftDiagnostic } from "./draft-diagnostic";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -23,6 +24,7 @@ async function swipeAway(locator: import("@playwright/test").Locator, dx: number
 }
 
 test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
+  if (await phoneLayout(page)) { await phoneReply(page, journey); return; }
   // Nineteen stages; on a loaded host (load ~50) the full run took 108 s of
   // the old 120 s budget (cas-f657 QA N2). Every wait inside is event-driven,
   // so the budget only needs headroom, as HUB-J3 has.
@@ -93,6 +95,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     const delivered = page.locator('.conversation-turn[data-state="acknowledged"]');
     await expect(delivered.getByRole("status")).toHaveText("Delivered");
     await expect(page.getByText(/Sending to /)).toHaveCount(0);
+    // cas-387e: a Delivered message never sits above "will go out by itself".
+    await expect(page.locator("#message-status")).toBeHidden();
   });
 
   await journey.stage("See it answered", async () => {
@@ -363,6 +367,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.locator(".conversation-turn").filter({ hasText: "Is the gate green yet?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Is the gate green yet?")).toHaveCount(1);
+    // cas-387e: Retry on a live session never says the message waits for the connection.
+    await expect(page.locator("#message-status")).toBeHidden();
   });
 
   await journey.stage("Not confirmed settles once the supervisor replies after it", async () => {
@@ -396,6 +402,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.locator(".conversation-turn").filter({ hasText: "Did the Mac tests start?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);
+    await expect(page.locator("#message-status")).toBeHidden();
   });
 
   await journey.stage("A long supervisor name leaves the message box usable", async () => {
@@ -565,5 +572,81 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await composer.pressSequentially("!");
     await expect(note).toBeHidden();
     await expect(composer).not.toHaveAttribute("aria-describedby", /\bmessage-draft-note\b/);
+  });
+});
+
+test("HUB-J5 sending without control takes it, and the take notice clears once the message goes (cas-cff2)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const composer = page.getByRole("textbox", { name: "Your message" });
+  const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
+  const status = page.locator("#message-status");
+  // The lease lapsed while the operator was away: this device reads as not
+  // in control, and nobody else holds it, until the page takes it itself.
+  let taken = false;
+  await page.route(/\/v1\/sessions\/[^/]+\/lease$/, (route) => {
+    if (route.request().method() === "POST") { taken = true; return route.fallback(); }
+    if (!taken) return route.fulfill({ json: { held_by_me: false, controller_label: null } });
+    return route.fallback();
+  });
+  await journey.stage("Send while this device does not hold the session", async () => {
+    await journey.open();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(send).toBeVisible();
+    await composer.fill("Take it and send this.");
+    const sent = hub.nextSend();
+    await send.click();
+    expect((await sent).text).toBe("Take it and send this.");
+    expect(taken).toBe(true);
+  });
+  await journey.stage("Delivered: the take notice is gone", async () => {
+    hub.deliverLatest(PELICAN);
+    await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    await expect(status).toBeHidden();
+    await expect(page.getByText(/Taking control of/)).toHaveCount(0);
+  });
+});
+
+test("HUB-J5 Send again without control takes it, replaces the settled message and settles Delivered (cas-cff2)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const composer = page.getByRole("textbox", { name: "Your message" });
+  const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
+  const status = page.locator("#message-status");
+  let lapsed = false;
+  let taken = false;
+  await page.route(/\/v1\/sessions\/[^/]+\/lease$/, (route) => {
+    if (route.request().method() === "POST") { if (lapsed) taken = true; return route.fallback(); }
+    if (lapsed && !taken) return route.fulfill({ json: { held_by_me: false, controller_label: null } });
+    return route.fallback();
+  });
+  await journey.stage("A message whose receipt never came settles as Not confirmed", async () => {
+    await journey.open();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(send).toBeVisible();
+    await composer.fill("Did the Mac tests start?");
+    const unreceipted = hub.nextSend();
+    await send.click();
+    expect((await unreceipted).text).toBe("Did the Mac tests start?");
+    hub.supervisorSays(PELICAN, "Gate run 3 of 3 is going.");
+    await expect(page.getByRole("log")).toContainText("Gate run 3 of 3 is going.");
+    await page.clock.fastForward(5_000);
+    hub.supervisorSays(PELICAN, "Tests are running on the Mac.");
+    const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]').filter({ hasText: "Did the Mac tests start?" });
+    await expect(bubble).toHaveAttribute("data-settled", "true");
+  });
+  await journey.stage("The lease lapses; Send again takes control and the message goes once", async () => {
+    lapsed = true;
+    // The next lease read finds this device no longer in control.
+    await page.clock.fastForward(30_000);
+    await expect.poll(() => taken || page.evaluate(() => document.querySelector(".conversation-send-again") !== null)).toBe(true);
+    const resent = hub.nextSend();
+    await page.getByRole("button", { name: "Send this message again" }).click();
+    expect((await resent).text).toBe("Did the Mac tests start?");
+    expect(taken, "the send took control first").toBe(true);
+    hub.deliverLatest(PELICAN);
+    await expect(page.locator(".conversation-turn").filter({ hasText: "Did the Mac tests start?" }).locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);
+    await expect(status).toBeHidden();
   });
 });

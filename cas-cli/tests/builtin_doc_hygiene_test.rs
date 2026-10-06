@@ -722,6 +722,16 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Defines the project's end-to-end user-flow terminology and file names.",
     ),
     (
+        "skills/cas-worker/SKILL.md",
+        "journey",
+        "Names the journey-eval.sh browser tier command and its affected-journey selection.",
+    ),
+    (
+        "skills/cas-worker/references/discipline.md",
+        "journey",
+        "Names the journey-eval.sh browser tier command and the journey npm scripts the hook denies.",
+    ),
+    (
         "skills/cas-worker/references/close-gate.md",
         "journey",
         "Names a catalog journey as a user-facing QA evidence trigger.",

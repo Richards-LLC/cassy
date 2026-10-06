@@ -102,7 +102,7 @@ pid_file="$run_dir/gate.pid"
 # this list to the gate's gate_check_ids, so a new gate row cannot be refused
 # by `--gate --only` again (cas-704a: hub-web-tests and eight more were).
 readonly -a gate_rows=(
-    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
+    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
     version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
@@ -132,7 +132,7 @@ fi
 invocation_blockers="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-${CAS_RELEASE_TRAIN_BLOCKERS:-none}}"
 if [[ "$invocation_resume" == true && "$invocation_blockers" == none \
     && -s "$run_dir/blockers.log" ]]; then
-    invocation_blockers="$(paste -sd, "$run_dir/blockers.log")"
+    invocation_blockers="$(awk '{print $1}' "$run_dir/blockers.log" | paste -sd,)"
 fi
 if [[ "$invocation_kind" == manual && "$invocation_blockers" == none \
     && "$invocation_stage" =~ ^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$ ]]; then
@@ -798,48 +798,11 @@ receipt_field() {
 }
 
 release_intervention_count() {
-    local log="$run_dir/interventions.log"
-    [[ -s "$log" ]] || { printf '0\n'; return; }
-    awk '
-        function field(prefix,    i) {
-            for (i = 1; i <= NF; i++) if (index($i, prefix) == 1) return substr($i, length(prefix) + 1)
-            return ""
-        }
-        {
-            kind = field("kind="); command = field("subcommand="); resume = field("resume="); blockers = field("blockers=")
-            if (kind != "manual") next
-            if (command == "--cut" && resume == "true" && blockers != "" && blockers != "none") {
-                count = split(blockers, names, ",")
-                for (i = 1; i <= count; i++) if (names[i] ~ /^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$/) seen[names[i]]++
-            } else count_manual++
-        }
-        END { for (name in seen) count_manual++; print count_manual + 0 }
-    ' "$log"
+    python3 "$script_dir/release-interventions.py" count "$run_dir"
 }
 
 release_intervention_stages() {
-    local log="$run_dir/interventions.log"
-    [[ -s "$log" ]] || { printf 'none\n'; return; }
-    awk '
-        function field(prefix,    i) {
-            for (i = 1; i <= NF; i++) if (index($i, prefix) == 1) return substr($i, length(prefix) + 1)
-            return ""
-        }
-        function canonical(name) { return name ~ /^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$/ }
-        function add(name) { if (canonical(name) && !seen[name]++) names[++n] = name }
-        {
-            if (field("kind=") != "manual") next
-            add(field("stage=")); blockers = field("blockers=")
-            if (blockers != "" && blockers != "none") {
-                count = split(blockers, values, ",")
-                for (i = 1; i <= count; i++) add(values[i])
-            }
-        }
-        END {
-            if (n == 0) print "none"
-            else { for (i = 1; i <= n; i++) printf "%s%s", (i == 1 ? "" : ","), names[i]; printf "\n" }
-        }
-    ' "$log"
+    python3 "$script_dir/release-interventions.py" stages "$run_dir"
 }
 
 release_epoch_delta() {

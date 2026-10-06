@@ -17,7 +17,7 @@ cd "$repo_root"
 
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
-    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
+    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
     version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
@@ -26,12 +26,32 @@ readonly -a gate_check_ids=(
 usage() {
     printf 'Usage: %s <version> [--reuse | --only <row,row>]\n' "$0"
     printf '       %s --fast-rows [--base <ref>]\n' "$0"
-    printf '       %s --learn "<symptom>" "<cause>" "<check-id>"\n' "$0"
+    printf '       %s --learn "<symptom>" "<cause>" "<check-id>" [--run-dir <dir> --evidence <file:line> ...]\n' "$0"
 }
 
 learn() {
     local symptom="$1" cause="$2" check_id="$3"
-    local date entry path before
+    local date entry path before mapping_dir='' known registered=false
+    local -a mapping_rows=()
+    shift 3
+    while (($#)); do
+        case "$1" in
+            --run-dir) [[ $# -ge 2 ]] || return 2; mapping_dir="$2"; shift 2 ;;
+            --evidence) [[ $# -ge 2 ]] || return 2; mapping_rows+=("$2"); shift 2 ;;
+            *) printf 'error: unknown --learn option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    if [[ -n "$mapping_dir" || ${#mapping_rows[@]} -gt 0 ]]; then
+        [[ -n "$mapping_dir" && ${#mapping_rows[@]} -gt 0 ]] || {
+            printf 'error: --run-dir and --evidence are required together\n' >&2; return 2;
+        }
+        for known in "${gate_check_ids[@]}"; do
+            [[ "$check_id" == "$known" ]] && registered=true
+        done
+        "$registered" || { printf 'error: learned evidence needs an executable gate row: %s\n' "$check_id" >&2; return 2; }
+        python3 "$repo_root/scripts/release-learning.py" --validate-map "$repo_root" \
+            "$mapping_dir" "$check_id" "${mapping_rows[@]}" || return $?
+    fi
     [[ "$symptom" != *$'\n'* && "$cause" != *$'\n'* ]] || {
         printf 'error: --learn values must be single-line strings\n' >&2
         return 2
@@ -58,6 +78,10 @@ learn() {
         fi
         rm -f "$before"
     done
+    if [[ -n "$mapping_dir" ]]; then
+        python3 "$repo_root/scripts/release-learning.py" --map "$repo_root" \
+            "$mapping_dir" "$check_id" "${mapping_rows[@]}" || return $?
+    fi
     if [[ -x "$repo_root/scripts/gen-builtin-reference-history.sh" ]]; then
         "$repo_root/scripts/gen-builtin-reference-history.sh"
         printf 'Regenerated builtin reference history after --learn; commit the ledger before starting a gate.\n'
@@ -66,13 +90,17 @@ learn() {
 }
 
 if [[ "${1:-}" == '--learn' ]]; then
-    [[ "$#" -eq 4 ]] || {
+    [[ "$#" -ge 4 ]] || {
         usage >&2
         exit 2
     }
-    learn "$2" "$3" "$4"
+    shift
+    learn "$@"
     exit $?
 fi
+
+# The guardian must re-execute the requested mode/base, before parsing rewrites argv.
+gate_original_args=("$@")
 
 # Lane admission uses the current checked-in version, before release prep.
 # An explicit base limits docs lint to this lane's merged delta. Without it,
@@ -174,6 +202,13 @@ scratch_archive_history_file="$(dirname "$scratch_base")/.cas-release-gate-last-
 archive_size_file="${CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE:-}"
 readonly scratch_archive_history_file archive_size_file
 
+# A guardian owns every large scratch path, forwards graceful signals to the
+# entire child group, waits for it, then removes scratch and remap metadata.
+if [[ -z "${CAS_RELEASE_GATE_SCRATCH_RUN_DIR:-}" ]]; then
+    exec python3 "$repo_root/scripts/release_scratch.py" --repo "$repo_root" \
+        --base "$scratch_base" guard -- bash "$repo_root/scripts/release-gate.sh" "${gate_original_args[@]}"
+fi
+
 # The gate IS the "slow CI environment" the `cas init` watchdog names.
 #
 # `cas init` aborts itself after CAS_INIT_TIMEOUT_SECS (default 300s) so a hang
@@ -202,7 +237,15 @@ export CAS_INIT_TIMEOUT_SECS
 readonly init_timeout_origin
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-release-gate.XXXXXX")"
-trap 'rm -rf "$tmp_dir"' EXIT
+register_scratch() {
+    python3 "$repo_root/scripts/release_scratch.py" --owner-dir "$CAS_RELEASE_GATE_SCRATCH_RUN_DIR" \
+        --path "$1" register
+}
+register_scratch "$tmp_dir"
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+# The guardian removes registered tmp_dir only after descendants are reaped.
 
 # The train supplies a unique attempt directory. Successful logs survive just
 # like failures; the temporary fallback remains useful for direct diagnostics.
@@ -256,7 +299,8 @@ def ignored(name):
         "CAS_AGENT_NAME", "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID",
         "CAS_RELEASE_GATE_LOG_DIR", "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE",
         "CAS_RELEASE_GATE_CACHE_DIR", "CAS_RELEASE_GATE_SWEEP_CACHE_DIR",
-        "CAS_RELEASE_GATE_HOME_DIR",
+        "CAS_RELEASE_GATE_HOME_DIR", "CAS_RELEASE_GATE_SCRATCH_RUN_DIR",
+        "CAS_RELEASE_GATE_SCRATCH_LEASE_FDS",
     } or name.startswith("CAS_RELEASE_TRAIN_")
 
 material = "".join(
@@ -1093,6 +1137,7 @@ check_archive_mode() {
     mkdir -p "$(dirname "$archive_base")"
     assert_no_cas_ancestor "$archive_base" || return 1
     archive_dir="$(mktemp -d "${archive_base}.XXXXXX")"
+    register_scratch "$archive_dir" || { rm -rf "$archive_dir"; return 1; }
     archive="$archive_dir/suite.tar.zst"
     remap="$archive_dir/workspace-remap"
     # The archive and extraction can be several GB: keep them on the checkout
@@ -1121,8 +1166,6 @@ check_archive_mode() {
     }
     archive_path="$(make_archive_path)" || {
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     }
     local -a compile_command=(env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
@@ -1135,8 +1178,6 @@ check_archive_mode() {
         :
     else
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     fi
     [[ -s "$archive" ]] || {
@@ -1158,17 +1199,13 @@ check_archive_mode() {
         :
     else
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     fi
     # nextest canonicalizes --extract-to before extracting, so it must exist.
     # Match the private 0700 mktemp base, with the same process owner/group.
-    # The whole archive_dir (including extracted files) is removed below.
+    # The guardian removes the whole archive_dir after all descendants exit.
     mkdir -p -m 700 "$archive_dir/extract" || {
         status=$?
-        git worktree remove --force "$remap" >/dev/null 2>&1 || true
-        rm -rf "$archive_dir"
         return "$status"
     }
     printf 'archive-mode: test TMPDIR=%s; extraction=%s; workspace-remap=%s\n' \
@@ -1193,8 +1230,6 @@ check_archive_mode() {
     else
         status=$?
     fi
-    git worktree remove --force "$remap" >/dev/null 2>&1 || true
-    rm -rf "$archive_dir"
     return "$status"
 }
 
@@ -1213,6 +1248,7 @@ check_snapshot_portability() {
     # everyone, including once per self-test fixture.
     local deep_root deep_tmp
     deep_root="$(mktemp -d "${deep_base}.snap.XXXXXX")"
+    register_scratch "$deep_root" || { rm -rf "$deep_root"; return 1; }
     deep_tmp="$deep_root/$(printf 'deep-temp-path-%.0s' {1..12})"
     mkdir -p "$deep_tmp"
     # COLUMNS must be absent, rather than merely empty: terminal-width probes
@@ -1221,7 +1257,6 @@ check_snapshot_portability() {
     env -u COLUMNS INSTA_UPDATE=no TMPDIR="$deep_tmp" \
         "$cargo_bin" nextest run -p cas --test component_output_test
     status=$?
-    rm -rf "$deep_root"
     # Never leave insta's pending-snapshot artifacts behind: they would fail
     # the working-tree row of this same gate.
     find . -path ./target -prune -o -name '*.snap.new' -print0 2>/dev/null | xargs -0 rm -f --
@@ -1283,6 +1318,10 @@ check_changelog_and_versions() {
             return 1
         fi
     done
+}
+
+check_publish_toolchain() {
+    python3 "$repo_root/scripts/check-release-publish-toolchain.py" "$repo_root"
 }
 
 check_release_script() {
@@ -1441,6 +1480,9 @@ run_check epic-worktree-fresh \
 run_check epic-worktree-zig \
     'resolve and export an executable Zig from env, epic worktree, or main checkout' \
     check_epic_worktree_zig
+run_check publish-toolchain \
+    'python3 scripts/check-release-publish-toolchain.py (real zigbuild parser, no build)' \
+    check_publish_toolchain
 run_check failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log

@@ -164,6 +164,13 @@ describe("redraws keep each notice's state by its key (cas-a5c6 QA round 3)", ()
     expect(document.activeElement).toBe(copy);
     expect(details.open).toBe(true);
     expect(time.textContent).not.toBe(before);
+    // A measured outage changes the panel header, not this notice's Details.
+    const refreshedCallbacks = callbacks();
+    renderAttentionPanel(root, [a], refreshedCallbacks, { now: now + 61_000, outage: "Connection unsteady — checking…" });
+    copy.click();
+    expect(refreshedCallbacks.copy).toHaveBeenCalledWith(card(root, "a").querySelector("pre")!.textContent);
+    expect(card(root, "a").querySelector("[data-role='copy']")).toBe(copy);
+    expect(document.activeElement).toBe(copy);
     // A real change redraws, and the opened Details stays open on its notice.
     renderAttentionPanel(root, [a, warn("b", "2026-09-07T11:59:30Z")], callbacks(), { now: now + 62_000 });
     expect(card(root, "a").querySelector("details")!.open).toBe(true);

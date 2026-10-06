@@ -144,6 +144,12 @@ impl SessionManager {
         }
     }
 
+    pub(crate) fn for_home_read_only(home: &Path) -> Self {
+        Self {
+            sessions_dir: home.join(".cas").join(SESSIONS_DIR),
+        }
+    }
+
     /// Ensure the sessions directory exists
     pub fn ensure_dir(&self) -> std::io::Result<()> {
         fs::create_dir_all(&self.sessions_dir)
@@ -152,10 +158,20 @@ impl SessionManager {
     /// List all active sessions
     pub fn list_sessions(&self) -> std::io::Result<Vec<SessionInfo>> {
         self.ensure_dir()?;
+        self.list_sessions_read_only()
+    }
+
+    /// A status receipt must not create session state just to inspect it.
+    pub(crate) fn list_sessions_read_only(&self) -> std::io::Result<Vec<SessionInfo>> {
+        let entries = match fs::read_dir(&self.sessions_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
 
         let mut sessions = Vec::new();
 
-        for entry in fs::read_dir(&self.sessions_dir)? {
+        for entry in entries {
             let entry = entry?;
             let path = entry.path();
 

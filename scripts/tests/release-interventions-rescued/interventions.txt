@@ -1,0 +1,15 @@
+2026-10-05T16:01:51Z subcommand=--status stage=status caller=fixture-supervisor kind=internal source=internal resume=false blockers=none
+2026-10-05T16:35:56Z subcommand=--cut stage=preflight caller=fixture-supervisor kind=internal source=internal resume=false blockers=none
+2026-10-05T16:36:41Z subcommand=--cut stage=preflight caller=fixture-supervisor kind=internal source=internal resume=true blockers=assemble
+2026-10-05T16:37:01Z subcommand=--gate stage=gate caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble
+2026-10-05T16:52:13Z subcommand=--pipeline stage=pipeline caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble
+2026-10-05T17:11:13Z subcommand=--cut stage=preflight caller=fixture-supervisor kind=internal source=internal resume=true blockers=assemble,pipeline
+2026-10-05T17:11:13Z subcommand=--pipeline stage=pipeline caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble,pipeline
+2026-10-05T17:25:48Z subcommand=--cut stage=preflight caller=fixture-supervisor kind=internal source=internal resume=true blockers=assemble,pipeline
+2026-10-05T17:25:48Z subcommand=--pipeline stage=pipeline caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble,pipeline
+2026-10-05T17:41:23Z subcommand=--publish stage=publish caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble,pipeline
+2026-10-05T17:54:59Z subcommand=--cut stage=preflight caller=fixture-supervisor kind=internal source=internal resume=true blockers=assemble,pipeline,publish
+2026-10-05T17:54:59Z subcommand=--publish stage=publish caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble,pipeline,publish
+2026-10-05T17:55:41Z subcommand=--cut stage=preflight caller=fixture-supervisor kind=internal source=internal resume=true blockers=assemble,pipeline,publish
+2026-10-05T17:55:41Z subcommand=--publish stage=publish caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble,pipeline,publish
+2026-10-05T18:12:00Z subcommand=--report stage=report caller=fixture-supervisor kind=internal source=internal resume=false blockers=assemble,pipeline,publish

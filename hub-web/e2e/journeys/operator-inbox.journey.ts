@@ -47,9 +47,14 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible({ timeout: 15_000 });
       expect(cloud.presence.get(soundwave.id)?.monitoring).toBe("disabled");
       const settings = row.locator("summary");
+      const chevron = settings.locator(".machine-presence-chevron");
+      await expect(chevron).toBeVisible();
+      const closedMarker = await chevron.evaluate((node) => getComputedStyle(node).transform);
       await settings.focus();
       await settings.press("Enter");
       await expect(row.getByText(/keeps notices for 90 days/)).toBeVisible();
+      expect(await chevron.evaluate((node) => getComputedStyle(node).transform)).not.toBe(closedMarker);
+      await expect(row.getByText(/Enable alerts, then run cas hub restart on soundwave/)).toBeVisible();
       const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
       await enable.focus();
       await enable.press("Enter");
@@ -63,6 +68,7 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(row.getByText(/Serve: degraded/)).toBeVisible();
       await expect(row.getByText(/Factory: not known/)).toBeVisible();
       await expect(row.getByText(/Last report/)).toBeVisible();
+      await expect(row.locator("p time")).toHaveText(/^(?:now|\d+[smhd] ago)$/);
       await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
     });
     await journey.stage("A separate read-only profile sees machine status without pairing", async () => {
@@ -81,6 +87,8 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       cloud.presence.set(soundwave.id, { ...report(), presence: "unobserved", open_outage: { outage_epoch: "1", opened_at: new Date(journeyNow()).toISOString(), unobserved_event_id: outageId } });
       await refresh();
       await expect(notices.getByText("soundwave unreachable", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(inbox.getByRole("heading", { name: "Alert history", exact: true })).toBeVisible();
+      expect(await inbox.locator(".machine-presence-history").evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
       await expect(deskInbox.getByText("soundwave unreachable", { exact: true })).toBeVisible({ timeout: 15_000 });
       const phone = [...cloud.devices.values()].find((device) => device.label === "Presence phone")!;
       const desktop = [...cloud.devices.values()].find((device) => device.label === "Presence desk")!;
@@ -110,7 +118,7 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
     await journey.stage("An unavailable observer is visible beside a fresh machine report", async () => {
       cloud.observerStatus = "unavailable";
       await refresh();
-      await expect(inbox.getByText(/Observer unavailable/)).toBeVisible();
+      await expect(inbox.getByText(/Cassy Cloud's alert check is unavailable/)).toBeVisible();
       await expect(row.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible();
     });
     const cells = [

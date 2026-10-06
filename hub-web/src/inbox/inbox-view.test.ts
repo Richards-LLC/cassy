@@ -48,24 +48,29 @@ function view(state: InboxState, events: InboxEvent[] = [], presence?: PresenceS
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   document.body.replaceChildren();
 });
 
 describe("operator inbox view (cas-9b7d QA round 1)", () => {
   it("names an unavailable observer and separate component status without claiming power state", () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-06T11:00:00Z"));
     const presence: PresenceSnapshot = {
       observerStatus: "unavailable", observerCheckedAt: null,
       machines: [{ machineId: "machine", hubId: "hub-1", monitoring: "enabled", monitoringGeneration: "1", presence: "observed",
-        lastReportAt: "2026-10-06T11:00:00Z", leaseExpiresAt: null, deadlineAt: null, silence: null, openOutage: null,
-        components: [{ component: "serve", state: "degraded", observedAt: "2026-10-06T10:59:59Z" }],
+        lastReportAt: "2026-10-06T10:59:55Z", leaseExpiresAt: null, deadlineAt: null, silence: null, openOutage: null,
+        components: [{ component: "serve", state: "degraded", observedAt: "2026-10-06T11:00:00Z" }],
       }],
     };
     const { inbox } = view({ kind: "ready", accountHint: null, label: "Phone" }, [], presence);
     const text = inbox.dialog.textContent!;
-    expect(text).toContain("Observer unavailable");
+    expect(text).toContain("Cassy Cloud's alert check is unavailable");
+    expect(text).toContain("an alert may take longer than five minutes");
     expect(text).toContain("Reporting to Cassy Cloud");
     expect(text).toContain("Serve: degraded");
-    expect(text).toContain("Last report");
+    expect(text).toContain("Last report 5s ago");
+    expect(text).toContain("observed now");
+    expect(text).not.toContain("now ago");
     expect(text).not.toMatch(/powered off|sleeping/);
     expect(inbox.dialog.querySelector('[id^="presence-toggle-"]')).toBeNull();
   });
@@ -89,16 +94,22 @@ describe("operator inbox view (cas-9b7d QA round 1)", () => {
     const enable = inbox.dialog.querySelector<HTMLButtonElement>("#presence-toggle-machine")!;
     expect(enable.textContent).toBe("Enable alerts for Atlas");
     expect(details.textContent).toContain("90 days");
+    expect(details.textContent).toContain("Enable alerts, then run cas hub restart on Atlas");
+    expect(details.textContent).not.toMatch(/hub reporter|presence reporting permission/);
     enable.click();
     await vi.waitFor(() => expect(controller.setMonitoring).toHaveBeenCalledWith("machine", true));
   });
 
   it("renders a verified machine notice outside conversation bubbles", () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-06T11:00:05Z"));
     const notice: InboxEvent = { ...event("1", "verified"), scope: "machine", producerKind: "cloud_observer", projectId: null, sessionId: null,
       plaintext: { type: "psc.operator.machine_presence", v: 1, account_id: "acct", machine_id: "machine", hub_id: "hub-1", kind: "machine_unobserved", outage_epoch: "1", ref_event_id: null, detected_at: "2026-10-06T11:00:00Z" },
     };
     const { inbox } = view({ kind: "ready", accountHint: null, label: "Phone" }, [notice]);
     expect(inbox.dialog.querySelector('[data-presence-event="1"]')?.textContent).toContain("Machine unreachable");
+    expect(inbox.dialog.querySelector('[data-presence-event="1"] time')?.textContent).toBe("5s ago");
+    expect(inbox.dialog.querySelector("#machine-presence-history-title")?.textContent).toBe("Alert history");
+    expect(inbox.dialog.querySelector(".machine-presence-history ol")?.getAttribute("aria-label")).toBe("Machine alert history");
     expect(inbox.dialog.querySelector(".operator-inbox-bubble")).toBeNull();
   });
   it("F02: the browser name and Sign in are one form, so Enter in the field signs in", async () => {

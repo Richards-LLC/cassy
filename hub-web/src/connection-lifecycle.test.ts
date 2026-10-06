@@ -132,7 +132,9 @@ describe("Commander live connection lifecycle", () => {
     supervisors.push(connection);
     connection.start();
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    const first = connection.attach("session-a"), second = connection.attach("session-a");
+    const first = connection.attach("session-a");
+    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    const second = connection.attach("session-a");
     await vi.waitFor(() => expect(tickets).toHaveLength(2));
     tickets[0]!();
     await first;

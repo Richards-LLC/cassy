@@ -539,10 +539,26 @@ is host/user-wide under `/var/tmp`, independent of producer `TMPDIR`.
 Every memory-sampled attempt records capacity and occupancy; every admission
 records its slot. `execution.link_jobs` is the configured maximum, while
 `link_slots` in each admission is the fresh capacity. Each invocation records
-`peak_waited_driver_rss_bytes` in `link-rss.jsonl`: waited driver RSS, excluding
-mold workers. It is not a whole-link peak and must not size capacity; the
-external 2.1 GiB measurement above sizes links. The producer start budget
-reserves one link; additional links require fresh pool admission.
+`peak_waited_driver_rss_bytes` in `link-rss.jsonl`: `wait4` RSS for the exact
+waited driver, excluding unwaited workers and unrelated children. The same
+invocation also records `peak_mold_worker_rss_bytes` (largest observed single
+`mold`/`ld.mold` worker) and `peak_process_tree_rss_bytes` (largest sampled sum
+of the driver and its observed descendants). Sampling runs every 100 ms using
+Linux `/proc/*/stat` or macOS `ps`; observed descendants stay attributed by PID
+and start identity after reparenting. The worker peak includes its PID, start
+identity and sample timestamp for comparison with a synchronized external
+sampler. Tree sums may double-count shared pages, and short-lived workers that
+fork and reparent between samples may be missed. These are sampled lower
+bounds, not a complete whole-link high-water mark. `rss_sampling_status`,
+errors, sample count and bounded post-driver drain report incomplete evidence;
+no samples produce null values rather than a fabricated zero peak. A zero
+worker peak with samples means no named mold worker was observed.
+The added observations do not change native linker flags, process groups,
+leases, admission estimates or the memory reserve guard. `estimate_exceeded`
+still checks the waited driver; `sampled_tree_estimate_exceeded` is observational.
+The external 2.1 GiB estimate above still sizes links pending same-link native
+assembly calibration. The producer start budget reserves one link; additional
+links require fresh pool admission.
 Supervisor memory/PSI samples must validate the estimates on each host.
 Insufficient concurrent capacity selects sequential legs with a fresh memory
 admission before each phase. `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS`

@@ -181,8 +181,127 @@ sys.exit(m.link([sys.executable, '-c', "import pathlib,time; p=pathlib.Path("+re
         completed = [item for item in map(json.loads, self.events.read_text().splitlines()) if item["phase"] == "link-complete"]
         self.assertEqual(len(completed), 2)
         self.assertTrue(all(item["peak_waited_driver_rss_bytes"] > 0 and not item["estimate_exceeded"] for item in completed))
-        self.assertTrue(all("excludes mold workers" in item["rss_scope"] for item in completed))
+        self.assertTrue(all("includes observed mold workers" in item["rss_scope"] for item in completed))
         self.assertTrue(all("peak_child_rss_bytes" not in item for item in completed))
+
+    def test_unwaited_mold_worker_rss_matches_same_link_external_sample(self):
+        worker = self.root / "ld.mold"
+        source = self.root / "worker.c"
+        source.write_text(r'''#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    char *allocation = malloc(64 * 1024 * 1024);
+    if (!allocation) return 2;
+    memset(allocation, 1, 64 * 1024 * 1024);
+    FILE *pid = fopen(argv[1], "w");
+    if (!pid) return 3;
+    fprintf(pid, "%d", getpid()); fclose(pid);
+    usleep(600000);
+    FILE *done = fopen(argv[2], "w");
+    if (!done) return 4;
+    fclose(done); free(allocation); return 0;
+}
+''')
+        subprocess.run(["cc", "-O0", str(source), "-o", str(worker)], check=True)
+        pidfile, done = self.root / "worker.pid", self.root / "worker.done"
+        # Driver waits for a file, never waitpid(): the worker's RSS is absent
+        # from its rusage even though both belong to this exact invocation.
+        driver_code = ("import subprocess,time,pathlib; subprocess.Popen(["
+                       + repr(str(worker)) + ", " + repr(str(pidfile)) + ", "
+                       + repr(str(done)) + "]); "
+                       "done=pathlib.Path(" + repr(str(done)) + ")\n"
+                       "while not done.exists(): time.sleep(.01)\n")
+        external = []
+        stop = threading.Event()
+        def sample_external():
+            while not stop.is_set():
+                if pidfile.exists():
+                    sample = subprocess.run(["ps", "-o", "rss=", "-p", pidfile.read_text()],
+                                            text=True, capture_output=True)
+                    if sample.returncode == 0 and sample.stdout.strip():
+                        external.append(int(sample.stdout.strip()) * 1024)
+                stop.wait(.04)
+        observer = threading.Thread(target=sample_external)
+        observer.start()
+        try:
+            with mock.patch.dict(os.environ, dict(self.env,
+                    CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG=str(self.events)), clear=True), \
+                    mock.patch.object(guard, "LINK_LEASE_ROOT", self.root), \
+                    mock.patch.object(guard.proof, "memory_snapshot", return_value=self.high):
+                self.assertEqual(guard.link([sys.executable, "-c", driver_code]), 0)
+        finally:
+            stop.set()
+            observer.join(timeout=5)
+            if pidfile.exists() and not done.exists():
+                try:
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        completed = [json.loads(line) for line in self.events.read_text().splitlines()
+                     if json.loads(line)["phase"] == "link-complete"]
+        self.assertTrue(external, "independent ps must sample this worker")
+        receipt = completed[0]
+        peak = receipt.get("peak_mold_worker_rss_bytes", 0)
+        self.assertGreaterEqual(peak, 64 * 1024 * 1024, receipt)
+        self.assertLess(abs(peak - max(external)), 8 * 1024 * 1024)
+        self.assertGreater(peak, receipt["peak_waited_driver_rss_bytes"])
+        self.assertEqual(receipt["rss_sampling_status"], "sampled")
+        self.assertGreaterEqual(receipt["peak_process_tree_rss_bytes"], peak)
+        self.assertEqual(receipt["mold_worker_peak"]["pid"], int(pidfile.read_text()))
+        print("SAME_LINK_RSS: " + json.dumps({"external_worker_peak_bytes": max(external),
+              "receipt": receipt}, sort_keys=True))
+
+    def test_observed_worker_survives_reparent_and_pid_reuse_is_excluded(self):
+        sampler = guard.LinkRssSampler(10)
+        snapshots = [
+            {10: (1, "driver-start", 100, "cc", "S"),
+             11: (10, "worker-start", 200, "ld.mold", "S"),
+             90: (1, "other-link", 10000, "ld.mold", "S")},
+            {11: (1, "worker-start", 300, "ld.mold", "S"),
+             10: (1, "reused-driver", 10000, "cc", "S"),
+             12: (10, "unrelated-child", 10000, "ld.mold", "S")},
+            {11: (1, "reused-worker", 10000, "ld.mold", "S")},
+        ]
+        with mock.patch.object(guard, "process_snapshot", side_effect=snapshots):
+            self.assertTrue(sampler.sample())
+            self.assertTrue(sampler.sample())
+            self.assertFalse(sampler.sample())
+        receipt = sampler.receipt(False)
+        self.assertEqual(receipt["peak_process_tree_rss_bytes"], 300)
+        self.assertEqual(receipt["peak_mold_worker_rss_bytes"], 300)
+        self.assertEqual(receipt["mold_worker_peak"]["start_identity"], "worker-start")
+
+    def test_sampler_failure_is_explicit_not_a_zero_rss_success(self):
+        sampler = guard.LinkRssSampler(10)
+        with mock.patch.object(guard, "process_snapshot", side_effect=PermissionError("denied")):
+            self.assertFalse(sampler.sample())
+        receipt = sampler.receipt(False)
+        self.assertIsNone(receipt["peak_process_tree_rss_bytes"])
+        self.assertIsNone(receipt["peak_mold_worker_rss_bytes"])
+        self.assertEqual(receipt["rss_sampling_status"], "partial")
+        self.assertIn("PermissionError", receipt["rss_sampling_errors"][0])
+
+    def test_macos_process_snapshot_keeps_identity_units_and_zombies(self):
+        output = (" 10 1 Mon Oct  5 12:34:56 2026 1024 S /usr/bin/cc\n"
+                  " 11 10 Mon Oct  5 12:34:57 2026 2048 Z /tmp/a path/ld.mold\n")
+        with mock.patch.object(guard.platform, "system", return_value="Darwin"), \
+                mock.patch.object(guard.subprocess, "check_output", return_value=output):
+            rows = guard.process_snapshot()
+        self.assertEqual(rows[10], (1, "Mon Oct 5 12:34:56 2026", 1024 * 1024, "cc", "S"))
+        self.assertEqual(rows[11][2:], (2048 * 1024, "ld.mold", "Z"))
+
+    def test_waited_driver_rss_excludes_an_unrelated_prior_child(self):
+        subprocess.run([sys.executable, "-c", "allocation=bytearray(128*1024*1024)"], check=True)
+        with mock.patch.dict(os.environ, dict(self.env,
+                CAS_RELEASE_GATE_ASSEMBLY_LINK_RSS_LOG=str(self.events)), clear=True), \
+                mock.patch.object(guard, "LINK_LEASE_ROOT", self.root), \
+                mock.patch.object(guard.proof, "memory_snapshot", return_value=self.high):
+            self.assertEqual(guard.link([sys.executable, "-c", "import time; time.sleep(.2)"]), 0)
+        receipt = json.loads(self.events.read_text().splitlines()[-1])
+        self.assertLess(receipt["peak_waited_driver_rss_bytes"], 64 * 1024 * 1024)
+        self.assertLess(receipt["peak_process_tree_rss_bytes"], 64 * 1024 * 1024)
 
     def wait_until(self, predicate):
         until = time.monotonic() + 5

@@ -1714,6 +1714,11 @@ export class HubConnectionSupervisor {
         this.settleUpstreamStreak(session);
         this.transitionAttach(session, "live", "live");
       }
+      // A fresh session can recover before the event-stream retry timer.
+      // Check the machine now; the session alone never bypasses the machine
+      // send fence, and connect still replaces untrusted recovery sockets.
+      if (this.attachLifecycles.get(session)?.phase === "live"
+        && (this.lifecycle.phase === "backoff" || this.lifecycle.phase === "failed")) this.networkChanged();
       const welcome = message.Welcome;
       this.sessionPanes.set(session, welcome.state.panes);
       const authoritative = Number(welcome.protocol_version ?? 1) >= 3

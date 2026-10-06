@@ -17,8 +17,9 @@ unattributed changes select the surface with an explanatory reason.
 Diff mode retains base...head semantics and reads the catalog/graph at head.
 For --paths/--check/--all from another checkout, set CAS_JOURNEYS_HEAD to the
 reviewed revision; CAS_JOURNEYS_BASE supplies CSS/main/fixture hunk context.
-Without that context those files select the surface safely. Errors exit nonzero;
-an unrelated/derived-only diff produces an empty list and exit 0.
+Without that context those files select the surface safely. Uncertain source
+parsing selects every catalog journey with a reason; Git/catalog errors exit
+nonzero. An unrelated/derived-only diff produces an empty list and exit 0.
 
 The catalog contract is described in docs/qa/journey-evaluation.md.
 """

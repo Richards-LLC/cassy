@@ -398,6 +398,7 @@ export class HubConnectionSupervisor {
       networkAccessHelp: phase === "live" || phase === "idle" || update.authFailure ? undefined : prior?.networkAccessHelp,
       ...update,
     };
+    console.debug("[DEBUG-9dc6-r6] attach", session, phase, this.lifecycle.phase, this.machineSocketGeneration, this.machineSocketReady, this.machineSubscriptions.has(session));
     this.attachLifecycles.set(session, snapshot);
     this.diagnostics.record(snapshot, this.machineSocketGeneration, session);
     this.callbacks.onAttachState?.(session, snapshot);
@@ -1148,8 +1149,10 @@ export class HubConnectionSupervisor {
 
   private async ensureMachineSocket(session: string): Promise<boolean> {
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) return true;
+    console.debug("[DEBUG-9dc6-r6] ensure", session, this.machineSocketGeneration, !!this.machineSocketOpening);
     if (this.machineSocketOpening) return this.machineSocketOpening;
     this.machineSocketOpening = this.openMachineSocket(session).finally(() => {
+      console.debug("[DEBUG-9dc6-r6] finally", session, this.machineSocketGeneration);
       this.machineSocketOpening = undefined;
     });
     return this.machineSocketOpening;
@@ -1157,6 +1160,7 @@ export class HubConnectionSupervisor {
 
   private async openMachineSocket(session: string): Promise<boolean> {
     const generation = this.machineSocketGeneration;
+    console.debug("[DEBUG-9dc6-r6] opening", generation);
     this.transitionAttach(session, "auth", "auth");
     let ticket: { ticket: string };
     try {
@@ -1175,6 +1179,7 @@ export class HubConnectionSupervisor {
     }
     // Abandoned while the ticket was on its way: the replacement opening owns
     // the machine socket now (cas-7b31).
+    console.debug("[DEBUG-9dc6-r6] ticket", generation, this.machineSocketGeneration);
     if (!this.desired || generation !== this.machineSocketGeneration) return true;
     const endpoint = new URL("/v1/attach", this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
@@ -1264,6 +1269,7 @@ export class HubConnectionSupervisor {
             return;
           }
           clearTimers();
+          console.debug("[DEBUG-9dc6-r6] ready", generation, this.machineSocketGeneration);
           this.machineSocketReady = true;
           if (!settled) {
             settled = true;
@@ -1280,6 +1286,7 @@ export class HubConnectionSupervisor {
         });
       };
       socket.onclose = (event) => {
+        console.debug("[DEBUG-9dc6-r6] close", generation, this.machineSocketGeneration, this.machineSocket === socket, this.machineSocketReady);
         clearTimers();
         const wasReady = this.machineSocketReady;
         if (this.machineSocket === socket) this.machineSocket = undefined;

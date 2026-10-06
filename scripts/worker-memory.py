@@ -3,7 +3,9 @@
 import argparse
 import importlib.util
 import os
+import json
 from pathlib import Path
+import shlex
 import signal
 import subprocess
 import sys
@@ -41,12 +43,93 @@ def constrained(command):
     return result + [f'--workers={min(max(workers, 1), 4)}']
 
 
+def estimate(command, cwd=None, depth=0):
+    """Only known bounded commands enter the light lane; shell hints cannot opt in.
+
+    Resolve package scripts and literal shell statements before reserving their
+    maximum weight. Unknown commands, expansions and shell fanout stay heavy.
+    Direct Vitest is constrained before classification; shell Vitest must carry
+    an explicit cap because its arguments cannot be rewritten safely.
+    """
+    heavy = host_memory.DEFAULT_ESTIMATE_BYTES
+    cwd = Path.cwd() if cwd is None else Path(cwd)
+    if not command or depth > 8:
+        return heavy
+    name, args = Path(command[0]).name, command[1:]
+    if name in ('bash', 'sh', 'dash', 'zsh') and args[:1] in (['-c'], ['-lc']):
+        if len(args) != 2 or any(char in args[1] for char in ('$','`','\n')):
+            return heavy
+        try:
+            lexer = shlex.shlex(args[1], posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ''
+            words = list(lexer)
+        except ValueError:
+            return heavy
+        statements, current = [], []
+        for word in words:
+            if word in ('&&', ';'):
+                if not current: return heavy
+                statements.append(current)
+                current = []
+            elif word in ('&', '|', '||', '(', ')', '>', '>>', '<', '<<'):
+                return heavy
+            else:
+                current.append(word)
+        if current: statements.append(current)
+        weights = []
+        for statement in statements:
+            if statement[0] == 'cd' and len(statement) == 2:
+                cwd = cwd / statement[1]
+            else:
+                weights.append(estimate(statement, cwd, depth + 1))
+        return max(weights, default=heavy)
+    if name == 'tsc' and not any(arg.startswith('--watch') or arg == '-w' for arg in args):
+        return host_memory.GIB
+    if name == 'vite' and args[:1] == ['build'] and '--watch' not in args:
+        return host_memory.GIB
+    if name in ('node', 'nodejs') and args:
+        script = Path(args[0]).name
+        if script == 'vitest.mjs':
+            return estimate(['vitest', *args[1:]], cwd, depth + 1)
+        if script == 'run-verified-tests.mjs' and args[1:2] == ['vitest']:
+            # This entry point enforces maxWorkers=2 itself.
+            return 2 * host_memory.GIB
+        if script == 'generate-tokens.mjs':
+            return host_memory.GIB
+    if name == 'vitest' and not any(arg in ('--watch', '-w', '--browser') or
+                                    arg.startswith('--browser.') for arg in args):
+        cap = None
+        for index, arg in enumerate(args):
+            if arg.startswith('--maxWorkers='): cap = arg.split('=', 1)[1]
+            elif arg == '--maxWorkers' and index + 1 < len(args): cap = args[index + 1]
+        if cap and cap.isdigit() and 1 <= int(cap) <= 2 and (not args or args[0] == 'run'):
+            return 2 * host_memory.GIB
+    if name == 'npx' and args and not args[0].startswith('-'):
+        return estimate(args, cwd, depth + 1)
+    if name == 'npm' and args:
+        script = args[1] if args[0] in ('run', 'run-script') and len(args) > 1 else args[0]
+        # Extra caller arguments could change a bounded script's behavior.
+        expected = 2 if args[0] in ('run', 'run-script') else 1
+        if len(args) != expected: return heavy
+        try:
+            body = json.loads((cwd / 'package.json').read_text())['scripts'][script]
+            return estimate(['sh', '-c', body], cwd, depth + 1)
+        except (OSError, ValueError, KeyError, TypeError):
+            return heavy
+    if name in ('python3', 'python') and args and Path(args[0]).name == 'worker-memory.py' and args[1:2] == ['--']:
+        return estimate(constrained(args[2:]), cwd, depth + 1)
+    return heavy
+
+
 def run(command, env=None, directory=None):
     env = dict(os.environ if env is None else env)
     wait = proof.positive_knob(env, 'CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS') or 600
     poll = proof.positive_knob(env, 'CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS') or 1
-    with host_memory.admission('worker', env, proof.memory_budget, wait, poll, directory) as (admitted_env, fds):
-        child = subprocess.Popen(constrained(command), env=admitted_env, pass_fds=fds, start_new_session=True)
+    command = constrained(command)
+    with host_memory.admission('worker', env, proof.memory_budget, wait, poll, directory,
+                               estimate_bytes=estimate(command)) as (admitted_env, fds):
+        child = subprocess.Popen(command, env=admitted_env, pass_fds=fds, start_new_session=True)
         handlers = {}
         def interrupted(sig, frame):
             raise InterruptedError('worker suite interrupted by ' + signal.Signals(sig).name)
@@ -80,9 +163,13 @@ def run(command, env=None, directory=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--shell-command', help='literal hook command; classify before running bash -c')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    command = ['bash', '-c', args.shell_command] if args.shell_command is not None else (
+        args.command[1:] if args.command[:1] == ['--'] else args.command)
+    if args.shell_command is not None and args.command:
+        parser.error('--shell-command cannot be combined with another command')
     if not command:
         parser.error('a command is required after --')
     return run(command)

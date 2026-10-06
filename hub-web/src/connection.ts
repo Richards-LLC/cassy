@@ -914,8 +914,8 @@ export class HubConnectionSupervisor {
   /**
    * Drop every terminal socket without waiting for it to close. A half-open
    * socket never finishes a closing handshake, so its onclose may not fire
-   * for minutes; its state-producing handlers are detached and the state it
-   * owned is reset here instead. Known legacy-send receipts may still settle.
+   * for minutes; its handlers are detached and the state it owned is reset
+   * here instead.
    */
   private abandonSockets(reason: string): void {
     this.machineSocketGeneration += 1;
@@ -935,10 +935,7 @@ export class HubConnectionSupervisor {
     if (this.probeTimer !== undefined) window.clearTimeout(this.probeTimer);
     this.probeTimer = undefined;
     for (const socket of this.sockets.values()) {
-      // Stop every state-producing handler, but drain already queued positive
-      // receipts for refs this socket wrote. They cannot revive the transport.
-      if (!this.legacySends.get(socket)?.length) socket.onmessage = null;
-      socket.onopen = null; socket.onerror = null; socket.onclose = null;
+      socket.onopen = null; socket.onmessage = null; socket.onerror = null; socket.onclose = null;
       try { socket.close(4000, "abandoned"); } catch { /* already closing */ }
     }
     this.sockets.clear();
@@ -1124,7 +1121,6 @@ export class HubConnectionSupervisor {
     };
     socket.onmessage = (message) => {
       if (this.sockets.get(session) === socket) void this.handleDaemonMessage(session, message.data, frameFence);
-      else void this.handleRetiredLegacyReceipt(session, socket, message.data, frameFence);
     };
     socket.onclose = (event) => {
       const timedOut = this.timedOutSockets.has(socket);
@@ -1688,20 +1684,6 @@ export class HubConnectionSupervisor {
       }
     }
     this.callbacks.onMachineEvent(event);
-  }
-
-  /** A received receipt remains positive evidence when a network probe retires its socket. */
-  private async handleRetiredLegacyReceipt(session: string, socket: WebSocket, input: string | ArrayBuffer | Blob, frameFence: CredentialFence): Promise<void> {
-    try {
-      const text = typeof input === "string" ? input : input instanceof Blob ? await input.text() : new TextDecoder().decode(input);
-      const queued = messageQueuedFromDaemon(JSON.parse(text));
-      const current = credentialFence(this.machine);
-      if (!this.desired || !this.desiredSessions.has(session) || current.credentialId !== frameFence.credentialId || current.generation !== frameFence.generation
-        || !queued?.client_ref || !this.legacySends.get(socket)?.includes(queued.client_ref)) return;
-      // No Welcome, history, output, refusal or connection transition survives
-      // abandonment. Only the known send's credential-fenced receipt settles.
-      this.callbacks.onMessageQueued?.(session, queued, frameFence);
-    } catch { /* Malformed or unreadable retired frames carry no evidence. */ }
   }
 
   private async handleDaemonMessage(session: string, input: string | ArrayBuffer | Blob, frameFence = credentialFence(this.machine)): Promise<void> {

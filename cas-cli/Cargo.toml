@@ -2,7 +2,7 @@
 name = "cas"
 # Tests are modules of the explicit harnesses below; do not auto-link each source.
 autotests = false
-version = "3.47.1"
+version = "3.48.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"

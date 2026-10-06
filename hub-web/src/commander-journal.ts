@@ -17,7 +17,7 @@ export function credentialFence(machine: StoredMachine): CredentialFence {
   return { credentialId: machine.credentialId, generation: (machine as StoredMachine & { credentialGeneration?: number }).credentialGeneration ?? 0 };
 }
 export type JournalReceipt = MessageQueued & { sentAt: number };
-export type JournalSend = { key: string; scope: DeliveryScope; send?: PendingSend; receipt?: JournalReceipt; revision: number; updatedAt: number; flight?: CredentialFence; owner?: string };
+export type JournalSend = { key: string; scope: DeliveryScope; send?: PendingSend; receipt?: JournalReceipt; revision: number; updatedAt: number; flight?: CredentialFence; owner?: string; claim?: string };
 export type StoredReply = { key: string; scope: DeliveryScope; reply: OperatorReply; persistedAt: number };
 type Block = { key: string; credentialId: string };
 const itemKey = (scope: DeliveryScope, id: string | number) => JSON.stringify([scopeKey(scope), id]);
@@ -40,6 +40,7 @@ function validSendRow(value: unknown): value is JournalSend {
   return object(value) && validScope(value.scope) && typeof value.key === "string"
     && Number.isSafeInteger(value.revision) && (value.revision as number) > 0 && finiteTime(value.updatedAt)
     && (value.flight === undefined || validFence(value.flight)) && (value.owner === undefined || boundedText(value.owner, 2_000))
+    && (value.claim === undefined || (boundedText(value.claim, 2_000) && Boolean(value.claim)))
     && (value.send === undefined || (Boolean(validPendingSend(value.send)) && value.key === itemKey(value.scope, (value.send as PendingSend).id)))
     && (value.receipt === undefined || (validReceipt(value.receipt) && value.key === itemKey(value.scope, value.receipt.client_ref!)));
 }
@@ -50,7 +51,9 @@ function validReceipt(value: unknown): value is JournalReceipt {
     && finiteTime(value.sentAt) && (value.device_label === undefined || boundedText(value.device_label, 2_000));
 }
 function normalizedReply(value: unknown): OperatorReply | undefined {
-  if (!object(value) || !Number.isSafeInteger(value.notification_id) || (value.notification_id as number) <= 0
+  // Notices have their own durable attention/resolution store. Never ACK or
+  // restore them as supervisor turns; this also prunes pre-fix journal rows.
+  if (!object(value) || (value.notice !== undefined && value.notice !== null) || !Number.isSafeInteger(value.notification_id) || (value.notification_id as number) <= 0
     || !(value.reply_to === null || (Number.isSafeInteger(value.reply_to) && (value.reply_to as number) > 0))
     || !boundedText(value.message) || !boundedText(value.summary) || !boundedText(value.device_id, 2_000)) return undefined;
   const kind = value.kind ?? "answer";
@@ -62,9 +65,6 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
   if (value.options !== undefined && (!Array.isArray(value.options) || value.options.some(option => !boundedText(option)))) return undefined;
   if (value.operator_label !== undefined && !boundedText(value.operator_label, 2_000)) return undefined;
   if (value.reply_to_session !== undefined && value.reply_to_session !== null && !boundedText(value.reply_to_session, 2_000)) return undefined;
-  if (value.notice !== undefined && value.notice !== null && (!object(value.notice) || !boundedText(value.notice.source, 2_000)
-    || (value.notice.subject !== undefined && !Number.isSafeInteger(value.notice.subject))
-    || (value.notice.resolved !== undefined && typeof value.notice.resolved !== "boolean"))) return undefined;
   const reply: OperatorReply = {
     notification_id: value.notification_id as number, reply_to: value.reply_to as number | null,
     message: value.message, summary: value.summary, device_id: value.device_id, kind: kind as OperatorReply["kind"],
@@ -72,11 +72,6 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
     ...(value.operator_label === undefined ? {} : { operator_label: value.operator_label as string }),
     ...(value.options === undefined || !(value.options as string[]).length ? {} : { options: value.options as string[] }),
     ...(value.reply_to_session === undefined || value.reply_to_session === null ? {} : { reply_to_session: value.reply_to_session as string }),
-    ...(value.notice === undefined || value.notice === null ? {} : { notice: {
-      source: (value.notice as Record<string, unknown>).source as string,
-      ...((value.notice as Record<string, unknown>).subject === undefined ? {} : { subject: (value.notice as Record<string, unknown>).subject as number }),
-      resolved: (value.notice as Record<string, unknown>).resolved === true,
-    } }),
   };
   return JSON.stringify(reply).length <= 64_000 ? reply : undefined;
 }
@@ -101,6 +96,8 @@ function survivingRows<T extends { key: string }>(store: IDBObjectStore, rows: u
 export class CommanderJournal {
   private readonly owner = crypto.randomUUID();
   private readonly observed = new Map<string, number>();
+  // Ordered attempts on this tab's wire, never reconstructed from captions.
+  private readonly wireClaims = new Map<string, JournalSend[]>();
   private readonly channel: BroadcastChannel | undefined;
   onChange?: () => void;
   constructor(
@@ -112,7 +109,7 @@ export class CommanderJournal {
     this.channel = broadcast && typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(DELIVERY_DB) : undefined;
     if (this.channel) this.channel.onmessage = () => this.onChange?.();
   }
-  close(): void { this.channel?.close(); }
+  close(): void { this.channel?.close(); this.wireClaims.clear(); }
   private changed(): void { this.channel?.postMessage("changed"); }
   private open(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
@@ -193,6 +190,7 @@ export class CommanderJournal {
     const next = new Map(after.slice(-MAX_PENDING_SENDS).map((send) => [send.id, send]));
     const changes = [...new Set([...prior.keys(), ...next.keys()])].filter((id) => JSON.stringify(prior.get(id)) !== JSON.stringify(next.get(id)));
     const committedVersions = new Map<string, number>();
+    const clearedClaims = new Set<string>();
     let rejected = false;
     try {
       await this.transaction<void>(["sends", "blocks"], "readwrite", (tx, done) => {
@@ -207,7 +205,7 @@ export class CommanderJournal {
             for (const id of changes) {
               const key = itemKey(scope, id);
               const row = records.get(key);
-              if (row?.receipt) continue; // A late stale snapshot cannot undo delivery.
+              if (row?.receipt || (row && !row.send)) continue; // Terminal refs never regain private payloads.
               if (row && row.revision !== this.observed.get(key)) continue;
               if (!row && prior.has(id)) continue;
               if (!prior.has(id) && row) continue;
@@ -218,9 +216,12 @@ export class CommanderJournal {
               // cannot turn a definitely unsent item back into an uncertain
               // write: only dispatch may advance held to sending.
               if (row?.send?.state === "held" && (send?.state === "sending" || send?.state === "unconfirmed")) continue;
-              if (send?.state === "held" && row?.send?.state !== "held" && row?.owner !== this.owner && row !== undefined) continue;
+              // Even the claiming tab can have a stale held History snapshot.
+              // Only an explicit no-delivery settlement may reopen a claim.
+              if (send?.state === "held" && row?.send?.state !== "held" && row !== undefined) continue;
               const revision = (row?.revision ?? 0) + 1;
-              const updated = { key, scope, ...(send ? { send } : {}), revision, updatedAt: this.now(), ...(row?.flight ? { flight: row.flight, owner: row.owner } : {}) } satisfies JournalSend;
+              const updated = { key, scope, ...(send ? { send } : {}), revision, updatedAt: this.now(), ...(row?.flight ? { flight: row.flight, owner: row.owner, ...(row.claim ? { claim: row.claim } : {}) } : {}) } satisfies JournalSend;
+              if (!send) clearedClaims.add(key);
               records.set(key, updated);
               store.put(updated);
               committedVersions.set(key, revision);
@@ -245,6 +246,7 @@ export class CommanderJournal {
           };
         };
       });
+      for (const key of clearedClaims) this.wireClaims.delete(key);
       for (const [key, revision] of committedVersions) this.observed.set(key, revision);
       if (committedVersions.size) this.changed();
       return rejected ? "not-saved" : "kept";
@@ -278,6 +280,7 @@ export class CommanderJournal {
           };
         };
       });
+      if (committed) this.wireClaims.delete(key);
       if (modified) this.changed();
       return committed;
     } catch { return false; }
@@ -354,7 +357,7 @@ export class CommanderJournal {
         cancelled = true;
       };
     });
-    if (cancelled) this.changed();
+    if (cancelled) { this.wireClaims.delete(key); this.changed(); }
     return cancelled;
   }
   async dispatch(scope: DeliveryScope, id: string, fence: CredentialFence, write: () => boolean): Promise<"written" | "waiting" | "unconfirmed" | "expired" | "stale" | "not-saved"> {
@@ -380,7 +383,7 @@ export class CommanderJournal {
               store.put({ ...row, revision: row.revision + 1, send: { ...row.send, state: "error", error: "This message was not sent before its wait expired. Retry to send it." } });
               return;
             }
-            claimed = { ...row, revision: row.revision + 1, updatedAt: this.now(), flight: fence, owner: this.owner, send: { ...row.send, state: "sending", sentAt: this.now() } };
+            claimed = { ...row, revision: row.revision + 1, updatedAt: this.now(), flight: fence, owner: this.owner, claim: crypto.randomUUID(), send: { ...row.send, state: "sending", sentAt: this.now() } };
             store.put(claimed);
           };
         };
@@ -408,18 +411,74 @@ export class CommanderJournal {
             // Caption persistence may advance the revision without changing
             // ownership. Fence by the claim and immutable wire content instead.
             if (!row?.send || row.receipt || row.owner !== this.owner || !row.flight || !sameFence(row.flight, fence)
+              || row.claim !== claimed!.claim
               || row.send.target !== claimed!.send!.target || row.send.text !== claimed!.send!.text
               || row.send.replyTo !== claimed!.send!.replyTo) return;
-            try { done(write()); } catch { done(undefined); }
+            const attempts = this.wireClaims.get(key) ?? [];
+            attempts.push(claimed!);
+            this.wireClaims.set(key, attempts);
+            let outcome: boolean | undefined;
+            try { outcome = write(); } catch { /* A later refusal may prove no delivery. */ }
+            if (outcome === false) {
+              const index = attempts.indexOf(claimed!);
+              if (index >= 0) attempts.splice(index, 1);
+              if (!attempts.length) this.wireClaims.delete(key);
+            }
+            done(outcome);
           };
         };
       });
     } catch { this.changed(); return "unconfirmed"; }
     if (sent === undefined) { this.changed(); return "unconfirmed"; }
     if (sent) { this.changed(); return "written"; }
-    // Only a synchronous false proves no websocket write was made.
-    await this.reconcile(scope, [claimed.send!], [{ ...claimed.send!, state: "held", sentAt: undefined }], fence);
-    return "waiting";
+    // Synchronous false proves no websocket write was made.
+    const reset = await this.settleClaim(claimed, fence, { ...claimed.send!, state: "held", sentAt: undefined });
+    return reset === "kept" ? "waiting" : reset === "stale" ? "unconfirmed" : "not-saved";
+  }
+  /** Settle the oldest outstanding attempt refused by this tab's hub socket. */
+  async refuse(scope: DeliveryScope, id: string, fence: CredentialFence, detail: string, retryable: boolean): Promise<"held" | "refused" | "stale" | "not-saved"> {
+    if (!validScope(scope)) return "stale";
+    const key = itemKey(scope, id), attempts = this.wireClaims.get(key);
+    const claimed = attempts?.shift();
+    if (!attempts?.length) this.wireClaims.delete(key);
+    if (!claimed?.send) return "stale";
+    try {
+      const accepted = await this.current(scope);
+      if (!accepted || !sameFence(accepted, fence)) return "stale";
+      const send: PendingSend = retryable
+        ? { ...claimed.send, state: "held", sentAt: undefined }
+        : { ...claimed.send, state: "error", error: detail };
+      const result = await this.settleClaim(claimed, fence, send);
+      return result === "kept" ? retryable ? "held" : "refused" : result;
+    } catch { return "not-saved"; }
+  }
+  /** Proven no-delivery settles only the exact attempt, never a newer Retry. */
+  private async settleClaim(claimed: JournalSend, fence: CredentialFence, send: PendingSend): Promise<"kept" | "stale" | "not-saved"> {
+    const { key, scope } = claimed;
+    let revision: number | undefined;
+    try {
+      await this.transaction<void>(["sends", "blocks"], "readwrite", (tx, done) => {
+        done(undefined);
+        const block = tx.objectStore("blocks").get(blockKey(scope.hub, fence));
+        block.onsuccess = () => {
+          if (block.result) return;
+          const store = tx.objectStore("sends"), get = store.get(key);
+          get.onsuccess = () => {
+            const row = validSendRow(get.result) ? get.result : undefined;
+            if (!row?.send || row.receipt || row.owner !== this.owner || row.claim !== claimed!.claim
+              || !row.flight || !sameFence(row.flight, fence)
+              || row.send.target !== claimed!.send!.target || row.send.text !== claimed!.send!.text
+              || row.send.replyTo !== claimed!.send!.replyTo) return;
+            revision = row.revision + 1;
+            store.put({ key, scope, revision, updatedAt: this.now(),
+              send } satisfies JournalSend);
+          };
+        };
+      });
+    } catch { this.changed(); return "not-saved"; }
+    if (revision !== undefined) this.observed.set(key, revision);
+    this.changed();
+    return revision === undefined ? "stale" : "kept";
   }
   async persistReply(scope: DeliveryScope, reply: OperatorReply, fence: CredentialFence): Promise<boolean> {
     if (!validScope(scope)) return false;
@@ -460,6 +519,7 @@ export class CommanderJournal {
     } catch { return false; }
   }
   async purge(hub: string, fence: CredentialFence): Promise<void> {
+    for (const [key, attempts] of this.wireClaims) if (attempts[0]?.scope.hub === hub) this.wireClaims.delete(key);
     await this.transaction<void>(["sends", "replies", "blocks"], "readwrite", (tx, done) => {
       done(undefined);
       tx.objectStore("blocks").put({ key: blockKey(hub, fence), credentialId: fence.credentialId } satisfies Block);

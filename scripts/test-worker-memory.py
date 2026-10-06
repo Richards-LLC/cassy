@@ -50,6 +50,71 @@ class AdmissionTests(unittest.TestCase):
         return host.admission(role, self.env, lambda _: HIGH, directory=self.pool,
                               wait_secs=.5, poll_secs=.02, report=self.events.append, **kwargs)
 
+    def start_counted_command(self, executable, name, budget):
+        binary = self.root / executable
+        binary.write_text('#!' + sys.executable + '\n'
+                          'import pathlib,sys,time\n'
+                          'pathlib.Path(sys.argv[1]).write_text("started")\n'
+                          'while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n')
+        binary.chmod(0o755)
+        marker = self.root / (name + '-started')
+        release = self.root / (name + '-release')
+        launcher = (
+            f"import sys,pathlib;sys.path.insert(0,{str(ROOT/'scripts')!r});"
+            f"import importlib.util;spec=importlib.util.spec_from_file_location('worker',{str(ROOT/'scripts/worker-memory.py')!r});"
+            "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
+            f"m.proof.memory_budget=lambda env:{budget!r};"
+            f"sys.exit(m.run({[str(binary), str(marker), str(release)]!r},directory=pathlib.Path({str(self.pool)!r})))"
+        )
+        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3',
+                   CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS='0.02')
+        child = subprocess.Popen([sys.executable, '-c', launcher], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def cleanup():
+            release.touch()
+            if child.poll() is None: child.terminate()
+            child.communicate(timeout=5)
+        self.addCleanup(cleanup)
+        return child, marker, release
+
+    def wait_for_markers(self, markers):
+        deadline = time.monotonic() + 2
+        while not all(marker.exists() for marker in markers):
+            self.assertLess(time.monotonic(), deadline,
+                            f'commands did not run concurrently: {[p.name for p in markers if p.exists()]}')
+            time.sleep(.01)
+
+    def test_cas_4cb9_two_browser_suites_and_typecheck_run_concurrently(self):
+        commands = [self.start_counted_command('playwright', 'browser-one', HIGH),
+                    self.start_counted_command('playwright', 'browser-two', HIGH),
+                    self.start_counted_command('tsc', 'typecheck', HIGH)]
+        self.wait_for_markers([marker for _, marker, _ in commands])
+        # All three native commands are alive, waiting for our release barrier.
+        self.assertTrue(all(child.poll() is None for child, _, _ in commands))
+        for _, _, release in commands: release.touch()
+        for child, _, _ in commands:
+            stdout, stderr = child.communicate(timeout=5)
+            self.assertEqual(child.returncode, 0, stdout + stderr)
+
+    def test_cas_4cb9_low_budget_serializes_browser_suites(self):
+        low = dict(HIGH, budget_bytes=8*GIB)
+        first, one, release_one = self.start_counted_command('playwright', 'first', low)
+        self.wait_for_markers([one])
+        second, two, release_two = self.start_counted_command('playwright', 'second', low)
+        deadline = time.monotonic() + 2
+        while True:
+            self.assertFalse(two.exists(), 'low budget admitted two browser estimates')
+            self.assertLess(time.monotonic(), deadline)
+            readable, _, _ = select.select([second.stdout], [], [], .02)
+            if readable and 'waiting for host memory' in second.stdout.readline(): break
+        release_one.touch()
+        stdout, stderr = first.communicate(timeout=5)
+        self.assertEqual(first.returncode, 0, stdout + stderr)
+        self.wait_for_markers([two])
+        release_two.touch()
+        stdout, stderr = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 0, stdout + stderr)
+
     def wait_for_proof(self, child, marker):
         # Node/Python startup can exceed a fixed sleep under assembly load.
         # Keep the proof lease until the real admission wait is observable.

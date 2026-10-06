@@ -61,6 +61,19 @@ new_fixture() {
     cp "$script_dir/proof_target.py" "$repo/scripts/proof_target.py"
     cp "$script_dir/assembly-memory.py" "$repo/scripts/assembly-memory.py"
     cp "$script_dir/host_memory.py" "$repo/scripts/host_memory.py"
+    # Only copied fixture code selects a private pool. Keep real locking and
+    # inherited-lease validation in subprocesses and clones; production has no
+    # environment knob that redirects its host/user admission directory.
+    python3 - "$repo/scripts/host_memory.py" "$tmp/host-memory" <<'PY_HOST_MEMORY_FIXTURE'
+from pathlib import Path
+import sys
+path, pool = map(Path, sys.argv[1:])
+body = path.read_text()
+selector = "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'"
+if body.count(selector) != 1:
+    raise SystemExit('host memory fixture selector changed; refusing production pool')
+path.write_text(body.replace(selector, f'DIRECTORY = Path({str(pool)!r})'))
+PY_HOST_MEMORY_FIXTURE
     # The producer and its guard share deterministic physical-memory fixtures.
     python3 - "$repo/scripts/assembly-proof.py" <<'PY_MEMORY_GUARD_FIXTURE'
 from pathlib import Path

@@ -777,13 +777,15 @@ jobs:
           npm run visual-qa
           git diff --exit-code -- dist
           # User journeys (docs/qa/journeys.md) against the committed bundle,
-          # on the Chromium build pinned by @playwright/test.
+          # on the Chromium build pinned by @playwright/test. Four workers, the
+          # journey cap: one worker ran 115 journeys in 26.5 min and pushed the
+          # queue run past its check timeout.
           if sudo -n true 2>/dev/null; then
             npx playwright install --with-deps chromium
           else
             npx playwright install chromium
           fi
-          npm run journeys
+          npm run journeys -- --workers=4
 
       # cas-4ce5: a journey flake in the queue left no trace to diagnose.
       # Keep Playwright's traces, error-context.md and screenshots on failure.

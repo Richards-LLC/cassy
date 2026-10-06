@@ -96,7 +96,7 @@ pub fn execute_kill(name: Option<&str>, force: bool) -> Result<()> {
     let mut fmt = Formatter::stdout(&mut stdout, theme);
 
     if !session.is_running {
-        manager.remove_metadata(&name)?;
+        end_session_by_name(&name)?;
         StatusLine::success(format!("Cleaned up stale session: {name}")).render(&mut fmt)?;
         return Ok(());
     }
@@ -121,9 +121,7 @@ pub fn execute_kill(name: Option<&str>, force: bool) -> Result<()> {
         }
     }
 
-    terminate_process(session.metadata.daemon_pid)?;
-
-    manager.remove_metadata(&name)?;
+    end_session_by_name(&name)?;
     StatusLine::success(format!("Terminated session: {name}")).render(&mut fmt)?;
     Ok(())
 }
@@ -161,6 +159,26 @@ pub(crate) fn end_session_by_name(name: &str) -> Result<EndSessionOutcome> {
         return Ok(EndSessionOutcome::CleanedStale);
     }
     terminate_process(pid)?;
+    // SIGTERM delivery is not death. Wait before reclaiming socket names; if
+    // shutdown stalls, retain the receipt and leave the live daemon reachable.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while crate::ui::factory::daemon_identity_is_live(&session.metadata) {
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Session '{name}' is still shutting down; sockets retained. Check: cas list --name {name}"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // A replacement daemon may have acquired the same friendly name while
+    // shutdown ran. Its receipt and sockets belong to it, not this command.
+    if let Some(current) = manager.find_session(Some(name))? {
+        if current.metadata.daemon_pid != pid
+            || current.metadata.daemon_pid_starttime != session.metadata.daemon_pid_starttime
+        {
+            return Ok(EndSessionOutcome::Ended);
+        }
+    }
     manager.remove_metadata(name)?;
     Ok(EndSessionOutcome::Ended)
 }
@@ -228,20 +246,7 @@ pub fn execute_kill_all(force: bool) -> Result<()> {
 
 /// Kill a session if it's running (internal use, no confirmation)
 pub(super) fn kill_session_if_running(name: &str) -> Result<bool> {
-    let manager = SessionManager::new();
-    let session = match manager.find_session(Some(name)) {
-        Ok(Some(s)) => s,
-        _ => return Ok(false),
-    };
-
-    if !session.is_running {
-        manager.remove_metadata(name)?;
-        return Ok(false);
-    }
-
-    terminate_process(session.metadata.daemon_pid)?;
-    manager.remove_metadata(name)?;
-    Ok(true)
+    Ok(end_session_by_name(name)? == EndSessionOutcome::Ended)
 }
 
 /// Kill all orphaned daemon processes (running but socket gone)
@@ -256,8 +261,8 @@ pub(super) fn cleanup_orphaned_daemons() -> usize {
 
     for session in sessions {
         if session.is_running && !session.socket_exists {
-            match terminate_process(session.metadata.daemon_pid) {
-                Ok(()) => {
+            match end_session_by_name(&session.name) {
+                Ok(EndSessionOutcome::Ended) => {
                     killed += 1;
                     tracing::info!(
                         "Killed orphaned daemon: {} (PID {})",
@@ -265,6 +270,7 @@ pub(super) fn cleanup_orphaned_daemons() -> usize {
                         session.metadata.daemon_pid
                     );
                 }
+                Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(
                         "Failed to terminate orphaned daemon {} (PID {}): {}",
@@ -273,14 +279,6 @@ pub(super) fn cleanup_orphaned_daemons() -> usize {
                         e
                     );
                 }
-            }
-
-            if let Err(e) = manager.remove_metadata(&session.name) {
-                tracing::warn!(
-                    "Failed to remove metadata for orphaned session {}: {}",
-                    session.name,
-                    e
-                );
             }
         }
     }

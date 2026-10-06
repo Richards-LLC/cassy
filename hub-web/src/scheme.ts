@@ -4,9 +4,27 @@ const STORAGE_KEY = "commander.scheme";
 let preference: SchemePreference = "system";
 let media: MediaQueryList | undefined;
 
+/**
+ * cas-97d58 F20: a scheme switch is atomic. Colour transitions (row hovers,
+ * cards, pills) would otherwise animate every surface through mixed light and
+ * dark frames where text is nearly invisible, so they are suspended for the
+ * frame that flips the scheme and restored once it has painted.
+ */
+function switchAtomically(root: HTMLElement, scheme: Scheme): void {
+  root.dataset.schemeSwitching = "";
+  root.dataset.scheme = scheme;
+  // Commit the new colours while transitions are off.
+  void getComputedStyle(root).color;
+  const restore = () => { delete root.dataset.schemeSwitching; };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => requestAnimationFrame(restore));
+  else restore();
+}
+
 function renderScheme(): Scheme {
   const scheme = preference === "system" ? (media?.matches ? "dark" : "light") : preference;
-  document.documentElement.dataset.scheme = scheme;
+  const root = document.documentElement;
+  if (root.dataset.scheme && root.dataset.scheme !== scheme) switchAtomically(root, scheme);
+  else root.dataset.scheme = scheme;
   document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
     "content", getComputedStyle(document.documentElement).getPropertyValue("--bg-root").trim(),
   );

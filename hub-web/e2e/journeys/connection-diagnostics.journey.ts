@@ -30,7 +30,7 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await expect(page.locator("#conversation-connection")).toHaveText(" · Reconnecting");
     await page.getByRole("button", { name: "Connection details", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Connection log" })).toBeVisible();
-    await expect(page.locator(".connection-log-summary")).toContainText("Network or browser policy blocked the request (browser)");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Network or browser policy blocked the request.");
     await expect(page.locator(".connection-log-summary")).toContainText("Next retry in");
     await expect(page.locator(".connection-log-summary")).toContainText("Last successful connection:");
     await expect(page.getByRole("button", { name: "Export safe diagnostics" })).toBeEnabled();
@@ -42,8 +42,12 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
   - heading "Connection log" [level=2]
   - button "Close connection log": ×
   - paragraph: /Network or browser policy blocked the request.*/
-  - button "Export safe diagnostics"
-  - text: /.*schema_version.*/`);
+  - button "Export safe diagnostics"`);
+    await expect(page.locator(".connection-log-technical > summary")).toHaveText("Technical details");
+    // cas-97d58 F08: the lead is one plain sentence; the layer and the raw JSON wait behind Technical details.
+    await expect(page.locator(".connection-log-summary")).not.toContainText("(browser)");
+    await expect(page.locator(".connection-log-summary")).not.toContainText("indistinguishable");
+    await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export safe diagnostics" }).click();
     const download = await downloadPromise;
@@ -58,6 +62,20 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
     const markup = await page.locator("#connection-log").evaluate(element => element.outerHTML);
     await writeFile(join(RECEIPTS, "connection-log-snapshot.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Built Commander connection log snapshot</title><style>${css}</style><body>${markup}<script>document.documentElement.dataset.scheme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';const dialog=document.querySelector('dialog');dialog.removeAttribute('open');dialog.showModal();</script></body></html>`);
+    // cas-97d58 QA F01: collapsed, Technical details still shows an expand
+    // affordance (a chevron), which turns when it opens; keyboard opens it.
+    const summary = page.locator(".connection-log-technical > summary");
+    const chevron = () => summary.evaluate((node) => { const mark = getComputedStyle(node, "::before"); return { content: mark.content, transform: mark.transform, width: mark.width }; });
+    const closed = await chevron();
+    expect(closed.content).not.toBe("none");
+    expect(closed.width).toBe("7px");
+    await summary.focus(); await page.keyboard.press("Enter");
+    await expect(page.locator(".connection-log-technical")).toHaveAttribute("open", "");
+    await expect.poll(async () => (await chevron()).transform).not.toBe(closed.transform);
+    const openMarkup = await page.locator("#connection-log").evaluate(element => element.outerHTML);
+    await writeFile(join(RECEIPTS, "connection-log-snapshot-open.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Built Commander connection log snapshot, details open</title><style>${css}</style><body>${openMarkup}<script>document.documentElement.dataset.scheme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';const dialog=document.querySelector('dialog');dialog.removeAttribute('open');dialog.showModal();</script></body></html>`);
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
   });
   for (const width of [1280, 390]) for (const scheme of ["light", "dark"] as const) {
     await journey.stage(`Named evidence at ${width}px ${scheme}`, async () => {
@@ -79,7 +97,7 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await page.getByRole("button", { name: "Connection details", exact: true }).click();
     await expect(page.locator("#connection-log pre")).toContainText('"recovered": "network_or_browser_policy_unknown"');
     blocked = false; await clock.advance(10_000);
-    await expect(page.locator(".connection-log-summary")).toContainText("No active failure measured");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: nothing is failing now.");
   });
   for (const setting of ["reducedMotion", "forcedColors", "contrast"] as const) {
     await journey.stage(`Accessible log with ${setting}`, async () => {
@@ -127,8 +145,10 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
     // The log's periodic projection is a one-second protocol timer, independent
     // of the five-second heartbeat. Let that tick observe the settled failure.
     await clock.advance(1_000);
-    await expect(page.locator(".connection-log-summary")).toContainText("Network or browser policy blocked the request (browser)");
-    await expect(page.locator(".connection-log-summary")).not.toContainText("No active failure measured");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Network or browser policy blocked the request.");
+    await expect(page.locator(".connection-log-summary")).not.toContainText("nothing is failing now");
+    // Unsteady: the log agrees with the rail's "checking…" (F08), never "No retry scheduled".
+    await expect(page.locator(".connection-log-summary")).not.toContainText("No retry scheduled");
     await expect(page.locator(".connection-log-summary")).toContainText("Last successful connection:");
   });
 });

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 
 import { runVisualQa } from './visual-qa.mjs';
+import { runVisualQa as runBuiltinVisualQa } from '../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const fixture = (name) => join(here, 'visual-qa-fixtures', name);
@@ -256,6 +257,64 @@ test('reports content lost when JavaScript is disabled or print media applies', 
   assert.ok(result.findings.some((finding) => finding.type === 'print-loss'));
 });
 
+for (const [name, inspect] of [['repository', runVisualQa], ['builtin', runBuiltinVisualQa]]) {
+  test(`${name} honours a reasoned JavaScript requirement while undeclared pages still fail`, async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-js-required-'));
+    const reason = 'This application needs JavaScript to reach machines and pair devices.';
+    const html = (declaration) => `<!doctype html><html lang="en"><head>
+      <meta charset="utf-8">${declaration}
+      <style>body { margin: 24px; color: #172033; background: #fff; font: 16px/1.4 Arial, sans-serif; }</style>
+      </head><body><noscript>Enable JavaScript to reach your machines.</noscript><main></main>
+      <script>document.querySelector('main').textContent = ${JSON.stringify('This application shows live machine status, pairs devices and lets operators respond to their workers. '.repeat(4))};</script>
+      </body></html>`;
+    const declared = join(artifactDir, 'declared.html');
+    const undeclared = join(artifactDir, 'undeclared.html');
+    await writeFile(declared, html(`<meta name="visual-qa:requires-javascript" content="${reason}">`));
+    await writeFile(undeclared, html(''));
+    const options = { strict: true, schemes: ['light'], viewports: [{ name: 'phone', width: 390, height: 800 }] };
+    const accepted = await inspect({ ...options, urls: [declared], artifactDir: join(artifactDir, 'accepted') });
+    assert.equal(accepted.status, 'PASS', JSON.stringify(accepted.findings));
+    assert.equal(accepted.exitCode, 0);
+    assert.equal(accepted.findings.some(({ type }) => type === 'javascript-disabled-loss'), false);
+    assert.deepEqual(accepted.pageDeclarations, [{ url: declared, requiresJavaScript: true, reason }]);
+    assert.match(accepted.markdown, /JavaScript required/);
+    assert.ok(accepted.markdown.includes(reason));
+    const rejected = await inspect({ ...options, urls: [undeclared],
+      allowlistPath: join(repoRoot, 'hub-web/visual-qa-allowlist.json'), artifactDir: join(artifactDir, 'rejected') });
+    assert.equal(rejected.status, 'FAIL');
+    assert.equal(rejected.exitCode, 1);
+    assert.ok(rejected.findings.some(({ type }) => type === 'javascript-disabled-loss'));
+    const mixed = await inspect({ ...options, urls: [declared, undeclared], artifactDir: join(artifactDir, 'mixed') });
+    assert.equal(mixed.exitCode, 1, 'one declared page must not exempt its undeclared neighbour');
+    assert.deepEqual(mixed.pageDeclarations, accepted.pageDeclarations);
+    assert.deepEqual(mixed.findings.filter(({ type }) => type === 'javascript-disabled-loss').map(({ url }) => url), [undeclared]);
+  });
+}
+
+test('JavaScript requirement needs a reason and cannot waive print loss', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-js-required-controls-'));
+  const original = await readFile(fixture('media-loss.html'), 'utf8');
+  const options = { strict: true, schemes: ['light'], viewports: [{ name: 'phone', width: 390, height: 800 }] };
+  for (const [name, metadata, expected] of [
+    ['empty', '<meta name="visual-qa:requires-javascript" content=" ">', 'invalid-javascript-requirement'],
+    ['duplicate', '<meta name="visual-qa:requires-javascript" content="A reason"><meta name="visual-qa:requires-javascript" content="Another reason">', 'invalid-javascript-requirement'],
+    ['print', '<meta name="visual-qa:requires-javascript" content="This application renders live data.">', 'print-loss'],
+  ]) {
+    const page = join(artifactDir, `${name}.html`);
+    await writeFile(page, original.replace('<head>', `<head>${metadata}`));
+    const result = await runVisualQa({ ...options, urls: [page], artifactDir: join(artifactDir, name) });
+    assert.equal(result.exitCode, 1);
+    assert.ok(result.findings.some(({ type }) => type === expected), JSON.stringify(result.findings));
+    if (name === 'print') {
+      assert.equal(result.findings.some(({ type }) => type === 'javascript-disabled-loss'), false);
+      assert.equal(result.pageDeclarations.length, 1);
+    } else {
+      assert.ok(result.findings.some(({ type }) => type === 'javascript-disabled-loss'));
+      assert.deepEqual(result.pageDeclarations, []);
+    }
+  }
+});
+
 test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
   const artifactDir = await acceptanceDir('visual-qa-acceptance-');
   const exemplarNames = ['product-page.html', 'report.html', 'dashboard.html', 'before-after.html'];
@@ -501,6 +560,72 @@ test('text folded inside a closed <details> is not clipped; an open disclosure t
   assert.ok(clipped.some((finding) => /lost below the edge/.test(finding.textSample ?? '')), JSON.stringify(result.findings, null, 2));
   // Every clip found is that real one: its lost line or the box that loses it.
   assert.deepEqual(clipped.filter((finding) => !/lost below the edge/.test(finding.textSample ?? '') && !finding.elementPath.endsWith('div.clip')), [], JSON.stringify(clipped, null, 2));
+});
+
+test('an intentional multi-line clamp with an ellipsis is not clipped; an unclamped hidden overflow still is (cas-272d)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-clamp-'));
+  const result = await runVisualQa({
+    urls: [fixture('line-clamp.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 844 },
+    ],
+  });
+  const on = (id) => result.findings.filter((finding) => (finding.selector ?? '').includes(id) || (finding.elementPath ?? '').includes(id));
+  // The clamp hides its later lines on purpose and shows an ellipsis: no finding.
+  assert.deepEqual(on('#clamped'), [], JSON.stringify(result.findings, null, 2));
+  // A -webkit-box clamp draws its own ellipsis with text-overflow left at
+  // its default, as an audit summary with an expand toggle does (GH #1109).
+  assert.deepEqual(on('#engine-ellipsis'), [], JSON.stringify(result.findings, null, 2));
+  // Negative controls: hidden lines with no clamp and no ellipsis still fail,
+  // and so does a line count on a plain block, which clamps nothing.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(on('#unclamped').some((finding) => finding.type === 'clipped-content'), JSON.stringify(result.findings, null, 2));
+  assert.ok(on('#stray').some((finding) => finding.type === 'clipped-content'), JSON.stringify(result.findings, null, 2));
+});
+
+test('cards in a horizontal scroll-snap carousel are reachable, not clipped; a row that cannot scroll still is (GH #1109)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-carousel-'));
+  const result = await runVisualQa({
+    urls: [fixture('carousel.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 844 },
+    ],
+  });
+  const on = (id) => result.findings.filter((finding) => [finding.selector, finding.elementPath, finding.ancestorPath].some((value) => (value ?? '').includes(id)));
+  // Off-screen cards are reached by scrolling the rail: plain, inside a
+  // section that hides its bleed, and inside a narrow shell with overflow
+  // hidden, as the audit page's carousel sits.
+  for (const id of ['#rail', '#bleed-rail', '#screens', 'ul.rail', 'div.scroller']) assert.deepEqual(on(id), [], `${id}: ${JSON.stringify(on(id), null, 2)}`);
+  // Negative control: the same cards in a row that does not scroll are cut off.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(on('stuck').some((finding) => finding.type === 'clipped-content' && finding.reason === 'text-bounds-exceed-overflow-ancestor'), JSON.stringify(result.findings, null, 2));
+});
+
+test('a long value scrolling inside an editable field is not clipped; a box that clips the field still is (cas-000c)', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-editable-'));
+  const result = await runVisualQa({
+    urls: [fixture('editable-input.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light', 'dark'],
+    viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 844 },
+    ],
+  });
+  // The long input value and the unwrapped textarea line scroll while editing: no finding on either field.
+  assert.deepEqual(result.findings.filter((finding) => /#long-name|#long-notes|label:nth-of-type\((1|2)\) > (input|textarea)/.test(finding.elementPath ?? finding.selector ?? '')), [], JSON.stringify(result.findings, null, 2));
+  // Negative control: the box that clips its input is still flagged.
+  assert.equal(result.status, 'FAIL');
+  assert.ok(result.findings.some((finding) => finding.type === 'clipped-content' && /tight-box/.test(finding.selector ?? finding.elementPath ?? '')), JSON.stringify(result.findings, null, 2));
 });
 
 test('text the engine skips (content-visibility: hidden) is not clipped; a visible clip still is (cas-861c)', async () => {

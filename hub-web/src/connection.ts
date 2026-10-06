@@ -442,6 +442,10 @@ export class HubConnectionSupervisor {
       // trusted (a half-open one takes sends and delivers nothing); every
       // session attaches afresh, now (cas-0978).
       if (recovering) this.reattachDesired("Reconnected after the network changed");
+      // A session can become ready before this event stream. Its earlier
+      // flush was fenced while the machine was attaching; wake it now, after
+      // any untrusted recovery sockets have been abandoned.
+      this.releaseHeldMessages();
       await this.consumeEvents(response, this.eventAbort!.signal);
       if (this.desired) throw new Error("hub event stream closed");
     } catch (error) {
@@ -1487,7 +1491,10 @@ export class HubConnectionSupervisor {
     // sent into it could vanish, so it is refused here and the caller holds
     // it until the machine answers or the socket is replaced (cas-0978,
     // cas-a6f0, journey F9).
-    if (this.holdsMessages() && isSupervisorMessage(message)) return false;
+    // The journal's claim and credential reads are asynchronous. Recovery can
+    // begin after the caller checked live, while its old socket is still OPEN.
+    // Never write that pending send onto a socket recovery is about to replace.
+    if (isSupervisorMessage(message) && (this.lifecycle.phase !== "live" || this.holdsMessages())) return false;
     const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
       const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;
@@ -1707,6 +1714,11 @@ export class HubConnectionSupervisor {
         this.settleUpstreamStreak(session);
         this.transitionAttach(session, "live", "live");
       }
+      // A fresh session can recover before the event-stream retry timer.
+      // Check the machine now; the session alone never bypasses the machine
+      // send fence, and connect still replaces untrusted recovery sockets.
+      if (this.attachLifecycles.get(session)?.phase === "live"
+        && (this.lifecycle.phase === "backoff" || this.lifecycle.phase === "failed")) this.networkChanged();
       const welcome = message.Welcome;
       this.sessionPanes.set(session, welcome.state.panes);
       const authoritative = Number(welcome.protocol_version ?? 1) >= 3

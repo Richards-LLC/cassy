@@ -473,6 +473,88 @@ fn failing_or_assertion_free_trace_is_rejected() {
     assert!(refusal.problem.contains("not a zip"), "{refusal:?}");
 }
 
+/// cas-b10d: a trace zip with these entries, stored uncompressed.
+fn entries_zip(path: &Path, entries: &[(&str, String)]) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, body) in entries {
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(body.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+/// What `visual-qa.mjs --scrub-trace` writes for a signed-in runner zip's
+/// network record and evaluate argument (cas-b10d, captured from the scrubber).
+const SCRUBBED_NETWORK: &str = r#"{"type":"resource-snapshot","snapshot":{"request":{"url":"/account","headers":[{"name":"Authorization","value":"[REDACTED]"},{"name":"Cookie","value":"[REDACTED]"}],"cookies":[]},"response":{"headers":[{"name":"Set-Cookie","value":"[REDACTED]"}]}}}"#;
+const SCRUBBED_EVALUATE: &str = r#"{"type":"before","callId":"call@3","method":"evaluate","params":{"arg":"{\"refreshToken\":\"[REDACTED]\",\"idToken\":\"[REDACTED]\"}"}}"#;
+
+/// cas-b10d: the cas-qa-craft signed-in recipe keeps the runner's tracing on
+/// and scrubs the finished zip. Its output keeps the runner's test.trace, so
+/// the gate counts real assertions, and every credential reads [REDACTED]:
+/// the authenticated (deployed) bundle passes the credential scan.
+#[test]
+fn a_scrubbed_runner_trace_from_the_signed_in_recipe_is_accepted_cas_b10d() {
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    entries_zip(
+        &fx.bundle_dir().join("trace.zip"),
+        &[
+            ("test.trace", PASSING.join("\n")),
+            ("trace.trace", SCRUBBED_EVALUATE.to_string()),
+            ("trace.network", SCRUBBED_NETWORK.to_string()),
+        ],
+    );
+    let receipt = fx
+        .validate_with_origins(&staging())
+        .expect("the recipe's scrubbed runner trace is accepted");
+    assert_eq!(receipt.passed_expects, 1);
+}
+
+/// cas-b10d: what the old recipe's `saveQaTrace` wrote: a library
+/// `context.tracing` zip whose protocol calls include assertions, but with
+/// no runner test.trace and so no test outcome. It stays refused, and the
+/// refusal names the runner recipe and its scrub step.
+#[test]
+fn a_library_context_trace_is_refused_with_the_runner_recipe_cas_b10d() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    entries_zip(
+        &fx.bundle_dir().join("trace.zip"),
+        &[
+            ("trace.trace", PASSING.join("\n")),
+            ("trace.network", SCRUBBED_NETWORK.to_string()),
+        ],
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("has no test.trace"), "{}", refusal.problem);
+    assert!(refusal.problem.contains("library context.tracing"), "{}", refusal.problem);
+    assert!(refusal.command.contains("Playwright test runner"), "{}", refusal.command);
+    assert!(refusal.command.contains("--scrub-trace"), "{}", refusal.command);
+}
+
+/// cas-b10d: skipping the recipe's scrub leaves the runner's recorded
+/// session cookie in the network log; the signed-in bundle is refused by name.
+#[test]
+fn an_unscrubbed_signed_in_runner_trace_is_refused_cas_b10d() {
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    let raw_network = SCRUBBED_NETWORK.replacen(
+        r#"{"name":"Cookie","value":"[REDACTED]"}"#,
+        r#"{"name":"Cookie","value":"__session=synthetic-session-cookie-value"}"#,
+        1,
+    );
+    entries_zip(
+        &fx.bundle_dir().join("trace.zip"),
+        &[("test.trace", PASSING.join("\n")), ("trace.network", raw_network)],
+    );
+    let refusal = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(refusal.problem.contains("carrying credentials"), "{}", refusal.problem);
+    assert!(refusal.problem.contains("trace.network"), "{}", refusal.problem);
+}
+
 #[test]
 fn passing_poll_and_to_pass_ignore_caught_inner_expect_retries_gh1013() {
     let fx = Fixture::new();

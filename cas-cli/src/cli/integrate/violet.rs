@@ -2264,7 +2264,7 @@ fn existing_machine_env_names(paths: &MachinePaths, url: &str) -> Result<Option<
     Ok(None)
 }
 
-pub fn execute(args: &VioletArgs, json: bool) -> Result<IntegrationOutcome> {
+pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationOutcome> {
     if !args.dry_run && !args.no_harness {
         super::violet_retirement::retire_installed_hub(project_proxy_path().as_deref())?;
     }
@@ -2454,9 +2454,7 @@ pub fn execute(args: &VioletArgs, json: bool) -> Result<IntegrationOutcome> {
     // rather than at the first release post.
     if matches!(report.probe, ProbeOutcome::Unauthorized) {
         if !json {
-            for line in &outcome.summary {
-                println!("  {line}");
-            }
+            super::render_summary(&outcome.summary, full)?;
         }
         anyhow::bail!(
             "Violet refused this machine's credential (HTTP 401). Nothing was verified; the \

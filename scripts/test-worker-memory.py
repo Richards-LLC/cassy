@@ -35,6 +35,8 @@ sys.modules['host_memory'] = host
 worker = load('worker_memory', ROOT / 'scripts/worker-memory.py')
 GIB = 1024**3
 HIGH = {'total_bytes': 64*GIB, 'available_bytes': 60*GIB, 'reserve_bytes': 16*GIB, 'budget_bytes': 44*GIB, 'source': 'fixture'}
+TRAIN_ENV_KEYS = ('CAS_RELEASE_TRAIN_INVOCATION_KIND', 'CAS_RELEASE_TRAIN_RUN_DIR',
+                  'CAS_RELEASE_TRAIN_STAGE')
 
 
 class AdmissionTests(unittest.TestCase):
@@ -46,6 +48,9 @@ class AdmissionTests(unittest.TestCase):
         self.events = []
         self.env = dict(os.environ)
         self.env.pop(host.LEASE_ENV, None)
+        # Never start or contact the host's real compiler-cache server.
+        for key in ('RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WRAPPER'):
+            self.env.pop(key, None)
 
     def admit(self, role, **kwargs):
         return host.admission(role, self.env, lambda _: HIGH, directory=self.pool,
@@ -197,19 +202,166 @@ with host.admission('worker',dict(__import__('os').environ),lambda env: (_ for _
             child = subprocess.run([sys.executable, '-c', program], env=env, capture_output=True, text=True)
             self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
 
-    def test_cas_4cb9_assembly_propagates_its_host_descriptors(self):
+    def test_cas_7b7b9_assembly_rows_get_no_host_descriptors_and_holder_tracks_them(self):
+        # Replaces the 4cb9 contract that merged intent/budget into the rows'
+        # inherited leases: rows now get none, the lock stays held, and every
+        # row's process group is tracked by the proof's lease holder.
+        tracked = []
         def inspect(root, clone, env, *args):
             record = json.loads(env[host.LEASE_ENV])
-            inherited = worker.proof.release_scratch.inherited_leases(env)
-            self.assertEqual(inherited, set(record['fds']))
-            for fd in inherited: os.fstat(fd)
+            self.assertTrue(set(record['fds']).isdisjoint(worker.proof.release_scratch.inherited_leases(env)))
             with host.private_file(self.pool/'intent.lock') as probe:
                 with self.assertRaises(BlockingIOError):
                     fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            self.assertEqual(len(worker.proof.release_scratch.CURRENT.spawn_hooks), 1)
+            tracked.append(worker.proof.release_scratch.CURRENT.spawn_hooks[0])
             return 'ran'
         with mock.patch.object(worker.proof, 'HOST_MEMORY_DIRECTORY', self.pool), \
-             mock.patch.object(worker.proof, '_run_contexts', side_effect=inspect):
+             mock.patch.object(worker.proof, '_run_contexts', side_effect=inspect), \
+             worker.proof.release_scratch.ChildScope() as scope:
             self.assertEqual(worker.proof.run_contexts(self.root, self.root, self.env, self.root, self.root, {}), 'ran')
+            self.assertEqual(scope.spawn_hooks, [])
+        self.assertEqual(len(tracked), 1)
+        with self.admit('proof'): pass  # released on a normal return
+
+    def daemonizing_program(self, pidfile):
+        # Double fork + setsid: the grandchild leaves the command's process
+        # group and session, like an sccache server, and outlives the command.
+        return f'''import os,pathlib,time
+if os.fork() == 0:
+    os.setsid()
+    if os.fork() == 0:
+        pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))
+        time.sleep(30)
+    os._exit(0)
+os.wait()
+while not pathlib.Path({str(pidfile)!r}).exists(): time.sleep(.01)
+'''
+
+    def held_pool_locks(self, pid):
+        names = set()
+        for descriptor in Path(f'/proc/{pid}/fd').iterdir():
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if target.startswith(str(self.pool)):
+                names.add(Path(target).name)
+        return names
+
+    def kill_pidfile(self, pidfile):
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), 9)
+            except ProcessLookupError:
+                pass
+
+    @unittest.skipUnless(Path('/proc/self/fd').is_dir(), 'needs /proc')
+    def test_cas_7b7b9_daemonized_child_does_not_keep_the_lease(self):
+        pidfile = self.root / 'daemon-pid'
+        self.addCleanup(self.kill_pidfile, pidfile)
+        with mock.patch.object(worker.proof, 'memory_budget', return_value=HIGH), \
+             mock.patch.object(worker.proof, 'positive_knob', return_value=None):
+            status = worker.run([sys.executable, '-c', self.daemonizing_program(pidfile)],
+                                env=self.env, directory=self.pool)
+        self.assertEqual(status, 0)
+        daemon = int(pidfile.read_text())
+        os.kill(daemon, 0)  # still running after its command and wrapper finished
+        self.assertEqual(self.held_pool_locks(daemon), set(), 'the daemon inherited admission descriptors')
+        with self.admit('proof'): pass  # nothing holds the budget any more
+        with self.admit('worker'):
+            self.assertEqual(self.events[-1]['reserved_bytes'], 0)
+
+    @unittest.skipUnless(Path('/proc/self/fd').is_dir(), 'needs /proc')
+    def test_cas_7b7b9_killed_wrapper_holds_until_its_command_group_ends(self):
+        marker, release = self.root/'cmd-started', self.root/'cmd-release'
+        program = (f'import pathlib,time;pathlib.Path({str(marker)!r}).touch()\n'
+                   f'while not pathlib.Path({str(release)!r}).exists(): time.sleep(.01)')
+        launcher = (f"import sys,pathlib;sys.path.insert(0,{str(ROOT/'scripts')!r});"
+                    f"import importlib.util;spec=importlib.util.spec_from_file_location('worker',{str(ROOT/'scripts/worker-memory.py')!r});"
+                    "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
+                    f"m.proof.memory_budget=lambda env:{HIGH!r};"
+                    f"sys.exit(m.run([sys.executable,'-c',{program!r}],directory=pathlib.Path({str(self.pool)!r})))")
+        # stderr is not a pipe: the orphaned command keeps its copy open.
+        wrapper = subprocess.Popen([sys.executable, '-c', launcher], env=self.env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(release.touch)
+        try:
+            self.wait_for_markers([marker])
+            wrapper.kill()  # SIGKILL: no teardown, the command keeps running
+            wrapper.wait(timeout=3)
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                with self.admit('proof'): self.fail('proof admitted over a killed wrapper\'s running command')
+            release.touch()
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with self.admit('proof'): break
+                except ValueError:
+                    self.assertLess(time.monotonic(), deadline, 'holder outlived its command group')
+        finally:
+            release.touch()
+            if wrapper.poll() is None: wrapper.kill()
+            wrapper.wait(timeout=3)
+
+    @unittest.skipUnless(Path('/proc/self/fdinfo').is_dir(), 'needs /proc fdinfo')
+    def test_cas_7b7b9_an_escaped_inheritor_is_named_not_blamed_on_a_suite(self):
+        # The incident shape: an older wrapper passed its descriptors to the
+        # command, the command started a daemon, and the wrapper exited.
+        pidfile = self.root / 'escaped-pid'
+        self.addCleanup(self.kill_pidfile, pidfile)
+        launcher = f'''import os,sys,pathlib,subprocess
+sys.path.insert(0,{str(ROOT/'scripts')!r})
+import host_memory as host
+with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=pathlib.Path({str(self.pool)!r})) as (env,fds):
+    subprocess.run([sys.executable,'-c',{self.daemonizing_program(pidfile)!r}],env=env,pass_fds=fds,check=True)
+'''
+        subprocess.run([sys.executable, '-c', launcher], env=self.env, check=True, timeout=10)
+        daemon = int(pidfile.read_text())
+        self.assertIn('slot-0.lock', self.held_pool_locks(daemon))
+        with self.assertRaises(ValueError) as refused:
+            with self.admit('proof'): self.fail('admitted over an escaped holder')
+        self.assertIn(f'pid {daemon}', str(refused.exception))
+        self.assertIn('not an admitted suite', str(refused.exception))
+        self.assertNotIn('worker suite running', str(refused.exception))
+        os.kill(daemon, 9)
+        deadline = time.monotonic() + 2
+        while Path(f'/proc/{daemon}').exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        with self.admit('proof'): pass
+
+    def test_cas_7b7b9_compiler_cache_server_starts_outside_the_lease(self):
+        self.assert_compiler_cache_starts_outside_lease()
+
+    def test_compiler_cache_preserves_release_train_environment(self):
+        self.env.update(zip(TRAIN_ENV_KEYS, ('cut', str(self.root / 'train'), 'gate')))
+        self.assert_compiler_cache_starts_outside_lease()
+
+    def assert_compiler_cache_starts_outside_lease(self):
+        calls = self.root / 'calls'
+        fake = self.root / 'bin' / 'sccache'
+        fake.parent.mkdir()
+        fake.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
+                        f'lease_keys = {host.LEASE_ENV_KEYS!r}\n'
+                        f'train_keys = {TRAIN_ENV_KEYS!r}\n'
+                        f'open({str(calls)!r},"a").write(json.dumps([sys.argv[1:], sorted(k for k in os.environ if k in lease_keys), [os.readlink("/proc/self/fd/"+n) for n in os.listdir("/proc/self/fd") if os.path.exists("/proc/self/fd/"+n)] if os.path.isdir("/proc/self/fd") else [], {{k: os.environ[k] for k in train_keys if k in os.environ}}])+"\\n")\n'
+                        'sys.exit(2)\n')
+        fake.chmod(0o755)
+        lease = os.open(self.root / 'lease', os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lease)
+        os.set_inheritable(lease, True)  # what an inherited lease looks like
+        env = dict(self.env, RUSTC_WRAPPER=str(fake), **{host.LEASE_ENV: '{}',
+                   'CAS_RELEASE_GATE_SCRATCH_LEASE_FDS': str(lease)})
+        self.assertTrue(host.start_compiler_cache(env))  # "Address in use" (exit 2) is fine
+        argv, lease_keys, descriptors, train_env = json.loads(calls.read_text().splitlines()[0])
+        self.assertEqual(argv, ['--start-server'])
+        self.assertEqual(lease_keys, [])
+        self.assertNotIn(str(self.root / 'lease'), descriptors)
+        self.assertEqual(train_env, {k: self.env[k] for k in TRAIN_ENV_KEYS if k in self.env})
+        self.assertFalse(host.start_compiler_cache(dict(self.env, RUSTC_WRAPPER='/usr/bin/ccache')))
+        self.assertFalse(host.start_compiler_cache({k: v for k, v in self.env.items()
+                                                    if k not in ('RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WRAPPER')}))
 
     def test_cas_4cb9_slot_symlink_fails_closed(self):
         host.private_directory(self.pool)

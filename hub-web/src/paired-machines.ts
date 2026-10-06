@@ -6,6 +6,12 @@ import { FACTORY_MANAGE_CAPABILITY, FACTORY_OPERATE_CAPABILITY } from './pairing
 export { CANT_REACH_RETRYING } from './connection-state';
 
 export interface PairedMachineRow {
+  /**
+   * cas-97d58 F16: why this browser, not the machine, is the problem (a
+   * browser permission or a missing browser feature). Shown in place of the
+   * bare connection word ("Unreachable"), which reads as the machine's fault.
+   */
+  cause?: string;
   id: string;
   label: string;
   address: string;
@@ -90,7 +96,7 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
 }
 
 /** "Shed NAS · Linux" reads "Shed NAS" where room is short. */
@@ -142,7 +148,7 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
       button.onblur = () => { delete button.dataset.confirm; button.textContent = 'Remove from this browser'; };
       container.append(node);
     }
-    const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Version unknown until it connects' };
+    const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.cause ?? row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Version unknown until it connects' };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
     renderFleetPermissions(node, row, options);
     if (options.installations) {

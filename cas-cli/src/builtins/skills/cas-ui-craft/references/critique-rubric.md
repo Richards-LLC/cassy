@@ -17,7 +17,7 @@ the other scores. They are the defects that recur on our surfaces; taste does no
 - A border, rule, or neighbouring element crossing a glyph or a chart mark (overlap) — craft 0.
 - A text node that does not wrap or scroll inside its container at 390px, or any page-level
   horizontal scroll — craft 0.
-- Content lost with JavaScript disabled or in print — accessibility 0.
+- Content lost with JavaScript disabled on an undeclared page, or in print — accessibility 0.
 
 The receipt for this class is the visual-QA run. The script ships with this skill; run it from
 the project root, with Playwright available:
@@ -34,6 +34,15 @@ line into the critique table's craft evidence. A mergeable public surface needs 
 PASS receipt (`visual-qa.md`, JSON, and screenshots) under `--artifact-dir`. If the production
 report is committed, commit only its small `visual-qa.md` beside it, never JSON or screenshots.
 Review every allowlist entry for its finding type, selector, and specific reason.
+
+A JavaScript application may declare its reviewed requirement once in the page's
+head: `<meta name="visual-qa:requires-javascript" content="A specific reason the application requires JavaScript">`.
+The inspector reads it automatically and records `requiresJavaScript: true` and
+the reason in its JSON and Markdown reports. This exempts only the JS-disabled
+comparison; print, contrast and layout checks still apply. An empty or duplicate
+declaration fails strict QA. Keep the application's explanatory `noscript` text;
+it is the intended fallback, rather than a missing application screen. Reports
+and other undeclared pages retain their JS-disabled content requirement.
 
 A resting page can pass while the states a user reaches do not. For a surface with a submit, a
 request, or a connection to lose, add `--journey <file>.json`. Each declared state loads the

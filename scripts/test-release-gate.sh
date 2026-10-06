@@ -102,6 +102,9 @@ path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
     "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
+    for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
+        cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
+    done
     # Real defects in the new rows are covered by test-fast-release-rows.py.
     for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
@@ -184,7 +187,7 @@ cat >"$repo/.gitignore" <<'EOF'
 target/
 __pycache__/
 EOF
-    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$repo/.context/zig/zig"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-zig-1.0' >"$repo/.context/zig/zig"
     chmod +x "$repo/.context/zig/zig"
     cat >"$repo/Cargo.toml" <<'EOF'
 [workspace]
@@ -269,6 +272,46 @@ printf 'CAS_FACTORY_SESSION=%s CAS_AGENT_ROLE=%s CAS_AGENT_NAME=%s CAS_SUPERVISO
   "${CAS_FACTORY_SESSION:-unset}" "${CAS_AGENT_ROLE:-unset}" "${CAS_AGENT_NAME:-unset}" \
   "${CAS_SUPERVISOR_NAME:-unset}" "${CAS_AGENT_ID:-unset}" "$*" \
   >>"${GATE_FIXTURE_FACTORY_ENV_LOG:-/dev/null}"
+if [[ "$*" == 'zigbuild --version' ]]; then echo fixture-zigbuild-1.0; fi
+if [[ "$*" == 'tree --locked -p cas --target x86_64-unknown-linux-gnu --edges normal,build,features' ]]; then
+  printf '%s\n' 'rustls feature "ring"' 'blake3 feature "no_avx512"' 'blake3 v1.8.6 (/repo/vendor/blake3-1.8.6)'
+fi
+if [[ "$*" == 'zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked' ]]; then
+  [[ "$(command -v zig)" == "${ZIG:?}" ]] || {
+    echo 'release binary fixture: selected Zig is not on PATH' >&2; exit 1;
+  }
+  # run_gate captures the caller's flags for the ISA controls. Older manual
+  # fixture invocations test other rows and do not supply these expectations.
+  if [[ -n "${GATE_FIXTURE_ISA_ORIGINAL_ENCODED+x}" ]]; then
+    [[ "${CARGO_ENCODED_RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_ENCODED" \
+        && "${RUSTFLAGS-__unset__}" == "$GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS" ]] || {
+    echo 'release binary fixture: publisher rustflags/linker were changed' >&2; exit 1;
+    }
+  fi
+  [[ "${CFLAGS_x86_64_unknown_linux_gnu:-}" == -march=x86_64 && "${CXXFLAGS_x86_64_unknown_linux_gnu:-}" == -march=x86_64 ]] || {
+    echo 'release binary fixture: missing baseline C/C++ flags' >&2; exit 1;
+  }
+  if [[ "${GATE_FIXTURE_ISA_BUILD_FAIL:-}" == 1 ]]; then exit 1; fi
+  destination="${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/release"
+  mkdir -p "$destination"
+  cat >"$destination/fixture.S" <<'ASM'
+.text
+.globl main
+.type main, @function
+main:
+  xor %eax, %eax
+  ret
+.section .note.GNU-stack,"",@progbits
+ASM
+  if [[ "${GATE_FIXTURE_ISA_EVEX:-}" == 1 ]] || grep -qF 'name = "aes"' Cargo.lock; then
+    sed 's/xor %eax, %eax/.byte 0x62, 0xf1, 0xff, 0x08, 0x78, 0xc8/' "$destination/fixture.S" >"$destination/seeded.S"
+    mv "$destination/seeded.S" "$destination/fixture.S"
+  fi
+  source "$(dirname "$0")/release-portable.sh"
+  release_portable_x86_64_linux_cc
+  "${RELEASE_PORTABLE_X86_64_CC[@]}" "$destination/fixture.S" -o "$destination/cas"
+  if [[ "${GATE_FIXTURE_ISA_MISSING:-}" == 1 ]]; then rm "$destination/cas"; fi
+fi
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'check --workspace --tests --target aarch64-apple-darwin' && "${GATE_FIXTURE_MACOS_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'check --workspace --tests --target aarch64-apple-darwin' ]]; then
@@ -336,6 +379,8 @@ PY_ARCHIVE_EXTRACT
 fi
 EOF
     chmod +x "$repo/scripts/cargo-stub"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-zigbuild-1.0' >"$repo/scripts/cargo-zigbuild"
+    chmod +x "$repo/scripts/cargo-zigbuild"
     cat >"$repo/scripts/rustup-stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -374,6 +419,9 @@ run_gate() {
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           "$failure_variable=1" \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          PATH="$repo/scripts:$PATH" \
+          GATE_FIXTURE_ISA_ORIGINAL_ENCODED="${CARGO_ENCODED_RUSTFLAGS-__unset__}" \
+          GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS="${RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
           GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
           CARGO="$repo/scripts/cargo-stub" \
@@ -386,6 +434,9 @@ run_gate() {
         (cd "$repo" && \
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          PATH="$repo/scripts:$PATH" \
+          GATE_FIXTURE_ISA_ORIGINAL_ENCODED="${CARGO_ENCODED_RUSTFLAGS-__unset__}" \
+          GATE_FIXTURE_ISA_ORIGINAL_RUSTFLAGS="${RUSTFLAGS-__unset__}" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
           GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
           CARGO="$repo/scripts/cargo-stub" \
@@ -409,7 +460,7 @@ assert_named_failure() {
 assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
-        version-literals fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
+        version-literals release-binary-isa fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
@@ -430,6 +481,52 @@ run_scenario() {
     output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
     assert_named_failure "$3" "$output"
 }
+
+# The new row must audit the staged executable, including code introduced by
+# dependencies, before the train can authorize pr-body/pipeline.
+repo="$(new_fixture release-binary-isa)"
+output="$(run_gate "$repo" GATE_FIXTURE_ISA_EVEX "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
+if grep -qF 'FAIL release-binary-isa' <<<"$output" \
+    && grep -qF 'forbidden EVEX/AVX-512' <<<"$output" \
+    && grep -qi 'vcvttsd2usi' <<<"$output"; then
+    ok 'release-binary-isa refuses seeded EVEX with the first instruction finding'
+else
+    bad "release-binary-isa missed the seeded final ELF: $output"
+fi
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
+if grep -qF 'PASS release-binary-isa' <<<"$output" \
+    && grep -qF 'RELEASE GATE PASSED' <<<"$output"; then
+    ok 'release-binary-isa accepts a baseline executable with locked zigbuild and release flags'
+else
+    bad "release-binary-isa rejected the baseline final ELF: $output"
+fi
+for control in GATE_FIXTURE_ISA_BUILD_FAIL GATE_FIXTURE_ISA_MISSING; do
+    output="$(run_gate "$repo" "$control" "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
+    assert_named_failure release-binary-isa "$output"
+done
+isa_target="$tmp/custom-cargo-target"
+output="$(CARGO_TARGET_DIR="$isa_target" CARGO_ENCODED_RUSTFLAGS=$'-C\x1ftarget-cpu=x86-64' RUSTFLAGS='-C debuginfo=1' \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
+if grep -qF 'PASS release-binary-isa' <<<"$output" && [[ -f "$isa_target/x86_64-unknown-linux-gnu/release/cas" ]]; then
+    ok 'release-binary-isa preserves publisher linker flags, selected Zig and configured target directory'
+else
+    bad "release-binary-isa ignored the configured target directory: $output"
+fi
+isa_run="$tmp/isa-learning"
+mkdir -p "$isa_run"
+printf 'publish\n' >"$isa_run/blockers.log"
+output="$(cd "$repo" && "$repo/scripts/release-gate.sh" --learn 'publish ISA audit found seeded EVEX' 'dependency backend introduced AVX-512' release-binary-isa --run-dir "$isa_run" --evidence blockers.log:1 2>&1)"
+if grep -qF 'learn=release-binary-isa' "$isa_run/blockers.log" \
+    && python3 "$repo/scripts/release-learning.py" --check "$repo" "$isa_run"; then
+    ok 'release-binary-isa is an executable learned row for blockers.log'
+else
+    bad "release-binary-isa could not map the publish rescue: $output"
+fi
+if [[ "${1:-}" == --release-binary-isa-only ]]; then
+    printf '\n%s passed, %s failed\n' "$pass" "$fail"
+    test "$fail" -eq 0
+    exit
+fi
 
 # cas-728e: copied producers must use real admission in a private pool. The
 # wait case also proves that isolation did not become an admission bypass.
@@ -1351,6 +1448,7 @@ fi
 
 # Receipts from real fixture executions, never forged PASS to prove success.
 repo="$(new_fixture row-cache)"
+: >"$tmp/cargo.log"
 export CAS_RELEASE_GATE_CACHE_DIR="$tmp/pass-cache"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1 || { cat "$tmp/cache-first.log"; exit 1; }
@@ -1363,8 +1461,13 @@ else
     bad 'row timing or successful logs missing'
 fi
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-second.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 10 ]]; then
-    ok 'unchanged full gate reuses ten eligible PASS receipts'
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 11 ]]; then
+    ok 'unchanged full gate reuses eleven eligible PASS receipts'
+    if [[ "$(grep -cxF 'zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked' "$tmp/cargo.log")" == 1 ]]; then
+        ok 'unchanged code and lock reuse ISA evidence without another release build'
+    else
+        bad 'unchanged release ISA receipt rebuilt the executable'
+    fi
 else
     bad "unchanged full gate did not reuse eligible rows: $(cat "$tmp/cache-second.log")"
 fi
@@ -1378,10 +1481,42 @@ printf 'release prose\n' >"$repo/docs/release-notes/cache.md"
 git -C "$repo" add docs/release-notes/cache.md
 git -C "$repo" commit -qm 'fixture release prose'
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-docs.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 10 ]]; then
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 11 ]]; then
     ok 'train row cache automatically reuses unchanged code proof after a release-prose commit'
 else
     bad "release prose reran unchanged code rows: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"
+fi
+# Tool updates at the same selected path invalidate the artifact PASS too.
+printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-zig-2.0' >"$repo/.context/zig/zig"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-isa-zig.log" 2>&1
+if awk -F '\t' '$1 == "release-binary-isa" && $7 == "0" {found=1} END {exit !found}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+    ok 'selected Zig version change invalidates the release artifact PASS'
+else
+    bad 'updated Zig reused stale release artifact evidence'
+fi
+printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-zig-1.0' >"$repo/.context/zig/zig"
+
+# A graph change must invalidate an earlier artifact PASS without relying on
+# environment changes. Fake Cargo emits the incident EVEX when aes is locked.
+printf '\n[[package]]\nname = "aes"\nversion = "0.9.3"\n' >>"$repo/Cargo.lock"
+git -C "$repo" add Cargo.lock
+git -C "$repo" commit -qm 'fixture dependency introduces EVEX'
+if run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-isa-evex.log" 2>&1; then
+    bad 'changed Cargo.lock reused a release binary PASS containing seeded EVEX'
+elif grep -qF 'FAIL release-binary-isa' "$tmp/cache-isa-evex.log" \
+    && grep -qi 'vcvttsd2usi' "$tmp/cache-isa-evex.log" \
+    && ! grep -qF 'PASS workspace-tests' "$tmp/cache-isa-evex.log"; then
+    ok 'changed Cargo.lock invalidates release ISA PASS and refuses before later rows'
+else
+    bad "locked EVEX did not fail before pipeline: $(cat "$tmp/cache-isa-evex.log")"
+fi
+git -C "$repo" checkout HEAD~1 -- Cargo.lock
+git -C "$repo" commit -qm 'restore baseline locked dependency graph'
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-isa-restored.log" 2>&1
+if awk -F '\t' '$1 == "release-binary-isa" && $7 == "REUSED" {found=1} END {exit !found}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+    ok 'restored locked code reuses the genuine prior release ISA PASS'
+else
+    bad 'restored baseline did not reuse the matching artifact receipt'
 fi
 printf '// Rust-only fix\n' >>"$repo/cas-cli/tests/smoke.rs"
 git -C "$repo" add .
@@ -1492,6 +1627,34 @@ unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
 repo="$(new_fixture train-proof)"
 cp -R "$script_dir/release-train.d" "$repo/scripts/"
 cp "$script_dir/release-train-resume.py" "$repo/scripts/"
+# This fixture proves train/assembly receipt consumption, while the ISA cases
+# above exercise real ELF refusal and auditing. Supply its already-proved ISA
+# receipt at the copied gate's key seam: prep changes Cargo.lock, so a receipt
+# seeded before prep would belong to a different input. Keep the real cache
+# reader and all nine receipt fields, without adding a production bypass.
+python3 - "$repo/scripts/release-gate.sh" <<'PY_TRAIN_ISA_RECEIPT'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+seam = '    if "$reuse_rows" && [[ -n "$key" ]]; then\n'
+assert body.count(seam) == 1, 'train ISA receipt seam changed'
+seed = '''    if [[ "$name" == release-binary-isa && -n "$key" && -n "$cache_dir" ]]; then
+        printf '%s %s %s PASS %s %s %s %s %s\\n' \\
+            "$key" "$cache_head" "$(date +%s)" "$cache_checkout_identity" \\
+            "$input_hash" "$env_fingerprint" "$cache_toolchain" \\
+            "$cache_implementation_digest" >"$cache_dir/$name.$key"
+    fi
+'''
+path.write_text(body.replace(seam, seed + seam))
+PY_TRAIN_ISA_RECEIPT
+# Any accidental execution of the auditor fails this fixture. The separate
+# seeded-EVEX/baseline cases retain the real auditor and zigbuild stub.
+cat >"$repo/scripts/test-check-portable-x86_64-isa.sh" <<'EOF'
+#!/usr/bin/env bash
+echo 'train fixture unexpectedly executed the ISA auditor' >&2
+exit 1
+EOF
 # This regression exercises assembly onward, with no GitHub/toolchain preflight.
 # Keep helper functions used by the nested integration fixtures while skipping
 # this train fixture's GitHub/toolchain stage.
@@ -1549,6 +1712,9 @@ if grep -q 'stopped after stage assemble' "$tmp/train-proof.log" \
     if [[ "$(grep -c '^nextest run --workspace.*--no-fail-fast' "$tmp/cargo.log")" == 1 ]] \
         && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 2 ]] \
         && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]] \
+        && [[ "$(grep -c '^zigbuild ' "$tmp/cargo.log" || true)" == 0 ]] \
+        && grep -q '^Reused PASS ' "$train_run"/rows/*/release-binary-isa.log \
+        && [[ "$(awk -F '\t' '$1 == "release-binary-isa" && $4 == 0 && $7 == "REUSED" {n++} END {print n+0}' "$train_run"/rows/*/timing.tsv)" == 1 ]] \
         && grep -q 'stage prep: done' "$tmp/train-proof.log" \
         && grep -q 'stage ledger: done' "$tmp/train-proof.log"; then
         ok 'real train assemble, prep, ledger and detached gate reuse both assembly contexts'

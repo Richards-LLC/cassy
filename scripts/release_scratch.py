@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -24,6 +25,7 @@ CURRENT = None
 PROC_ROOT = Path("/proc")
 TEARDOWN_WAIT_SECS = 20
 PROTOCOL = "cas-scratch-v1"
+REMAP_RECEIPT = ".cas-release-remap.json"
 REGENERABLE = ("suite.tar.zst", "extract", "tmp", "cargo-home", "bin")
 INVENTORY_ROOTS = set()
 
@@ -67,6 +69,8 @@ def read_owner(path):
     if file.stat().st_uid != os.getuid():
         raise ValueError("foreign owner record")
     owner = json.loads(file.read_text())
+    if not isinstance(owner, dict):
+        return None
     stat = path.stat()
     if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
         return None  # The lease protocol requires a private, same-user directory.
@@ -104,7 +108,7 @@ def open_lock(path, create=False):
 @contextlib.contextmanager
 def admitted(path, owner, clean):
     lease = Path(owner["lease"]) if owner else path / LOCK
-    if owner and lease != path / LOCK:
+    if owner and not (lease.name == LOCK and lease.parent.resolve() == path.resolve()):
         # Registered children refer only to a real guardian's lease, with a
         # matching owner identity. Never follow an arbitrary JSON lease path.
         guardian = lease.parent
@@ -319,6 +323,8 @@ class ChildScope:
     """Stop and reap process groups before any owned directory is removed."""
     def __init__(self):
         self.children = set()
+        # Called with each child's process group id right after it starts.
+        self.spawn_hooks = []
         self.signalled = set()
         self.interrupted = False
         self.spawning = False
@@ -391,6 +397,8 @@ class ChildScope:
             try:
                 child = subprocess.Popen(command, env=child_env, start_new_session=True, pass_fds=tuple(inherited), **kwargs)
                 self.children.add(child)
+                for hook in list(self.spawn_hooks):
+                    hook(child.pid)
             finally:
                 self.spawning = False
             if self.cancelled:
@@ -460,12 +468,194 @@ def scratch_parents(base, env):
     return parents
 
 
-def registered(path, protected):
+def registered(path, protected, generated_remap=False):
     remap = path / "workspace-remap/.git"
     registry = path / "repo/.git/worktrees"
+    linked = any((Path(parent) / '.git').is_file() or (Path(parent) / '.git').is_symlink()
+                 for parent, dirs, files in os.walk(path, followlinks=False)
+                 if not (generated_remap and Path(parent) == path / 'workspace-remap'))
     return (any(contains(path.resolve(), tree) for tree in protected)
-            or remap.is_file() or remap.is_symlink()
-            or (registry.is_dir() and any(registry.iterdir())))
+            or ((remap.is_file() or remap.is_symlink()) and not generated_remap)
+            or linked or (registry.is_dir() and any(registry.iterdir())))
+
+
+def git_output(repo, *args):
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE')}
+    env['GIT_OPTIONAL_LOCKS'] = '0'
+    return subprocess.check_output(['git', '-C', str(repo), *args], env=env, stderr=subprocess.PIPE)
+
+
+def git_rows(common):
+    raw = git_output(common, '--git-dir=' + str(common), 'worktree', 'list', '--porcelain', '-z')
+    rows, row = {}, {}
+    for field in raw.split(b'\0'):
+        if not field:
+            if row:
+                rows[row['worktree']] = row
+                row = {}
+        else:
+            key, _, value = os.fsdecode(field).partition(' ')
+            row[key] = str(Path(value).resolve()) if key == 'worktree' else value
+    return rows
+
+
+def file_identity(path, directory=False):
+    import stat
+    metadata = path.lstat()
+    if (metadata.st_uid != os.getuid() or stat.S_ISLNK(metadata.st_mode)
+            or (not stat.S_ISDIR(metadata.st_mode) if directory else not stat.S_ISREG(metadata.st_mode))):
+        raise ValueError('unsafe remap identity: ' + str(path))
+    return [metadata.st_dev, metadata.st_ino]
+
+
+def admin_identity(admin, common):
+    """Validate the registry path before Git or Python can follow its metadata."""
+    if admin.parent != common / 'worktrees' or admin.name in ('', '.', '..'):
+        raise ValueError('generated remap belongs to another Git registry')
+    registry_identity = file_identity(admin.parent, directory=True)
+    identity = file_identity(admin, directory=True)
+    # Git reads HEAD, gitdir, commondir and index; reject any unexpected links
+    # anywhere in this admin entry, including auxiliary config/log metadata.
+    for parent, dirs, files in os.walk(admin, followlinks=False):
+        for name in dirs:
+            file_identity(Path(parent) / name, directory=True)
+        for name in files:
+            file_identity(Path(parent) / name)
+    for name in ('HEAD', 'gitdir', 'commondir'):
+        file_identity(admin / name)
+    if (admin / (admin / 'commondir').read_text().strip()).resolve() != common:
+        raise ValueError('generated remap common directory changed')
+    return registry_identity, identity
+
+
+def validate_remap_receipt(receipt):
+    if not isinstance(receipt, dict) or receipt.get('protocol') != 'cas-release-remap-v1':
+        raise ValueError('invalid generated remap receipt')
+    for key in ('remap', 'common', 'admin'):
+        value = receipt.get(key)
+        if (not isinstance(value, str) or not value or '\0' in value
+                or not Path(value).is_absolute() or str(Path(value)) != value
+                or '..' in Path(value).parts):
+            raise ValueError('invalid generated remap receipt path: ' + key)
+    for key in ('remap_identity', 'git_file_identity', 'common_identity', 'registry_identity', 'admin_identity'):
+        value = receipt.get(key)
+        if (not isinstance(value, list) or len(value) != 2
+                or any(type(item) is not int or item < 0 for item in value)):
+            raise ValueError('invalid generated remap receipt identity: ' + key)
+    if not isinstance(receipt.get('head'), str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', receipt['head']):
+        raise ValueError('invalid generated remap receipt HEAD')
+
+
+def remap_owner_identity(owner):
+    return {key: owner[key] for key in ('protocol', 'uid', 'pid', 'start', 'path', 'device', 'inode', 'lease')}
+
+
+def remap_identity(base, common, receipt=None):
+    remap = base / 'workspace-remap'
+    present = remap.exists() or remap.is_symlink()
+    if present:
+        file_identity(remap, directory=True)
+    if any(parent.name == '.cas' for parent in remap.parents) or (remap / '.cas').exists() or (remap / '.cas').is_symlink():
+        raise ValueError('Cassy checkout is never a reclaimable generated remap')
+    git_file = remap / '.git'
+    if not present and receipt:
+        admin = Path(receipt['admin'])
+    else:
+        file_identity(git_file)
+        pointer = git_file.read_text().strip()
+        if not pointer.startswith('gitdir: '):
+            raise ValueError('invalid generated remap Git pointer')
+        admin = Path(pointer[8:])
+        if not admin.is_absolute():
+            admin = remap / admin
+    registry_identity, identity = admin_identity(admin, common)
+    row = git_rows(common).get(str(remap))
+    if not row or 'detached' not in row or 'branch' in row or 'locked' in row:
+        raise ValueError('remap is not an unlocked generated detached worktree')
+    if Path((admin / 'gitdir').read_text().strip()) != git_file:
+        raise ValueError('generated remap Git backlink changed')
+    if (admin / 'HEAD').read_text().strip() != row['HEAD']:
+        raise ValueError('generated remap HEAD is not detached')
+    if remap.exists() and git_output(remap, 'status', '--porcelain', '--untracked-files=all'):
+        raise ValueError('generated remap has delivery changes')
+    return {'remap': str(remap), 'remap_identity': file_identity(remap, directory=True) if remap.exists() else receipt['remap_identity'],
+            'git_file_identity': file_identity(git_file) if remap.exists() else receipt['git_file_identity'], 'common': str(common),
+            'common_identity': file_identity(common, directory=True), 'admin': str(admin),
+            'registry_identity': registry_identity, 'admin_identity': identity, 'head': row['HEAD']}
+
+
+def register_remap(base, repo):
+    """Record only a fresh generated detached checkout under a live held owner."""
+    base = Path(base).resolve()
+    owner = read_owner(base)
+    if not owner or not owner_live(owner):
+        raise ValueError('remap registration requires a live verified scratch owner')
+    with open_lock(Path(owner['lease'])) as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise ValueError('remap registration requires a held lifetime lease')
+    common = Path(os.fsdecode(git_output(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')).strip()).resolve()
+    identity = remap_identity(base, common)
+    receipt = dict(identity, protocol='cas-release-remap-v1', owner=remap_owner_identity(owner))
+    # Exclusive creation prevents a stale receipt being silently overwritten.
+    with (base / REMAP_RECEIPT).open('x') as stream:
+        json.dump(receipt, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    directory = os.open(base, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def unregister_generated_remap(base, owner, clean):
+    """Caller already holds the dead/released owner's exclusive lifetime lease."""
+    base = base.resolve()
+    receipt_path = base / REMAP_RECEIPT
+    if not owner or (not receipt_path.exists() and not receipt_path.is_symlink()):
+        return False
+    receipt_identity = file_identity(receipt_path)
+    with open_lock(receipt_path) as stream:
+        receipt = json.load(stream)
+    validate_remap_receipt(receipt)
+    if receipt.get('owner') != remap_owner_identity(owner):
+        raise ValueError('generated remap owner receipt changed')
+    if read_owner(base) != owner:
+        raise ValueError('generated remap base identity changed')
+    common = Path(receipt['common'])
+    if common.resolve() != common or file_identity(common, directory=True) != receipt.get('common_identity'):
+        raise ValueError('generated remap registry changed')
+    remap = base / 'workspace-remap'
+    admin = Path(receipt['admin'])
+    if admin.parent != common / 'worktrees' or receipt.get('remap') != str(remap):
+        raise ValueError('generated remap receipt escapes its registry/base')
+    registry = common / 'worktrees'
+    if registry.exists() or registry.is_symlink():
+        if file_identity(registry, directory=True) != receipt['registry_identity']:
+            raise ValueError('generated remap registry identity changed')
+    if not remap.exists() and not remap.is_symlink() and not admin.exists() and not admin.is_symlink() and str(remap) not in git_rows(common):
+        return True  # Targeted Git removal completed before a prior interruption.
+    identity = remap_identity(base, common, receipt)
+    if any(receipt.get(key) != value for key, value in identity.items()):
+        raise ValueError('generated remap Git identity changed')
+    if not clean:
+        return True
+    # Targeted Git removal also prunes this exact admin entry. Never globally
+    # prune unrelated missing parked checkouts or force-remove dirty worktrees.
+    with open_lock(receipt_path) as stream:
+        current_receipt = json.load(stream)
+    if (read_owner(base) != owner or file_identity(receipt_path) != receipt_identity
+            or current_receipt != receipt or remap_identity(base, common, receipt) != identity):
+        raise ValueError('generated remap changed before unregistration')
+    git_output(common, '--git-dir=' + str(common), 'worktree', 'remove', identity['remap'])
+    if Path(identity['admin']).exists() or Path(identity['admin']).is_symlink() or identity['remap'] in git_rows(common):
+        raise ValueError('generated remap unregister did not remove exact metadata')
+    return True
 
 
 def sweep(repo, base, clean=False, env=None):
@@ -486,6 +676,7 @@ def sweep(repo, base, clean=False, env=None):
             for path in sorted(parent.iterdir()):
                 if not path.name.startswith(prefixes) or path.is_symlink() or not path.is_dir():
                     continue
+                path = path.resolve()
                 stat = path.stat()
                 if stat.st_uid != os.getuid():
                     continue
@@ -496,9 +687,13 @@ def sweep(repo, base, clean=False, env=None):
                     owner = read_owner(path)
                     if owner is not None or stat.st_mtime <= cutoff:
                         with admitted(path, owner, clean):
-                            keep_base = registered(path, protected)
-                            # Partial reclamation requires CAS provenance. A registered
-                            # remap and its base always remain; only these siblings go.
+                            generated = unregister_generated_remap(path, owner, clean)
+                            protected = worktrees(repo)
+                            if generated and not clean:
+                                protected = [tree for tree in protected if tree != path / 'workspace-remap']
+                            keep_base = registered(path, protected, generated_remap=generated and not clean)
+                            # Only exact generated receipts may unregister a worktree;
+                            # unknown/worker/parked checkouts retain their whole base.
                             candidates = ([path / name for name in REGENERABLE
                                            if (path / name).exists() and not (path / name).is_symlink()]
                                           if keep_base and owner else ([] if keep_base else [path]))
@@ -520,11 +715,12 @@ def sweep(repo, base, clean=False, env=None):
                                     row["reclaimed_bytes"] += used
                             row["reclaimable"] = row["reclaimable_bytes"] > 0
                             row["removed"] = not path.exists()
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, subprocess.CalledProcessError, KeyError, TypeError) as exc:
                     row["reason"] = "protected: " + str(exc)
                 row["retained_bytes"] = size(path) if path.exists() else 0
                 records.append(row)
-    # Never prune/unregister a stale remap here; follow-up cas-638d owns that.
+    # Targeted Git removal cleans only receipt-matching admin metadata; never
+    # globally prune missing parked/delivery worktrees from another run.
     return {"entries": records,
             "reclaimable_bytes": sum(row["reclaimable_bytes"] for row in records),
             "reclaimed_bytes": sum(row["reclaimed_bytes"] for row in records),
@@ -705,18 +901,22 @@ def guard(command, repo, base):
                             current = read_owner(owner_dir)
                             if not owner or owner["pid"] != current["pid"] or owner["start"] != current["start"] or owner["lease"] != str(owner_dir / LOCK):
                                 continue
-                            remap = path / "workspace-remap"
-                            if remap.exists():
-                                subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(remap)],
-                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            if path.exists() and not path.is_symlink():
-                                shutil.rmtree(path)
-                        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], check=True)
+                            try:
+                                if process_uses(path.resolve(), lease_managed=True):
+                                    raise ValueError('live output retained')
+                                unregister_generated_remap(path, owner, True)
+                                if registered(path, worktrees(repo)) or process_uses(path.resolve(), lease_managed=True):
+                                    raise ValueError('registered checkout or live output retained')
+                                if path.exists() and not path.is_symlink():
+                                    shutil.rmtree(path)
+                            except (OSError, ValueError, subprocess.CalledProcessError, KeyError, TypeError) as exc:
+                                print(json.dumps({'scratch_retained': str(path), 'retained_bytes': size(path),
+                                                  'reason': str(exc)}), file=sys.stderr)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("report", "clean", "register", "guard"))
+    parser.add_argument("action", choices=("report", "clean", "register", "register-remap", "guard"))
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--base", type=Path, default=Path(os.environ.get("CAS_RELEASE_GATE_HOME_DIR") or "/var/tmp/cas-release-gate/base"))
     parser.add_argument("--cache", type=Path)
@@ -727,6 +927,9 @@ def main():
     args = parser.parse_args()
     if args.action == "register":
         register(args.path, args.owner_dir)
+        return 0
+    if args.action == 'register-remap':
+        register_remap(args.path, args.repo)
         return 0
     if args.action == "guard":
         return guard(args.command[1:] if args.command[:1] == ["--"] else args.command, args.repo, args.base)

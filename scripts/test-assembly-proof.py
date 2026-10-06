@@ -633,6 +633,49 @@ p.prove(root)
         self.assertEqual([item["admitted"] for item in execution["phases"]], [False, True])
         sleep.assert_called_once()
 
+    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "needs /proc")
+    def test_cas_7b7b9_row_daemon_does_not_keep_the_proof_lease(self):
+        # The release incident (cas-7b7b9): a row's build started an sccache server that
+        # inherited the proof's intent/budget and held them after the proof.
+        pool = self.root / ".host-memory"
+        pidfile = self.root / "daemon-pid"
+        daemon_program = (
+            "import os,pathlib,time\n"
+            "if os.fork() == 0:\n"
+            "    os.setsid()\n"
+            "    if os.fork() == 0:\n"
+            f"        pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+            "        time.sleep(30)\n"
+            "    os._exit(0)\n"
+            "os.wait()\n"
+            f"while not pathlib.Path({str(pidfile)!r}).exists(): time.sleep(.01)\n")
+        def rows(root, clone, env, *args):
+            proof.release_scratch.child_run([sys.executable, "-c", daemon_program], env=env, check=True)
+            return "ran"
+        def stop_daemon():
+            if pidfile.exists():
+                try:
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        self.addCleanup(stop_daemon)
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "CAS_HOST_MEMORY_LEASE")}
+        with mock.patch.object(proof, "_run_contexts", side_effect=rows), \
+                proof.release_scratch.ChildScope():
+            self.assertEqual(proof.run_contexts(self.root, self.root, env, self.root, self.root, {}), "ran")
+        daemon = int(pidfile.read_text())
+        os.kill(daemon, 0)  # the daemon outlived its row and the proof
+        held = {os.readlink(fd) for fd in Path(f"/proc/{daemon}/fd").iterdir()
+                if os.path.exists(fd) and os.readlink(fd).startswith(str(pool))}
+        self.assertEqual(held, set(), "the row daemon inherited the proof's admission descriptors")
+        spec = importlib.util.spec_from_file_location("host_memory_7b7b9", Path(proof.__file__).with_name("host_memory.py"))
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        with host.admission("proof", env, lambda _: {}, wait_secs=1, poll_secs=.05, directory=pool,
+                            report=lambda event: None):
+            pass  # a second proof is admitted although the daemon still runs
+
     def test_invalid_memory_and_job_knobs_fail_closed(self):
         for key in ("CAS_RELEASE_GATE_ASSEMBLY_BUILD_JOBS", "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB",
                     "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS", "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS",

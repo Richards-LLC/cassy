@@ -61,7 +61,13 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
 
   const pairing = view.pairing;
   if (pairing) {
-    setNotice(root.querySelector<HTMLElement>("#pair-dialog .pair-status"), pairing.status);
+    const feedback = root.querySelector<HTMLElement>("#pair-dialog .pair-status");
+    // A failure is assertive; progress on its next attempt is polite. Reset
+    // before changing the text, including updates that retain the same node.
+    if (pairing.exchangeInFlight || pairing.createInFlight || pairing.cleanupRetryInFlight || pairing.status === undefined) {
+      feedback?.setAttribute("role", "status");
+    }
+    setNotice(feedback, pairing.status);
     const form = root.querySelector<HTMLFormElement>("#pair-form");
     if (form) form.setAttribute("aria-busy", String(pairing.exchangeInFlight));
     const submit = root.querySelector<HTMLButtonElement>('#pair-form button[type="submit"]');

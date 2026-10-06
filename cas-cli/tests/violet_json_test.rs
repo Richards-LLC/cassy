@@ -103,6 +103,121 @@ fn violet_without_json_keeps_the_human_summary() {
     assert!(serde_json::from_str::<serde_json::Value>(&stdout).is_err());
 }
 
+fn assert_integrate_terminal_fit(width: usize, locale: &str) {
+    let temp = TempDir::new().unwrap();
+    let root = temp
+        .path()
+        .join(format!("terminal-fixture-{}", "long-path-".repeat(18)));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(".cas")).unwrap();
+    std::fs::write(root.join(".cas/config.toml"), "").unwrap();
+    std::fs::write(
+        root.join(".cas/proxy.toml"),
+        r#"allowlist = ["neon.list_projects"]
+[servers.neon]
+transport = "http"
+url = "https://neon.example.test/mcp"
+"#,
+    )
+    .unwrap();
+    let output = violet_command(&root)
+        .env("COLUMNS", width.to_string())
+        .env("LC_ALL", locale)
+        .env("NO_COLOR", "1")
+        .args([
+            "integrate",
+            "violet",
+            "--dry-run",
+            "--skip-verify",
+            "--no-harness",
+            "--label",
+            "CAS_46B0",
+            "--url",
+            "https://violet.example.test/mcp/slack",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let defects: Vec<_> = stdout
+        .lines()
+        .filter(|line| ratatui::text::Span::raw(*line).width() > width)
+        .collect();
+    assert!(
+        defects.is_empty(),
+        "overflow at {width}/{locale}: {defects:?}\n{stdout}"
+    );
+    if locale == "C" {
+        assert!(
+            stdout.is_ascii(),
+            "C-locale output must use ASCII punctuation:\n{stdout}"
+        );
+    }
+    assert!(stdout.starts_with("violet init: "), "{stdout}");
+    assert!(stdout.contains("credentials file:"), "{stdout}");
+    assert!(stdout.contains("project proxy:"), "{stdout}");
+    assert!(stdout.contains("--skip-verify"), "{stdout}");
+}
+
+#[test]
+fn integrate_40_column_capture_cas_46b0() {
+    assert_integrate_terminal_fit(40, "C.UTF-8");
+}
+
+#[test]
+fn integrate_80_column_capture_cas_46b0() {
+    assert_integrate_terminal_fit(80, "C.UTF-8");
+}
+
+#[test]
+fn integrate_120_column_capture_cas_46b0() {
+    assert_integrate_terminal_fit(120, "C.UTF-8");
+}
+
+#[test]
+fn integrate_c_locale_capture_cas_46b0() {
+    assert_integrate_terminal_fit(80, "C");
+}
+
+#[test]
+fn integrate_full_keeps_complete_paths_cas_46b0() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("long-path-".repeat(18));
+    std::fs::create_dir(&root).unwrap();
+    let args = [
+        "integrate",
+        "violet",
+        "--dry-run",
+        "--skip-verify",
+        "--no-harness",
+    ];
+    let json = violet_command(&root)
+        .args(args)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let full = violet_command(&root)
+        .env("COLUMNS", "40")
+        .args(args)
+        .arg("--full")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(full).unwrap();
+    let credentials = report["credentials_path"].as_str().unwrap();
+    let registration = report["registration_path"].as_str().unwrap();
+    assert!(text.contains(credentials), "{text}");
+    assert!(text.contains(registration), "{text}");
+    assert!(!text.contains("--full for untruncated values"), "{text}");
+}
+
 #[tokio::test]
 async fn violet_rejected_probe_keeps_json_clean_and_human_diagnostics() {
     use wiremock::matchers::any;

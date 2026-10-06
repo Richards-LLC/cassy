@@ -23,8 +23,8 @@ pub(super) use crate::ui::factory::app::{
 pub(super) use crate::ui::factory::buffer_backend::BufferBackend;
 pub(super) use crate::ui::factory::director::with_response_instructions;
 pub(super) use crate::ui::factory::session::{
-    SessionManager, create_metadata, daemon_log_path, daemon_trace_log_path, gui_socket_path,
-    panic_log_path, socket_path,
+    SessionManager, bind_factory_socket, create_metadata, daemon_log_path, daemon_trace_log_path,
+    gui_socket_path, panic_log_path, socket_path,
 };
 pub(super) use crate::ui::factory::set_terminal_title;
 

@@ -1033,6 +1033,10 @@ RECEIPT
 EOF
 chmod +x "$announce_stub"
 announce_log="$tmp/announce-stub.log"
+# The runtime template ships an empty POSTED table; announce must replace it
+# with the receipt rather than treat the heading as already recorded.
+printf '\n## POSTED\n\n| Message | UTC timestamp | Permalink |\n| --- | --- | --- |\n| User top-level |  |  |\n' \
+    >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
 announce_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
     CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$announce_stub" \
     CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$announce_log" \
@@ -1045,10 +1049,15 @@ if [[ "$announce_stage_out" == *'announce complete'* ]] \
 else
     bad "--announce did not record the adapter receipt: $announce_stage_out"
 fi
-if grep -q '^## POSTED$' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"; then
-    ok 'gap 8: --announce appends the POSTED block to the draft after posting'
+posted_draft="$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+if [[ "$(grep -c '^## POSTED$' "$posted_draft")" == 1 ]] \
+    && grep -q 'message_id=user-1' "$posted_draft" \
+    && grep -q 'message_id=dev-2' "$posted_draft" \
+    && ! grep -q '^| User top-level |  |  |$' "$posted_draft"; then
+    ok 'gap 8: --announce records the message ids in the draft, replacing an empty template POSTED table'
 else
-    bad 'gap 8: --announce left the POSTED block only in the run receipt'
+    bad 'gap 8: --announce left the POSTED ids only in the run receipt, or kept the empty template table'
+    sed -n '/^## POSTED$/,$p' "$posted_draft" >&2
 fi
 
 # Gap 3: announce must use the run's pinned start date when the stage crosses

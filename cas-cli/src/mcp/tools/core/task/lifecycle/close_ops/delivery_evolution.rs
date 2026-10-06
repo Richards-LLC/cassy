@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use super::epic_measurement::CommandExt as _;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Hunk {
     old_start: usize,
     old_count: usize,
@@ -924,6 +924,56 @@ fn line_content_presence_impl(
     Ok(answer)
 }
 
+/// cas-bdd2: a merge's bases, and a base's edits on a path, are the same for
+/// every walk that crosses that merge (one per delivery path and caller),
+/// so they are memoized by commit ids. Only successful answers are kept: a
+/// measurement-budget expiry is not a property of the history.
+type BaseKey = (std::path::PathBuf, String, String);
+type HunkKey = (std::path::PathBuf, String, String, String);
+static MERGE_BASES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<BaseKey, String>>,
+> = std::sync::OnceLock::new();
+static BASE_HUNKS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<HunkKey, Vec<Hunk>>>,
+> = std::sync::OnceLock::new();
+
+fn cached_merge_bases(repo: &Path, first: &str, second: &str) -> Result<String, String> {
+    let key = (repo.to_path_buf(), first.to_string(), second.to_string());
+    let cache = MERGE_BASES.get_or_init(Default::default);
+    if let Some(bases) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return Ok(bases);
+    }
+    let bases = text(repo, &["merge-base", "--all", first, second])?;
+    if let Ok(mut cache) = cache.lock() {
+        if cache.len() >= WALK_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, bases.clone());
+    }
+    Ok(bases)
+}
+
+fn cached_hunks(repo: &Path, left: &str, right: &str, path: &str) -> Result<Vec<Hunk>, String> {
+    let key = (
+        repo.to_path_buf(),
+        left.to_string(),
+        right.to_string(),
+        path.to_string(),
+    );
+    let cache = BASE_HUNKS.get_or_init(Default::default);
+    if let Some(found) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return Ok(found);
+    }
+    let found = hunks(repo, left, right, path)?;
+    if let Ok(mut cache) = cache.lock() {
+        if cache.len() >= WALK_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, found.clone());
+    }
+    Ok(found)
+}
+
 /// cas-24d8: the blob each commit holds at `path`, from one batched
 /// `cat-file`; `None` for a commit where the path is absent. An edge whose two
 /// ends hold the same blob has no hunks, and `advance` maps every owner
@@ -1295,13 +1345,13 @@ fn line_content_presence_uncached(
                 })
             {
                 union_checked = true;
-                let bases = text(repo, &["merge-base", "--all", fields[1], fields[2]])?;
+                let bases = cached_merge_bases(repo, fields[1], fields[2])?;
                 let bases: Vec<_> = bases.lines().collect();
                 if let [base] = bases.as_slice() {
                     union_base = Some(base.to_string());
                     union_changes = Some((
-                        hunks(repo, base, fields[1], path)?,
-                        hunks(repo, base, fields[2], path)?,
+                        cached_hunks(repo, base, fields[1], path)?,
+                        cached_hunks(repo, base, fields[2], path)?,
                     ));
                 }
             }

@@ -10569,8 +10569,16 @@ impl CasCore {
             )
         })?;
         if task.status == TaskStatus::Cancelled {
+            // cas-54b0: a runtime before cas-7877 cancelled QA work items
+            // without withdrawing their rounds. A retry repairs that.
+            let recorded = task
+                .close_reason
+                .clone()
+                .unwrap_or_else(|| reason.to_string());
+            let repaired =
+                self.withdraw_round_of_cancelled_qa_task(&task.id, &recorded, chrono::Utc::now());
             return Ok(Self::success(format!(
-                "Already cancelled: {} - {}. This call did not rewrite its reason or history.",
+                "Already cancelled: {} - {}. This call did not rewrite its reason or history.{repaired}",
                 task.id, task.title
             )));
         }
@@ -10648,28 +10656,8 @@ impl CasCore {
         // cas-7877: cancelling a QA work item is the supervisor deciding the
         // review will not happen. Withdraw its round too, so the delivery is
         // no longer gated on it and the next park does not re-open it.
-        let qa_withdrawn = if task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL) {
-            match cas_store::withdraw_qa_pass_for_qa_task(
-                &self.cas_root,
-                &task.id,
-                &format!("QA task {} cancelled: {reason}", task.id),
-                now,
-            ) {
-                Ok(Some(pass)) => format!(
-                    " Independent QA round {} (pass {}) for {} @{} withdrawn.",
-                    pass.round,
-                    pass.id,
-                    pass.task_id,
-                    pass.head8()
-                ),
-                Ok(None) => String::new(),
-                Err(error) => format!(
-                    " ⚠️ Its independent QA round could not be withdrawn: {error}. A supervisor can qa_waive it."
-                ),
-            }
-        } else {
-            String::new()
-        };
+        // cas-54b0: the round's own link decides, not the item's label.
+        let qa_withdrawn = self.withdraw_round_of_cancelled_qa_task(&task.id, reason, now);
 
         let pointer = superseded_by
             .as_deref()
@@ -21578,19 +21566,28 @@ fn delivery_content_presence_on_target_for_paths(
     let mut dropped = Vec::new();
     let mut evolved = Vec::new();
     let mut commits = Vec::new();
-    for path in &paths {
+    // cas-bdd2: each path's ownership walk is independent of the others.
+    // Measure them concurrently, then decide in the original order: the first
+    // path that cannot be measured still decides the answer, as before.
+    let proofs = measure_in_parallel(&paths, |path| {
         let measured = if resolution_only {
             delivery_evolution::resolution_content_presence(repo_path, &delivery_parent, delivery_commit, &target, path)
         } else {
             delivery_evolution::line_content_presence(repo_path, &delivery_parent, delivery_commit, &target, path)
         };
-        let proof = match measured {
-            Ok(Some(proof)) => proof,
+        match measured {
+            Ok(Some(proof)) => Ok(proof),
             Ok(None) => match reverse_delivery_path_applies_to_tree(repo_path, &delivery_parent, delivery_commit, &target, path) {
-                Ok(true) => DeliveryContentPresence::Present { paths: vec![path.clone()] },
-                Ok(false) => DeliveryContentPresence::Dropped { paths: vec![path.clone()] },
-                Err(reason) => return DeliveryContentPresence::Unknown { reason },
+                Ok(true) => Ok(DeliveryContentPresence::Present { paths: vec![path.clone()] }),
+                Ok(false) => Ok(DeliveryContentPresence::Dropped { paths: vec![path.clone()] }),
+                Err(reason) => Err(reason),
             },
+            Err(reason) => Err(reason),
+        }
+    });
+    for (path, proof) in paths.iter().zip(proofs) {
+        let proof = match proof {
+            Ok(proof) => proof,
             Err(reason) => return DeliveryContentPresence::Unknown { reason },
         };
         match proof {
@@ -21609,6 +21606,46 @@ fn delivery_content_presence_on_target_for_paths(
 
 }
 
+/// cas-bdd2: run independent per-path proofs on scoped threads, each under
+/// the caller's measurement deadline, and return the answers in input order.
+/// Only the Git work overlaps; every decision stays sequential in the caller.
+/// A panic in a proof is re-raised here, as it would have been inline.
+pub(super) fn measure_in_parallel<T, R>(items: &[T], measure: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    if items.len() <= 1 {
+        return items.iter().map(measure).collect();
+    }
+    let deadline = epic_measurement::deadline();
+    let width = std::thread::available_parallelism()
+        .map_or(4, |count| count.get())
+        .clamp(1, 8);
+    let mut answers = Vec::with_capacity(items.len());
+    for chunk in items.chunks(width) {
+        std::thread::scope(|scope| {
+            let measure = &measure;
+            let running: Vec<_> = chunk
+                .iter()
+                .map(|item| {
+                    scope.spawn(move || {
+                        let _deadline = epic_measurement::Scope::inherit(deadline);
+                        measure(item)
+                    })
+                })
+                .collect();
+            for proof in running {
+                match proof.join() {
+                    Ok(answer) => answers.push(answer),
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            }
+        });
+    }
+    answers
+}
+
 /// Verify delivery content on the authoritative parent view. Prefer the
 /// remote-tracking target when it already contains the delivery commit;
 /// otherwise use the local target. This preserves the existing local-merge
@@ -21620,6 +21657,92 @@ pub(crate) fn delivery_content_presence_in_parent(
     parent_branch: &str,
 ) -> DeliveryContentPresence {
     delivery_content_presence_in_parent_for_paths(repo_path, delivery_commit, parent_branch, None, false)
+}
+
+/// cas-bdd2: [`delivery_content_presence_in_parent`] for a commit inside a
+/// delivery that carries source. Its regenerable build artifacts are left to
+/// cas-baf7's rule, reported dropped as the callers already treat them,
+/// instead of being walked line by line through every rebuilt epic commit;
+/// only its other paths are measured. With nothing to leave, or when the
+/// commit's paths cannot be listed, this is the ordinary measurement.
+pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    parent_branch: &str,
+    carrier: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) -> DeliveryContentPresence {
+    let ordinary =
+        || delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch);
+    let Some(paths) = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &format!("{delivery_commit}^1"),
+            delivery_commit,
+            "--",
+        ])
+        .current_dir(repo_path)
+        .measurement_output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(|path| String::from_utf8(path.to_vec()).ok())
+                .collect::<Option<Vec<_>>>()
+        })
+    else {
+        return ordinary();
+    };
+    let (artifacts, measured): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
+        artifact_left_to_regeneration_rule(repo_path, carrier, path, carries_source)
+    });
+    if artifacts.is_empty() {
+        return ordinary();
+    }
+    if !delivery_reachable_in_parent(repo_path, delivery_commit, parent_branch) {
+        return ordinary();
+    }
+    let inner = (!measured.is_empty()).then(|| {
+        delivery_content_presence_in_parent_for_paths(
+            repo_path,
+            delivery_commit,
+            parent_branch,
+            Some(&measured),
+            false,
+        )
+    });
+    match inner {
+        Some(DeliveryContentPresence::Unknown { reason }) => {
+            DeliveryContentPresence::Unknown { reason }
+        }
+        Some(DeliveryContentPresence::Dropped { paths: dropped }) => DeliveryContentPresence::Dropped {
+            paths: paths
+                .into_iter()
+                .filter(|path| artifacts.contains(path) || dropped.contains(path))
+                .collect(),
+        },
+        _ => DeliveryContentPresence::Dropped { paths: artifacts },
+    }
+}
+
+/// The reachability [`delivery_content_presence_in_parent_for_paths`]
+/// requires before it measures anything.
+fn delivery_reachable_in_parent(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    parent_branch: &str,
+) -> bool {
+    let origin_parent = format!("origin/{parent_branch}");
+    (git_ref_exists(repo_path, &origin_parent)
+        && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent))
+        || (git_ref_exists(repo_path, parent_branch)
+            && git_commit_is_ancestor(repo_path, delivery_commit, parent_branch))
 }
 
 fn delivery_content_presence_in_parent_for_paths(
@@ -28981,6 +29104,142 @@ mod merge_state_gate_tests {
             Some(DeliveryContentPresence::Present {
                 paths: vec!["work.rs".into()]
             })
+        );
+    }
+
+    /// cas-bdd2: the cas-cee5 cost shape. A four-path delivery is followed by
+    /// a long merge-heavy history: every merge rewrites a line beside each
+    /// delivered line, so each path's ownership walk takes `merge-base --all`
+    /// and two union diffs at every merge. One walk per path ran in sequence
+    /// with no memo (11.3s here at load ~10); the per-path walks now run
+    /// concurrently with merge bases memoized (2.9s), inside a tight budget.
+    #[test]
+    fn multi_path_delivery_across_a_merge_heavy_history_fits_a_tight_budget_cas_bdd2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let files = ["a.rs", "b.rs", "c.rs", "d.rs"];
+        // The counter line predates the delivery; the delivery owns only the
+        // line it adds, which every later merge leaves in place.
+        for file in files {
+            std::fs::write(p.join(file), "counter = 0;\n").unwrap();
+        }
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "baseline counters"]);
+        for file in files {
+            std::fs::write(p.join(file), format!("delivered_{file}();\ncounter = 0;\n")).unwrap();
+        }
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: four-path delivery"]);
+        let delivery = head_sha(p);
+        let mut stream = String::new();
+        let mut mark = 1;
+        let mut mainline = delivery.clone();
+        let blob = |file: &str, counter: usize| format!("delivered_{file}();\ncounter = {counter};\n");
+        for index in 0..150 {
+            let side = mark;
+            stream.push_str(&format!("commit refs/heads/side\nmark :{side}\n"));
+            stream.push_str("committer fixture <fixture@example.test> 1767225600 +0000\n");
+            let message = format!("side {index}\n");
+            stream.push_str(&format!("data {}\n{message}from {mainline}\n", message.len()));
+            for file in files {
+                let content = blob(file, index + 1);
+                stream.push_str(&format!("M 100644 inline {file}\ndata {}\n{content}\n", content.len()));
+            }
+            let merge = mark + 1;
+            stream.push_str(&format!("commit refs/heads/merge-heavy\nmark :{merge}\n"));
+            stream.push_str("committer fixture <fixture@example.test> 1767225600 +0000\n");
+            let message = format!("merge side {index}\n");
+            stream.push_str(&format!("data {}\n{message}from {mainline}\nmerge :{side}\n", message.len()));
+            for file in files {
+                let content = blob(file, index + 1);
+                stream.push_str(&format!("M 100644 inline {file}\ndata {}\n{content}\n", content.len()));
+            }
+            mainline = format!(":{merge}");
+            mark += 2;
+        }
+        let mut import = std::process::Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(p)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            import.stdin.take().unwrap().write_all(stream.as_bytes()).unwrap();
+        }
+        assert!(import.wait().unwrap().success(), "fast-import failed");
+        let _budget =
+            crate::git_evidence::measurement::Scope::new(std::time::Duration::from_secs(6));
+        let started = std::time::Instant::now();
+        let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
+        // Measured at load ~10: 11.3s before (sequential walks), 2.9s after.
+        assert!(
+            !crate::git_evidence::measurement::expired(),
+            "the per-path walks exhausted their budget after {:?}: {presence:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            presence,
+            DeliveryContentPresence::Present {
+                paths: files.iter().map(|file| file.to_string()).collect()
+            }
+        );
+    }
+
+    /// cas-bdd2: a merge tip whose resolution rebuilt a regenerable bundle and
+    /// carries source leaves the bundle to cas-baf7's rule instead of walking
+    /// it: the bundle is reported dropped, and the source is still measured.
+    #[test]
+    fn a_merge_tip_resolution_leaves_its_rebuilt_bundle_to_the_regeneration_rule_cas_bdd2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("hub-web/dist")).unwrap();
+        std::fs::create_dir_all(p.join("hub-web/src")).unwrap();
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("hub-web/dist/app.js"), "bundle(0);\n").unwrap();
+        std::fs::write(p.join("hub-web/src/main.ts"), "base();\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "baseline"]);
+        git(p, &["checkout", "-B", "factory/worker", "main"]);
+        std::fs::write(p.join("hub-web/src/main.ts"), "base();\ndelivered();\n").unwrap();
+        std::fs::write(p.join("hub-web/dist/app.js"), "bundle(1);\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: source and bundle"]);
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("hub-web/dist/app.js"), "bundle(2);\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "unrelated rebuild on the target"]);
+        git(p, &["checkout", "factory/worker"]);
+        let merged = git_command(p, &["merge", "--no-ff", "-q", "main", "-m", "cas-test1: sync target"])
+            .output()
+            .unwrap();
+        if !merged.status.success() {
+            std::fs::write(p.join("hub-web/dist/app.js"), "bundle(3);\n").unwrap();
+            git(p, &["add", "."]);
+            git(p, &["commit", "-qm", "cas-test1: sync target"]);
+        }
+        let tip = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "land worker"]);
+        std::fs::write(p.join("hub-web/dist/app.js"), "bundle(4);\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "rebuild dist from merged source"]);
+        let window = window_at(0, "bundle rebuilt on target");
+        let presence = super::task_attribution::merge_tip_content_presence(
+            p,
+            "main",
+            &tip,
+            Some(&window),
+            &window.identity,
+            None,
+        );
+        let Some(DeliveryContentPresence::Dropped { paths }) = presence else {
+            panic!("the rebuilt bundle is left to the regeneration rule: {presence:?}");
+        };
+        assert_eq!(paths, vec!["hub-web/dist/app.js".to_string()]);
+        assert!(
+            regenerated_artifact_drop_note(p, &tip, &paths).is_some(),
+            "cas-baf7 accepts a bundle-only drop when the delivery carries source"
         );
     }
 

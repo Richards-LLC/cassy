@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { arrivalStore, ConversationStore, draftStore, MAX_ARRIVALS, MAX_PENDING_SENDS, PENDING_SEND_BOUNDS, pendingSendStore, purgeConversations, validArrivals, validDraft, validPendingSend, validPendingSends, type PendingSend } from "./conversation-store";
+import { arrivalStore, readMarkStore, ConversationStore, draftStore, MAX_ARRIVALS, MAX_PENDING_SENDS, PENDING_SEND_BOUNDS, pendingSendStore, purgeConversations, validArrivals, validDraft, validPendingSend, validPendingSends, type PendingSend } from "./conversation-store";
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -395,5 +395,13 @@ describe("a draft the browser refuses to store says so (cas-f657)", () => {
 
   it("still reports too-long, not not-saved, for a draft over the store's own bound", () => {
     expect(draftStore(quotaStorage(8_000)).save("atlas:pelican", { text: "z".repeat(70_000), caret: 0 })).toBe("too-long");
+  });
+  it("remembers the newest reply read per conversation across a reload, and drops it with its machine (cas-97d58 F14)", () => {
+    const storage = memoryStorage();
+    readMarkStore(storage).save("atlas:pelican", 42);
+    readMarkStore(storage).save("studio:otter", 7);
+    expect(readMarkStore(storage).load()).toEqual(new Map([["atlas:pelican", 42], ["studio:otter", 7]]));
+    purgeConversations(storage, "atlas");
+    expect(readMarkStore(storage).load()).toEqual(new Map([["studio:otter", 7]]));
   });
 });

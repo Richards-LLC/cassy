@@ -964,7 +964,8 @@ test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journe
     await clock.advance(2_000);
     const banner = page.locator(".terminal-disconnected-banner .banner-text");
     const recovery = "This browser is missing a feature Cassy Cloud needs. Update to Chrome 103, Edge 103, Firefox 100, or Safari 16 or newer. Then reload this page.";
-    await expect(banner).toHaveText(`Lost connection to Atlas · Linux. ${recovery}`);
+    // cas-97d58 F16: the browser, not the machine, is named as the cause.
+    await expect(banner).toHaveText(`This browser can't connect to Atlas · Linux. ${recovery}`);
     await expect(header).toContainText("Unreachable");
     await expect(page.locator(".status-stale").filter({ visible: true })).toHaveText(/^Not live — This browser is missing a feature Cassy Cloud needs\./);
     await expect(page.locator("#attention-panel").getByText("Lost connection to Atlas · Linux", { exact: true })).toHaveCount(1);
@@ -979,9 +980,10 @@ test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journe
       await expect(action).toHaveAttribute("aria-disabled", "true");
       await expect(action).toHaveAccessibleDescription(`${recovery} Interrupt and raw output wait until then.`);
     }
-    await expect(banner).toMatchAriaSnapshot(`- text: Lost connection to Atlas · Linux. ${recovery}`);
+    await expect(banner).toMatchAriaSnapshot(`- text: This browser can't connect to Atlas · Linux. ${recovery}`);
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     await page.locator("#palette-paired-machines").click();
-    await expect(page.locator("#paired-machines-list .paired-machine-state")).toHaveText("Unreachable");
+    // cas-97d58 F16: the browser is the cause, not an unreachable machine.
+    await expect(page.locator("#paired-machines-list .paired-machine-state")).toHaveText(`This browser can't connect. ${recovery}`);
   });
 });

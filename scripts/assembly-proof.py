@@ -527,12 +527,23 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
     spec.loader.exec_module(host)
     wait = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS") or 600
     poll = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 1
-    with host.admission("proof", env, memory_budget, wait, poll, HOST_MEMORY_DIRECTORY) as (admitted_env, fds):
-        # Reuse the release child's existing descriptor propagation contract so
-        # proof intent/budget stay live through nested native producer scripts.
-        inherited = release_scratch.inherited_leases(admitted_env) | set(fds)
-        admitted_env = dict(admitted_env, CAS_RELEASE_GATE_SCRATCH_LEASE_FDS=",".join(map(str, sorted(inherited))))
-        return _run_contexts(root, clone, admitted_env, log_dir, clone_target, execution)
+    # Rows build with sccache; its server must not start inside the proof's
+    # tree, where it would outlive the proof (cas-7b7b9).
+    host.start_compiler_cache(env)
+    with host.admission("proof", env, memory_budget, wait, poll, HOST_MEMORY_DIRECTORY) as (admitted_env, fds), \
+         host.LeaseHolder(fds) as holder:
+        # Rows never receive the proof's intent/budget descriptors, so an
+        # sccache server or a test's orphan cannot keep them. The holder keeps
+        # the lease across a killed proof while its row process groups run.
+        # Nested admissions reuse it by ancestry and the live lock, not by FD.
+        hooks = release_scratch.CURRENT.spawn_hooks if release_scratch.CURRENT else None
+        if hooks is not None:
+            hooks.append(holder.track)
+        try:
+            return _run_contexts(root, clone, admitted_env, log_dir, clone_target, execution)
+        finally:
+            if hooks is not None:
+                hooks.remove(holder.track)
 
 
 def _run_contexts(root, clone, env, log_dir, clone_target, execution):

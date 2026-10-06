@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 360px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      .card p { margin: 0 0 12px; }
+      /* cas-272d: an intentional two-line clamp with an ellipsis, as Commander's row preview. */
+      .clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
+      /* An audit summary's three-line clamp with an expand toggle. The engine
+         draws the ellipsis itself; text-overflow is left at its default. */
+      .summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+      .card button { font: inherit; }
+      /* Negative control: a line count on a plain block clamps nothing; the
+         fixed height hides the later lines, and text-overflow cannot mark a
+         lost line. */
+      .stray { -webkit-line-clamp: 2; height: 2.8em; overflow: hidden; text-overflow: ellipsis; }
+      /* Negative control: a fixed-height box that hides lines with no clamp and no ellipsis. */
+      .unclamped { height: 2.8em; overflow: hidden; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Conversations</h1>
+      <p class="clamped" id="clamped">Which plan should we use? Choose the quiet route or explain the tradeoff, and say whether the release can wait until tomorrow morning.</p>
+      <p class="summary" id="engine-ellipsis">The first second shows the payoff, so viewers stay. Cuts land every two seconds through the middle third, and the last frame loops back to the opening shot for a clean replay that keeps the watch time climbing.</p>
+      <button type="button" aria-controls="engine-ellipsis" aria-expanded="false">Show more</button>
+      <p class="stray" id="stray">This box sets a line count on a plain block, so nothing is clamped: its third and later lines are simply hidden behind a fixed height.</p>
+      <p class="unclamped" id="unclamped">This box hides its third and later lines without a clamp or an ellipsis, so the reader cannot tell that anything is missing from the text.</p>
+    </main>
+  </body>
+</html>

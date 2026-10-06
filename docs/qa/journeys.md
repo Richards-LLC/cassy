@@ -158,7 +158,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation with a live supervisor
 - **Goal:** my message reaches the supervisor and I see its answer
-- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`, `hub-web/src/swipe-dismiss.ts`
+- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/connection.ts`
 - **Suite:** `hub-web/e2e/journeys/reply-typed.journey.ts`
 - **Gaps:** delivery by a running daemon and operator stamping are doubled
 
@@ -595,7 +595,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 ### HUB-J19 · Read my inbox on a new phone while the machine is off
 
 - **Entry:** `/commander/` at 390×844 on a browser profile with no paired machine and no inbox sign-in, while soundwave (enrolled in the account's operator inbox) is off; a second desktop profile joins later
-- **Goal:** I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a reply that waits as Pending machine until soundwave is back and accepts it
+- **Goal:** I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a reply that waits for soundwave until it is back and receives it
 - **Touches:** `hub-web/src/inbox/*`, `hub-web/src/conversation-shell.ts`, `hub-web/test/operator-cloud-double.ts`
 - **Suite:** `hub-web/e2e/journeys/operator-inbox.journey.ts`, with the cloud answered by `hub-web/e2e/journeys/operator-cloud-route.ts`
 - **Gaps:** the cloud is a protocol double (PoP, enrollment check, epoch wraps, coverage, ACKs, commands), so the deployed-cloud two-profile journey of cas-9b7d S5 is the acceptance gate; soundwave's reservation and admission are modeled by the double, and proven by the hub's Rust tests (`operator_inbox::commands`)
@@ -604,15 +604,15 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Sign in on a brand-new phone with no machine paired — "Operator inbox" under the Conversations heading opens the inbox dialog, which says the cloud holds the keys and "this isn’t end-to-end encryption"; Sign in shows a code of the form ABCD-EFGH and "Approve on Petra Stella Cloud" linking to the approval page with that code
 2. Approve it from the account; the weeks of messages are there — after the account approves the code, the dialog lists "soundwave · amber-fox-29"; opening it shows all three supervisor messages (20, 9 and 1 days old), and each was stored on the phone and acknowledged once
-3. Reply while soundwave is off: it waits as Pending machine — "Reply — soundwave gets it when it’s back" queues "Go. Cut the release." and shows "Pending machine"; the cloud holds one pending command for soundwave
+3. Reply while soundwave is off: it waits for soundwave — "Reply — soundwave gets it when it’s back" queues "Go. Cut the release." and shows "Waiting for soundwave"; the cloud holds one pending command for soundwave
 4. A second browser profile sees the history and the queued reply — a desktop profile signs in with its own code and reads the same history and the queued reply; approved for reading only, it says it "can read this conversation but not leave replies"
-5. soundwave returns and accepts the reply; a reload keeps everything — the reply reads "Accepted by machine"; after a reload the inbox is still signed in with the history and the status, and no new sign-in was asked
+5. soundwave returns and accepts the reply; a reload keeps everything — the reply reads "soundwave received it"; after a reload the inbox is still signed in with the history and the status, and no new sign-in was asked
 
 #### Expected experience
 
 - The inbox needs no machine connection: retained messages read while every machine is off.
 - Sign-in is approved by the account, never by an older device.
-- A reply to an offline machine never claims more than the machine confirmed: Pending machine until its receipt, Accepted by machine after.
+- A reply to an offline machine never claims more than the machine confirmed: waiting for the machine until its receipt, received after.
 
 #### Edge paths
 

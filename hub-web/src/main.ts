@@ -14,7 +14,7 @@ import { activityTime, ConversationList, filterConversationRows, groupConversati
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
-import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
+import { arrivalStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
@@ -37,7 +37,7 @@ import { ensureMachineConnection, replaceMachineConnection } from "./connection-
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft, type PairingStep } from "./pairing-draft";
-import { bindPairingDialogCancel } from "./pairing-dialog";
+import { bindPairingDialogCancel, focusPairingFeedback } from "./pairing-dialog";
 import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
 import { PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
@@ -55,7 +55,7 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { relativeTimestamp } from "./time";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
-import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetOpsViewContext } from "./fleet-ops-view";
 import { runFleetOperation } from "./fleet-ops-request";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { clearStoredSelection, forgetMachine, loadStoredSelection, pairedSessionToOpen, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -72,7 +72,7 @@ import { isEditableElement, renderDecision, shellSignature } from "./render-mode
 import { applyDraftNote, applyMicState, composerMarkup } from "./composer-markup";
 import { countdownLabel, nextCountdown, pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
 import { OperatorInboxController, startInboxLoop } from "./inbox/controller";
-import { InboxView } from "./inbox/inbox-view";
+import { InboxView, browserLabel } from "./inbox/inbox-view";
 import { enrollPairedInstallation } from "./inbox/hub-enrollment";
 import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
@@ -93,7 +93,7 @@ const operatorInbox = new OperatorInboxController({
   locks: navigator.locks ?? null,
   channel: typeof BroadcastChannel === "function" ? new BroadcastChannel("cas-operator-inbox") : null,
 });
-const inboxView = new InboxView(operatorInbox, { defaultLabel: `Commander on ${navigator.platform || "this device"}`.slice(0, 80) });
+const inboxView = new InboxView(operatorInbox, { defaultLabel: browserLabel(navigator.userAgent) });
 let inboxLoop: AbortController | null = null;
 function syncInboxLoop(ready: boolean): void {
   if (ready && !inboxLoop) {
@@ -234,6 +234,9 @@ let lastPairingView: string | undefined;
 const deferredRender = new DeferredRenderScheduler({
   render: () => render(),
   afterGesture: (run) => window.setTimeout(run, 0),
+  // A tap's click follows its lifted finger at once; a long press or a lift
+  // that produces none releases the rebuild after this.
+  touchWindow: (run) => window.setTimeout(run, 600),
 });
 const sessionStates = new Map<string, SessionState>();
 // Shared data source for session drawers, status rows, pane tooltips, and the
@@ -1146,6 +1149,12 @@ async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> 
 async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {
   const invitation = pendingPairing?.kind === "invitation" ? pendingPairing : null;
   if (!invitation) throw new Error("Create a pairing request or open a one-time pairing link first.");
+  const browserName = form.querySelector<HTMLInputElement>('input[name="device"]');
+  if (browserName) {
+    browserName.value = browserName.value.trim();
+    browserName.setCustomValidity(browserName.value ? "" : "Enter a name for this browser.");
+    if (!browserName.reportValidity()) return false;
+  }
   const values = new FormData(form);
   pairingDraft = updatePairingDraft(pairingDraft, values.entries(), !invitation.hubUrl);
   const operation = pairingOperations.begin();
@@ -1153,6 +1162,9 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   exchangeOperationGeneration = operation.generation;
   pairingStatus = "Updating this browser installation… Cancel restores its previous access.";
   render();
+  // Pair is now disabled; keep the keyboard in the dialog on its available
+  // next action rather than letting the browser drop focus to the body.
+  document.querySelector<HTMLButtonElement>("#pair-dialog #pair-cancel")?.focus({ preventScroll: true });
   let machine: StoredMachine;
   try {
     machine = await installationAccess.pair({
@@ -1257,6 +1269,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
       // this attempt consumed anything; the error copy preserves that uncertainty.
       pairingStatus = error.message;
       render(false);
+      focusPairingFeedback(document.querySelector<HTMLDialogElement>("#pair-dialog"));
       throw error;
     }
     if (error instanceof PairingExchangeError) {
@@ -1266,6 +1279,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
       pairingDraft = createPairingDraft(location.origin);
       pairingStatus = pairingStorageClearFailureMessage(error.message, cleared);
       render(false);
+      focusPairingFeedback(document.querySelector<HTMLDialogElement>("#pair-dialog"));
     } else {
       render();
     }
@@ -1391,6 +1405,9 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           const machine = result.invitation.machineLabel ?? result.invitation.hubId;
           pairingStatus = `Approved — this browser's reachability check for ${machine} failed. Check Tailscale (VPN), browser site permissions (Local network access), and Private DNS or secure DNS, then press Pair to try this approved invitation.`;
+          render();
+          focusPairingFeedback(document.querySelector<HTMLDialogElement>("#pair-dialog"));
+          return;
         }
         render();
       }
@@ -1612,11 +1629,13 @@ function openConnectionLog(machineId: string): void {
     dialog.id = "connection-log";
     dialog.className = "connection-log";
     dialog.setAttribute("aria-label", "Connection log");
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><pre>Running diagnostics…</pre></section>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence"></p><pre>Running diagnostics…</pre></details></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
   const summary = dialog.querySelector<HTMLElement>(".connection-log-summary")!;
+  const technical = dialog.querySelector<HTMLElement>(".connection-log-evidence")!;
+  const machineLabel = machines.get(machineId)?.label ?? "this machine";
   const download = dialog.querySelector<HTMLButtonElement>(".connection-log-export")!;
   download.disabled = true;
   const update = () => {
@@ -1624,9 +1643,19 @@ function openConnectionLog(machineId: string): void {
     const machineState = connection?.snapshot();
     const state = machineState?.phase !== "live" || machineState.degraded ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
     const cause = state?.cause;
-    const retry = state?.nextRetryAt === undefined ? "No retry scheduled." : `Next retry in ${Math.max(0, Math.ceil((state.nextRetryAt - Date.now()) / 1000))}s.`;
+    // cas-97d58 F08: what happens next, in the live state's own words; never
+    // "No retry scheduled" while the rail says it is checking.
+    const retry = state?.nextRetryAt !== undefined ? `Next retry in ${Math.max(0, Math.ceil((state.nextRetryAt - Date.now()) / 1000))}s.`
+      : state?.phase === "live" ? (state.degraded ? "Checking the connection now." : "Connected now.")
+        : state?.phase === "failed" ? (state.fatal === true || state.authFailure ? "Cassy won't retry this by itself." : "Retrying.")
+          : "Connecting now.";
     const evidence = cause ? `${cause.status === undefined ? "" : ` Measured HTTP status: ${cause.status}.`}${cause.closeCode === undefined ? "" : ` Measured socket close: ${cause.closeCode}.`}${cause.permission === undefined || cause.permission === "unknown" ? "" : ` Measured local-network permission: ${cause.permission}.`}` : "";
-    summary.textContent = `${cause ? `${CAUSE_COPY[cause.code].title} (${cause.layer}).${evidence} ${CAUSE_COPY[cause.code].action}` : "No active failure measured."} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
+    // One plain sentence that names the machine and the next step leads; the
+    // layer, measured codes and engineering notes sit behind Technical details.
+    summary.textContent = `${cause ? `${machineLabel}: ${CAUSE_COPY[cause.code].title}. ${CAUSE_COPY[cause.code].action}` : `${machineLabel}: nothing is failing now.`} ${retry} Last successful connection: ${state?.lastSuccessAt ? new Date(state.lastSuccessAt).toLocaleTimeString() : "not measured in this visit"}.`;
+    const technicalText = cause ? `Layer: ${cause.layer}.${evidence}${CAUSE_COPY[cause.code].detail ? ` ${CAUSE_COPY[cause.code].detail}` : ""}` : "";
+    if (technical.textContent !== technicalText) technical.textContent = technicalText;
+    technical.hidden = technicalText === "";
   };
   update();
   const timer = window.setInterval(update, 1000);
@@ -2065,6 +2094,7 @@ function selectedSurface(): { key: string; surface: TerminalSurface } | undefine
 
 /** The header's Interrupt and Raw output follow what they can do now, without a shell rebuild. */
 function syncConversationActions(): void {
+  retireStaleToast();
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-raw-output"), document.querySelector<HTMLElement>("#conversation-raw-output-reason"), rawOutputUnavailableReason());
 }
@@ -2079,7 +2109,8 @@ const interruptsInFlight = new Set<string>();
  */
 async function interruptSupervisor(): Promise<void> {
   const reason = interruptUnavailableReason();
-  if (reason) { toast(reason); return; }
+  const thread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  if (reason) { toast(reason, { thread, until: () => interruptUnavailableReason() !== reason }); return; }
   const machine = machines.get(selectedMachineId!)!;
   const session = selectedSession!;
   const key = sessionKey(machine.id, session);
@@ -2094,16 +2125,16 @@ async function interruptSupervisor(): Promise<void> {
       if (!await takeControlForMessage(machine, session, force)) {
         toast(holder
           ? `${holder} is in control of this session. Interrupt works once it releases control.`
-          : "Couldn't take control of this session to interrupt it. Check that it's live, then try again.");
+          : "Couldn't take control of this session to interrupt it. Check that it's live, then try again.", { thread: key });
         return;
       }
     }
     const took = holder ? `Took control from ${holder}. ` : "";
     if (!sendControl(machine.id, session, { InterruptPane: { pane_id: paneId } })) {
-      if (took) toast(`${took}The interrupt didn't go through; try again once the conversation is live.`);
+      if (took) toast(`${took}The interrupt didn't go through; try again once the conversation is live.`, { thread: key });
       return;
     }
-    toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`);
+    toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`, { thread: key });
   } finally {
     interruptsInFlight.delete(key);
   }
@@ -2141,7 +2172,11 @@ function rawOutputDialog(): HTMLDialogElement {
 /** Open the read-only Raw output drawer over the open conversation (cas-0546). */
 function openRawOutput(): void {
   const reason = rawOutputUnavailableReason();
-  if (reason) { toast(reason); return; }
+  if (reason) {
+    const thread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+    toast(reason, { thread, until: () => rawOutputUnavailableReason() !== reason });
+    return;
+  }
   if (!selectedMachineId || !selectedSession) return;
   const dialog = rawOutputDialog();
   rawOutputThread = sessionKey(selectedMachineId, selectedSession);
@@ -2195,7 +2230,7 @@ function sendControl(machineId: string, session: string, message: unknown): bool
   // the held bubble and the composer say so (cas-a6f0).
   if (connections.get(machineId)?.holdsMessages()) return false;
   const attach = attachStates.get(sessionKey(machineId, session));
-  if (!attach || attach.phase === "live" || attach.phase === "idle") toast("The conversation is reconnecting");
+  if (!attach || attach.phase === "live" || attach.phase === "idle") toast("The conversation is reconnecting", { thread: sessionKey(machineId, session) });
   return false;
 }
 
@@ -2281,7 +2316,33 @@ function placeToastClearOfBanner(output: HTMLElement): void {
  * replaces app.innerHTML, and a confirmation that a heartbeat can delete a
  * moment after it appears is not a confirmation.
  */
-function toast(message: string): void {
+/**
+ * cas-97d58 F10/F11: a toast about one conversation, or about a state that
+ * can end (an outage's "returns when it reconnects"), belongs to it. It is
+ * retired as soon as the operator opens another conversation or the state
+ * ends, instead of outliving it on screen or in the accessibility tree.
+ */
+let toastScope: { thread?: string; until?: () => boolean } | undefined;
+
+function dismissToast(): void {
+  const output = document.querySelector<HTMLElement>("#toast");
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+  toastTimer = undefined;
+  toastScope = undefined;
+  if (!output) return;
+  output.classList.remove("visible");
+  // Hidden text in a status region is still read and still in the tree.
+  output.textContent = "";
+}
+
+/** Retire a scoped toast whose conversation is no longer open or whose state has ended. */
+function retireStaleToast(): void {
+  if (!toastScope) return;
+  const open = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  if ((toastScope.thread !== undefined && toastScope.thread !== open) || toastScope.until?.()) dismissToast();
+}
+
+function toast(message: string, scope?: { thread?: string; until?: () => boolean }): void {
   let output = document.querySelector<HTMLElement>("#toast");
   if (!output) {
     output = document.createElement("div");
@@ -2290,9 +2351,12 @@ function toast(message: string): void {
     document.body.append(output);
   }
   output.textContent = message;
+  toastScope = scope;
   placeToastClearOfBanner(output);
   output.classList.add("visible");
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+  // Timing out only hides it, as before; a scoped toast is also emptied once
+  // its conversation closes or its state ends (retireStaleToast).
   toastTimer = window.setTimeout(() => output.classList.remove("visible"), 3200);
 }
 
@@ -2342,6 +2406,8 @@ const conversationPersistenceBlocked = new Set<string>();
  * clock runs ahead otherwise re-timed every turn to the reload).
  */
 const arrivals = arrivalStore(conversationStorage);
+const readMarkStorage = readMarkStore(conversationStorage);
+const readMarks: Map<string, number> = readMarkStorage.load();
 const storedArrivals: Map<string, Arrivals> = arrivals.load();
 const persistedArrivals = new Map<string, string>();
 
@@ -2837,7 +2903,9 @@ function scheduleReceiptCheck(key: string): void {
   if (pending !== undefined) clearTimeout(pending);
   receiptChecks.delete(key);
   const history = conversationHistories.get(key);
-  const wait = history?.nextReceiptCheck(Date.now());
+  const deadline = history?.nextReceiptCheck(Date.now());
+  const cue = history?.nextConfirmCue(Date.now());
+  const wait = deadline === undefined ? cue : cue === undefined ? deadline : Math.min(deadline, cue);
   if (!history || wait === undefined) return;
   receiptChecks.set(key, setTimeout(() => {
     receiptChecks.delete(key);
@@ -2848,7 +2916,7 @@ function scheduleReceiptCheck(key: string): void {
         document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
       }
       updateConversationViews(); renderConversationList();
-    }
+    } else updateConversationViews(); // a due confirmation cue (cas-97d58 F18)
     scheduleReceiptCheck(key);
   }, wait));
 }
@@ -3075,14 +3143,20 @@ async function persistDeviceReply(machine: StoredMachine, session: string, reply
   try {
   const fence = frameFence ?? credentialFence(machine);
   const scope = deliveryScope(machine, session);
-  if (!await sendJournal.persistReply(scope, reply, fence)) return;
+  if (!await sendJournal.persistReply(scope, reply, fence)) { markReplyNotKept(machine, session, reply); return; }
   const current = (await catalog.snapshot()).machines.find((item) => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
   if (!current || current.credentialId !== fence.credentialId || credentialFence(current).generation !== fence.generation || conversationPersistenceBlocked.has(machine.id)) return;
   conversationHistory(sessionKey(machine.id, session)).markReplyPersisted(reply.notification_id);
   // Device identity is derived by the hub, never trusted from this frame.
   connections.get(machine.id)?.send(session, { OperatorReplyPersisted: { notification_id: reply.notification_id, device_id: "" } });
   updateConversationViews();
-  } catch { /* Display remains forwarded; failed storage cannot authorize ACK. */ }
+  } catch { markReplyNotKept(machine, session, reply); /* Display remains forwarded; failed storage cannot authorize ACK. */ }
+}
+
+/** cas-97d58 F05: say "Not kept on this device yet" only after storing it actually failed. */
+function markReplyNotKept(machine: StoredMachine, session: string, reply: OperatorReply): void {
+  conversationHistory(sessionKey(machine.id, session)).markReplyStoreFailed(reply.notification_id);
+  updateConversationViews();
 }
 
 async function cancelWaitingMessage(machineId: string, session: string, id: string): Promise<void> {
@@ -3099,8 +3173,11 @@ async function cancelWaitingMessage(machineId: string, session: string, id: stri
     for (const held of [...queue]) if (held.clientRef === id) { clearTimeout(held.expiry); queue.splice(queue.indexOf(held), 1); }
     if (!queue.length) heldSends.delete(key);
     heldSince.delete(id);
+    // cas-97d58 F15: a cancel is the operator's own decision, not a failure.
+    // The message leaves the thread (as it does after a reload) instead of
+    // turning into a red "unsent message" chip; the composer says it was not sent.
     conversationHistory(key).reject(id, "Cancelled — not sent.");
-    conversationHistory(key).dismissSend(id);
+    conversationHistory(key).discardRefused(id);
     updateConversationViews(); renderConversationList();
     showComposerStatus("Waiting message cancelled. It was not sent.", "info");
     document.querySelector<HTMLElement>("#message-text")?.focus({ preventScroll: true });
@@ -3300,6 +3377,11 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     history.discardRefused(retryOf);
   }
   if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }
+  // cas-97d58 F10: "Not sent — see the message above" pointed at the refused
+  // message this send replaces. With no refused message left to point at,
+  // it would sit under the new Sending… bubble, so it goes.
+  if ((retryOf || editOf) && messageStatus?.session === key && messageStatus.text === REFUSED_SEE_ABOVE
+    && !history.visibleEvents().some((event) => event.kind === "send" && history.isFailedSend(event.value))) clearComposerStatus();
   holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);
   updateConversationViews(); renderConversationList();
   if (selectedMachineId === machine.id && selectedSession === session) {
@@ -3384,6 +3466,26 @@ function capturePairingDraft(): void {
   const addressHelp = form?.querySelector<HTMLDetailsElement>("details.pair-address-help");
   if (addressHelp) pairingDraft.addressHelpOpen = addressHelp.open;
   if (form) pairingDraft = updatePairingDraft(pairingDraft, new FormData(form).entries(), pendingPairing?.kind === "invitation" && !pendingPairing.hubUrl);
+}
+
+interface PairDialogPlace { readonly scroll: readonly number[]; readonly focus?: { readonly index: number; readonly tag: string } }
+/** Where the operator is in the open pairing dialog: its scroll and the control they are on. */
+function pairDialogPlace(): PairDialogPlace | undefined {
+  const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  const form = dialog?.querySelector<HTMLFormElement>("#pair-form");
+  if (!dialog || !form) return undefined;
+  const active = document.activeElement;
+  const index = active && dialog.contains(active) ? [...dialog.querySelectorAll("*")].indexOf(active) : -1;
+  return { scroll: [dialog.scrollTop, form.scrollTop], ...(active && index >= 0 ? { focus: { index, tag: active.tagName } } : {}) };
+}
+/** The same step's markup is rebuilt node for node, so the control at the same place is the one the operator was on. */
+function restorePairDialogPlace(place: PairDialogPlace): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  const form = dialog?.querySelector<HTMLFormElement>("#pair-form");
+  if (!dialog || !form) return;
+  const target = place.focus ? dialog.querySelectorAll("*")[place.focus.index] : undefined;
+  if (target instanceof HTMLElement && target.tagName === place.focus?.tag) target.focus({ preventScroll: true });
+  [dialog.scrollTop, form.scrollTop] = place.scroll;
 }
 
 /** Each machine's accent, recorded when it first pairs so later pairings never re-colour it (cas-50a7). */
@@ -3541,6 +3643,11 @@ function render(captureDraft = true): void {
   const pairedDialogWasOpen = machineDialog?.open === true;
   if (pairedDialogWasOpen) machineDialog!.remove();
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
+  const pairingFeedbackWasFocused = pairDialogWasOpen && document.activeElement?.matches("#pair-dialog .pair-status") === true;
+  // A rebuild for something else (a machine connecting) redraws the same
+  // pairing step; the operator keeps their place in it rather than the
+  // dialog's autofocus pulling them back to the top (cas-207a).
+  const pairPlace = pairDialogWasOpen && pairingView === lastPairingView ? pairDialogPlace() : undefined;
   // The open conversation's grid (its thread, connection card and hidden pane
   // host) survives a rebuild, so a heartbeat never remounts the thread.
   const preservedGrid = selectedThreadKey && currentGrid?.dataset.sessionKey === selectedThreadKey ? currentGrid : undefined;
@@ -3606,7 +3713,12 @@ function render(captureDraft = true): void {
     document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
     queueMicrotask(() => document.querySelector<HTMLInputElement>("#command-palette-query")?.focus());
   }
-  if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+  if (pairDialogWasOpen) {
+    const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+    dialog?.showModal();
+    if (pairPlace) restorePairDialogPlace(pairPlace);
+    if (pairingFeedbackWasFocused) focusPairingFeedback(dialog);
+  }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
@@ -3826,8 +3938,16 @@ function renderConversationList(): void {
     // Preview is the last turn this page has seen; unread counts supervisor
     // turns that arrived while the thread was not open. Opening it reads them.
     const events = conversationHistories.get(key)?.events ?? [];
-    const replies = events.filter((event) => event.kind === "reply").length;
-    if (selected) readReplies.set(key, replies);
+    const replyIds = events.flatMap((event) => event.kind === "reply" ? [event.value.notification_id] : []);
+    const replies = replyIds.length;
+    if (selected) {
+      readReplies.set(key, replies);
+      // cas-97d58 F14: remember the newest reply read, across reloads.
+      const newest = replyIds.reduce((max, id) => Number.isSafeInteger(id) && id > max ? id : max, readMarks.get(key) ?? -1);
+      if (newest >= 0 && newest !== readMarks.get(key)) { readMarks.set(key, newest); readMarkStorage.save(key, newest); }
+    }
+    const mark = readMarks.get(key);
+    const unreadCount = mark === undefined ? Math.max(0, replies - (readReplies.get(key) ?? 0)) : replyIds.filter((id) => id > mark).length;
     // Waiting (ochre dot, hot time) is driven by asks and blockers the
     // operator has not answered, never by attention events (cas-0546).
     const waiting = waitingOnOperator(conversationHistories.get(key));
@@ -3851,7 +3971,7 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -3873,7 +3993,7 @@ function renderConversationList(): void {
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) {
     empty.hidden = shown.length > 0;
-    const listState = rows.length > 0 ? { kind: "text" as const, text: conversationNoMatchText(conversationSearchQuery) } : conversationListState(machineCatalogLoaded, [...machines.keys()].map((id) => ({ catalogReceived: fleetCatalogUpdatedAt.has(id), phase: connectionStates.get(id)?.phase })));
+    const listState = rows.length > 0 ? { kind: "text" as const, text: conversationNoMatchText(conversationSearchQuery) } : conversationListState(machineCatalogLoaded, [...machines.keys()].map((id) => ({ catalogReceived: fleetCatalogUpdatedAt.has(id), phase: connectionStates.get(id)?.phase, browserBlocked: Boolean(connectionStates.get(id)?.networkAccessHelp) })));
     const markup = listState.kind === "loading" ? conversationSkeletonMarkup() : "";
     if (listState.kind === "loading") { if (empty.dataset.state !== "loading") empty.innerHTML = markup; }
     else empty.textContent = listState.text;
@@ -4225,9 +4345,11 @@ async function runFleetAction(rowKey: string, action: FleetAction): Promise<void
   if (!result || fleetOps.selectionEpoch !== epoch || selectedMachineId !== machineId || selectedSession !== session) return;
   if (result === "succeeded") {
     if (action.request.op.kind === "request_merge") fleetAsked.set(String(action.request.op.task_id), Date.now());
-    fleetFocusNext = action.inverse ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
+    // Focus stays with the rows (the next row's ⋯ after a Stop); a destructive
+    // result with no row left to go to lands on its result line (cas-97d58 F12).
+    fleetFocusNext = action.inverse && fleetOps.undo ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
     window.clearTimeout(fleetUndoTimer);
-    if (fleetOps.undo) fleetUndoTimer = window.setTimeout(() => { if (selectedMachineId && selectedSession) renderStatus(statuses.get(sessionKey(selectedMachineId, selectedSession))); }, UNDO_WINDOW_MS + 50);
+    if (fleetOps.undo || fleetOps.result) fleetUndoTimer = window.setTimeout(() => { if (selectedMachineId && selectedSession) renderStatus(statuses.get(sessionKey(selectedMachineId, selectedSession))); }, UNDO_WINDOW_MS + 50);
   } else {
     fleetFocusNext = `${rowKey}:note`;
   }
@@ -4349,6 +4471,8 @@ function renderStatus(status?: Record<string, unknown>): void {
     const alive = (key: string) => container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(key)}"]`);
     const neighbour = priorTriggers.slice(at + 1).map(alive).find(Boolean);
     if (neighbour) { neighbour.focus({ preventScroll: false }); return; }
+    const result = container.querySelector<HTMLElement>('[data-fleet-focus="result"]');
+    if (result) { result.focus({ preventScroll: false }); return; }
     container.tabIndex = -1;
     container.focus({ preventScroll: false });
   };
@@ -4396,7 +4520,9 @@ function renderStatus(status?: Record<string, unknown>): void {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();
     const phoneConversation = phoneLayout();
-    const undo = fleetOps.currentUndo(ops.now) ? undoBar(document, { ...ops, phone: phoneConversation }) : phoneConversation ? phoneFleetNotice(document, ops) : undefined;
+    const undo = fleetOps.currentUndo(ops.now) ? undoBar(document, { ...ops, phone: phoneConversation })
+      : !phoneConversation && fleetOps.currentResult(ops.now) ? resultBar(document, ops)
+        : phoneConversation ? phoneFleetNotice(document, ops) : undefined;
     if (undo && phoneConversation) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
     else if (undo) container.append(undo);
     container.append(headerControls(document, ops, fleetHeaderPanel));
@@ -4690,6 +4816,8 @@ function bindEvents(): void {
   }
   const pairForm = document.querySelector<HTMLFormElement>("#pair-form");
   const pairCancel = document.querySelector<HTMLButtonElement>("#pair-cancel");
+  const pairDevice = pairForm?.querySelector<HTMLInputElement>('input[name="device"]');
+  if (pairDevice) pairDevice.addEventListener("input", () => pairDevice.setCustomValidity(""));
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
   const pairCreate = document.querySelector<HTMLButtonElement>("#pair-create");
   const pairDialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
@@ -4804,7 +4932,9 @@ function escapeAttr(value: string): string { return escapeHtml(value).replaceAll
 // on focusout alone deleted the button under the finger before the browser
 // dispatched the click, so the tap did nothing at all (cas-c142).
 app.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);
-app.addEventListener("pointerup", () => deferredRender.gestureEnded(), true);
+// A lifted finger's click comes in a later task, after its focus change.
+app.addEventListener("pointerup", (event) => { if (event.pointerType === "touch") deferredRender.touchEnded(); else deferredRender.gestureEnded(); }, true);
+app.addEventListener("click", () => deferredRender.clicked(), true);
 app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);
 app.addEventListener("focusout", () => {
   queueMicrotask(() => {
@@ -4890,6 +5020,8 @@ function pairedMachineRows(): PairedMachineRow[] {
       connected: state?.phase === "live" && !state.degraded && fresh,
       everConnected: lastLiveAt.has(machine.id),
       connectionState: state,
+      ...(state?.networkAccessHelp ? { cause: "This browser is blocking the connection. Allow Local network access for this site in the browser's settings." }
+        : state?.phase === "failed" && state.fatal === true ? { cause: `This browser can't connect. ${fatalConnectionRecovery(state.reason)}` } : {}),
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version,
       // cas-d382: what this pairing may do to the fleet, and how to get the rest.

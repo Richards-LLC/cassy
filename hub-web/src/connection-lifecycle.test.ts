@@ -477,6 +477,112 @@ describe("Commander live connection lifecycle", () => {
     expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
   });
 
+  it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
+    const hub = transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("reconnecting-send"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
+    hub.event({ kind: "viewer_lagged" });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    // A dispatch's IndexedDB/credential await can finish after this transition.
+    // The old socket is physically open, but recovery will replace it.
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+    const before = socket.sent.length;
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
+    expect(socket.sent).toHaveLength(before);
+    connection.retry();
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    const recovered = TransportSocket.instances[1]!;
+    recovered.open();
+    recovered.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
+    await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(true);
+    expect(socket.sent).toHaveLength(before);
+    expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
+  });
+
+  it("releases a held send when the machine becomes live after its session (cas-9dc6)", async () => {
+    const hub = transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const fetchNow = globalThis.fetch;
+    let releaseEvents!: () => void;
+    const eventsReady = new Promise<void>(resolve => { releaseEvents = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fetchNow(input, init);
+      if (new URL(String(input)).pathname === "/v1/events") await eventsReady;
+      return response;
+    }));
+    let written = false;
+    const connection: HubConnectionSupervisor = new HubConnectionSupervisor(await storedMachine("session-before-machine"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onAttachState: (session, state) => {
+        if (state.phase === "live" && !written) written = connection.send(session, {
+          SendMessage: { target: "supervisor", text: "Held in the first tab", client_ref: "held-before-live" },
+        });
+      },
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(hub.streams).toHaveLength(1));
+    const attached = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    socket.receive({ channel: "pty:session-a", message: { Welcome: {
+      state: { panes: [] }, protocol_version: 3, capabilities: [],
+    } } });
+    expect(connection.attachSnapshot("session-a")?.phase).toBe("live");
+    expect(connection.snapshot().phase).toBe("attaching");
+    expect(written).toBe(false);
+    releaseEvents();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(written).toBe(true);
+    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.message?.SendMessage?.client_ref === "held-before-live")).toHaveLength(1);
+  });
+
+  it("checks the machine immediately when a fresh session recovers during event backoff (cas-9dc6)", async () => {
+    const hub = transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("session-recovers-first"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const initial = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const old = TransportSocket.instances[0]!;
+    old.open(); old.receive({ proto: 2 });
+    await initial;
+    old.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    hub.block(true);
+    hub.event({ kind: "viewer_lagged" });
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    old.close(1011);
+    hub.block(false);
+    const recovering = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    const recovered = TransportSocket.instances[1]!;
+    recovered.open(); recovered.receive({ proto: 2 });
+    await recovering;
+    // The fresh session is reachable, while the machine's independent retry
+    // still waits. Its Welcome must prompt a check, not bypass send fencing.
+    expect(connection.snapshot().phase).toBe("backoff");
+    const streams = hub.streams.length;
+    recovered.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    await vi.waitFor(() => expect(hub.streams).toHaveLength(streams + 1), { timeout: 250, interval: 10 });
+    expect(connection.snapshot().phase).toBe("live");
+  });
+
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {
     const hub = transport(true);
     TransportSocket.instances = [];

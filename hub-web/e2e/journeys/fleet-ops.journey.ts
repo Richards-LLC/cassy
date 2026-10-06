@@ -121,7 +121,7 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await panel().getByRole("menuitem", { name: "Pause" }).click();
         await expect(result).toHaveText("swift-lark-3 paused.");
         await expect(row.locator(".fleet-ops-note")).toHaveCount(0);
-        await expect(row.locator(".status-chip")).toHaveText("Held");
+        await expect(row.locator(".status-chip")).toHaveText("Paused");
         await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
     });
@@ -238,7 +238,7 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(menu.getByRole("menuitem", { name: "Pause" })).toBeFocused();
     await menu.getByRole("menuitem", { name: "Pause" }).click();
     await expect(announcer).toHaveText("swift-lark-3 paused.");
-    await expect(row("swift-lark-3").locator(".status-chip")).toHaveText("Held");
+    await expect(row("swift-lark-3").locator(".status-chip")).toHaveText("Paused");
     await expect(rail.locator(".fleet-ops-undo")).toContainText("swift-lark-3 paused.");
     await rail.getByRole("button", { name: "Undo" }).click();
     await expect(announcer).toHaveText("swift-lark-3 resumed.");
@@ -272,8 +272,12 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await row("brisk-wren-9").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
     await expect(announcer).toHaveText("brisk-wren-9 stopped.");
     await expect(row("brisk-wren-9")).toHaveCount(0);
-    // It was the last row, so focus moves to the list, never to <body> (QA N1).
-    await expect(rail).toBeFocused();
+    // cas-97d58 F12: the row is gone, so its result shows where an Undo would,
+    // in view and focused (never <body>, QA N1), and without an Undo.
+    const result = rail.locator(".fleet-ops-result");
+    await expect(result).toHaveText("brisk-wren-9 stopped.");
+    await expect(result).toBeFocused();
+    await expect(result).toBeInViewport();
     expect(hub.operations.length).toBe(before + 1);
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "shutdown_workers", workers: ["brisk-wren-9"] }, expected: { worker: "brisk-wren-9", generation: 4 } });
     // No Undo for a destructive action.
@@ -313,7 +317,7 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeFocused();
   });
 
-  await journey.stage("A pairing without factory:manage sees Stop disabled with the command that adds it", async () => {
+  await journey.stage("A pairing without factory:manage sees Stop disabled and where to add it", async () => {
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click();
     await expect(row("swift-lark-3")).toBeVisible();
     await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
@@ -321,7 +325,11 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(stop).toHaveAttribute("aria-disabled", "true");
     const reason = row("swift-lark-3").locator(`#${await stop.getAttribute("aria-describedby")}`);
     await expect(reason).toContainText("Not allowed on this pairing.");
-    await expect(reason).toContainText(/--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
+    // cas-97d58 F06: by what it allows, with one remedy; the command and its
+    // scope ids live in Paired machines (with Copy), never in a menu a 720px
+    // viewport cuts off.
+    await expect(reason).toContainText("Needs the Stop and restart workers and sessions permission. Add it in Paired machines.");
+    await expect(reason).not.toContainText(/factory:|--scopes/);
     // Pause needs factory:operate, which this control pairing may allow itself.
     await expect(row("swift-lark-3").getByRole("menuitem", { name: "Pause" })).toHaveAttribute("aria-disabled", "true");
     await expect(row("swift-lark-3").locator(".fleet-ops-reason").first()).toContainText("Allow managing workers in Paired machines.");

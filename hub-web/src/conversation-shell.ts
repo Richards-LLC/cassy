@@ -279,6 +279,8 @@ export interface MachineCatalogProgress {
   /** The hub has answered with a session catalog at least once in this visit. */
   catalogReceived: boolean;
   phase: string | undefined;
+  /** cas-97d58 F16: the browser itself blocks the connection (Local network access denied). */
+  browserBlocked?: boolean;
 }
 
 export type ConversationListState = { readonly kind: "loading" } | { readonly kind: "text"; readonly text: string };
@@ -296,6 +298,10 @@ export function conversationListState(storageLoaded: boolean, machines: readonly
   const unanswered = machines.filter((machine) => !machine.catalogReceived);
   // Still on a first attempt: no answer yet, and no failure either.
   if (unanswered.some((machine) => machine.phase !== "failed" && machine.phase !== "backoff")) return { kind: "loading" };
+  // cas-97d58 F16: when this browser blocks every machine, the cause is the
+  // browser, not "check that the machines are awake". The permission notice
+  // beside it carries the one remedy (cas-7c37f).
+  if (unanswered.length === machines.length && unanswered.every((machine) => machine.browserBlocked)) return { kind: "text", text: "This browser is blocking its connection to your paired machines." };
   if (unanswered.length === machines.length) return { kind: "text", text: "Can't reach your paired machines yet. Cassy keeps retrying; check that the machines are awake and on your network." };
   return { kind: "text", text: conversationEmptyText(true, machines.length) };
 }

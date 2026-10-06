@@ -18,7 +18,7 @@ cd "$repo_root"
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
-    version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
@@ -317,6 +317,14 @@ cache_input_hash() {
         hub-web-tests|hub-web-visual-qa|hub-web-dist-drift)
             git ls-tree -r HEAD -- hub-web scripts .github | sha256sum | cut -d' ' -f1
             ;;
+        release-binary-isa)
+            # Assembly masks release-version churn; this artifact proof also
+            # binds the exact locked dependency graph, including member versions.
+            {
+                git rev-parse HEAD:Cargo.lock || return 1
+                python3 "$repo_root/scripts/assembly-proof.py" input "$repo_root" || return 1
+            } | sha256sum | cut -d' ' -f1
+            ;;
         fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
             if [[ -f "$repo_root/scripts/assembly-proof.py" ]]; then
                 python3 "$repo_root/scripts/assembly-proof.py" input "$repo_root"
@@ -375,7 +383,7 @@ row_receipt_valid() {
 }
 
 row_cache_key() {
-    local name="$1" env_fingerprint input_hash
+    local name="$1" env_fingerprint input_hash artifact_toolchain=''
     [[ ( -n "$cache_dir" || "$reuse_rows" == true ) && -z "$only_rows" ]] || return 1
     git diff --quiet HEAD || return 1
     [[ "$(git rev-parse HEAD)" == "$cache_head" ]] || return 1
@@ -383,15 +391,19 @@ row_cache_key() {
     local -a inputs=()
     case "$name" in
         hub-web-tests|hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
-        fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
+        release-binary-isa|fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
             inputs=(.) ;;
         *) return 1 ;;
     esac
     env_fingerprint="$(cache_environment)" || return 1
     input_hash="$(cache_input_hash "$name")" || return 1
+    if [[ "$name" == release-binary-isa ]]; then
+        artifact_toolchain="$(release_binary_isa_toolchain)" || return 1
+    fi
     {
         printf '%s\n' row-cache-v2 "$name" "$cache_checkout_identity" "$input_hash" \
             "$env_fingerprint" "$cache_toolchain" "$cache_implementation_digest"
+        [[ "$name" != release-binary-isa ]] || printf '%s\n' "$artifact_toolchain"
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -847,6 +859,40 @@ check_workspace_tests() {
     "$cargo_bin" check --workspace --tests
 }
 
+# A final release-profile artifact catches dependency backends that are absent
+# from check/test profiles. No tags, uploads or remote mutation occur here.
+release_binary_isa_toolchain() {
+    local zigbuild_version zig_version objdump_bin objdump_version
+    # Version belongs to the plugin's top-level CLI, not its zigbuild subcommand.
+    zigbuild_version="$(cargo-zigbuild --version)" || return 1
+    [[ -x "${ZIG:-}" ]] || return 1
+    zig_version="$("$ZIG" version)" || return 1
+    objdump_bin="$(release_portable_gnu_objdump)" || return 1
+    objdump_version="$("$objdump_bin" --version)" || return 1
+    [[ -n "$zigbuild_version" && -n "$zig_version" && -n "$objdump_version" ]] || return 1
+    printf '%s\n' "$zigbuild_version" "$zig_version" "$objdump_version" | sha256sum | cut -d' ' -f1
+}
+
+check_release_binary_isa() {
+    local target=x86_64-unknown-linux-gnu staging="$tmp_dir/release-binary-isa"
+    local target_dir="${CARGO_TARGET_DIR:-target}"
+    # --only does not dispatch the separate Zig discovery row. Resolve it here
+    # too; zigbuild discovers the selected compiler through PATH, like release.sh.
+    check_epic_worktree_zig || return $?
+    # Use the same locked target/profile and C/C++ baseline as release.sh.
+    # Keep the publisher's linker/rustflags: the native assembly compiler guard
+    # installs its own linker and would change the cross-target artifact.
+    env PATH="$(dirname "$ZIG"):$PATH" \
+        CFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
+        CXXFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
+        "$cargo_bin" zigbuild -p cas --release --target "$target" --locked || return $?
+    mkdir -p "$staging" || return $?
+    cp "$target_dir/$target/release/cas" "$staging/cas" || return $?
+    # Audit the packaging copy rather than a dev/test executable. This also
+    # retains the auditor's deterministic baseline and seeded-EVEX self-tests.
+    "$repo_root/scripts/test-check-portable-x86_64-isa.sh" "$staging/cas"
+}
+
 check_macos() {
     local rustup_bin="${RUSTUP:-rustup}" macos_cc="$tmp_dir/macos-check-cc"
     if ! command -v "$rustup_bin" >/dev/null 2>&1; then
@@ -1164,6 +1210,7 @@ check_archive_mode() {
         printf 'archive-mode: cannot create remap worktree at %s\n' "$remap"
         return 1
     }
+    python3 "$repo_root/scripts/release_scratch.py" --repo "$repo_root" --path "$archive_dir" register-remap || return 1
     archive_path="$(make_archive_path)" || {
         status=$?
         return "$status"
@@ -1507,6 +1554,13 @@ run_check hub-web-tests \
     check_hub_web_tests
 if row_selected hub-web-tests && [[ "${failures[*]}" == *hub-web-tests* ]]; then
     printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
+    exit 1
+fi
+run_check release-binary-isa \
+    "$cargo_bin zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked (baseline C/C++ flags); scripts/test-check-portable-x86_64-isa.sh <packaged-cas>" \
+    check_release_binary_isa
+if row_selected release-binary-isa && [[ "${failures[*]}" == *release-binary-isa* ]]; then
+    printf 'RELEASE GATE FAILED: %s (release binary ISA audit refused before pr-body/pipeline)\n' "${failures[*]}"
     exit 1
 fi
 run_check fixture-paths \

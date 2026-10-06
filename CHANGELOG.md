@@ -7,6 +7,61 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.47.1] - 2026-10-06
+
+### Fixed — Commander
+
+- A message held while a machine reconnects is sent once the machine is back,
+  and the tab that held it shows it delivered. Before, a held send could stay
+  unsent after another tab delivered it, and a tab could stay on
+  "Reconnecting" after the machine had returned.
+- Pairing that times out now shows the error in view, moves focus to it and
+  offers the next step, instead of looking as if nothing happened. On a phone,
+  tapping "Technical details" after scrolling the invitation form opens it
+  and keeps your place.
+- The installations sheet names each browser and shows local, relative times.
+  Generation numbers, ISO timestamps and signing keys sit behind a closed
+  "Technical details" disclosure. Long browser names wrap, and a blank name is
+  refused.
+- Polish from the 3.47.0 journey evaluation:
+  - plain-language permission wording, with no scope ids or "terminals";
+  - a phone header that no longer truncates the machine name;
+  - a Connection log that leads with the cause in words and keeps the raw JSON
+    behind an expandable "Technical details";
+  - inbox status reads "Waiting for soundwave" and then "soundwave received it";
+  - clearer captions, toasts and read marks.
+
+### Fixed — CLI and factory
+
+- `cas list` shows a session whose daemon has died as dead rather than
+  "stopped", stale factory sockets are removed only when no live process holds
+  them, and `cas kill` waits for the daemon to exit before removing both of
+  its sockets.
+- `cas integrate` output fits the terminal width at 40, 80 and 120 columns and
+  stays readable under the C locale, `NO_COLOR` and pipes.
+- Closing a parked task no longer re-walks generated bundles: its content proof
+  takes about 2 s instead of about 29 s.
+- Host memory admission locks are held by a dedicated process, so an sccache
+  server or an orphaned test child can no longer keep them after a suite ends.
+- A QA round whose review task was cancelled no longer blocks its delivery
+  forever; asking for QA again withdraws it and opens a fresh round.
+- Leftover release worktrees from a killed run are unregistered and reclaimed
+  only when their owner is provably dead and the worktree is clean.
+
+### Changed — release and QA tooling
+
+- The release gate builds and audits the x86_64 release binary for AVX-512
+  instructions before the merge queue, instead of discovering them at publish.
+- Visual QA no longer reports an editable field's own scrolling, an intentional
+  multi-line clamp, or a page that declares it needs JavaScript as defects.
+- The QA evidence recipe produces the runner trace the close gate accepts, with
+  a `--scrub-trace` step for signed-in runs.
+- Journey receipts keep light and dark variants apart, the affected-journey
+  selector no longer crashes on regex literals, and CI runs the Commander
+  journeys on four workers.
+- The release announcement records its Slack message ids in the release-notes
+  draft even when the draft starts from the template's empty POSTED table.
+
 ## [3.47.0] - 2026-10-06
 
 ### Added — Commander cloud operator inbox

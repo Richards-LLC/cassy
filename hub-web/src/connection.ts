@@ -215,6 +215,13 @@ export class HubConnectionSupervisor {
     try {
       await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
     } catch (error) {
+      // cas-eefe: event delivery never waits on this read, and every
+      // heartbeat reads the catalog too, so a failed or timed-out read is the
+      // heartbeat's evidence to count. Aborting the stream here skipped the
+      // four-missed-heartbeats rule: a heartbeat GET this read shares (the
+      // catalog flight is coalesced) took a half-open machine from Unsteady
+      // straight to Reconnecting. Only a refused pairing ends the stream now.
+      if (!(error instanceof AuthenticationError)) return;
       // A cancelled or failed old stream must not abort its replacement.
       if (stream === this.eventAbort && !stream?.signal.aborted) stream?.abort(error);
     }

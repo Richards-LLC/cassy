@@ -12,6 +12,77 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 - Do not expose port 4173 on a LAN interface. The Cassy hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
 - In Chrome, allow **Local network access** for `https://hub.petrastella.io` in the page's site settings when connecting to a tailnet hub; Tailscale's `100.64.0.0/10` addresses are [classified as local by Chromium](https://chromium.googlesource.com/chromium/src/+/d1e9879b75be1e3ef0f9b9991f6831dca5a618f8), so a denied permission blocks requests before they reach the hub and does not mean the browser needs pairing again.
 
+## Choose the macOS Tailscale variant
+
+Inbound **Tailscale SSH** uses tailnet identity and policy rather than SSH keys.
+On macOS it requires the open-source `tailscaled` daemon. Installing a CLI
+wrapper for `Tailscale.app` does not add this server capability.
+
+| Variant | Connect to the tailnet / Serve HTTPS | Tailscale SSH client | Tailscale SSH server | Management |
+| --- | --- | --- | --- | --- |
+| Standalone GUI app | Yes | Yes, including `tailscale ssh` | No | Menu bar; in-app Sparkle updater |
+| Mac App Store app | Yes | Yes, using ordinary `ssh` to a Tailscale SSH server | No | Menu bar; App Store updates |
+| Open-source Homebrew **formula** (`tailscale` + `tailscaled`) | Yes | Yes | Yes, after `tailscale up --ssh` and tailnet SSH policy authorization | CLI; root Homebrew service; `brew upgrade tailscale` |
+
+**Fleet requirement:** prowl needs the Homebrew formula because soundwave must
+open an identity-based shell with `tailscale ssh prowl`. Any other macOS fleet
+machine accepting Tailscale SSH needs the same variant. A Mac used only as a
+client can keep the standalone GUI app; an App Store client uses ordinary
+`ssh user@machine` for Tailscale SSH destinations. This restriction concerns
+Tailscale's SSH server; the macOS Remote Login service is a separate facility.
+
+The daemon has no menu-bar UI and cannot be managed through macOS VPN settings.
+Start it with `sudo brew services start tailscale`, which installs a system
+LaunchDaemon that runs before user login. `brew services start tailscale`
+without sudo is not the fleet's boot-persistence configuration. Check the
+installed service definition and `sudo brew services list`; Homebrew service
+labels can differ between releases.
+
+Inspect the daemon explicitly while migrating:
+
+```sh
+tailscale --socket=/var/run/tailscaled.socket status --json
+```
+
+An unqualified Homebrew CLI can still select the GUI's local API while its
+system extension is active. Verify the reported daemon version as well as the
+CLI's `tailscale version`; do not infer the variant from the executable path.
+Disable GUI launch-at-login and retire its VPN/system extension before relying
+on the daemon for unattended operation.
+
+MagicDNS is supported by the daemon. Current macOS builds manage split-DNS
+files under `/etc/resolver` and may configure a default resolver through
+SystemConfiguration when the tailnet overrides local DNS. Verify `scutil --dns`
+and `dscacheutil -q host -a name MACHINE.TAILNET.ts.net` after migration and
+updates. Test short names separately; `dig` alone does not exercise macOS's
+system resolver. Do not blindly overwrite LAN DNS settings or add persistent
+resolver files before checking what the installed daemon manages.
+
+See Tailscale's [macOS variant comparison](https://tailscale.com/docs/concepts/macos-variants),
+the [Homebrew formula](https://formulae.brew.sh/formula/tailscale), and the
+[1.102.5 macOS DNS implementation](https://github.com/tailscale/tailscale/blob/v1.102.5/net/dns/manager_darwin.go).
+
+### Keep Tailscale updated
+
+Check for stable updates weekly and before a planned fleet maintenance window.
+Schedule service restarts when no acceptance run or hub publication depends on
+the machine; use LAN access when changing prowl's networking.
+
+- Standalone GUI: use the menu-bar update action / Sparkle automatic updates.
+- App Store: update through the App Store.
+- Homebrew daemon: run `brew update` and `brew upgrade tailscale` as the
+  Homebrew owner, then `sudo brew services restart tailscale`. Root service
+  installation can leave formula paths owned by root; if upgrade reports an
+  ownership conflict, inspect the exact paths Homebrew names rather than
+  running `sudo brew upgrade` or changing ownership across the prefix.
+- Linux: run `sudo tailscale update` on supported package installations, then
+  verify the daemon's version and service state.
+
+After an update, check `tailscale status`, MagicDNS, `tailscale ssh prowl` from
+soundwave, `cas hub status`, and HTTPS `/v1/health`. Re-publish the hub with
+`cas hub restart --tailscale-serve` if its recorded mapping no longer targets
+the live shim.
+
 ## Hub promotion (hosted Commander at hub.petrastella.io)
 
 Standing policy: after any `main` merge that changes `hub-web/dist`, or hub-web

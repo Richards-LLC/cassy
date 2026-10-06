@@ -48,10 +48,12 @@ describe("desktop context rail (P10)", () => {
   it("names waiting only while a real conversation turn still needs me (cas-b113)", () => {
     const rail = mountShell();
     const history = new ConversationHistory();
-    // The shell itself must not predeclare a waiting state before hydration.
-    expect(rail.textContent).not.toContain("Waiting on you");
+    // The static heading labels the section when shown, but an empty
+    // section is hidden and contributes no actionable waiting entries.
+    expect(section(rail, "waiting").hidden).toBe(true);
     syncContextRail(document, { history, progress: true, attention: 0 });
-    expect(rail.textContent).not.toContain("Waiting on you");
+    expect(section(rail, "waiting").hidden).toBe(true);
+    expect(section(rail, "waiting").querySelectorAll("li")).toHaveLength(0);
     history.reply(reply(1, "blocker", "Please fix the ledger."), at(9, 30));
     syncContextRail(document, { history, progress: true, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(false);
@@ -60,8 +62,8 @@ describe("desktop context rail (P10)", () => {
     history.submit("handled", "patient-pelican-9", "Fixed.", at(9, 31));
     syncContextRail(document, { history, progress: true, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(true);
-    expect(rail.textContent).not.toContain("Waiting on you");
-    // Clearing the empty label must not suppress a later genuine blocker.
+    expect(section(rail, "waiting").querySelectorAll("li")).toHaveLength(0);
+    // Settling one blocker must not suppress a later genuine blocker.
     history.reply(reply(2, "blocker", "Please check another row."), at(9, 32));
     syncContextRail(document, { history, progress: true, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(false);

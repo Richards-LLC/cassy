@@ -19,35 +19,45 @@ source that implies a dist rebuild, promote that dist to
 `https://hub.petrastella.io`. A supervisor treats such a merge as carrying the
 promotion duty. The hosted origin is never left pinned behind `main`.
 
-The procedure and the current pin live in `Richards-LLC/petra-stella-cloud`,
-not in this repository:
+The pin and its record live in `Richards-LLC/petra-stella-cloud`, not in this
+repository:
 
-- Procedure: [`hub-static/GO-LIVE.md`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/GO-LIVE.md).
-- Verifier: [`hub-static/scripts/verify-dist.sh`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/scripts/verify-dist.sh), run as `CAS_SRC_DIR=<pinned cas-src checkout> scripts/verify-dist.sh` from `hub-static/`.
 - Current pin and deployment record: [`hub-static/PROVENANCE.md`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/PROVENANCE.md).
-  This names the source commit, dist tree, verify-dist digest, `app.js` and
+  It names the source commit, dist tree, verify-dist digest, `app.js` and
   `app.css` hashes, Vercel deployment ID and rollback anchor. It is the only
   authority for what the hosted origin serves; this runbook keeps no copy.
+- Verifier: [`hub-static/scripts/verify-dist.sh`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/scripts/verify-dist.sh), run as `CAS_SRC_DIR=<pinned cas-src checkout> scripts/verify-dist.sh` from `hub-static/`.
+- One-time origin setup, domain attachment, deployment protection and rollback:
+  [`hub-static/GO-LIVE.md`](https://github.com/Richards-LLC/petra-stella-cloud/blob/main/hub-static/GO-LIVE.md).
+  A routine promotion does not repeat those steps.
 
-In outline:
+Vercel does not deploy `main` by itself. A routine promotion is:
 
-1. Pin a clean cas-src checkout of the exact commit, normally the release tag,
-   and copy only `hub-web/dist/` into `hub-static/public/commander/`. Copy
-   `index.html` to `hub-static/public/index.html` as well.
-2. Run `verify-dist.sh`. It recomputes the dist digest and the two WASM
-   integrity hashes, and the hashes in [`hub-web/README.md`](../hub-web/README.md)
+1. **Pin.** On a petra-stella-cloud branch, copy `hub-web/dist/` from a clean
+   cas-src checkout of the exact `main` commit (normally the release tag) into
+   `hub-static/public/commander/`, and copy its `index.html` to
+   `hub-static/public/index.html`.
+2. **Verify.** Run `verify-dist.sh`. It recomputes the dist digest and the two
+   WASM integrity hashes. The hashes in [`hub-web/README.md`](../hub-web/README.md)
    are the authority: `ghostty-vt.wasm` `6b1df1a9…3f7e` and
    `ghostty-write-pty.wasm` `75cb147e…d3d903`. Stop on any mismatch.
-3. Deploy the `hub-static` directory with the Vercel CLI to the `cas-hub-static`
-   project in the Richards-LLC team. Never use the `petra-stella-cloud` Vercel
-   project, and never create a git-sourced deployment.
-4. Verify the live bytes on both the custom and the immutable origin. For
-   example, `curl -fsS https://hub.petrastella.io/commander/app.js | md5` must
-   match the md5 of `hub-web/dist/app.js` at the pin, and likewise `app.css`
-   and both WASM files. Every route must return HTTP 200 with no redirect to
-   Vercel SSO.
-5. Record the commit, digest, deployment ID, URL and rollback anchor in
-   `PROVENANCE.md`, and merge that through a petra-stella-cloud pull request.
+3. **Record and merge.** Update `PROVENANCE.md` with the commit, dist tree and
+   digest, then open a petra-stella-cloud pull request and let it auto-merge.
+4. **Deploy.** From a clean checkout of petra-stella-cloud `origin/main`, run
+   `vercel deploy hub-static --prod --scope richards-llc --project cas-hub-static --yes`.
+   Use only the `cas-hub-static` project in the Richards-LLC team, never the
+   `petra-stella-cloud` Vercel project. Never create a git-sourced deployment:
+   the project has no root directory set, so it would build the repository
+   root and serve NOT_FOUND. If the project is in a rolled-back state, promote
+   the new deployment.
+5. **Check the live bytes.** On both `https://hub.petrastella.io` and the
+   deployment's immutable URL, the md5 of `/commander/app.js` and
+   `/commander/app.css` must match `hub-web/dist` at the pin, and both WASM
+   files must match the pinned hashes. For example,
+   `curl -fsS https://hub.petrastella.io/commander/app.js | md5sum`. Every
+   route must return HTTP 200 with no redirect to Vercel SSO.
+6. **Record the deployment.** Add the deployment ID, URL and rollback anchor to
+   `PROVENANCE.md` in a follow-up petra-stella-cloud pull request.
 
 Changing the relay metadata or the origin itself is a security-domain move that
 requires every hub to re-pair. A dist-only promotion does not.

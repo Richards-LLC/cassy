@@ -156,7 +156,9 @@ def prove(repo, target, source):
         commit = git(repo, "commit-tree", tree, "-p", base, "-p", source_sha,
                      input=b"Capped lane compile preview\n", env=env)
         with tempfile.TemporaryDirectory(prefix="lane-compile-", dir=previews) as scratch:
-            preview = Path(scratch) / "preview"
+            # The installed target owner accepts only direct worktrees children.
+            # Keep metadata outside the clean checkout, in its unique sibling.
+            preview = Path(scratch).with_name(Path(scratch).name + "-preview")
             # Durable provenance plus an OS lifetime lock lets explicit GC
             # distinguish a crashed preview from a live proof. Naming alone
             # must never authorize checkout removal.
@@ -164,6 +166,7 @@ def prove(repo, target, source):
             fcntl.flock(owner, fcntl.LOCK_EX)
             (Path(scratch) / ".cas-lane-compile.json").write_text(json.dumps({
                 "version": 1, "git_common_dir": str(common_dir(repo)), "head": commit,
+                "worktree": str(preview),
             }) + "\n")
             try:
                 git(repo, "worktree", "add", "--detach", str(preview), commit, stderr=subprocess.STDOUT)

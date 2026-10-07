@@ -149,6 +149,8 @@ for (const colorScheme of ["light", "dark"] as const) {
         await page.locator("dialog.fleet-action-sheet").getByRole("button", { name: "Stop", exact: true }).click();
         await expect(notice).toContainText("Could not stop");
         const task = rail.locator(".status-task").last();
+        // A status refresh redraws the notice; measure once both are laid out.
+        await expect.poll(async () => (await Promise.all([task.boundingBox(), notice.boundingBox()])).every(Boolean)).toBe(true);
         const [row, feedback] = await Promise.all([task.boundingBox(), notice.boundingBox()]);
         expect(row!.y + row!.height, "feedback reserves space after the last task").toBeLessThanOrEqual(feedback!.y);
         await task.scrollIntoViewIfNeeded();

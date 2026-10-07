@@ -256,11 +256,11 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     coalesce = undefined;
 
     const turn = turnOf(event);
-    // cas-d043 H14: one time shows beneath a group, so turns minutes apart,
-    // or one whose time is a clock-ahead arrival beside one that is not, are
-    // not merged under the later time and flag: they start a new group.
-    const apart = group !== undefined && at !== undefined && groupLastAt !== undefined
-      && (at - groupLastAt >= GROUP_SPLIT_MS || clockAhead !== (group.clockAhead === true));
+    // cas-d043 H14: one time shows beneath a group, so turns minutes apart
+    // are not merged under the later time and its clock-ahead mark: they
+    // start a new group. (Splitting on the mark alone would regroup a thread
+    // on reload, where a first live turn's mark is settled differently.)
+    const apart = group !== undefined && at !== undefined && groupLastAt !== undefined && at - groupLastAt >= GROUP_SPLIT_MS;
     if (!group || group.side !== turn.side || apart) {
       closeGroup();
       group = { type: "group", key: `group:${turn.key}`, side: turn.side, turns: [], time: undefined };

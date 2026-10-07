@@ -139,7 +139,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     await expect(page.locator(".installation-inventory")).toHaveCount(0);
     expect(hub.installations.get(id!)!.revoked_at).not.toBeNull();
     // cas-d043 G09: the page says what happened and lands on the next step.
-    await expect(page.locator("#toast")).toHaveText("This browser's access to Atlas · Linux was revoked.");
+    await expect(page.locator("#toast")).toHaveText("This browser's access to Atlas was revoked.");
     await expect(page.locator(":focus")).toHaveAccessibleName("Pair a machine");
     await page.reload();
     await expect(page.getByText("Pair a machine to start your first conversation.")).toBeVisible();
@@ -233,7 +233,7 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
     // cas-d043 G08: plain words naming the machine, not the raw "hub:admin";
     // the summary claims the power only once the box is ticked.
     await expect(dialog.locator(".pair-admin-consent label.scope")).toContainText("See and revoke other browsers on Atlas");
-    await expect(dialog.locator(".pair-summary")).not.toContainText("See and revoke");
+    await expect(dialog.locator(".pair-summary")).not.toContainText("See and revoke", { useInnerText: true });
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
   });
 
@@ -260,7 +260,7 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
     await admin.focus();
     await page.keyboard.press("Space");
     await expect(admin).toBeChecked();
-    await expect(dialog.locator(".pair-summary")).toContainText("See and revoke other browsers on Atlas");
+    await expect(dialog.locator(".pair-summary")).toContainText("See and revoke other browsers on Atlas", { useInnerText: true });
   });
 
   await journey.stage("Pairing with that consent grants hub:admin", async () => {

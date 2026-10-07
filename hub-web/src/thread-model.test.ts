@@ -478,3 +478,27 @@ describe("turns minutes apart keep their own time (cas-d043 H14)", () => {
     expect(shown([answer(1, at), answer(2, at + 60_000)])).toEqual(["2@12:01"]);
   });
 });
+
+describe("a kept reply is marked the same before and after a reload (cas-d043 G03)", () => {
+  it("does not take the time it was stored for the machine's stamp", () => {
+    const now = Date.UTC(2026, 8, 30, 12, 0);
+    const yesterday = Date.UTC(2026, 8, 29, 17, 20);
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const marks = (history: ConversationHistory, at: number) => shownTimes(history.events, at).map((time) => time.clockAhead);
+    const blocker = { ...reply(900, "blocker", "The ledger import is red."), at: iso(yesterday), session: "S" };
+    const visit = new ConversationHistory();
+    visit.currentSession = "S";
+    visit.hydrateReply(blocker as never, now);
+    expect(marks(visit, now)).toEqual([false]);
+    // Reload: the journal restores the kept reply first, stored at 12:00 today.
+    const reload = new ConversationHistory();
+    reload.currentSession = "S";
+    reload.seedArrivals(visit.arrivalsRecord());
+    reload.hydrateKeptReply({ ...reply(900, "blocker", "The ledger import is red."), at: iso(now), session: "S" } as never, now + 60_000);
+    expect(marks(reload, now + 60_000), "before the machine answers").toEqual([false]);
+    // Then the machine's page brings its own stamp: still as the visit showed it.
+    reload.hydrateReply(blocker as never, now + 60_000);
+    expect(marks(reload, now + 60_000), "after the machine's page").toEqual([false]);
+    expect(reload.events[0]!.at).toBe(yesterday);
+  });
+});

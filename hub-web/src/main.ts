@@ -1622,6 +1622,7 @@ function openingDelay(key: string, now = Date.now()): number {
 
 function clearDisconnectedState(grid: HTMLElement): void {
   grid.classList.remove("terminal-disconnected");
+  grid.style.removeProperty("--outage-banner-space");
   grid.querySelector(".terminal-disconnected-banner")?.remove();
   const shown = document.querySelector<HTMLElement>("#toast");
   if (shown) placeToastClearOfBanner(shown);
@@ -1789,6 +1790,9 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     }
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
+    // cas-d043 G14: the thread's top spacer, the banner's height and its inset.
+    const space = `${Math.ceil(banner.getBoundingClientRect().height + 2 * 8)}px`;
+    if (grid.style.getPropertyValue("--outage-banner-space") !== space) grid.style.setProperty("--outage-banner-space", space);
     // A toast already up when the banner arrives moves clear of it (cas-00cc).
     const shown = document.querySelector<HTMLElement>("#toast.visible");
     if (shown) placeToastClearOfBanner(shown);
@@ -3121,7 +3125,7 @@ sendJournal.onChange = () => {
         scheduleReceiptCheck(key);
         for (const row of snapshot.replies) {
           if (isOperatorNotice(row.reply)) continue;
-          history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+          history.hydrateKeptReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
         }
         if (sessionIsUp(machine.id, scope.session)) void flushHeldSends(machine, scope.session);
       }
@@ -3185,7 +3189,7 @@ function restoreStoredSends(machine: StoredMachine): void {
       const history = conversationHistory(key, scope.session);
       for (const row of snapshot.replies) {
         if (isOperatorNotice(row.reply)) continue;
-        history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+        history.hydrateKeptReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
       }
       for (const held of history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts)) {
         const since = held.heldAt ?? held.at;
@@ -4328,6 +4332,8 @@ function openProgressSheet(): void {
   if (!selectedMachineId || !selectedSession) return;
   attentionSheetOpen = false;
   progressSheetSession = sessionKey(selectedMachineId, selectedSession);
+  // An Undo dismissed from the floating notice lives in the sheet (cas-2796a F03).
+  renderStatus(statuses.get(progressSheetSession));
   applyAttentionSheet();
   document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close")?.focus();
 }
@@ -4555,7 +4561,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
-  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const signature = JSON.stringify([phoneLayout(), progressSheetOpen(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.

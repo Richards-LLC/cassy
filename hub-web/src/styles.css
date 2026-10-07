@@ -1634,10 +1634,11 @@ dialog form > *,
 
   /* Toasts span the top of a narrow screen, under the status bar. */
   #toast { left: var(--space-3); right: var(--space-3); top: calc(var(--space-3) + env(safe-area-inset-top)); max-width: none; }
-  /* With a conversation open, the toast drops below the one-row thread header
-     (56 px: 44 px targets + 6 px padding) so the back link, project and host
-     stay readable (cas-002e). */
-  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
+  /* With a conversation open, the toast drops below the thread header so the
+     back link, project and host stay readable (cas-002e). The header is two
+     rows now, the actions above the identity (cas-d043 G01): 6 + 44 px, the
+     36 px identity row with its padding, 6 px, and Glass's 8 px inset. */
+  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 112px + var(--space-2)); }
 
   /* == Unit 4: Phone attention and composer == */
   .attention-group-label { max-width: 100%; }
@@ -1847,12 +1848,12 @@ dialog form > *,
 /* The thread's own slot beside the hidden pane host (cas-0546). */
 .conversation-mount { min-height: 0; min-width: 0; }
 .conversation-pane-slot .conversation-thread-slot { height: 100%; min-height: 0; }
-/* cas-d043 G14: in a conversation the outage banner takes its place above the
-   thread rather than lying over its top, where it cut the "Today" divider in
-   half and hid "No earlier history". The thread gives up the banner's height. */
-.conversation-pane-slot .pane-grid:has(> .terminal-disconnected-banner) { display: flex; flex-direction: column; }
-.conversation-pane-slot .pane-grid > .terminal-disconnected-banner { position: relative; inset: auto; flex: none; margin: var(--space-2) var(--space-2) 0; }
-.conversation-pane-slot .pane-grid:has(> .terminal-disconnected-banner) > :is(.conversation-thread-slot, .conversation-early) { flex: 1 1 auto; height: auto; min-height: 0; }
+/* cas-d043 G14: the outage banner lies over the thread's top, where it cut
+   the "Today" divider in half and hid "No earlier history". The thread makes
+   room for it with a spacer of the banner's height (main.ts measures it):
+   at the top of history the first lines move below the banner, and a reader
+   further down keeps their place (scroll anchoring), as before. */
+.conversation-pane-slot .pane-grid.terminal-disconnected .conversation-reading.thread::before { content: ""; display: block; flex: none; height: var(--outage-banner-space, 0px); }
 
 /* ---- Pebble thread (cas-d167) --------------------------------------------
  * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:
@@ -2441,6 +2442,8 @@ button.chip:disabled { cursor: default; }
   /* cas-8526: off the short landscape header, not out of its spoken name or
      its connection status. */
   .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
+  /* One row again, so the toast sits under 56 px (cas-002e). */
+  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
   /* With the machine line hidden the title alone fits beside the actions, so
      a short screen (a phone with its keyboard up) keeps the one-row header
      and the thread keeps its room (cas-d043 G01). The attention chip still

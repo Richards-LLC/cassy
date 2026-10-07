@@ -501,6 +501,37 @@ pub(crate) fn wake_attempt_narrative(
     format!("{line}\n")
 }
 
+/// cas-ad92: say whether the body reached the recipient's turn or was only
+/// claimed by the daemon's transport. A Claude teams handoff is claimed when
+/// the inbox file is written, but Claude Code renders it only at a turn
+/// boundary, so "claimed" is not "rendered".
+pub(crate) fn recipient_receipt_narrative(receipt: Option<cas_store::SurfacingSource>) -> String {
+    use cas_store::SurfacingSource;
+    let line = match receipt {
+        None => return String::new(),
+        Some(SurfacingSource::HookSurfaced) => {
+            "recipient_receipt: rendered — the body was injected into the recipient's turn \
+             (hook_surfaced)."
+        }
+        Some(SurfacingSource::InboxPoll) => {
+            "recipient_receipt: rendered — the recipient read the body with inbox_poll."
+        }
+        Some(SurfacingSource::ObservedWake) => {
+            "recipient_receipt: rendered — Cassy observed the recipient take a turn carrying \
+             the body (observed_wake)."
+        }
+        Some(SurfacingSource::TransportClaimed) => {
+            "recipient_receipt: claimed, not rendered — the transport handed the body to the \
+             recipient's harness, which has not shown it in a turn yet (transport_claimed)."
+        }
+        Some(SurfacingSource::TransportDelivered) => {
+            "recipient_receipt: handed off, not rendered — still claimable by the recipient's \
+             inbox_poll (transport_delivered)."
+        }
+    };
+    format!("{line}\n")
+}
+
 /// cas-ac7e (GH #130): the operator-facing warning for a row that claims
 /// `stage=delivered` with no recipient-side transport stamp.
 ///
@@ -3117,6 +3148,7 @@ impl CasService {
                 // `wake_attempt` is the daemon's own record of which of those
                 // happened; `wake` remains recipient-side evidence.
                 let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
+                let receipt_line = recipient_receipt_narrative(r.recipient_receipt);
                 // cas-15f2: a row that no daemon can select used to read
                 // "awaiting_delivery" for a full 15 minutes and then flip to
                 // abandoned, so the operator watching it had no way to tell
@@ -3134,6 +3166,7 @@ impl CasService {
                      stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\
+                     {receipt_line}\
                      {transport_line}\
                      {pending_deadline_line}\
                      {undelivered_line}\
@@ -3607,6 +3640,18 @@ mod inbox_poll_identity_tests {
         );
         assert!(line.contains("DID nudge"), "{line}");
         assert!(line.contains("#155"), "{line}");
+    }
+
+    /// cas-ad92: status must tell a body rendered into a turn from one the
+    /// transport only claimed.
+    #[test]
+    fn recipient_receipt_separates_rendered_from_claimed() {
+        use cas_store::SurfacingSource;
+        let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced));
+        let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed));
+        assert!(rendered.contains("rendered —"), "{rendered}");
+        assert!(claimed.contains("claimed, not rendered"), "{claimed}");
+        assert!(super::recipient_receipt_narrative(None).is_empty());
     }
 
     /// The three wake-attempt states must read differently. If two of them

@@ -716,6 +716,10 @@ export class ConversationHistory {
     if (event?.kind !== "send" || event.value.state !== "sending" || event.value.notificationId !== undefined || event.value.sentAt === undefined) return undefined;
     const sentAt = event.value.sentAt;
     const timeout = sentAt + RECEIPT_TIMEOUT_MS;
+    // A journal projection may be on a different tab's wire. A supervisor
+    // reply here cannot prove that tab's receipt is overdue. Its durable
+    // settlement or the original claim timeout decides when Retry is safe.
+    if (event.value.restored) return timeout;
     // The grace starts when the later turn reached this browser, not at the
     // send: a turn that crosses the send must not shorten the receipt's wait.
     const arrivals = this.events.slice(index + 1).flatMap((later) => later.kind === "reply" ? [later.arrivedAt ?? sentAt] : []);

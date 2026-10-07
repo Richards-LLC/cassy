@@ -71,6 +71,17 @@ describe("atomic Commander journal", () => {
     expect(history.events[0]).toMatchObject({ value: { id: item.id, notificationId: 99, state: "acknowledged" } });
     expect(history.pendingSends()).toEqual([]);
   });
+  it("a reply in a peer tab cannot shorten the writer's receipt clock (cas-fb48; cas-1185)", async () => {
+    const { a, b } = journals(), history = new ConversationHistory();
+    const item = send("peer-reply");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    history.restorePending((await b.read(scope)).sends, 1_200);
+    history.receive({ notification_id: 20, reply_to: null, message: "A reply on this tab", summary: "", device_id: scope.device }, 1_300);
+    expect(history.unconfirmSilent(6_300)).toEqual([]);
+    expect(history.nextReceiptCheck(6_300)).toBe(1_000 + RECEIPT_TIMEOUT_MS - 6_300);
+    expect(history.unconfirmSilent(1_000 + RECEIPT_TIMEOUT_MS)).toEqual([item.id]);
+  });
   it("requeues an existing history row after a claim makes no socket write (cas-9dc6)", async () => {
     const db = new IDBFactory(), history = new ConversationHistory();
     const peer = new CommanderJournal(db, async () => fence, () => 1_000, false);

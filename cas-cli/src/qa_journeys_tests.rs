@@ -282,15 +282,27 @@ fn cas_8132_journeys_reason_comes_from_the_delivered_head() {
             producer,
             "journeys reason for {path} must come from the delivered head"
         );
+        // The gate's affected-journey IDs equal journey-eval's for the same
+        // base and head, so the receipt its repair command produces is the
+        // one it checks.
+        assert_eq!(
+            select_journeys(repo, &base, &head, Some(&paths)).unwrap(),
+            producer,
+            "gate selection equals journey-eval's for {path}"
+        );
+        // The "journeys:" eligibility reason judges surface paths only: a
+        // spec-only change is a test (cas-0cd5 is_non_surface_path), never on
+        // its own a user-facing delivery, though journey-eval still runs it.
+        let expected_reason: Vec<String> = if crate::qa_pass::is_non_surface_path(path) { Vec::new() } else { producer.clone() };
         assert_eq!(
             crate::qa_pass::catalog_journeys_for(repo, Some(&head), &paths),
-            producer,
-            "catalog_journeys_for with a head agrees with the producer for {path}"
+            expected_reason,
+            "catalog_journeys_for with a head agrees with the producer for surface path {path}"
         );
         // The old checkout's own selector would name its whole two-journey
         // catalog for any surface path: the skew this pins against.
         let unpinned = crate::qa_pass::catalog_journeys_for(repo, None, &paths);
-        if path != "hub-web/dist/app.js" {
+        if path != "hub-web/dist/app.js" && !crate::qa_pass::is_non_surface_path(path) {
             assert_eq!(unpinned, ["HUB-J1", "HUB-J10"], "older checkout working tree for {path}");
         }
     }

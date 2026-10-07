@@ -582,7 +582,9 @@ export class HubConnectionSupervisor {
   private async authorizedFetch(method: string, path: string, init: RequestInit = {}): Promise<{ response: Response; refusal: AuthRefusal }> {
     // The proof binds the bare path; the hub rejects an htu with a query.
     const htu = path.split("?")[0] ?? path;
+    let signedWith = this.machine.credentialId;
     const send = async () => {
+      signedWith = this.machine.credentialId;
       const proof = await dpopHeaders(this.machine, method, htu, Date.now() + this.clockOffsetMs);
       init.signal?.throwIfAborted();
       return fetch(new URL(path, this.machine.baseUrl), {
@@ -596,8 +598,12 @@ export class HubConnectionSupervisor {
     let response = await send();
     if ((response.status === 401 || response.status === 403) && (this.machine.credentialGeneration !== undefined || typeof indexedDB !== "undefined") && !this.installationMutation) {
       // A peer may have rotated between signing and arrival. Wait for its durable
-      // commit/rollback, then retry only a different accepted credential.
-      if (await installationLock(this.machine.id, () => this.adoptInstallation(), init.signal ?? undefined)) response = await send();
+      // commit/rollback, then retry only a different accepted credential. A
+      // concurrent request may already have adopted it while this one waited
+      // for the lock (cas-d308: the inventory read and a catalog poll both
+      // left with the stale credential, and only the adopter retried).
+      const adopted = await installationLock(this.machine.id, () => this.adoptInstallation(), init.signal ?? undefined);
+      if (adopted || this.machine.credentialId !== signedWith) response = await send();
     }
     if (response.status !== 401) return { response, refusal: {} };
     let refusal = await readAuthRefusal(response);

@@ -1,0 +1,205 @@
+<!doctype html>
+<!-- Render with ../scripts/render.py. Contract and source schema: exemplar.md.
+     UPPER_CASE slots accept escaped text or renderer-owned HTML only.
+     section data-section markers are stable; preserve their order. -->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark"><title>cas-src v3.48.1 · Release report · Published 7 October 2026 · 06:10 UTC</title>
+<style>
+:root{ --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--good-tint:rgba(34,104,69,0.10);--warning-tint:rgba(127,85,4,0.10);--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F; --font-display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;--font-body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{ --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;--ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,0.16);--evidence:#A3A7B4;--action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;--good-tint:rgba(95,196,146,0.14);--warning-tint:rgba(226,177,77,0.14);--danger-tint:rgba(239,123,114,0.14);--focus:#A9B3FF }}
+
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 var(--font-body)}
+a{color:var(--action);text-underline-offset:3px;overflow-wrap:anywhere}a:hover{text-decoration-thickness:2px}a:focus-visible,summary:focus-visible{outline:3px solid var(--action);outline-offset:4px}
+.skip{position:absolute;top:8px;left:8px;transform:translateY(-200%);padding:12px;background:var(--surface);color:var(--ink);z-index:3}.skip:focus{transform:none}
+main{max-width:1120px;margin:auto;padding:0 24px}.hero{background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict);padding:48px max(24px,calc((100vw - 1072px)/2)) 24px}
+.eyebrow{font:600 12px/1.5 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}.folio{display:flex;justify-content:space-between;gap:16px;margin:0 0 32px}.hero-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:48px;align-items:center}
+h1{font:400 clamp(40px,4.6vw,60px)/1.06 var(--font-display);letter-spacing:-.025em;margin:0;max-width:19ch}.hero h1 em{font-weight:400;color:var(--verdict)}h2{font:600 27px/1.2 var(--font-body);letter-spacing:-.015em;margin:0 0 24px}h3{font:600 21px/1.35 var(--font-body);margin:4px 0 16px}h4{font-size:17px;line-height:1.4;margin:0 0 12px;font-weight:600}p{margin:0 0 16px;max-width:68ch}figure{margin:0}svg{display:block;width:100%;height:auto}.svg-label,.svg-count{font:15px var(--font-body);fill:var(--ink)}.svg-count{font-family:var(--font-mono)}.svg-meta{font:10px var(--font-mono);fill:var(--ink-muted)}.svg-note{font:11px var(--font-body);fill:var(--ink-muted)}.dot{fill:var(--evidence)}.decisive{fill:var(--verdict)}.figure-claim{font-size:14px;line-height:1.45;margin:8px 0 0;color:var(--ink-muted)}.hero-note{border-top:1px solid var(--line-strong);margin:32px 0 0;padding-top:16px;display:flex;gap:24px;justify-content:space-between;font-size:14px;color:var(--ink-muted)}.hero-note p{margin:0}.hero-note a{white-space:nowrap}
+.report-section{padding:64px 0;border-bottom:1px solid var(--line-strong)}.section-top{display:flex;justify-content:space-between;gap:16px}.section-no{white-space:nowrap;font:14px var(--font-mono);color:var(--ink-muted)}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-bottom:24px}.stat{border-left:1px solid var(--line-strong);padding-left:16px}.stat:first-child{border:0;padding:0}.stat-value{display:block;font:400 44px/1.1 var(--font-display);letter-spacing:-.025em;margin-bottom:8px}.stat-label{display:block;font-weight:600;margin-bottom:8px}.stat p{font-size:12px;line-height:1.5;color:var(--ink-muted);margin:0}.method{font-size:14px;color:var(--ink-muted)}details{margin-top:24px}summary{cursor:pointer;font-weight:600;color:var(--action)}details p{font-size:14px;margin-top:16px}.table-wrap{overflow-x:auto;margin:24px 0}table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}caption{text-align:left;color:var(--ink-muted);font-size:14px;margin-bottom:12px}th,td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:500}thead th{font:600 11px/1.6 var(--font-mono);letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--line-strong)}.num{text-align:right;font-variant-numeric:tabular-nums}tbody th{min-width:56px}tbody tr:last-child td,tbody tr:last-child th{border-bottom:1px solid var(--line-strong)}code,pre{font-family:var(--font-mono);font-size:.86em}code{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:24px 0;padding:20px;border-left:3px solid var(--verdict);background:var(--surface);color:var(--ink)}
+.theme{padding:32px 0;border-top:1px solid var(--line);display:grid;grid-template-columns:220px 1fr;gap:48px}.theme:first-child{border-top:0;padding-top:0}.change{padding:0 0 24px;margin:0 0 24px;border-bottom:1px solid var(--line)}.change:last-child{margin:0;padding:0;border:0}.pair{display:grid;grid-template-columns:1fr 1.25fr;gap:24px}.pair p{font-size:15px;line-height:1.6;margin:0}.was{color:var(--ink-muted)}.state{display:block;font:600 10px/1.8 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}.now .state{color:var(--verdict)}
+.users .theme-1 .theme-label{padding:24px;background:var(--surface-hero);color:var(--ink);align-self:start;border-left:3px solid var(--verdict)}.users .theme-2{grid-template-columns:1fr}.users .theme-2 .theme-label{display:flex;gap:16px;align-items:baseline}.users .theme-2 .pair{grid-template-columns:1fr 1fr}.users .theme-2 .change{display:grid;grid-template-columns:220px 1fr;gap:48px}.users .theme-4{grid-template-columns:1fr}.users .theme-4 .changes{display:grid;grid-template-columns:1fr 1fr;gap:24px}.users .theme-4 .change{padding:24px;background:var(--surface);color:var(--ink);border:0;margin:0}.users .theme-4 .pair{display:block}.users .theme-4 .was{margin-bottom:16px}
+.dev .theme{gap:32px}.dev .change{display:grid;grid-template-columns:150px 1fr;gap:24px;margin:0 0 16px;padding-bottom:16px}.dev h4{font-size:14px}.dev .pair{display:block}.dev .pair p{font-size:14px}.dev .was{margin-bottom:4px}.dev .state{display:inline;margin-right:8px}.dev .changes>p{font-size:14px;color:var(--ink-muted)}.install pre{font-size:32px}.install h3{margin-top:32px}.install code{word-break:break-all}.stitch{width:132px;color:var(--verdict);margin-bottom:24px}.provenance{font-size:14px}.provenance pre{font-size:12px}.provenance p{max-width:90ch}.page-footer{max-width:1120px;margin:auto;padding:32px 24px 48px;display:flex;justify-content:space-between;gap:24px;font-size:12px;color:var(--ink-muted)}
+@media(max-width:820px){.hero-grid{gap:24px}.theme{grid-template-columns:160px 1fr;gap:24px}.users .theme-2 .change{grid-template-columns:160px 1fr;gap:24px}.dev .theme,.dev .change{grid-template-columns:1fr;gap:8px}.stats{gap:16px}.stat-value{font-size:34px}}
+@media(max-width:600px){main{padding:0 24px}.hero{padding:24px 24px 20px}.folio{display:block;margin-bottom:24px}.folio span{display:block}.hero-grid{grid-template-columns:1fr;gap:24px}h1{font-size:40px;max-width:19ch}.hero figure{max-width:400px}.hero-note{display:block;margin-top:20px;padding-top:12px;font-size:12px}.hero-note a{display:inline-block;margin-top:8px}.figure-claim{font-size:12px}.report-section{padding:40px 0}.stats{grid-template-columns:1fr 1fr;gap:24px}.stat:nth-child(3){border:0;padding:0}.stat-value{font-size:38px}.theme,.users .theme-2 .change{grid-template-columns:1fr;gap:16px}.pair,.users .theme-2 .pair{grid-template-columns:1fr;gap:12px}.users .theme-1 .theme-label{padding:16px}.users .theme-4 .changes{grid-template-columns:1fr}.theme{padding:24px 0}.theme-label h3{margin-bottom:4px}.change{margin-bottom:20px;padding-bottom:20px}.users .theme-2 .theme-label{display:block}.table-wrap{margin:20px 0}td,th{padding-right:10px;font-size:12px}thead th{font-size:10px}.ledger td:last-child{overflow-wrap:anywhere;width:24%}.page-footer{display:block}.page-footer span{display:block;margin-bottom:8px}.section-top{gap:8px}h2{font-size:25px}.install pre{font-size:27px}}
+
+@page{margin:15mm}
+@media print{
+:root{ --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--good-tint:rgba(34,104,69,0.10);--warning-tint:rgba(127,85,4,0.10);--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F;color-scheme:light}
+body{background:var(--surface);color:var(--ink);font-size:10pt;line-height:1.4}
+main{max-width:none;padding:0}.skip{display:none}
+.hero{background:var(--surface);color:var(--ink);padding:4mm 0 6mm;break-after:auto}
+.folio{margin-bottom:6mm}.hero-grid{grid-template-columns:1fr 1fr;gap:8mm}
+.hero h1{font-size:26pt;max-width:22ch}.hero figure{width:100%}
+.hero-note{margin-top:5mm;font-size:8pt}.figure-claim{font-size:8pt}
+.report-section{padding:7mm 0 0;border:0;break-before:auto}
+.section-top{break-after:avoid}h2{font-size:20pt;margin-bottom:5mm}
+h3{font-size:14pt}h4{font-size:10pt}h2,h3,h4{break-after:avoid}p{max-width:none;orphans:3;widows:3}
+.stats{gap:5mm;break-inside:avoid}.stat-value{font-size:25pt}.stat p{font-size:8pt}.stat-label{font-size:9pt}
+.method,details p,caption{font-size:8pt}summary{font-size:9pt}
+.table-wrap{overflow:visible;margin:5mm 0}table{font-size:9pt;table-layout:fixed}
+thead{display:table-header-group}th,td{padding:2mm;font-size:8pt;overflow-wrap:anywhere}
+tr,figure,pre,.change{break-inside:avoid;page-break-inside:avoid}
+a[href^="http"]::after{content:" (" attr(href) ")";font:7pt var(--font-body);overflow-wrap:anywhere;color:var(--ink-muted)}
+a{color:var(--ink);text-decoration:underline}
+.theme,.users .theme-2,.users .theme-4,.dev .theme{display:block;padding:4mm 0;break-inside:auto}
+.changes{orphans:1;widows:1}
+.theme-label{margin-bottom:3mm;break-after:avoid;break-inside:avoid}.theme-label .eyebrow{display:none}.theme-label h3{margin-bottom:2mm}
+.users .theme-1 .theme-label{background:var(--surface);color:var(--ink);padding:0;border:0}
+.users .theme-2 .theme-label,.users .theme-2 .change{display:block}
+.pair,.users .theme-2 .pair{grid-template-columns:1fr 1fr;gap:6mm}.pair p{font-size:9pt}
+.users .change{display:inline-block;width:100%;margin-bottom:3mm;padding-bottom:3mm}
+.users h4{margin-bottom:2mm}.users .state{display:inline;margin-right:2mm}
+.users .theme-4 .changes{display:block}.users .theme-4 .change{background:var(--surface);color:var(--ink);padding:0 0 3mm;margin:0 0 3mm}
+.users .theme-4 .pair{display:grid}.users .theme-4 .was{margin:0}
+.dev .change{display:inline-block;width:100%;margin-bottom:2.5mm;padding-bottom:2.5mm}.dev h4{display:inline-block;width:22%;vertical-align:top;margin:0 3% 0 0}
+.dev .pair p,.dev h4{font-size:9pt}.dev .pair{display:inline-block;width:74%;vertical-align:top}.dev .changes>p{font-size:8pt}
+.ledger th:first-child{width:28%}.ledger td:last-child{width:22%}
+.ledger th,.ledger td{font-size:8pt;line-height:1.2;padding:1mm 2mm 1mm 0}
+.install pre{font-size:20pt}.install h3{margin-top:6mm}
+.provenance{font-size:9pt}.provenance pre{font-size:8pt}
+.page-footer{font-size:8pt;padding:8mm 0 0}.page-footer a:after{content:none}
+pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}.stitch{width:35mm}
+}
+</style></head><body>
+<a class="skip" href="#content">Skip to release details</a>
+<!-- section: hero -->
+<header class="hero" data-section="hero"><div class="folio eyebrow"><span>cas-src v3.48.1 / Release notes</span><span>Published 7 October 2026 · 06:10 UTC</span></div>
+<div class="hero-grid"><h1>It goes out promptly, exactly once.</h1><figure>
+<!-- Change-map contract v1: each g[data-surface] has data-count (integer),
+     data-issues (JSON string array), data-emphasis (true/false). Every circle
+     carries data-issue; one equal-area circle per verified closure. Zero rows
+     stay labelled. SVG description and adjacent table carry identical data. -->
+<svg viewBox="0 0 340 206" role="img" aria-labelledby="map-title map-desc" data-change-map="1" data-total="0">
+<title id="map-title">The closure map is empty until release evidence names verified issues.</title><desc id="map-desc">Sending 0, Polish 0, Commander send fixes, polish and journey tooling 0, Verification 0. Each filled circle represents one closed issue. Total 0.</desc>
+<text x="0" y="16" class="svg-meta">SURFACE</text><text x="337" y="16" text-anchor="end" class="svg-meta">CLOSED</text>
+<g data-surface="Sending" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="51" class="svg-label">Sending</text>
+<text x="134" y="50" class="svg-note">no listed issues</text>
+<text x="337" y="51" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Polish" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="91" class="svg-label">Polish</text>
+<text x="134" y="90" class="svg-note">no listed issues</text>
+<text x="337" y="91" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Commander send fixes, polish and journey tooling" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="131" class="svg-label">Commander send fixes, polish and journey tooling</text>
+<text x="134" y="130" class="svg-note">no listed issues</text>
+<text x="337" y="131" text-anchor="end" class="svg-count">0</text></g>
+<g data-surface="Verification" data-count="0" data-issues="[]" data-emphasis="false">
+<text x="0" y="171" class="svg-label">Verification</text>
+<text x="134" y="170" class="svg-note">no listed issues</text>
+<text x="337" y="171" text-anchor="end" class="svg-count">0</text></g></svg><figcaption class="figure-claim">The closure map is empty until release evidence names verified issues.</figcaption></figure></div>
+<div class="hero-note"><p>One dot, one closed issue. 0 issue-bearing surfaces.</p><a href="#map-data">Read the map data ↓</a></div></header>
+<main id="content">
+<!-- section: glance -->
+<section class="report-section" data-section="glance"><div class="section-top"><h2>Release at a glance</h2><span class="section-no">01 / 06</span></div>
+<div class="stats"><div class="stat"><span class="stat-value">0</span><span class="stat-label">Issues closed</span><p>Named, verified closed issues in this report</p></div>
+<div class="stat"><span class="stat-value">0</span><span class="stat-label">Features added</span><p>Top-level Added entries in the CHANGELOG section</p></div>
+<div class="stat"><span class="stat-value">0</span><span class="stat-label">Changed entries</span><p>Top-level Changed entries in the CHANGELOG section</p></div>
+<div class="stat"><span class="stat-value">0</span><span class="stat-label">Fix entries</span><p>Top-level Fixed entries in the CHANGELOG section</p></div>
+<div class="stat"><span class="stat-value">61m 25s</span><span class="stat-label">Green to published</span><p>gate.green.epoch to the published receipt, when available</p></div>
+<div class="stat"><span class="stat-value">3m 20s — within budget (10m 0s budget)</span><span class="stat-label">Tag to published</span><p>First tag workflow to publication; measured budget result</p></div>
+<div class="stat"><span class="stat-value">2</span><span class="stat-label">Manual interventions</span><p>Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS</p></div></div><div class="method"></div>
+<details open id="map-data"><summary>Change map · data and reading guide</summary><p>One filled dot represents one closed issue. Dots have equal weight: this is a count of closures, not a measured impact score.</p><div class="table-wrap"><table><caption>Change map data · closed issues by surface</caption><thead><tr>
+<th scope="col">Surface</th>
+<th scope="col" class="num">Issues closed</th>
+<th scope="col">Issue numbers</th>
+</tr></thead><tbody>
+<tr>
+<th scope="row">Sending</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Polish</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Commander send fixes, polish and journey tooling</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Verification</th>
+<td class="num">0</td>
+<td>No listed issues</td>
+</tr>
+<tr>
+<th scope="row">Total</th>
+<td class="num">0</td>
+<td>0 issue-bearing themes</td>
+</tr>
+</tbody></table></div><p>Source: CHANGELOG <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.48.1/CHANGELOG.md</code>, release-notes <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.48.1/docs/release-notes/2026-10-07-v3.48.1-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.48.1; retrieved 2026-10-07T06:10:51Z.</p></details></section>
+<!-- section: users -->
+<section class="report-section users" data-section="users"><div class="section-top"><h2>What you can do now</h2><span class="section-no">02 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Sending</h3></div><div class="changes">
+<article class="change"><h4>Held messages go out after reconnect</h4><div class="pair"><p class="was"><span class="state">Was</span>if the machine came back mid-send, a held message could sit unsent with nothing trying it again. →</p><p class="now"><span class="state">Now</span>it goes out promptly once Commander reconnects, exactly once.</p></div></article>
+<article class="change"><h4>No Retry while another tab is sending</h4><div class="pair"><p class="was"><span class="state">Was</span>with two tabs open, &quot;Retry&quot; could flash in one tab while the other was still sending, inviting a double send. →</p><p class="now"><span class="state">Now</span>both tabs wait for that send to confirm, and a new reply no longer cuts the wait short.</p></div></article>
+</div></section>
+<section class="theme theme-2"><div class="theme-label"><span class="eyebrow">02</span><h3>Polish</h3></div><div class="changes">
+<article class="change"><h4>Long machine names read in full on phones</h4><div class="pair"><p class="was"><span class="state">Was</span>a long machine name was cut off beside its codename. →</p><p class="now"><span class="state">Now</span>the name gets its own row and reads whole, and the codename steps aside when space runs out.</p></div></article>
+<article class="change"><h4>Stop result stays in view</h4><div class="pair"><p class="was"><span class="state">Was</span>after Stop, the result line could scroll out of sight. →</p><p class="now"><span class="state">Now</span>it stays on screen beside the next row, and the confirmation says the task goes back to Open.</p></div></article>
+<article class="change"><h4>Revoking says what happened</h4><div class="pair"><p class="was"><span class="state">Was</span>revoking this browser&#x27;s own access dropped you on a silent first screen. →</p><p class="now"><span class="state">Now</span>Commander says the access was revoked and puts you on Pair a machine.</p></div></article>
+<article class="change"><h4>Plain words for browser problems</h4><div class="pair"><p class="was"><span class="state">Was</span>a blocked permission or an unsupported browser read &quot;Can&#x27;t reach&quot;. →</p><p class="now"><span class="state">Now</span>it reads &quot;Blocked by browser&quot; or &quot;Browser can&#x27;t connect&quot;.</p></div></article>
+<article class="change"><h4>Keyboard reaches Interrupt quickly</h4><div class="pair"><p class="was"><span class="state">Was</span>Interrupt was about a dozen Tab presses from search. →</p><p class="now"><span class="state">Now</span>&quot;Skip to the conversation&quot; gets you there in three keys, with a ring at every stop.</p></div></article>
+<article class="change"><h4>Pinned bar readable on hover in dark</h4><div class="pair"><p class="was"><span class="state">Was</span>hovering the pinned question bar in dark turned it navy under dark text. →</p><p class="now"><span class="state">Now</span>it keeps its amber fill and only lifts.</p></div></article>
+<article class="change"><h4>Assign names its task</h4><div class="pair"><p class="was"><span class="state">Was</span>the Assign picker showed only the task&#x27;s ID. →</p><p class="now"><span class="state">Now</span>it names the task by its title.</p></div></article>
+<article class="change"><h4>Landscape refusals stay in view</h4><div class="pair"><p class="was"><span class="state">Was</span>on a phone held sideways, a refusal in Tasks &amp; progress landed below the fold. →</p><p class="now"><span class="state">Now</span>it rides the bottom edge of the sheet.</p></div></article>
+<article class="change"><h4>Undo dismiss says what happens</h4><div class="pair"><p class="was"><span class="state">Was</span>dismissing the phone Undo offer gave no hint where Undo went. →</p><p class="now"><span class="state">Now</span>the dismiss button says Undo stays in Tasks &amp; progress, and it does.</p></div></article>
+<article class="change"><h4>Lighter pairing buttons</h4><div class="pair"><p class="was"><span class="state">Was</span>in light, the pairing dialog&#x27;s button bar read as a whiter slab. →</p><p class="now"><span class="state">Now</span>it is part of the sheet and frosts only while fields scroll beneath it.</p></div></article>
+<article class="change"><h4>Answers minutes apart get their own time</h4><div class="pair"><p class="was"><span class="state">Was</span>replies minutes apart merged under one time. →</p><p class="now"><span class="state">Now</span>a five-minute gap starts a new group with its own time, and reload keeps the grouping.</p></div></article>
+<article class="change"><h4>Clearer during an outage</h4><div class="pair"><p class="was"><span class="state">Was</span>a reload mid-outage read &quot;0 conversations&quot; and the banner covered the thread&#x27;s top. →</p><p class="now"><span class="state">Now</span>it reads &quot;Conversations not loaded yet&quot; and the banner sits above the thread.</p></div></article>
+<article class="change"><h4>Who is in control</h4><div class="pair"><p class="was"><span class="state">Was</span>you learned another device held control only by trying to take it. →</p><p class="now"><span class="state">Now</span>the header names that device, and a refusal says how to get past it.</p></div></article>
+<article class="change"><h4>Plainer pairing</h4><div class="pair"><p class="was"><span class="state">Was</span>the admin permission showed its raw code and every browser had the same default name. →</p><p class="now"><span class="state">Now</span>it reads &quot;See and revoke other browsers on&quot; the machine, and a browser is named like &quot;Chrome on Linux&quot;.</p></div></article>
+</div></section></section>
+<!-- section: dev -->
+<section class="report-section dev" data-section="dev"><div class="section-top"><h2>Under the hood</h2><span class="section-no">03 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Commander send fixes, polish and journey tooling</h3></div><div class="changes">
+<article class="change"><h4>Held-send wake coalescing</h4><div class="pair"><p class="was"><span class="state">Was</span><code>HeldSendFlushes</code> returned early while a batch held the key, so a Live callback during a definite no-write settlement was lost and the message stalled. →</p><p class="now"><span class="state">Now</span>a mid-batch call marks the batch to rerun with the latest work, the journal still gates every write, and uncertain or revoked claims never replay.</p></div></article>
+<article class="change"><h4>Peer receipt deadlines</h4><div class="pair"><p class="was"><span class="state">Was</span>a tab projecting another tab&#x27;s durable <code>sending</code> claim marked it unconfirmed at once and showed Retry. →</p><p class="now"><span class="state">Now</span>it keeps the claim&#x27;s original 15 s receipt clock, and the journal refuses to re-hold an active peer claim even from a stale Retry.</p></div></article>
+<article class="change"><h4>Peer clocks ignore local replies</h4><div class="pair"><p class="was"><span class="state">Was</span>a reply landing in one tab applied the 5 s reply grace to a peer&#x27;s send. →</p><p class="now"><span class="state">Now</span>restored projections keep the original timeout, a lost dispatch claim reads durable state instead of unconfirming, and history settles restored sends as one row.</p></div></article>
+<article class="change"><h4>Phone header and Stop result</h4><div class="pair"><p class="was"><span class="state">Was</span>the phone identity shared a row with the actions, so names truncated beside the codename. →</p><p class="now"><span class="state">Now</span>identity has its own row, the machine never shrinks while the codename shows, and Stop scrolls its result into view.</p></div></article>
+<article class="change"><h4>Browser-side status</h4><div class="pair"><p class="was"><span class="state">Was</span>blocked permission and unsupported browser fell through to &quot;Can&#x27;t reach&quot;, and one session&#x27;s retry set the machine footer to Reconnecting. →</p><p class="now"><span class="state">Now</span><code>BROWSER_BLOCKED</code> and <code>BROWSER_UNSUPPORTED</code> labels reach header, row, footer and launch sheet, and the footer ignores a sibling retry.</p></div></article>
+<article class="change"><h4>Keyboard, control and pairing copy</h4><div class="pair"><p class="was"><span class="state">Was</span>Interrupt was 12 Tabs from search, control holders were hidden, and pairing showed raw scope ids. →</p><p class="now"><span class="state">Now</span>a skip link, a header control line, plain admin consent, a <code>browserLabel</code> default name and <code>aria-labelledby</code> on every pair dialog.</p></div></article>
+<article class="change"><h4>Thread time groups and kept replies</h4><div class="pair"><p class="was"><span class="state">Was</span>turns minutes apart merged under one time, and a journal-restored reply&#x27;s stored time posed as a machine stamp. →</p><p class="now"><span class="state">Now</span><code>GROUP_SPLIT_MS</code> splits on a five-minute gap, and kept replies take the machine stamp once history arrives.</p></div></article>
+<article class="change"><h4>Glass details</h4><div class="pair"><p class="was"><span class="state">Was</span>the pinned bar lost its amber on hover in dark, the rail sliced rows at its corners, and the pair action bar frosted into a slab. →</p><p class="now"><span class="state">Now</span>hover keeps the ask fill, rail edges fade only with rows beyond, and the bar frosts only over scrolled fields.</p></div></article>
+<article class="change"><h4>Fleet sheet details</h4><div class="pair"><p class="was"><span class="state">Was</span>the Assign picker showed only an id, a landscape refusal fell below the fold, and dismissing Undo was ambiguous. →</p><p class="now"><span class="state">Now</span>the picker names the task title, the notice is sticky at the sheet&#x27;s bottom, and the dismiss label says Undo stays.</p></div></article>
+<article class="change"><h4>Journey selection at the reviewed head</h4><div class="pair"><p class="was"><span class="state">Was</span>the close gate and <code>journey-receipt.py</code> ran <code>journeys-for-diff.py</code> from the shared checkout, whose older copy could ignore <code>CAS_JOURNEYS_HEAD</code>. →</p><p class="now"><span class="state">Now</span>both run the selector blob from the reviewed head over stdin and refuse proof if it is missing or broken.</p></div></article>
+</div></section></section>
+<!-- section: ledger -->
+<section class="report-section ledger" data-section="ledger"><div class="section-top"><h2>Fixes ledger</h2><span class="section-no">04 / 06</span></div><div class="table-wrap"><table><caption>Issue register · 0 verified closures</caption><thead><tr>
+<th scope="col">Issue</th>
+<th scope="col">State</th>
+<th scope="col">Closed</th>
+<th scope="col">Theme</th>
+</tr></thead><tbody>
+</tbody></table></div></section>
+<!-- section: install -->
+<section class="report-section install" data-section="install"><div class="section-top"><h2>Install</h2><span class="section-no">05 / 06</span></div>
+<svg class="stitch" viewBox="0 0 132 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="currentColor"/><circle cx="31" cy="8" r="5" fill="currentColor"/><circle cx="54" cy="8" r="5" fill="currentColor"/><circle cx="77" cy="8" r="5" fill="currentColor"/><circle cx="100" cy="8" r="5" fill="currentColor"/><circle cx="123" cy="8" r="5" fill="currentColor"/></svg><pre><code>cas update  # install v3.48.1 through the project&#x27;s normal release channel</code></pre>
+<div class="table-wrap"><table><caption>Change map data · closed issues by surface</caption><thead><tr>
+<th scope="col">Asset</th>
+<th scope="col">Digest</th>
+<th scope="col" class="num">Size</th>
+</tr></thead><tbody>
+<tr>
+<th scope="row">cas-aarch64-apple-darwin.tar.gz</th>
+<td>sha256:834be230088a6197eb3ddc0ba62f717d3901fa2bacd3fc985dd38f0a39d0dcee</td>
+<td class="num">29843644</td>
+</tr>
+<tr>
+<th scope="row">cas-x86_64-unknown-linux-gnu.tar.gz</th>
+<td>sha256:7ff34b5843e5e424951541bfff3dfa9568c150e40ea1d50c464df14f27444043</td>
+<td class="num">34342197</td>
+</tr>
+</tbody></table></div></section>
+<!-- section: provenance -->
+<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 2026-10-07T06:10:51Z.</p>
+<p>Source: CHANGELOG <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.48.1/CHANGELOG.md</code>, release-notes <code>/home/pippenz/Petrastella/cas-src/.cas/release-3.48.1/docs/release-notes/2026-10-07-v3.48.1-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.48.1; retrieved 2026-10-07T06:10:51Z.</p>
+<p>GitHub issue theme assignment uses labels first, then the keyword table in the CLI. Any issue classified as <code>Unclassified</code> is shown in the map so a human can correct the Markdown before rendering.</p>
+<p>Release-notes draft: <code>docs/release-notes/2026-10-07-v3.48.1-slack.md</code>.</p>
+<p>CHANGELOG source: <code>CHANGELOG.md</code>.</p>
+<p>GitHub release: &lt;https://github.com/Richards-LLC/cassy/releases/tag/v3.48.1&gt; (published or unknown).</p>
+<p>Release receipt: <code>/home/pippenz/.cas/artifacts/release/v3.48.1-release-3.48.1/release-published.receipt</code>.</p>
+<p>No source warnings.</p></section>
+</main><footer class="page-footer"><span>cas-src v3.48.1 / Release report</span><span><a href="v3.48.1.md">Markdown source</a> · <a href="v3.48.1.pdf">Print edition</a></span></footer>
+<script>addEventListener("beforeprint",()=>document.querySelectorAll("details").forEach(panel=>{panel.open=true}));</script>
+</body></html>

@@ -22,6 +22,11 @@
 //!   write can be lost between rename and read-back; the transaction is
 //!   retried once before the launch is refused.
 //!
+//! - serde_json is built without `preserve_order` (enabling it would unify
+//!   onto every crate in the binary), so a rewrite re-sorts object keys.
+//!   Values are unchanged and Claude does not depend on key order; the diff
+//!   is noisy only.
+//!
 //! Trust is necessary but not sufficient: the factory's launch canary (the
 //! SessionStart marker) is what proves hooks actually run.
 
@@ -90,9 +95,20 @@ fn is_trusted(config: &Value, key: &str) -> bool {
         == Some(true)
 }
 
+/// Parse an existing config. Empty or whitespace-only contents are refused, not
+/// treated as `{}`: a live Claude session can leave the file truncated
+/// mid-write, and renaming `{"projects":…}` over it would wipe the account's
+/// whole config. Only a genuinely missing file starts from `{}`.
 fn parse_config(contents: &str, path: &Path) -> io::Result<Value> {
     if contents.trim().is_empty() {
-        return Ok(Value::Object(Map::new()));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Claude config {} exists but is empty (possibly mid-write by a live session); \
+                 refusing to rewrite it",
+                path.display()
+            ),
+        ));
     }
     let value: Value = serde_json::from_str(contents).map_err(|error| {
         io::Error::new(
@@ -198,12 +214,11 @@ fn trust_transaction(config_path: &Path, keys: &[String]) -> io::Result<(bool, b
         .ok()
         .unwrap_or_else(|| config_path.to_path_buf());
     let _lock = ConfigLock::acquire(&config_path)?;
-    let existing = match std::fs::read_to_string(&config_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+    let mut config = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => parse_config(&contents, &config_path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Value::Object(Map::new()),
         Err(error) => return Err(error),
     };
-    let mut config = parse_config(&existing, &config_path)?;
     let changed = merge_claude_trust(&mut config, keys)?;
     if changed {
         let updated = serde_json::to_string_pretty(&config).map_err(io::Error::other)?;

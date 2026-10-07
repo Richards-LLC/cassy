@@ -97,6 +97,31 @@ fn cas_0f5b_refuses_to_rewrite_a_config_it_cannot_parse() {
     );
 }
 
+/// A live session can leave `.claude.json` truncated mid-write. An existing
+/// empty or whitespace-only file must refuse the launch and stay
+/// byte-identical, never be replaced by `{"projects": …}`.
+#[test]
+fn cas_0f5b_refuses_an_existing_empty_config_and_leaves_it_byte_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let config = dir.path().join(".claude.json");
+    for body in [&b""[..], b"   \n\t"] {
+        std::fs::write(&config, body).unwrap();
+        assert!(
+            ensure_claude_project_trusted_in(&config, &cwd).is_err(),
+            "must refuse an existing config of {body:?}"
+        );
+        assert_eq!(std::fs::read(&config).unwrap(), body, "left byte-identical");
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with(".claude.json.cas-") && name != ".claude.json.cas-lock")
+        .collect();
+    assert!(leftovers.is_empty(), "no temp file left behind: {leftovers:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn cas_0f5b_keeps_the_file_mode_and_a_managed_symlink() {

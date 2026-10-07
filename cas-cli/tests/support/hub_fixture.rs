@@ -145,16 +145,17 @@ fn cleanup_hub_test_home(home: &Path, root: &Path) {
         unsafe {
             libc::kill(group.map_or(pid as i32, |group| -group), libc::SIGTERM);
         }
-        for _ in 0..25 {
-            if !hub_pid_exists(pid) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        // cas-b86b: wait for the exit itself, not a fixed 0.5 s. Under a loaded
+        // workspace nextest a graceful hub shutdown outlived the old budget, the
+        // lock was already released so SIGKILL was skipped, and the caller saw
+        // the hub still serving.
+        if wait_for_hub_exit(pid, GRACEFUL_EXIT) {
+            continue;
         }
-        if hub_pid_exists(pid)
-            && holds_hub_lock(pid, &paths.lock_path())
-            && hub_process_command(pid).is_some_and(|command| command.contains(" hub serve"))
-        {
+        // Still running past a generous graceful deadline: force it, whether
+        // or not it still holds the lock (shutdown may release it first), as
+        // long as it is the same hub serve process and group.
+        if hub_process_command(pid).is_some_and(|command| command.contains(" hub serve")) {
             let group = group.filter(|group| {
                 let same_group = unsafe { libc::getpgid(pid as libc::pid_t) == *group };
                 let same_session =
@@ -164,7 +165,78 @@ fn cleanup_hub_test_home(home: &Path, root: &Path) {
             unsafe {
                 libc::kill(group.map_or(pid as i32, |group| -group), libc::SIGKILL);
             }
+            wait_for_hub_exit(pid, FORCED_EXIT);
         }
+    }
+}
+
+/// A loaded workspace nextest can stretch a graceful hub shutdown well past a
+/// second; these are ceilings, and the wait ends as soon as the hub exits.
+#[cfg(unix)]
+const GRACEFUL_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
+#[cfg(unix)]
+const FORCED_EXIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether `pid` has exited (gone, or a zombie awaiting its reaper) within
+/// `deadline`. Linux waits on a pidfd, which becomes readable exactly when the
+/// process terminates; elsewhere, or without pidfd support, it polls.
+#[cfg(unix)]
+fn wait_for_hub_exit(pid: u32, deadline: std::time::Duration) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) } as libc::c_int;
+        if fd >= 0 {
+            let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let started = std::time::Instant::now();
+            let exited = loop {
+                let left = deadline.saturating_sub(started.elapsed());
+                // SAFETY: one valid pollfd for the fd opened above.
+                let ready = unsafe { libc::poll(&mut poll, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+                if ready > 0 {
+                    break true;
+                }
+                if ready == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                    break hub_exited(pid);
+                }
+            };
+            // SAFETY: closes the pidfd this function opened.
+            unsafe { libc::close(fd) };
+            return exited;
+        }
+        // ESRCH: already gone. Any other error (an old kernel) polls below.
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return true;
+        }
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < deadline {
+        if hub_exited(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    hub_exited(pid)
+}
+
+/// Gone, or a zombie: it no longer runs, whatever its reaper is doing.
+#[cfg(unix)]
+fn hub_exited(pid: u32) -> bool {
+    if !hub_pid_exists(pid) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().next()) == Some("Z")
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim_start().starts_with('Z'))
     }
 }
 

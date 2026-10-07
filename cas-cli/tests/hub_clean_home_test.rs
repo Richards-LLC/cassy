@@ -998,16 +998,15 @@ fn panic_mid_fixture_reaps_detached_hub_and_group() {
         panic!("forced panic after detached hub startup");
     }));
     assert!(panic.is_err());
-    for _ in 0..50 {
-        if !hub_serve_command_is_live(pid) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(20));
+    // cas-b86b: the fixture's Drop waits for the hub to exit (a pidfd on
+    // Linux, with load-tolerant ceilings), so by now it must be gone or a
+    // zombie. No grace period here: a hub still serving is a real leak.
+    if hub_serve_command_is_live(pid) {
+        // The PID came from this fixture's successful start; prevent this
+        // regression test itself from leaving a leaked hub on assertion failure.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        panic!("detached fixture hub PID {pid} survived panic cleanup");
     }
-    // The PID came from this fixture's successful start; prevent this
-    // regression test itself from leaving a leaked hub on assertion failure.
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    panic!("detached fixture hub PID {pid} survived panic cleanup");
 }
 
 #[cfg(unix)]

@@ -54,6 +54,17 @@ pub fn handle_session_start(
                 ),
             ],
         );
+        // cas-0f5b: the launch canary. The factory refuses a Claude worker whose
+        // marker does not appear, because a worker whose hooks never run has
+        // no CAS guard at all.
+        if std::env::var("CAS_FACTORY_MODE").is_ok_and(|value| !value.trim().is_empty())
+            && let Ok(agent) = std::env::var("CAS_AGENT_NAME")
+            && !agent.trim().is_empty()
+            && let Err(error) =
+                crate::factory_hook_canary::record_session_start(cas_root, &agent, &input.session_id)
+        {
+            eprintln!("cas: could not record the SessionStart hook canary for {agent}: {error}");
+        }
         let mut stores = HookStores::new(cas_root);
 
         if let Some(sqlite_store) = stores.sqlite() {
@@ -636,6 +647,26 @@ mod large_artifact_staging_tests {
             banner,
             "Stage large artifacts (>1GB) in /mnt/datacube/staging — /tmp is tmpfs on this host."
         );
+    }
+
+    /// cas-0f5b: the launch canary the factory checks before confirming a
+    /// Claude worker. A factory agent's SessionStart writes it; a plain
+    /// session (no CAS_FACTORY_MODE) does not.
+    #[test]
+    fn cas_0f5b_factory_session_start_writes_the_hook_canary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = staging_env("worker");
+        env.set("CAS_AGENT_NAME", "canary-worker-1");
+        env.set("CAS_FACTORY_MODE", "1");
+        let launched = std::time::SystemTime::now();
+        let input = session_input(tmp.path().to_str().unwrap());
+        handle_session_start(&input, Some(tmp.path())).unwrap();
+        assert!(crate::factory_hook_canary::fired_since(tmp.path(), "canary-worker-1", launched));
+
+        let plain = tempfile::tempdir().unwrap();
+        env.remove("CAS_FACTORY_MODE");
+        handle_session_start(&input, Some(plain.path())).unwrap();
+        assert!(!crate::factory_hook_canary::marker_path(plain.path(), "canary-worker-1").exists());
     }
 
     #[test]

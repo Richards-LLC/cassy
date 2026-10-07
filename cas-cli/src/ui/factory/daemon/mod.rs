@@ -160,6 +160,9 @@ struct SpawnVerification {
     /// registration so the binding is re-confirmed (and the worker briefed)
     /// at the only moment the worker is provably alive.
     task_id: Option<String>,
+    /// cas-0f5b: wall-clock launch time; the hook canary (SessionStart marker)
+    /// must be written after it, so a previous worker's marker never counts.
+    launched_wall: std::time::SystemTime,
 }
 
 /// Factory daemon state

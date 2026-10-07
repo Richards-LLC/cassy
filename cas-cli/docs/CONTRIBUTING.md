@@ -122,6 +122,11 @@ Without it the hook warns and retains the existing permission guards.
 Plain npm reads, inline Node code and arbitrary Node scripts retain their
 existing permission decisions. The hub-web build, typecheck, visual-QA
 and verified test entry points also acquire admission when run directly.
+The helper owns the command's process group and ends it when the command
+returns, so it refuses a routed command that backgrounds a job with `&`:
+the suite's receipt launcher would die while a detached runner lived on
+unreported. Run a long suite in the foreground of a persistent session with
+its output redirected to a log, and read the log.
 
 Admission uses `assembly-proof.py`'s fresh host memory snapshot and reserve
 (default: greater of 8 GiB or 25% of physical RAM). A suite needs an assumed

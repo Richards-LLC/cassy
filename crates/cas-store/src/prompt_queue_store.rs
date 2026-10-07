@@ -172,6 +172,9 @@ enum TransportEligibility {
     /// transport handoff happened after the current turn began — a message
     /// that reached a busy worker mid-turn and cannot be that turn's prompt.
     After(chrono::DateTime<Utc>),
+    /// cas-ad92: only the ids a pointer wake named, including rows the
+    /// daemon's transport still holds claimed.
+    WakeNamed,
 }
 
 /// cas-098d (GH #904): the order an inbox poll drains a recipient's unread
@@ -191,6 +194,14 @@ const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
     "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
      AND (q.transport_delivered_at IS NULL
           OR julianday(q.transport_delivered_at) > julianday(?))";
+
+/// cas-ad92: eligibility for rows a pointer wake named in the turn it started.
+/// The daemon's claim (`transport_claimed`) hides a handed-off row from every
+/// other drain, so a Claude worker woken by the pointer found an empty inbox
+/// while its harness held the body back until the next turn boundary. The
+/// wake turn itself may take the named row over its claim.
+const WAKE_NAMED_RECEIPT_SQL: &str = "AND (seen.prompt_id IS NULL
+          OR seen.source IN ('transport_delivered', 'transport_claimed'))";
 
 /// Eligibility for a fallback invoked after a tool result. Unlike a new
 /// turn, this path must never replay a row whose transport handoff was
@@ -1389,6 +1400,12 @@ pub struct MessageDeliveryReport {
     pub broadcast_succeeded: Option<u32>,
     pub broadcast_failed: Option<u32>,
     pub wake: ObservationStatus,
+    /// cas-ad92: the addressed recipient's receipt source. Separates a body
+    /// rendered into a turn (`hook_surfaced`) or polled (`inbox_poll`) from
+    /// one the daemon's transport merely claimed (`transport_claimed`) and the
+    /// harness may still be holding back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient_receipt: Option<SurfacingSource>,
     /// cas-7a01 (GH #155): what CAS's own wake nudge did for this row.
     ///
     /// Independent of [`MessageDeliveryReport::wake`], and answers a different
@@ -1867,6 +1884,21 @@ pub trait PromptQueueStore: Send + Sync {
             limit,
         )
     }
+
+    /// cas-ad92: surface, into the turn a pointer wake started, the rows that
+    /// wake named. A Claude teams handoff keeps the daemon's
+    /// `transport_claimed` receipt, which hides the row from every other
+    /// drain, while Claude Code holds the teams copy back until the next turn
+    /// boundary; the wake turn otherwise starts with no body and an empty
+    /// inbox. Only rows addressed to `recipient` are eligible, and the
+    /// receipt becomes `hook_surfaced`, so `message_status` reports the body
+    /// as rendered into a turn rather than merely claimed.
+    fn surface_wake_named_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        ids: &[i64],
+    ) -> Result<Vec<QueuedPrompt>>;
 
     /// Atomically surface unread rows from a bounded set of senders.
     ///
@@ -4049,6 +4081,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             SurfacingSource::InboxPoll,
             None,
             TransportEligibility::Any,
+            &[],
         )
     }
 
@@ -4068,6 +4101,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             SurfacingSource::HookSurfaced,
             None,
             TransportEligibility::Any,
+            &[],
         )
     }
 
@@ -4084,6 +4118,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             SurfacingSource::HookSurfaced,
             None,
             TransportEligibility::NoneRecorded,
+            &[],
         )
     }
 
@@ -4101,6 +4136,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             SurfacingSource::HookSurfaced,
             None,
             TransportEligibility::After(turn_started_at),
+            &[],
+        )
+    }
+
+    fn surface_wake_named_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        ids: &[i64],
+    ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            ids.len(),
+            SurfacingSource::HookSurfaced,
+            None,
+            TransportEligibility::WakeNamed,
+            ids,
         )
     }
 
@@ -4118,6 +4171,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             SurfacingSource::HookSurfaced,
             Some(sources),
             TransportEligibility::Any,
+            &[],
         )
     }
 
@@ -4994,6 +5048,18 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .as_deref()
             .and_then(Self::parse_datetime);
 
+        let recipient_receipt: Option<SurfacingSource> = conn
+            .query_row(
+                "SELECT source FROM prompt_queue_recipient_seen
+                  WHERE prompt_id = ? AND recipient = ?",
+                params![id, &target],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .as_deref()
+            .and_then(SurfacingSource::parse);
+
         let wake_evidence = hook_surfaced_at.map(|_| {
             format!(
                 "prompt_queue_recipient_seen(prompt_id={id}, recipient={target}, \
@@ -5132,6 +5198,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             } else {
                 ObservationStatus::Unobserved
             },
+            recipient_receipt,
             wake_attempt: WakeAttempt::from_column(wake_attempt_s.as_deref()),
             wake_gate_declines: wake_gate_declines.try_into().unwrap_or(u32::MAX),
             wake_attempt_at: Self::optional_datetime(
@@ -6223,6 +6290,7 @@ impl SqlitePromptQueueStore {
         source: SurfacingSource,
         source_filter: Option<&[&str]>,
         transport: TransportEligibility,
+        only_ids: &[i64],
     ) -> Result<Vec<QueuedPrompt>> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other(
@@ -6242,6 +6310,9 @@ impl SqlitePromptQueueStore {
             })
             .unwrap_or_default();
         if source_filter.is_some() && normalized_sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        if matches!(transport, TransportEligibility::WakeNamed) && only_ids.is_empty() {
             return Ok(Vec::new());
         }
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -6265,6 +6336,7 @@ impl SqlitePromptQueueStore {
                 TransportEligibility::Any => UNCLAIMED_RECIPIENT_RECEIPT_SQL,
                 TransportEligibility::NoneRecorded => UNSEEN_RECIPIENT_RECEIPT_SQL,
                 TransportEligibility::After(_) => DELIVERED_AFTER_TURN_START_RECEIPT_SQL,
+                TransportEligibility::WakeNamed => WAKE_NAMED_RECEIPT_SQL,
             };
             // The receipt clause precedes every other bound predicate, so its
             // one parameter follows the join's recipient.
@@ -6291,6 +6363,14 @@ impl SqlitePromptQueueStore {
                     .join(", ");
                 format!("AND LOWER(q.source) IN ({placeholders})")
             };
+            let ids_sql = if only_ids.is_empty() {
+                String::new()
+            } else {
+                let placeholders = std::iter::repeat_n("?", only_ids.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("AND q.id IN ({placeholders})")
+            };
 
             let (sql, query_params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
                 if let Some(session) = factory_session {
@@ -6309,6 +6389,11 @@ impl SqlitePromptQueueStore {
                             .cloned()
                             .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>),
                     );
+                    params.extend(
+                        only_ids
+                            .iter()
+                            .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>),
+                    );
                     params.push(Box::new(session.to_string()));
                     params.push(Box::new(sql_limit));
                     (
@@ -6325,6 +6410,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {source_sql}
+                           {ids_sql}
                            AND (q.factory_session = ? OR q.factory_session IS NULL)
                          {order_sql}
                          LIMIT ?"
@@ -6347,6 +6433,11 @@ impl SqlitePromptQueueStore {
                             .cloned()
                             .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>),
                     );
+                    params.extend(
+                        only_ids
+                            .iter()
+                            .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>),
+                    );
                     params.push(Box::new(sql_limit));
                     (
                         format!(
@@ -6362,6 +6453,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {source_sql}
+                           {ids_sql}
                            AND q.factory_session IS NULL
                          {order_sql}
                          LIMIT ?"
@@ -6384,14 +6476,16 @@ impl SqlitePromptQueueStore {
                 let mut stmt = tx.prepare_cached(
                     "INSERT INTO prompt_queue_recipient_seen
                          (prompt_id, recipient, seen_at, source)
-                     VALUES (?, ?, ?, ?)
+                     VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(prompt_id, recipient) DO UPDATE SET
                          seen_at = excluded.seen_at,
                          source = excluded.source
-                     WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
+                     WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
+                        OR (?5 AND prompt_queue_recipient_seen.source = 'transport_claimed')",
                 )?;
+                let takes_claim = matches!(transport, TransportEligibility::WakeNamed);
                 for prompt in &prompts {
-                    stmt.execute(params![prompt.id, recipient, seen_at, source.as_str()])?;
+                    stmt.execute(params![prompt.id, recipient, seen_at, source.as_str(), takes_claim])?;
                 }
                 drop(stmt);
 
@@ -13429,5 +13523,41 @@ mod cas_94a1_delivery_attempts_tests {
                 "{reason} must not spend a transport attempt"
             );
         }
+    }
+}
+
+
+#[cfg(test)]
+mod cas_ad92_wake_named_tests {
+    use super::*;
+
+    #[test]
+    fn a_wake_named_row_surfaces_over_the_transport_claim_once() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store.enqueue_with_session("supervisor", "worker", "the body", "s").unwrap();
+        let other = store.enqueue_with_session("supervisor", "peer", "peer body", "s").unwrap();
+        assert!(store.claim_recipient_transport(id, "worker").unwrap());
+        store.record_recipient_surfaced(id, "worker", SurfacingSource::TransportClaimed).unwrap();
+        store.mark_transport_delivered(id).unwrap();
+
+        assert!(store.surface_unseen_for_recipient("worker", Some("s"), 10).unwrap().is_empty());
+        assert!(store.poll_unseen_for_recipient("worker", Some("s"), 10).unwrap().is_empty());
+        assert!(store.surface_wake_named_for_recipient("worker", Some("s"), &[]).unwrap().is_empty());
+        assert!(store.surface_wake_named_for_recipient("worker", Some("s"), &[other]).unwrap().is_empty());
+
+        let named = store.surface_wake_named_for_recipient("worker", Some("s"), &[id]).unwrap();
+        assert_eq!(named.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(SurfacingSource::HookSurfaced));
+        assert_eq!(report.wake, ObservationStatus::Observed);
+        assert!(store.surface_wake_named_for_recipient("worker", Some("s"), &[id]).unwrap().is_empty());
+
+        // A late post-handoff receipt or a release never demotes the render.
+        store.record_recipient_surfaced(id, "worker", SurfacingSource::TransportClaimed).unwrap();
+        store.release_recipient_transport(id, "worker").unwrap();
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(SurfacingSource::HookSurfaced));
     }
 }

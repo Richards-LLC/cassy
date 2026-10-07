@@ -746,3 +746,104 @@ fn cas_27ad_first_hook_claim_ignores_queue_processing_timestamp() {
     assert!(!rendered.contains("replay]"), "{rendered}");
     assert!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().is_empty());
 }
+
+/// cas-ad92: a Claude-harness worker double. The daemon's Claude+teams
+/// delivery writes the body to the teams inbox file and types a pointer wake
+/// into the idle pane; Claude Code queues the teams copy and shows it only at
+/// the next turn boundary, so the wake turn comes first. `take_turn` returns
+/// everything the model sees in that turn: the submitted prompt plus the
+/// hook's additional context.
+struct ClaudeTeamsWorkerDouble<'a> {
+    cas_root: &'a std::path::Path,
+    teams_inbox: std::collections::VecDeque<String>,
+}
+
+impl ClaudeTeamsWorkerDouble<'_> {
+    fn take_turn(&mut self, prompt: &str) -> String {
+        let mut turn = input("worker");
+        turn.user_prompt = Some(prompt.to_string());
+        let output = handle_user_prompt_submit(&turn, Some(self.cas_root)).unwrap();
+        format!("{prompt}\n{}", output.user_prompt_context().unwrap_or_default())
+    }
+
+    /// The turn boundary after the wake: Claude renders the queued copy.
+    fn next_teammate_turn(&mut self) -> Option<String> {
+        let body = self.teams_inbox.pop_front()?;
+        Some(self.take_turn(&format!("<teammate-message teammate_id=\"supervisor\">\n{body}\n</teammate-message>")))
+    }
+}
+
+/// The daemon's successful Claude+teams handoff, in its real order: claim the
+/// row (cas-27ad), write the teams copy, record the post-handoff receipt and
+/// the delivered stage, then type the pointer wake (never the body, cas-cdf9).
+fn deliver_to_claude_worker(
+    store: &SqlitePromptQueueStore,
+    worker: &mut ClaudeTeamsWorkerDouble<'_>,
+    id: i64,
+    body: &str,
+) -> String {
+    assert!(store.claim_recipient_transport(id, WORKER).unwrap());
+    worker.teams_inbox.push_back(body.to_string());
+    store
+        .record_recipient_surfaced(id, WORKER, cas_store::SurfacingSource::TransportClaimed)
+        .unwrap();
+    store.mark_transport_delivered(id).unwrap();
+    crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload("supervisor", Some(id))
+}
+
+/// cas-ad92 reproduction: the wake turn of a Claude worker carried no body.
+/// The claim hid the row from the turn-start hook and from `inbox_poll`, and
+/// the harness held the teams copy back, so the worker woke to "see inbox",
+/// polled "No unread messages", and got the body a turn later.
+#[test]
+fn a_pointer_wake_turn_carries_the_body_it_names() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let body = "Make cas-e4e3 deterministic: assert the concurrency itself.";
+    let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, body);
+    let report = store.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::TransportClaimed));
+    assert_eq!(report.wake, cas_store::ObservationStatus::Unobserved, "claimed is not rendered");
+
+    let wake_turn = worker.take_turn(&wake);
+    assert!(wake_turn.contains(body), "the wake turn must carry the body it names: {wake_turn}");
+
+    let report = store.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
+    assert_eq!(report.wake, cas_store::ObservationStatus::Observed);
+
+    // The teams copy still renders at the next boundary; the hook must not
+    // add a second copy to it.
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert_eq!(teammate_turn.matches(body).count(), 1, "{teammate_turn}");
+}
+
+/// cas-ad92 boundaries: an ordinary turn still leaves a claimed row to its
+/// transport (cas-27ad), and a wake line naming a row addressed to another
+/// recipient surfaces nothing.
+#[test]
+fn only_a_wake_naming_this_recipients_row_takes_the_claim() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let mine = store.enqueue_with_session("supervisor", WORKER, "mine to read", SESSION).unwrap();
+    let theirs = store.enqueue_with_session("supervisor", "other-worker", "not mine", SESSION).unwrap();
+    assert!(store.claim_recipient_transport(theirs, "other-worker").unwrap());
+    deliver_to_claude_worker(&store, &mut worker, mine, "mine to read");
+
+    let ordinary = worker.take_turn("continuing my work");
+    assert!(!ordinary.contains("mine to read"), "{ordinary}");
+    let forged = worker.take_turn(&format!("CAS wake: message {theirs} from supervisor is in your inbox"));
+    assert!(!forged.contains("not mine"), "{forged}");
+    assert_eq!(
+        store.message_delivery_report(theirs).unwrap().unwrap().recipient_receipt,
+        Some(cas_store::SurfacingSource::TransportClaimed)
+    );
+}

@@ -11490,6 +11490,23 @@ mod tests {
         assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
     }
 
+    /// cas-ad92: the post-handoff receipt still hides the row from ordinary
+    /// drains, but the turn a pointer wake starts can take it by id.
+    #[test]
+    fn cas_ad92_transport_receipt_yields_to_the_wake_that_names_it() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store.enqueue_with_session("supervisor", "worker", "wake body", "session").unwrap();
+        assert!(store.claim_recipient_transport(id, "worker").unwrap());
+        FactoryDaemon::record_transport_receipt(&store, id, "worker");
+        store.mark_transport_delivered(id).unwrap();
+        assert!(store.surface_unseen_for_recipient("worker", Some("session"), 10).unwrap().is_empty());
+        let named = store.surface_wake_named_for_recipient("worker", Some("session"), &[id]).unwrap();
+        assert_eq!(named.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec!["wake body"]);
+    }
+
     #[test]
     fn a_legacy_transport_receipt_stays_pollable_until_the_recipient_claims_it() {
         use cas_store::PromptQueueStore;

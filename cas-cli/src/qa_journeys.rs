@@ -2,8 +2,9 @@
 use super::{EvidenceContext, EvidenceRefusal, cited_bundle_path, git, is_full_sha};
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub const SELECTION_PREFIX: &str = "affected-journeys:";
 pub const RECEIPT_CITATION: &str = "journey-receipt:";
@@ -61,20 +62,37 @@ pub fn select_journeys(
             "journey selection requires a readable ancestor base and exact full head SHA".into(),
         );
     }
+    // The store checkout may predate the delivery's selector and catalog.
+    // Pin the executable as well as its data to the reviewed revision; an
+    // older executable may not understand the HEAD/BASE environment at all.
+    let source = git(repo, &["show", &format!("{head}:scripts/journeys-for-diff.py")])
+        .ok_or_else(|| format!("journeys-for-diff selection failed at {head}: committed selector is unreadable"))?;
     let mut command = Command::new("python3");
-    command.arg(repo.join("scripts/journeys-for-diff.py"));
+    command.arg("-");
     if let Some(paths) = paths {
         command.arg("--paths").args(paths);
     } else {
         command.arg("--all");
     }
-    let output = command
+    let mut child = command
         .current_dir(repo)
         .env("CAS_JOURNEYS_ROOT", repo)
         .env("CAS_JOURNEYS_BASE", base)
         .env("CAS_JOURNEYS_HEAD", head)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("journey selection failed to start: {e}"))?;
+    let written = child.stdin.take().ok_or_else(|| "selector input is unavailable".to_string())
+        .and_then(|mut input| input.write_all(source.as_bytes()).map_err(|e| e.to_string()));
+    if let Err(error) = written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("journey selection failed to load committed selector: {error}"));
+    }
+    let output = child.wait_with_output()
+        .map_err(|e| format!("journey selection failed to finish: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "journeys-for-diff selection failed at {head}; repair the selector before recording proof"

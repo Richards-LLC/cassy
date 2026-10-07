@@ -84,6 +84,14 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
 
 ## 3. Release-time journey evaluation
 
+For affected delivery proof, the producer and close gate execute
+`scripts/journeys-for-diff.py` from the reviewed head's Git blob. They provide
+the same repository, ancestor base, reviewed head and changed paths; the
+selector reads its catalog and source graph at that head. A primary checkout
+on another branch cannot substitute its older selector or catalog. Missing,
+broken or invalid committed selectors refuse proof rather than fall back to
+the checkout. Full-catalog selection uses the same revision binding.
+
 A release that changes a user-facing surface must carry a journey evaluation
 of exactly the UI it ships.
 

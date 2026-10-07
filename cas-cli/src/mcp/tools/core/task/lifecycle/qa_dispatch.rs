@@ -688,7 +688,7 @@ impl CasCore {
         });
         let journeys = changed
             .as_deref()
-            .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
+            .map(|paths| crate::qa_pass::catalog_journeys_for(repo, head, paths))
             .unwrap_or_default();
         let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
         if let Some(reason) = requested.map(str::trim).filter(|reason| !reason.is_empty()) {
@@ -1235,7 +1235,7 @@ impl CasCore {
         if passes.iter().all(|pass| pass.is_withdrawn()) {
             let journeys = changed
                 .as_deref()
-                .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
+                .map(|paths| crate::qa_pass::catalog_journeys_for(repo, head.as_deref(), paths))
                 .unwrap_or_default();
             if !delivery_eligibility(task, &qa, changed.as_deref(), &journeys).is_eligible() {
                 return QaCloseGate::Clear;

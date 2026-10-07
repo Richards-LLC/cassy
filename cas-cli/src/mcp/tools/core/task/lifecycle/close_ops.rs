@@ -26293,7 +26293,7 @@ mod merge_state_gate_tests {
 
         let docs = crate::qa_pass::changed_paths_for_delivery(repo, "main", &head).unwrap();
         assert_eq!(docs, vec!["CHANGELOG.md", "docs/release-notes/2026-09-27-v34-slack.md"]);
-        let docs_journeys = crate::qa_pass::catalog_journeys_for(repo, &docs);
+        let docs_journeys = crate::qa_pass::catalog_journeys_for(repo, None, &docs);
         assert!(docs_journeys.is_empty(), "a docs-only diff maps to no journey: {docs_journeys:?}");
         assert!(
             !crate::qa_pass::user_facing_reasons(&task, &qa, Some(&docs), &docs_journeys).is_eligible(),
@@ -26302,7 +26302,7 @@ mod merge_state_gate_tests {
 
         let lane = crate::qa_pass::changed_paths_for_delivery(repo, "main", "factory/worker").unwrap();
         assert!(lane.contains(&"hub-web/src/main.ts".to_string()), "{lane:?}");
-        let lane_journeys = crate::qa_pass::catalog_journeys_for(repo, &lane);
+        let lane_journeys = crate::qa_pass::catalog_journeys_for(repo, None, &lane);
         assert!(
             ["HUB-J1", "HUB-J8", "HUB-J12"].iter().all(|id| lane_journeys.iter().any(|journey| journey == id)),
             "hub-web/src/main.ts is Surface-wide and maps to every hub journey: {lane_journeys:?}",
@@ -26310,7 +26310,7 @@ mod merge_state_gate_tests {
         let reasons = crate::qa_pass::user_facing_reasons(&task, &qa, Some(&lane), &lane_journeys).reasons;
         assert!(reasons.iter().any(|reason| reason.starts_with("journeys:HUB-J1")), "{reasons:?}");
 
-        let one = crate::qa_pass::catalog_journeys_for(repo, &["hub-web/src/connection.ts".to_string()]);
+        let one = crate::qa_pass::catalog_journeys_for(repo, None, &["hub-web/src/connection.ts".to_string()]);
         assert!(
             !one.is_empty() && one.len() < lane_journeys.len(),
             "a narrower hub-web source path maps to its own journeys, not all: {one:?}",

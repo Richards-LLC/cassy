@@ -255,3 +255,49 @@ fn cas_f365_reviewed_selector_failure_cannot_fall_back_to_checkout() {
     git_ok(repo, &["checkout", "-q", &older]);
     assert!(select_journeys(repo, &base, &head, None).is_err());
 }
+
+/// cas-8132: a delivery's "journeys:" reason (qa_pass::catalog_journeys_for)
+/// read the store checkout's working tree. The store sat on an old main whose
+/// catalog listed fewer journeys, so the gate named HUB-J1..J11 while
+/// journey-eval at the tip selected others. With the delivered head it now
+/// agrees with the producer at that head, from an older checkout.
+#[test]
+fn cas_8132_journeys_reason_comes_from_the_delivered_head() {
+    let (temp, older, base) = fixture();
+    let repo = temp.path();
+    for (path, body) in [
+        ("hub-web/src/delivery.ts", "export const delivery = 'held';\n"),
+        ("hub-web/src/theme.ts", "export const theme = 'dark';\n"),
+        ("hub-web/e2e/delivery.journey.ts", "test('HUB-J12 delivery changed', () => {});\n"),
+        ("hub-web/dist/app.js", "derived bundle\n"),
+    ] {
+        git_ok(repo, &["checkout", "-q", &base]);
+        write(repo, path, body);
+        let head = commit(repo);
+        let producer = producer_ids(repo, &base, &head, false);
+        let paths = vec![path.to_string()];
+        git_ok(repo, &["checkout", "-q", &older]);
+        assert_eq!(
+            super::journeys_for_paths_at(repo, &head, &paths).unwrap(),
+            producer,
+            "journeys reason for {path} must come from the delivered head"
+        );
+        assert_eq!(
+            crate::qa_pass::catalog_journeys_for(repo, Some(&head), &paths),
+            producer,
+            "catalog_journeys_for with a head agrees with the producer for {path}"
+        );
+        // The old checkout's own selector would name its whole two-journey
+        // catalog for any surface path: the skew this pins against.
+        let unpinned = crate::qa_pass::catalog_journeys_for(repo, None, &paths);
+        if path != "hub-web/dist/app.js" {
+            assert_eq!(unpinned, ["HUB-J1", "HUB-J10"], "older checkout working tree for {path}");
+        }
+    }
+    // A head without a catalog names no journeys rather than borrowing the checkout's.
+    git_ok(repo, &["checkout", "-q", &base]);
+    git_ok(repo, &["rm", "-q", "docs/qa/journeys.md"]);
+    let head = commit(repo);
+    git_ok(repo, &["checkout", "-q", &older]);
+    assert!(super::journeys_for_paths_at(repo, &head, &["hub-web/src/theme.ts".into()]).unwrap().is_empty());
+}

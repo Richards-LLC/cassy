@@ -2,7 +2,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 import { CommanderJournal, deliveryScope, DELIVERY_DB, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import type { PendingSend } from "./conversation-store";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 
 const scope: DeliveryScope = { hub: "hub-a", baseUrl: "https://hub.example", device: "phone", session: "session-a" };
 const fence: CredentialFence = { credentialId: "credential-a", generation: 1 };
@@ -10,11 +10,78 @@ const send = (id: string): PendingSend => ({ id, target: "supervisor", text: `me
 const reply = { notification_id: 42, reply_to: null, message: "Reply", summary: "", device_id: "phone" };
 function journals(now = () => 1_000) {
   const db = new IDBFactory();
-  const make = () => new CommanderJournal(db, async () => fence, now, false);
-  return { a: make(), b: make(), make, db };
+  let elapsed = 0;
+  const make = () => new CommanderJournal(db, async () => fence, () => now() + elapsed, false);
+  return { a: make(), b: make(), make, db, timeout: () => { elapsed += RECEIPT_TIMEOUT_MS; } };
 }
 
 describe("atomic Commander journal", () => {
+  it.each(["existing", "restored"])("does not offer Retry in a %s peer history while a real journal claim is in flight (cas-fb48)", async (mode) => {
+    const db = new IDBFactory(), history = new ConversationHistory();
+    let now = 1_000, checks = 0;
+    let release!: () => void, entered!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const claimed = new Promise<void>(resolve => { entered = resolve; });
+    const peer = new CommanderJournal(db, async () => fence, () => now, false);
+    const writer = new CommanderJournal(db, async () => {
+      if (++checks === 2) { entered(); await barrier; }
+      return fence;
+    }, () => now, false);
+    const item = send("peer-flight");
+    await writer.reconcile(scope, [], [item], fence);
+    if (mode === "existing") history.restorePending((await peer.read(scope)).sends, now);
+    let writes = 0;
+    const dispatch = writer.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    await claimed;
+    now += 200;
+    const snapshot = await peer.read(scope);
+    expect(snapshot.sends[0].state).toBe("sending");
+    history.synchronizePending(snapshot.sends, now, snapshot.receipts);
+    const event = history.events[0];
+    try {
+      expect(event.kind === "send" && history.canRetrySend(event.value), "Retry must wait for the peer's receipt deadline").toBe(false);
+      expect(history.nextReceiptCheck(now)).toBe(RECEIPT_TIMEOUT_MS - 200);
+      expect(history.unconfirmSilent(1_000 + RECEIPT_TIMEOUT_MS - 1)).toEqual([]);
+      expect(history.unconfirmSilent(1_000 + RECEIPT_TIMEOUT_MS)).toEqual([item.id]);
+      expect(event.kind === "send" && history.canRetrySend(event.value)).toBe(true);
+    } finally { release(); await dispatch; writer.close(); peer.close(); }
+    expect(writes).toBe(1);
+  });
+  it("rejects an explicit peer Retry until the journal claim times out (cas-fb48)", async () => {
+    const { a, b, timeout } = journals();
+    const item = send("premature-retry");
+    await a.reconcile(scope, [], [item], fence);
+    let writes = 0;
+    await a.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    await b.read(scope);
+    expect(await b.retry(scope, item.id, fence, item)).toBe("not-saved");
+    expect(await b.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("unconfirmed");
+    expect(writes).toBe(1);
+    timeout();
+    expect(await b.retry(scope, item.id, fence, item)).toBe("kept");
+  });
+  it("durable history settles a fresh restored peer claim without a second bubble (cas-fb48)", async () => {
+    const { a, b } = journals(), history = new ConversationHistory();
+    const item = send("peer-history");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    history.restorePending((await b.read(scope)).sends, 1_200);
+    history.hydrateSend({ notification_id: 99, target: item.target, text: item.text, state: "acknowledged", stamped: true, device_id: scope.device, at: new Date(1_200).toISOString() }, 1_200);
+    expect(history.events).toHaveLength(1);
+    expect(history.events[0]).toMatchObject({ value: { id: item.id, notificationId: 99, state: "acknowledged" } });
+    expect(history.pendingSends()).toEqual([]);
+  });
+  it("a reply in a peer tab cannot shorten the writer's receipt clock (cas-fb48; cas-1185)", async () => {
+    const { a, b } = journals(), history = new ConversationHistory();
+    const item = send("peer-reply");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    history.restorePending((await b.read(scope)).sends, 1_200);
+    history.receive({ notification_id: 20, reply_to: null, message: "A reply on this tab", summary: "", device_id: scope.device }, 1_300);
+    expect(history.unconfirmSilent(6_300)).toEqual([]);
+    expect(history.nextReceiptCheck(6_300)).toBe(1_000 + RECEIPT_TIMEOUT_MS - 6_300);
+    expect(history.unconfirmSilent(1_000 + RECEIPT_TIMEOUT_MS)).toEqual([item.id]);
+  });
   it("requeues an existing history row after a claim makes no socket write (cas-9dc6)", async () => {
     const db = new IDBFactory(), history = new ConversationHistory();
     const peer = new CommanderJournal(db, async () => fence, () => 1_000, false);
@@ -27,7 +94,7 @@ describe("atomic Commander journal", () => {
           // The real onChange path sees the durable claim before the socket
           // readiness check returns false, and removes its in-memory queue.
           expect(history.synchronizePending(snapshot.sends, 1_010)).toEqual([]);
-          expect(history.pendingSends()[0].state).toBe("unconfirmed");
+          expect(history.pendingSends()[0].state).toBe("sending");
         }
       }
       return fence;
@@ -77,11 +144,12 @@ describe("atomic Commander journal", () => {
     expect(writes).toBe(0);
   });
   it("an old refusal cannot re-hold a newer same-tab Retry; the newer attempt can still be refused", async () => {
-    const { a, b } = journals();
+    const { a, b, timeout } = journals();
     const item = send("retried");
     await a.reconcile(scope, [], [item], fence);
     let writes = 0;
     await a.dispatch(scope, item.id, fence, () => { writes++; return true; });
+    timeout(); // An explicit uncertain retry waits for the receipt deadline.
     expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
     await a.dispatch(scope, item.id, fence, () => { writes++; return true; });
     expect(await a.refuse(scope, item.id, fence, "late old refusal", true)).toBe("stale");
@@ -160,22 +228,24 @@ describe("atomic Commander journal", () => {
     expect((await b.read(scope)).receipts[0].notification_id).toBe(99);
   });
   it("explicit uncertain Retry retains the wire ref, while concurrent stale retries cannot re-claim it (cas-9dc6)", async () => {
-    const { a, b } = journals();
+    const { a, b, timeout } = journals();
     const item = send("shared");
     await a.reconcile(scope, [], [item], fence);
     await a.dispatch(scope, item.id, fence, () => true);
     await b.read(scope);
+    timeout(); // An explicit uncertain retry waits for the receipt deadline.
     const retries = await Promise.all([a.retry(scope, item.id, fence, item), b.retry(scope, item.id, fence, item)]);
     expect(retries.filter(value => value === "kept")).toHaveLength(1);
     expect((await a.read(scope)).sends[0].id).toBe(item.id);
     expect(await b.retry(scope, item.id, fence, { ...item, text: "different content" })).toBe("not-saved");
   });
   it("a peer's unconfirmed caption cannot undo the writer's explicit Retry (cas-9dc6 F01)", async () => {
-    const { a, b } = journals();
+    const { a, b, timeout } = journals();
     const item = send("shared"), peerHistory = new ConversationHistory();
     await a.reconcile(scope, [], [item], fence);
     await a.dispatch(scope, item.id, fence, () => true);
     peerHistory.restorePending((await b.read(scope)).sends, 1_000);
+    timeout(); // An explicit uncertain retry waits for the receipt deadline.
     expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
     // The broadcast refreshes this tab's observed revision, but its existing
     // unconfirmed bubble is still present when caption persistence runs.
@@ -188,10 +258,11 @@ describe("atomic Commander journal", () => {
     expect((await b.read(scope)).sends[0].id).toBe(item.id);
   });
   it("a retry stays dispatchable by a peer if the writer closes before dispatch (cas-9dc6 F01)", async () => {
-    const { a, b } = journals();
+    const { a, b, timeout } = journals();
     const item = send("shared");
     await a.reconcile(scope, [], [item], fence);
     await a.dispatch(scope, item.id, fence, () => true);
+    timeout(); // An explicit uncertain retry waits for the receipt deadline.
     expect(await a.retry(scope, item.id, fence, item)).toBe("kept");
     let writes = 0;
     expect(await b.dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("written");

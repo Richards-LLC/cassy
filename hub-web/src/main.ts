@@ -3058,6 +3058,7 @@ sendJournal.onChange = () => {
           if (remaining <= 0) expireHeldSend(machine, key, held.id);
           else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
         }
+        scheduleReceiptCheck(key);
         for (const row of snapshot.replies) {
           if (isOperatorNotice(row.reply)) continue;
           history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
@@ -3133,6 +3134,7 @@ function restoreStoredSends(machine: StoredMachine): void {
         if (remaining <= 0) expireHeldSend(machine, key, held.id);
         else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
       }
+      scheduleReceiptCheck(key);
     }
   })().catch(() => { showComposerStatus("Browser storage could not restore kept messages. Retry before sending.", "error"); });
   restoredMachines.set(machine.id, restore);
@@ -3313,7 +3315,12 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
       clearTimeout(held.expiry);
       history.release(held.clientRef);
       if (result === "expired") history.reject(held.clientRef, outageRefusal(machine.label));
-      else if (result !== "written") history.unconfirmInFlight(Date.now());
+      else if (result !== "written") {
+        // Another tab may own this send. A lost claim is not a failed wire
+        // write: project its durable state and original receipt deadline.
+        const snapshot = await sendJournal.read(deliveryScope(machine, session));
+        history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
+      }
     }
     if (queue.length === 0) heldSends.delete(key);
     scheduleReceiptCheck(key);

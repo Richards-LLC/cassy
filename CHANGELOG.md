@@ -7,6 +7,88 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.48.1] - 2026-10-07
+
+### Fixed — Commander sends
+
+- A message held while Commander was offline goes out promptly after the
+  machine reconnects, exactly once. In 3.48.0, if the machine came back while
+  a held message was still being settled, the reconnect's wake-up was dropped
+  and nothing tried the message again. The held-send flush now remembers a
+  wake-up that arrives mid-batch and runs once more. A write whose outcome is
+  uncertain is never sent a second time, and revoking the pairing during
+  recovery stops the deferred send.
+- With two tabs open, "Retry" no longer flashes in either tab while the other
+  tab's send is still in flight, so the same message cannot be sent twice by
+  accident. A tab that sees another tab's send keeps that send's own
+  15-second confirmation clock instead of marking it "Not confirmed" at once,
+  and a stale Retry cannot reopen a send another tab is still waiting on. A
+  new reply in the conversation no longer cuts the other tab's wait short.
+  When that send's confirmation arrives in the machine's history, it settles
+  as that one row instead of a second copy.
+
+### Fixed — Commander polish
+
+- On a phone, the conversation's name and machine take their own row under
+  the back link and actions, so "Atlas" and "Build Server" read whole. A long
+  machine name is never cut while its codename shows: the codename steps
+  aside instead. A short screen, such as a phone with its keyboard up, keeps
+  the one-row header. Raw output keeps its word beside Interrupt, the phone
+  toast drops below the taller header, and the phone Tasks & progress sheet
+  names its project and machine.
+- After Stop in Tasks & progress, focus moves to the next row and the result
+  line is scrolled into view as well. The Stop confirmation says the task
+  "goes back to Open", the word its chip then shows.
+- Revoking this browser's own access says so and lands on Pair a machine,
+  instead of a silent first-run screen.
+- A browser permission reads "Blocked by browser" and an unsupported browser
+  "Browser can't connect" in the header, list row, footer, empty thread and
+  launch sheet, instead of "Can't reach". The Connection log reads the
+  header's state, updates on the same render and names its machine. A retry
+  in one conversation no longer sets the machine footer to "Reconnecting"
+  while another conversation on that machine is answering.
+- A "Skip to the conversation" stop after search puts Interrupt three keys
+  away instead of about a dozen Tabs, with a focus ring at every stop. The
+  header names the device in control before you take it, and a refused take
+  says that a pairing with administrator access can take over.
+- Hovering the pinned question bar keeps its amber fill in both schemes; in
+  dark it had turned navy under dark text.
+- The Assign picker names the task by its title, not its ID alone.
+- In a short landscape sheet, a refusal notice rides the sheet's bottom edge
+  instead of landing below the fold.
+- Dismissing the phone Undo offer keeps Undo in Tasks & progress, and the
+  dismiss button says so.
+- The pair dialog's action bar is part of the sheet, frosting only while
+  fields scroll beneath it; in light it had read as a whiter slab.
+- Answers five minutes or more apart start a new group with their own time,
+  and grouping no longer changes on reload. A reply kept in this browser
+  keeps the time it was shown, then the machine's own time once history
+  arrives, so it is no longer marked "machine clock ahead" after a reload.
+- During an outage, a reload before any machine answers reads "Conversations
+  not loaded yet" instead of "0 conversations", and the empty list says how
+  many kept messages will go out. The outage banner sits above the thread
+  instead of over its first lines, and a reader mid-history keeps their
+  place.
+- Pairing reads in plain words: the admin permission is "See and revoke other
+  browsers on" the named machine and joins the summary only once ticked, a
+  new browser is named for itself (for example "Chrome on Linux"), every
+  pairing dialog is named by its heading, and sign-in says "Cassy Cloud
+  account".
+- A focused "Load earlier" keeps a plain ring on the aurora, the conversation
+  rail fades only the edges with rows beyond them, an Attention item about
+  the open conversation drops its no-op "Open conversation", "Asked …" notes
+  are kept per machine and conversation, and the skip link stays out of sight
+  until focused.
+
+### Fixed — release and factory tooling
+
+- The close gate's affected-journey selection, and `scripts/journey-receipt.py`,
+  now run `scripts/journeys-for-diff.py` from the reviewed head's committed
+  blob instead of the shared checkout's copy. An older selector in a checkout
+  on another branch could ignore the reviewed head and pick a different
+  journey set. A missing or broken committed selector refuses proof rather
+  than falling back to the checkout.
+
 ## [3.48.0] - 2026-10-06
 
 ### Added — Commander Glass look

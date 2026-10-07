@@ -394,7 +394,7 @@ export const CODENAME_KEEP_CH = 8;
  * The line's title always carries the whole "machine · codename". Decided
  * from widths that don't depend on the current state, so it never flips.
  */
-export function fitMachineLine(line: HTMLElement | null | undefined, available: number): void {
+export function fitMachineLine(line: HTMLElement | null | undefined, available: number, wholeCodename = false): void {
   if (!line) return;
   line.classList.remove("os-dropped", "codename-squeezed", "machine-long", "machine-squeezed");
   const codename = line.querySelector<HTMLElement>(":scope > .codename");
@@ -406,15 +406,18 @@ export function fitMachineLine(line: HTMLElement | null | undefined, available: 
   const ch = parseFloat(getComputedStyle(codename).fontSize) * 0.6;
   const separator = line.querySelector<HTMLElement>(":scope > .host-sep, :scope > .proj2-sep");
   const gap = separator?.getBoundingClientRect().width || 3 * ch;
-  if (machine.scrollWidth + gap + codename.scrollWidth <= available + 1) return;
+  // Two pixels of slack: any overflow, even a fraction of a pixel, swaps the
+  // last glyphs for an ellipsis (cas-d043 QA round 1).
+  if (machine.scrollWidth + gap + codename.scrollWidth <= available - 2) return;
   os?.classList.add("sr-only");
   if (machine.scrollWidth > MACHINE_KEEP_CH * ch) line.classList.add("machine-long");
   // cas-d043 QA round 1: the machine is never cut while any of the codename
-  // shows. It stays whole beside at least CODENAME_KEEP_CH of codename, or the
-  // codename steps aside and the machine has the line to itself (and only
-  // then ellipsises). Two pixels of slack absorb sub-pixel rounding, which
-  // otherwise drew "Build Server Rack Sev… · patient…" on a 390px phone.
-  if (machine.scrollWidth + gap + Math.min(codename.scrollWidth, CODENAME_KEEP_CH * ch) > available - 2) line.classList.add("codename-squeezed");
+  // shows ("Build Server Rack Sev… · patient…" on a 390px phone). It stays
+  // whole beside at least CODENAME_KEEP_CH of codename (the whole codename
+  // with `wholeCodename`, the phone header), or the codename steps aside and
+  // the machine has the line to itself, ellipsising only then.
+  const codenameNeeds = wholeCodename ? codename.scrollWidth : Math.min(codename.scrollWidth, CODENAME_KEEP_CH * ch);
+  if (machine.scrollWidth + gap + codenameNeeds > available - 2) line.classList.add("codename-squeezed");
 }
 
 /** The conversation header's host line, fitted to the room beside its connection state. */
@@ -432,7 +435,10 @@ export function fitConversationHost(root: ParentNode): void {
   const connection = host.querySelector<HTMLElement>("#conversation-connection");
   // cas-d043 G02: the device in control, when another one is, keeps its place too.
   const control = host.querySelector<HTMLElement>("#conversation-control");
-  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0));
+  // cas-d043 QA round 1: on a phone the header's codename shows whole or
+  // steps aside, never as a cut slot beside the machine.
+  const phoneHeader = identity.ownerDocument.defaultView?.matchMedia?.("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)").matches === true;
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0), phoneHeader);
 }
 
 /**

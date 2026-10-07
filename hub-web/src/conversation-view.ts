@@ -6,7 +6,7 @@ import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { bindSwipeDismiss } from "./swipe-dismiss";
 import { machineName } from "./conversation-list";
-import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
+import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
@@ -259,8 +259,11 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
 }
 
 /** The header's connection label, as the empty thread reads it. */
-function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "reconnecting" | "unreachable" {
+function connectionKind(label: string | undefined): "live" | "degraded" | "pairing" | "blocked" | "unsupported" | "reconnecting" | "unreachable" {
   return label === undefined || label === "Live" ? "live"
+    // cas-d043 G04: the browser's cause, not the machine's.
+    : label === BROWSER_BLOCKED ? "blocked"
+      : label === BROWSER_UNSUPPORTED ? "unsupported"
     // cas-97d58 F10: the half-open header's "Unsteady" is the banner's
     // "unsteady — checking…", not "can't be reached".
     : label === "Degraded" || label === UNSTEADY ? "degraded"
@@ -289,12 +292,16 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
   if (!input.resolved) {
     if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "" };
     if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.` };
+    if (kind === "blocked") return { state: "waiting", said: `This browser is blocking its connection to ${where}. Allow Local network access for this site, and messages from ${subject} will load.` };
+    if (kind === "unsupported") return { state: "waiting", said: `This browser can't connect to ${where}, so messages from ${subject} can't load. Update your browser, then reload this page.` };
     if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.` };
     return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.` };
   }
   if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.` };
   if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.` };
   if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.` };
+  if (kind === "blocked") return { state: "empty", said: `${none}. This browser is blocking its connection to ${where} — allow Local network access for this site to see anything new.` };
+  if (kind === "unsupported") return { state: "empty", said: `${none}. This browser can't connect to ${where} — update your browser, then reload this page to see anything new.` };
   if (kind === "reconnecting") return { state: "empty", said: `${none}. Reconnecting to ${where} — anything new will show here once it's back.` };
   return { state: "empty", said: `${none}. ${subjectMachine} can't be reached — anything new will show here once it's back.` };
 }

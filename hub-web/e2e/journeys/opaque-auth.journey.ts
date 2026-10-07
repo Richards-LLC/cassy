@@ -92,6 +92,8 @@ test("HUB-J12 denied Local network access explains site settings without re-pair
     // cas-97d58 F16: the cause is the browser; nothing says to check that the machines are awake.
     await expect(page.locator("#conversation-empty")).toHaveText("This browser is blocking its connection to your paired machines.");
     await expect(page.getByText(/keeps retrying|machines are awake/).filter({ visible: true })).toHaveCount(0);
+    // cas-d043 G04: the footer names the browser as the cause, not "Can't reach · retrying".
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Blocked by browser");
     expect(await page.locator(".conversation-sidebar").evaluate(aside => ((aside as HTMLElement).innerText.match(/allow Local network access/gi) ?? []).length), "one remedy").toBe(1);
   });
   for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {

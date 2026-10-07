@@ -313,6 +313,17 @@ export function conversationSkeletonMarkup(): string {
 }
 
 /**
+ * "cas-src on Atlas": whose tasks the phone Tasks sheet holds (cas-d043 G01).
+ * The sheet covers the header that names them; the desktop rail sits beside
+ * that header, so main.ts adds this line only while the sheet is open.
+ */
+export function contextSheetWhere(model: Pick<ConversationShellModel, "projectDir" | "supervisor" | "host">): string {
+  const title = projectTitle(model.projectDir) ?? model.supervisor ?? "";
+  const machine = (model.host || "").replace(HOST_OS, "$1");
+  return [title, machine].filter(Boolean).join(" on ");
+}
+
+/**
  * The desktop context rail (P10). It holds only what the thread header does
  * not: open asks and blockers, task progress, the thread's attachments and
  * its attention events — each section starts hidden and syncContextRail
@@ -323,7 +334,7 @@ export function conversationSkeletonMarkup(): string {
 function contextRailMarkup(selected: boolean): string {
   const sections = selected
     ? '<section class="context-section" data-section="waiting" aria-labelledby="context-waiting-heading" hidden><h2 id="context-waiting-heading">Waiting on you</h2><ul class="context-list context-waiting"></ul></section>'
-      + '<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>'
+      + `<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>`
       + '<section class="context-section" data-section="attachments" aria-labelledby="context-attachments-heading" hidden><h2 id="context-attachments-heading">Attachments</h2><ul class="context-list context-attachments"></ul></section>'
       + '<section class="context-section" data-section="attention" hidden><div id="conversation-attention-slot"></div></section>'
     : "";

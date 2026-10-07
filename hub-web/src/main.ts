@@ -26,14 +26,14 @@ import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
-import { applyActionAvailability, arrangeConversationShell, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
+import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
+import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, fatalConnectionRecovery, lostConnectionBanner, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -145,7 +145,7 @@ const attachStates = new Map<string, AttachSnapshot>();
 const sessionsEverLive = new Set<string>();
 /** Connection labels a conversation row shows in place of its last turn (cas-a447). */
 // cas-a6f0: an unsteady machine is named on the row too, as the header names it.
-const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING]);
+const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING, BROWSER_BLOCKED, BROWSER_UNSUPPORTED]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
@@ -1627,6 +1627,8 @@ function clearDisconnectedState(grid: HTMLElement): void {
   if (shown) placeToastClearOfBanner(shown);
 }
 
+/** The open Connection log's summary writer, run with every header update (cas-d043 G04). */
+let refreshConnectionLog: (() => void) | undefined;
 function openConnectionLog(machineId: string): void {
   let dialog = document.querySelector<HTMLDialogElement>("#connection-log");
   if (!dialog) {
@@ -1634,19 +1636,21 @@ function openConnectionLog(machineId: string): void {
     dialog.id = "connection-log";
     dialog.className = "connection-log";
     dialog.setAttribute("aria-label", "Connection log");
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence"></p><pre>Running diagnostics…</pre></details></section>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow"></p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence"></p><pre>Running diagnostics…</pre></details></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
   const summary = dialog.querySelector<HTMLElement>(".connection-log-summary")!;
   const technical = dialog.querySelector<HTMLElement>(".connection-log-evidence")!;
   const machineLabel = machines.get(machineId)?.label ?? "this machine";
+  // cas-d043 G04: the eyebrow names the machine; "Evidence ledger" was jargon.
+  dialog.querySelector<HTMLElement>(".connection-log-eyebrow")!.textContent = machines.get(machineId)?.label ?? "Machine";
   const download = dialog.querySelector<HTMLButtonElement>(".connection-log-export")!;
   download.disabled = true;
   const update = () => {
-    const connection = connections.get(machineId);
-    const machineState = connection?.snapshot();
-    const state = machineState?.phase !== "live" || machineState.degraded ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
+    // cas-d043 G04: the state the header and footer show, from the same
+    // source, so the log never says "Connecting now" beside a Live header.
+    const state = machineId === selectedMachineId && selectedSession ? conversationStatusState(machineId, selectedSession) : machineFooterConnection(machineId);
     const cause = state?.cause;
     // cas-97d58 F08: what happens next, in the live state's own words; never
     // "No retry scheduled" while the rail says it is checking.
@@ -1663,8 +1667,11 @@ function openConnectionLog(machineId: string): void {
     technical.hidden = technicalText === "";
   };
   update();
+  // The countdown ticks each second; a change of state is written on the
+  // same render that changes the header's word (renderConversationList).
   const timer = window.setInterval(update, 1000);
-  dialog.addEventListener("close", () => window.clearInterval(timer), { once: true });
+  refreshConnectionLog = update;
+  dialog.addEventListener("close", () => { window.clearInterval(timer); if (refreshConnectionLog === update) refreshConnectionLog = undefined; }, { once: true });
   output.textContent = "Running diagnostics…";
   dialog.showModal();
   void connections.get(machineId)?.diagnose().then((result) => {
@@ -4028,6 +4035,7 @@ function renderConversationList(): void {
   }
   // The state's width changes the room the machine · codename line has.
   fitConversationHost(document);
+  refreshConnectionLog?.();
 }
 
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
@@ -4043,13 +4051,18 @@ function conversationHeaderLabel(machineId: string, session: string | undefined)
  * back; the thread says "Opening the conversation…".
  */
 function conversationStatusLabel(machineId: string, session: string | undefined): string {
+  return fleetConnectionLabel(conversationStatusState(machineId, session), machineId);
+}
+
+/** The state behind the conversation's connection word, which the Connection log reads too (cas-d043 G04). */
+function conversationStatusState(machineId: string, session: string | undefined): ConnectionState | undefined {
   const machine = connectionStates.get(machineId);
   if (session && machine?.phase === "live") {
     const key = sessionKey(machineId, session);
     const attach = attachStates.get(key);
-    if (attach && !sessionsEverLive.has(key) && (attachInProgress(attach) || firstAttachRetry(attach, false))) return fleetConnectionLabel(machine, machineId);
+    if (attach && !sessionsEverLive.has(key) && (attachInProgress(attach) || firstAttachRetry(attach, false))) return machine;
   }
-  return fleetConnectionLabel(conversationConnection(machineId, session), machineId);
+  return conversationConnection(machineId, session);
 }
 
 /**
@@ -4136,11 +4149,23 @@ function syncConversationAttention(count: number): void {
   if (progressSheetOpen() && (!phoneLayout() || !selectedSession || progressSheetSession !== sessionKey(selectedMachineId ?? "", selectedSession))) progressSheetSession = undefined;
   applyAttentionSheet();
 }
+/** The phone Tasks sheet names whose tasks it holds, while it covers the header that does (cas-d043 G01). */
+function syncProgressSheetWhere(): void {
+  const heading = document.querySelector<HTMLElement>("#context-progress-heading");
+  let line = document.querySelector<HTMLElement>(".conversation-context .context-sheet-where");
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find((item) => item.name === selectedSession) : undefined;
+  const where = progressSheetOpen() ? contextSheetWhere({ projectDir: session?.project_dir, supervisor: session?.supervisor, host: machine?.label }) : "";
+  if (!where || !heading) { line?.remove(); return; }
+  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; heading.after(line); }
+  if (line.textContent !== where) line.textContent = where;
+}
 /** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
 let sheetFocus: HTMLElement | undefined;
 /** The same control's redraw-proof key (cas-a5c6 QA F03). */
 let sheetFocusKey: string | undefined;
 function applyAttentionSheet(): void {
+  syncProgressSheetWhere();
   applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), contextSheetOpen(), progressSheetOpen() ? "progress" : "attention");
   const fleetEntry = document.querySelector<HTMLButtonElement>("#conversation-fleet");
   fleetEntry?.setAttribute("aria-expanded", String(progressSheetOpen()));
@@ -4277,7 +4302,7 @@ function attentionOutage(): { readonly text: string; readonly word: string } | u
       };
     });
   if (!down.length) return undefined;
-  return { text: `Not all clear. ${down.map((item) => item.text).join("; ")}.`, word: down.every((item) => item.phase === UNSTEADY) ? UNSTEADY : down.every((item) => item.fatal) ? "Unreachable" : "Reconnecting" };
+  return { text: `Not all clear. ${down.map((item) => item.text).join("; ")}.`, word: down.every((item) => item.phase === UNSTEADY) ? UNSTEADY : down.every((item) => item.fatal) ? BROWSER_UNSUPPORTED : "Reconnecting" };
 }
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {
@@ -4482,8 +4507,12 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (at < 0) return;
     const alive = (key: string) => container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(key)}"]`);
     const neighbour = priorTriggers.slice(at + 1).map(alive).find(Boolean);
-    if (neighbour) { neighbour.focus({ preventScroll: false }); return; }
     const result = container.querySelector<HTMLElement>('[data-fleet-focus="result"]');
+    // cas-d043 G06: focus moves on to the next row, and the result line
+    // ("swift-lark-3 stopped.") is brought into view too, instead of sitting
+    // above the fold whenever another row follows.
+    // The focused row is scrolled to last, so it stays in sight when both can't be.
+    if (neighbour) { neighbour.focus({ preventScroll: false }); result?.scrollIntoView({ block: "nearest" }); neighbour.scrollIntoView({ block: "nearest" }); return; }
     if (result) { result.focus({ preventScroll: false }); return; }
     container.tabIndex = -1;
     container.focus({ preventScroll: false });

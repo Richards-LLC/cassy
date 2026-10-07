@@ -118,4 +118,16 @@ describe("responding attaches during event recovery (cas-49cc)", () => {
     ])).toBe(speaking);
     expect(machineConnection(retrying, [{ attach: speaking, wasLive: true, responding: false }])).toBe(retrying);
   });
+  it("keeps a live machine's footer Live while an exiting peer retries and another conversation answers (cas-d043 H09)", () => {
+    const live = machine("live");
+    const speaking = attach("live");
+    expect(machineConnection(live, [
+      { attach: speaking, wasLive: true, responding: true },
+      { attach: attach("failed"), wasLive: true },
+    ])).toBe(live);
+    // Nothing answering: the dropped session still counts against the machine.
+    expect(machineConnection(live, [{ attach: speaking, wasLive: true }, { attach: attach("failed"), wasLive: true }])?.phase).toBe("backoff");
+    // A failure retrying cannot fix still counts, answering or not.
+    expect(machineConnection(live, [{ attach: speaking, wasLive: true, responding: true }, { attach: attach("failed", { fatal: true }), wasLive: true }])?.phase).toBe("failed");
+  });
 });

@@ -315,6 +315,10 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(announcer).toHaveText("swift-lark-3 stopped.");
     await expect(row("swift-lark-3")).toHaveCount(0);
     await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeFocused();
+    // cas-d043 G06: with a row following, the result line is in view as well.
+    await expect(page.locator(".conversation-context .fleet-ops-result")).toHaveText("swift-lark-3 stopped.");
+    await expect(page.locator(".conversation-context .fleet-ops-result")).toBeInViewport();
+    await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeInViewport();
   });
 
   await journey.stage("A pairing without factory:manage sees Stop disabled and where to add it", async () => {

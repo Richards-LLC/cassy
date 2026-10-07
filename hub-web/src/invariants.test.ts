@@ -1030,7 +1030,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // transport alarm resolves itself once the socket is live again.
     expect(source).toContain('conversationStatusLabel(machine.id, session.name)');
     // The header and the empty thread read one helper (cas-010f).
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(machineId, session), machineId)');
+    expect(source).toContain('fleetConnectionLabel(conversationStatusState(machineId, session), machineId)');
+    expect(source).toContain('  return conversationConnection(machineId, session);');
     expect(source).toContain('const label = conversationHeaderLabel(selectedMachineId, selectedSession);');
     expect(source).toContain('connection: () => conversationHeaderLabel(threadMachineId, threadSession),');
     // The empty thread waits for this session's first page, requested or not yet (cas-010f).

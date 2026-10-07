@@ -1840,6 +1840,12 @@ dialog form > *,
 /* The thread's own slot beside the hidden pane host (cas-0546). */
 .conversation-mount { min-height: 0; min-width: 0; }
 .conversation-pane-slot .conversation-thread-slot { height: 100%; min-height: 0; }
+/* cas-d043 G14: in a conversation the outage banner takes its place above the
+   thread rather than lying over its top, where it cut the "Today" divider in
+   half and hid "No earlier history". The thread gives up the banner's height. */
+.conversation-pane-slot .pane-grid:has(> .terminal-disconnected-banner) { display: flex; flex-direction: column; }
+.conversation-pane-slot .pane-grid > .terminal-disconnected-banner { position: relative; inset: auto; flex: none; margin: var(--space-2) var(--space-2) 0; }
+.conversation-pane-slot .pane-grid:has(> .terminal-disconnected-banner) > :is(.conversation-thread-slot, .conversation-early) { flex: 1 1 auto; height: auto; min-height: 0; }
 
 /* ---- Pebble thread (cas-d167) --------------------------------------------
  * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:
@@ -2353,7 +2359,11 @@ button.chip:disabled { cursor: default; }
   #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
   #conversation-back .back-glyph { font: var(--weight-regular) 30px/1 var(--font-ui); }
   #conversation-back .back-label { display: none; } /* aria-label keeps the full name */
-  .conversation-identity { grid-column: 2; grid-row: 1; gap: 10px; }
+  /* cas-d043 G01: the identity takes its own full-width row beneath the back
+     link and the actions, always (cas-97d58 F07 did it only with the
+     attention chip). Beside Raw output and Interrupt it had about 150px, so a
+     plain "Atlas" read "A… · Reconnecting" and "Build Server" "Build Se…". */
+  .conversation-identity { grid-column: 1 / -1; grid-row: 2; gap: 10px; padding: 2px var(--space-1) 2px 40px; }
   .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
   /* The actions always take the last column, whichever others show. */
   .conversation-header-actions { grid-column: -2 / -1; grid-row: 1; gap: 4px; margin: 0; }
@@ -2367,12 +2377,6 @@ button.chip:disabled { cursor: default; }
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */
   .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
-  /* cas-97d58 F07: with the attention chip, Raw output and Interrupt sharing
-     the row, the identity was squeezed to "Accou…" over "A… · Live". Then it
-     takes its own full-width row, so the title and the machine line read
-     whole; the one-row header (cas-1776) stays whenever there is room. */
-  .conversation-heading:has(#conversation-attention:not([hidden])) .conversation-identity { grid-column: 1 / -1; grid-row: 2; padding: 2px var(--space-1) 2px 40px; }
-
   #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
   #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
@@ -2420,7 +2424,12 @@ button.chip:disabled { cursor: default; }
   /* cas-8526: off the short landscape header, not out of its spoken name or
      its connection status. */
   .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
-  .conversation-identity { gap: var(--space-2); }
+  /* With the machine line hidden the title alone fits beside the actions, so
+     a short screen (a phone with its keyboard up) keeps the one-row header
+     and the thread keeps its room (cas-d043 G01). The attention chip still
+     takes the row, so the identity stays beneath it then. */
+  .conversation-identity { gap: var(--space-2); grid-column: 2; grid-row: 1; padding: 0; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) .conversation-identity { grid-column: 1 / -1; grid-row: 2; padding: 0 var(--space-1) 0 40px; }
   .conversation-composer { padding-top: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
   .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); padding-top: 10px; padding-bottom: 10px; }
   .conversation-composer .composer-clip { width: var(--rail-item-min); height: var(--rail-item-min); }
@@ -2801,6 +2810,9 @@ button.chip:disabled { cursor: default; }
 
 /* S6: the phone enters its own fleet from the conversation, then takes one action. */
 #conversation-fleet { display: none; }
+/* The desktop rail sits beside the header that names the machine; the phone sheet covers it (cas-d043 G01). */
+.context-sheet-where { display: none; }
+.fleet-sheet-open > .conversation-context .context-sheet-where { display: block; margin: 0 0 var(--space-3); font: var(--weight-regular) var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-mid); overflow-wrap: anywhere; }
 .fleet-action-sheet { color: var(--text-hi); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   #conversation-fleet { display: flex; align-items: center; justify-content: center; min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font-size: var(--fs-lg); }

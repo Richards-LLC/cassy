@@ -44,6 +44,15 @@ describe('paired machine footer after authentication loss (cas-f698)', () => {
     expect(footerState([atlas, retrying])).toBe(CANT_REACH_RETRYING);
   });
 
+  it('says the browser blocks or cannot connect, not "Can\'t reach" (cas-d043 G04)', () => {
+    const blocked = { ...atlas, connection: 'Blocked by browser', everConnected: false, connectionState: { phase: 'backoff' as const, degraded: false, networkAccessHelp: 'Allow Local network access' } };
+    expect(footerState([blocked])).toBe('Blocked by browser');
+    const unsupported = { ...atlas, connection: "Browser can't connect", connectionState: { phase: 'failed' as const, degraded: false, fatal: true } };
+    expect(footerState([unsupported])).toBe("Browser can't connect");
+    expect(footerState([unsupported, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe("Browser can't connect to Atlas");
+    expect(footerState([blocked, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Browser is blocking Atlas');
+  });
+
   it('names the machine that needs pairing beside a connected one (cas-0739)', () => {
     expect(footerState([atlas, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Needs pairing: Atlas');
   });

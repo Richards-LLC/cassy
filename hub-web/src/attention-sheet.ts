@@ -34,7 +34,8 @@ export function applySheetSemantics(shell: HTMLElement | null, modal: boolean, s
   if (modal) {
     rail.setAttribute("role", "dialog");
     rail.setAttribute("aria-modal", "true");
-    rail.setAttribute("aria-label", section === "progress" ? "Tasks & progress" : LABEL_OPEN);
+    const where = rail.querySelector(".context-sheet-where")?.textContent?.trim();
+    rail.setAttribute("aria-label", section === "progress" ? (where ? `Tasks & progress, ${where}` : "Tasks & progress") : LABEL_OPEN);
   } else {
     rail.removeAttribute("role");
     rail.removeAttribute("aria-modal");

@@ -7,6 +7,95 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.48.2] - 2026-10-07
+
+### Fixed — Claude worker safety guards
+
+- Claude factory workers now always run with Cassy's hooks, and so with its
+  safety guards: the capped cargo runner, worker-memory admission, and the
+  Slack, publication and browser guards. Before this release, every Claude
+  worker ran with none of them. The launcher sets `IS_DEMO=true`, which skips
+  Claude Code's workspace trust dialog without trusting the workspace, and
+  Claude Code runs no hooks (SessionStart or PreToolUse, from any settings
+  source) in an untrusted workspace.
+- Before a Claude agent starts, Cassy now records trust for its working
+  directory in that agent's Claude config (`$CLAUDE_CONFIG_DIR/.claude.json`,
+  or `~/.claude.json`). The merge writes only
+  `projects["<cwd>"].hasTrustDialogAccepted = true` and keeps every other
+  value. It runs under an exclusive `.claude.json.cas-lock`, through a temp
+  file, fsync and rename that keep the file's mode and any symlink, then reads
+  the file back and retries once if a live Claude session rewrote it. A config
+  that is empty, does not parse, or is not a JSON object is never rewritten;
+  the launch is refused instead. Rewrites re-sort object keys; values are
+  unchanged.
+- A factory agent's SessionStart hook now writes a launch canary at
+  `.cas/factory/hook-canary/<agent>.json`. Spawn, respawn and recycle
+  verification kill a Claude worker whose canary has not appeared within 60
+  seconds of its launch, mark it crashed and report why. A canary left by an
+  earlier worker of the same name never counts. Codex workers are not held to
+  the canary; their trust was already recorded before spawn.
+- After upgrading, respawn every running Claude worker. Hooks start denying
+  what those workers were never denied before: raw `cargo`, `&` background
+  jobs under worker-memory admission, non-Violet Slack writes, publication and
+  unfiltered browser runs.
+
+### Fixed — Commander
+
+- With Commander open in two tabs, a tab no longer says "pairing was revoked"
+  after the other tab renews this browser's credential. When two requests
+  left with the old credential and were both refused, only the one that
+  adopted the new credential retried; the other found nothing left to adopt
+  and reported the pairing revoked. A refused request now retries whenever
+  the machine's credential differs from the one it signed with. A refusal of
+  the current credential still reads as a revoked pairing.
+- On a phone, the conversation header shows the machine's codename whole
+  beside the whole machine name, or steps it aside, instead of a cut stub such
+  as "patient…". A stepped-aside codename is still in the line's title and
+  still read by screen readers. Two pixels of slack on every fit test stop a
+  fraction of a pixel of overflow from drawing an ellipsis.
+
+### Fixed — messages between sessions
+
+- A message that wakes a Claude worker or supervisor now arrives in the turn
+  that wake starts. With Claude teams delivery, the daemon's transport claim
+  hid the message from the turn-start hook and from `inbox_poll`, while Claude
+  Code held its own copy back until the next turn boundary, so the woken
+  session read "see inbox", found its inbox empty and got the body a turn
+  later. The turn-start hook now reads `CAS wake: message N` from the
+  submitted prompt and shows that message, if it is addressed to this
+  recipient, over the transport claim. Ordinary turns and inbox polls still
+  skip claimed messages.
+- `message_status` reports a `recipient_receipt` line that tells a body
+  rendered into the recipient's turn from one the transport only claimed.
+- Without a hook, a woken session can still read the message: `inbox_poll`
+  with `notification_id=N` returns that claimed message to its recipient, and
+  the wake text names the call.
+
+### Fixed — release and factory tooling
+
+- The close gate's and QA dispatch's "journeys:" reason now comes from the
+  journey selector and catalog committed at the delivered head, as
+  journey-eval's does. It used to run the store checkout's
+  `scripts/journeys-for-diff.py` on its working tree, so a checkout on an
+  older main could name a different journey set than journey-eval selected at
+  the tip. The working tree serves only when no delivered head is known, and
+  a head without a journey catalog names no journeys.
+- `scripts/worker-memory.py --shell-command` refuses a command that puts a job
+  in the background with a bare `&`, and says to run the suite in the
+  foreground of a persistent session with a log. Admission ends the command's
+  whole process group when its shell returns, which cut down the suite's
+  receipt launcher while a detached Playwright runner lived on unreported.
+  `&&`, `>&`, `&>`, `|&` and quoted text are unaffected.
+- The hub test fixture's cleanup waits for the hub to exit (a pidfd on Linux)
+  for up to 15 seconds, then kills the hub process group and waits up to 10
+  seconds more. It used to wait a fixed half second and escalate only while
+  the hub held its lock, so a slow graceful shutdown failed the reap test
+  under load. The test now asserts at once that no hub remains.
+- The worker-memory concurrent-admission tests allow 20 seconds
+  (`CAS_TEST_SPAWN_DEADLINE_SECS`) for a counted command to start instead of
+  2. Two seconds missed by 7 ms on a loaded host; a serialized admission still
+  fails the test.
+
 ## [3.48.1] - 2026-10-07
 
 ### Fixed — Commander sends

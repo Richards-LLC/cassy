@@ -94,7 +94,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
         "task_id",
         "message with merge_request=true: the parked task; remind: bind the reminder to this task.",
     ),
-    ("notification_id", "message_ack / message_status: the notification id."),
+    ("notification_id", "message_ack / message_status: the notification id. inbox_poll: read that message even if its transport still holds it."),
     ("limit", "inbox_poll: maximum rows to return."),
     ("name", "register / session_start: agent name."),
     ("agent_type", "register / session_start: primary, sub_agent, worker or ci."),

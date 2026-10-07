@@ -3,8 +3,11 @@ use super::{
     finish_worker_config,
 };
 use crate::Effort;
+use crate::Result;
+use crate::error::Error;
 use crate::harness::HarnessCapabilities;
 use crate::pty::PtyConfig;
+use std::path::Path;
 
 pub(crate) static CLAUDE: Claude = Claude;
 
@@ -70,6 +73,30 @@ impl Backend for Claude {
         );
         finish_supervisor_config(&mut config, self.name(), launch.worker_names);
         config
+    }
+
+    /// cas-0f5b: Claude Code runs no hooks in an untrusted workspace, and the
+    /// factory's IS_DEMO launch skips the trust dialog without trusting it, so
+    /// every Claude agent ran with no CAS guard. Record the trust for this cwd
+    /// in the agent's own Claude config before it starts, or refuse to start.
+    /// The launch canary (SessionStart marker) still proves hooks run.
+    fn prepare_workdir(&self, cwd: &Path, config_dir: Option<&str>) -> Result<()> {
+        let config = cas_pty::claude_global_config_path(config_dir).ok_or_else(|| {
+            Error::pty(
+                "refusing to launch Claude: no CLAUDE_CONFIG_DIR or HOME to record workspace trust in",
+            )
+        })?;
+        match cas_pty::ensure_claude_project_trusted_in(&config, cwd) {
+            Ok(cas_pty::ClaudeTrustOutcome::Added(_) | cas_pty::ClaudeTrustOutcome::AlreadyPresent) => Ok(()),
+            Ok(cas_pty::ClaudeTrustOutcome::Skipped(reason)) => Err(Error::pty(format!(
+                "refusing to launch Claude before its workspace trust is recorded: {reason}"
+            ))),
+            Err(error) => Err(Error::pty(format!(
+                "refusing to launch Claude: could not record workspace trust for {} in {}: {error}",
+                cwd.display(),
+                config.display()
+            ))),
+        }
     }
 
     fn turn_cancel_bytes(&self) -> &'static [u8] {

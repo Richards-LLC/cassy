@@ -675,6 +675,15 @@ describe("fitMachineLine (cas-766c)", () => {
     fitMachineLine(short, 120);
     expect(state(short)).toEqual(["os-dropped"]);
   });
+  it("on the phone header shows the codename whole or not at all (cas-d043 QA round 1)", () => {
+    // 120px machine + 18px separator + 300px codename does not fit 200: aside, though 8ch would fit.
+    const where = line({ machine: 160, machineNoOs: 120, codename: 300 });
+    fitMachineLine(where, 200, true);
+    expect(state(where)).toEqual(["os-dropped", "machine-long", "codename-squeezed"]);
+    const fits = line({ machine: 160, machineNoOs: 120, codename: 50 });
+    fitMachineLine(fits, 200, true);
+    expect(state(fits)).toEqual(["os-dropped", "machine-long"]);
+  });
   it("hides the codename, not the machine, in the stylesheet, header and empty card alike", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
     // cas-8526: the codename steps aside from sight only; it is still heard.

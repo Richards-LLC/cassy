@@ -178,6 +178,31 @@ def run(command, env=None, directory=None):
                 signal.signal(sig, handler)
 
 
+BACKGROUND_REFUSAL = (
+    'a background job (&) in an admitted suite command is stopped when the command '
+    'returns: its receipt launcher dies while a detached native runner can live on '
+    'unreported (cas-04ebf). Run the suite in the foreground of a persistent session '
+    'with its output redirected to a log (Codex: exec and yield the session; Claude '
+    'Code: run_in_background), then read the log.')
+
+
+def background_job(shell_command):
+    """Whether a literal shell command puts any job in the background.
+
+    Only a bare `&` token is a background operator: `&&`, `>&`, `&>`, `&>>`
+    and `|&` lex as their own tokens, and quoted text is never an operator.
+    A command the lexer cannot parse counts when any bare `&` appears in it,
+    so a quoting error never hides one.
+    """
+    try:
+        lexer = shlex.shlex(shell_command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ''
+        return '&' in list(lexer)
+    except ValueError:
+        return '&' in shell_command.replace('&&', '').replace('>&', '').replace('&>', '').replace('|&', '')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--shell-command', help='literal hook command; classify before running bash -c')
@@ -189,6 +214,11 @@ def main():
         parser.error('--shell-command cannot be combined with another command')
     if not command:
         parser.error('a command is required after --')
+    # cas-04ebf: run() owns the command's whole process group and ends it when
+    # the shell returns, so a backgrounded suite would be cut down mid-run.
+    if args.shell_command is not None and background_job(args.shell_command):
+        print('worker memory admission: ' + BACKGROUND_REFUSAL, file=sys.stderr)
+        return 2
     return run(command)
 
 

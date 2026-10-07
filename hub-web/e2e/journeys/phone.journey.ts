@@ -250,10 +250,36 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       await expect(page.locator(".conversation-identity h1")).toHaveText(project);
       await expectHeaderKeepsMachine(machine, codename);
       // cas-d043 G01 (QA round 1): on its own header row, each of these
-      // machine names reads whole at 390, its OS word aside first.
-      const name = machine.split(" · ")[0]!;
-      expect(await page.locator(".conversation-identity .host-machine").evaluate((host) => host.scrollWidth <= host.clientWidth), `${name} is whole`).toBe(true);
-      expect(await page.locator(".conversation-identity .host-machine").evaluate((host) => (host as HTMLElement).innerText)).toContain(name);
+      // machine names is drawn whole at 390, in light and dark: the laid-out
+      // name ends inside every box that clips it (the machine span and the
+      // host line), and the codename is either aside or whole up to its own
+      // ellipsis, never beside a cut machine.
+      for (const scheme of ["light", "dark"] as const) {
+        await page.emulateMedia({ colorScheme: scheme });
+        await expect(page.locator("html")).toHaveAttribute("data-scheme", scheme);
+        const drawn = await page.locator(".conversation-identity .host-where").evaluate((line) => {
+          const host = line.querySelector<HTMLElement>(".host-machine")!;
+          const text = [...host.childNodes].find((node) => node.nodeType === Node.TEXT_NODE)!;
+          const range = document.createRange(); range.selectNodeContents(text);
+          const name = range.getBoundingClientRect();
+          const clips = [host, line, line.closest<HTMLElement>(".conversation-host")!].map((box) => box.getBoundingClientRect().right);
+          const codename = line.querySelector<HTMLElement>(".codename");
+          const codenameShown = codename !== null && codename.getBoundingClientRect().width > 1;
+          let codenameWhole = true;
+          if (codenameShown) {
+            const words = document.createRange(); words.selectNodeContents(codename!);
+            codenameWhole = words.getBoundingClientRect().right <= Math.min(codename!.getBoundingClientRect().right, ...clips.slice(1)) && codename!.scrollWidth <= codename!.clientWidth;
+          }
+          return { text: text.textContent ?? "", nameRight: name.right, clipRight: Math.min(...clips), hostCut: host.scrollWidth > host.clientWidth, codenameShown, codenameWhole };
+        });
+        const name = machine.split(" · ")[0]!;
+        expect(drawn.text, `${name} is the machine's text`).toBe(name);
+        // Any overflow, even a fraction of a pixel, swaps the last glyphs for "…".
+        expect(drawn.nameRight, `${name} is drawn whole at 390 in ${scheme}`).toBeLessThanOrEqual(drawn.clipRight);
+        expect(drawn.hostCut, `${name} has no ellipsis in ${scheme}`).toBe(false);
+        expect(drawn.codenameWhole, `${codename} is whole or aside beside ${name} in ${scheme}`).toBe(true);
+      }
+      await page.emulateMedia({ colorScheme: "light" });
       // These sessions have not written yet, so the empty card names them too.
       await expect(page.locator(".thread .empty .said")).toBeVisible();
       await expectCardKeepsMachine(machine, codename);

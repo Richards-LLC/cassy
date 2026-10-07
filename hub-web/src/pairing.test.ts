@@ -912,3 +912,14 @@ describe("wire-v1 reverse pairing", () => {
     expect(persisted).toHaveLength(1);
   });
 });
+
+describe("a browser's default name tells it apart (cas-d043 G10)", () => {
+  it("defaults the pairing name to the browser and its platform, not one shared name", async () => {
+    const { createPairingDraft } = await import("./pairing-draft");
+    const { browserLabel } = await import("./browser-label");
+    expect(createPairingDraft("https://commander.example").deviceLabel).toBe(browserLabel(navigator.userAgent));
+    expect(createPairingDraft("https://commander.example").deviceLabel).not.toBe("Cassy Cloud browser");
+    expect(browserLabel("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")).toBe("Chrome on Linux");
+    expect(browserLabel("Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:131.0) Gecko/20100101 Firefox/131.0")).toBe("Firefox on Mac");
+  });
+});

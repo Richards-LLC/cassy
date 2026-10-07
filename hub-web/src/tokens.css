@@ -58,6 +58,7 @@
   --rail-item-min: 44px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
+  --outage-banner-space: 0px;
   --attention-payload-max-height: 180px;
   --attention-motion-duration: 200ms;
   --motion-easing: cubic-bezier(0.2, 0, 0, 1);
@@ -179,6 +180,7 @@
     --rail-item-min: 44px;
     --browser-notice-height: 32px;
     --keyboard-viewport-height: 100dvh;
+    --outage-banner-space: 0px;
     --attention-payload-max-height: 180px;
     --attention-motion-duration: 200ms;
     --motion-easing: cubic-bezier(0.2, 0, 0, 1);
@@ -300,6 +302,7 @@ html[data-scheme="light"] {
   --rail-item-min: 44px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
+  --outage-banner-space: 0px;
   --attention-payload-max-height: 180px;
   --attention-motion-duration: 200ms;
   --motion-easing: cubic-bezier(0.2, 0, 0, 1);
@@ -420,6 +423,7 @@ html[data-scheme="dark"] {
   --rail-item-min: 44px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
+  --outage-banner-space: 0px;
   --attention-payload-max-height: 180px;
   --attention-motion-duration: 200ms;
   --motion-easing: cubic-bezier(0.2, 0, 0, 1);

@@ -325,7 +325,8 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
     if (open && gate.allowed) {
       const idle = idleWorkers(context.agents);
       const actions = idle.map((agent) => assignAction(task, agent.name));
-      if (actions.length || context.phone) wrap.append(picker(document, context, rowKey, actions, `Assign ${task.id} to`));
+      // cas-2796a F01: the task by its title too, as Focus names the current epic.
+      if (actions.length || context.phone) wrap.append(picker(document, context, rowKey, actions, `Assign ${task.id} to`, task.title ? `Task: ${String(task.title)}` : undefined));
       else {
         const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No idle worker. Add worker… starts one on this task.";
         wrap.append(none);
@@ -388,7 +389,10 @@ export function undoBar(document: Document, context: FleetOpsViewContext): HTMLE
   bar.className = "fleet-ops-undo";
   const text = document.createElement("span"); text.textContent = offer.label;
   bar.append(text, button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo()));
-  if (context.phone) appendNoticeDismiss(document, context, bar, offer);
+  // cas-2796a F03: dismissing the floating offer no longer forfeits Undo in
+  // silence: Undo stays in Tasks & progress for the rest of its window, and
+  // the × says so.
+  if (context.phone) appendNoticeDismiss(document, context, bar, offer, "Dismiss; Undo stays in Tasks & progress");
   return bar;
 }
 
@@ -408,12 +412,13 @@ export function resultBar(document: Document, context: FleetOpsViewContext): HTM
   return bar;
 }
 
-function appendNoticeDismiss(document: Document, context: FleetOpsViewContext, bar: HTMLElement, notice: FleetAction | RowNote | UndoOffer): void {
+function appendNoticeDismiss(document: Document, context: FleetOpsViewContext, bar: HTMLElement, notice: FleetAction | RowNote | UndoOffer, label = "Dismiss fleet notice"): void {
   const close = button(document, "×", "fleet-notice-dismiss", "phone-notice-dismiss", () => {
     context.state.dismissPhoneNotice(notice);
     context.on.dismissNotice?.();
   });
-  close.setAttribute("aria-label", "Dismiss fleet notice");
+  close.setAttribute("aria-label", label);
+  if (label !== "Dismiss fleet notice") close.title = label;
   close.id = "fleet-phone-notice-dismiss";
   bar.append(close);
 }

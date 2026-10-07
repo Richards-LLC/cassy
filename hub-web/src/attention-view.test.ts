@@ -270,3 +270,20 @@ describe("delivery notice Details (cas-ed87)", () => {
     expect(text).toContain(MESSAGE);
   });
 });
+
+describe("Open conversation on the conversation already open (cas-d043 G12)", () => {
+  const item = (session: string) => createAttentionItem({ id: `n-${session}`, machineId: "atlas", machineLabel: "Atlas", session, kind: "session_transport", createdAt: "2026-10-06T12:00:00Z" }, { headline: "Lost connection to the session", severity: "warning", action: "view_pane" });
+  const actions = (open?: { machineId: string; session?: string }) => {
+    const container = document.createElement("div");
+    renderAttentionPanel(container, [item("s1")], { act: vi.fn(), dismiss: vi.fn(), copy: vi.fn() }, { now: Date.parse("2026-10-06T12:01:00Z"), ...(open ? { openConversation: open } : {}) });
+    return [...container.querySelectorAll<HTMLButtonElement>(".attention-actions > button")].map((button) => button.textContent);
+  };
+  it("offers only Dismiss for an item about the open conversation", () => {
+    expect(actions({ machineId: "atlas", session: "s1" })).not.toContain("Open conversation");
+    expect(actions({ machineId: "atlas", session: "s1" })).toContain("Dismiss");
+  });
+  it("still opens another conversation", () => {
+    expect(actions({ machineId: "atlas", session: "s2" })).toContain("Open conversation");
+    expect(actions()).toContain("Open conversation");
+  });
+});

@@ -26,6 +26,13 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeVisible();
     await expect(dialog.getByText("This browser will be able to:")).toBeVisible();
     await expect(dialog.getByText("Technical details")).toBeVisible();
+    // cas-d043 G11: the dialog is named by its heading.
+    await expect(page.getByRole("dialog", { name: "Pair a machine", exact: true })).toBeVisible();
+    // cas-d043 H15: with nothing scrolled beneath it, the action bar is the
+    // sheet itself (its hairline only), never a whiter slab.
+    const bar = dialog.locator(".dialog-actions");
+    const fieldsScroll = await dialog.locator(".pair-flow").evaluate((flow) => flow.scrollHeight > flow.clientHeight + 1);
+    if (!fieldsScroll) expect(await bar.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
     await everyFieldAboveTheFold(dialog);
     // cas-d8a5 (journey F31): every value the countdown shows, from the code
     // to the machine's claim, so it can be checked to only go down.

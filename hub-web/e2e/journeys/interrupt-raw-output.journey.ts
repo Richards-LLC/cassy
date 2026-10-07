@@ -100,7 +100,21 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
 
   await journey.stage("Interrupt the supervisor from the keyboard", async () => {
     await page.getByRole("searchbox", { name: "Search conversations" }).focus();
-    await tabTo(page, interrupt);
+    // cas-d043 G02/H11: the first stop after the search skips to the
+    // conversation, so Interrupt is three keys away, not 12 Tabs; every stop
+    // on the way shows its ring.
+    await page.keyboard.press("Tab");
+    const skip = page.getByRole("button", { name: "Skip to the conversation", exact: true });
+    await expect(skip).toBeFocused();
+    await expect(skip).toBeVisible();
+    const ring = (locator: Locator) => locator.evaluate((node) => { const style = getComputedStyle(node); return style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0; });
+    expect(await ring(skip), "the skip link shows its focus ring").toBe(true);
+    await page.keyboard.press("Enter");
+    const raw = page.getByRole("button", { name: "Raw output", exact: true });
+    await expect(raw).toBeFocused();
+    expect(await ring(raw), "Raw output shows its focus ring").toBe(true);
+    expect(await tabTo(page, interrupt)).toBe(1);
+    expect(await ring(interrupt), "Interrupt shows its focus ring").toBe(true);
     await expect(interrupt).toBeFocused();
     await page.keyboard.press("Enter");
     await hub.waitFor(() => interrupts(hub).length === 1);
@@ -161,8 +175,10 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
           const box = (await action.boundingBox())!;
           expect(box.height, "a full-size target").toBeGreaterThanOrEqual(phone ? 44 : 36);
         }
-        // On a phone Raw output shows only its icon; aria-label keeps its name.
-        if (phone) await expect(raw.locator(".action-label")).toBeHidden();
+        // cas-d043 G02: with the identity on its own row, a phone has room
+        // for Raw output's word too; the bare ">_" glyph read as nothing.
+        await expect(raw.locator(".action-label")).toBeVisible();
+        await expect(raw.locator(".action-label")).toHaveText("Raw output");
         await expect(raw).toHaveAccessibleName("Raw output");
         // The two read apart in either scheme: Interrupt in the critical tone.
         const colours = await Promise.all([interrupt, raw].map((action) => action.evaluate((node) => getComputedStyle(node).color)));
@@ -188,13 +204,16 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
         if (await back.isVisible().catch(() => false)) await back.click();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
         await expect(interrupt).toBeVisible();
+        // cas-d043 G02: the header names the device in control before any take.
+        await expect(page.locator("#conversation-control")).toHaveText(" · Studio iPad in control");
+        await expect(page.locator("#conversation-control")).toBeVisible();
         await interrupt.focus();
         await page.keyboard.press("Enter");
         if (admin) {
           await expect(toast).toHaveText("Took control from Studio iPad. Interrupted the cas-src supervisor.");
           await hub.waitFor(() => interrupts(hub).length === 2);
         } else {
-          await expect(toast).toHaveText("Studio iPad is in control of this session. Interrupt works once it releases control.");
+          await expect(toast).toHaveText("Studio iPad is in control of this session. Interrupt works once it releases control, or from a pairing with administrator access, which can take over.");
           expect(interrupts(hub), "nothing interrupted while another device holds control").toHaveLength(1);
         }
         expect(hub.leaseTakes.filter((take) => take.status !== 200 || take.force).at(-1)).toMatchObject({ session: PELICAN, force: admin, status: admin ? 200 : 409 });

@@ -373,12 +373,16 @@ export class ConversationHistory {
         delete event.value.unconfirmedAt;
         delete event.value.error;
         reheld.push(current);
-      } else if (current.state !== "held" && event.value.held) {
+      } else if (current.state !== "held") {
         delete event.value.held;
-        event.value.state = current.state === "error" ? "error" : "unconfirmed";
+        // A peer's durable claim starts the same receipt clock as a local
+        // write. Observing it is not evidence that delivery failed.
+        event.value.state = current.state === "sending" && current.sentAt !== undefined && now < current.sentAt + RECEIPT_TIMEOUT_MS
+          ? "sending" : current.state === "error" ? "error" : "unconfirmed";
         event.value.error = current.error;
         event.value.sentAt = current.sentAt;
-        event.value.unconfirmedAt = now;
+        if (event.value.state === "unconfirmed") event.value.unconfirmedAt ??= now;
+        else delete event.value.unconfirmedAt;
         event.value.restored = true;
       }
     }
@@ -389,8 +393,8 @@ export class ConversationHistory {
    * Put messages kept across a reload back in the thread (cas-e7b1), each once.
    * A held message still waits: it has never left this browser, and the
    * caller queues it to go out once. One that was on the wire without a
-   * receipt cannot be known to have arrived, so it comes back "Not confirmed"
-   * (never "Sending…" or delivered) and is not sent again by itself. A
+   * receipt keeps its original confirmation clock, then becomes "Not confirmed"
+   * when that clock expires. Neither state is sent again by itself. A
    * message that was not sent stays not sent. Returns the held ones.
    */
   restorePending(sends: PendingSend[], now: number = Date.now()): PendingSend[] {
@@ -404,6 +408,8 @@ export class ConversationHistory {
       } else if (stored.state === "error") {
         value.state = "error";
         value.error = stored.error ?? "This message was not sent.";
+      } else if (stored.state === "sending" && stored.sentAt !== undefined && now < stored.sentAt + RECEIPT_TIMEOUT_MS) {
+        value.sentAt = stored.sentAt;
       } else {
         value.state = "unconfirmed";
         value.unconfirmedAt = now;
@@ -472,10 +478,10 @@ export class ConversationHistory {
       return;
     }
     const at = ConversationHistory.timestamp(message.at);
-    // cas-e7b1: a message restored as "Not confirmed" that the machine's
+    // cas-e7b1: an unsettled message restored from the journal that the machine's
     // history now shows did arrive. It becomes that row instead of a second
     // copy of the message.
-    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && event.value.state === "unconfirmed" && event.value.notificationId === undefined
+    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
       && event.value.sentAt !== undefined && event.value.target === message.target && event.value.text === message.text
       && (at === undefined || at >= event.value.sentAt - RESTORED_MATCH_WINDOW_MS));
     if (restored?.kind === "send") {
@@ -710,6 +716,10 @@ export class ConversationHistory {
     if (event?.kind !== "send" || event.value.state !== "sending" || event.value.notificationId !== undefined || event.value.sentAt === undefined) return undefined;
     const sentAt = event.value.sentAt;
     const timeout = sentAt + RECEIPT_TIMEOUT_MS;
+    // A journal projection may be on a different tab's wire. A supervisor
+    // reply here cannot prove that tab's receipt is overdue. Its durable
+    // settlement or the original claim timeout decides when Retry is safe.
+    if (event.value.restored) return timeout;
     // The grace starts when the later turn reached this browser, not at the
     // send: a turn that crosses the send must not shorten the receipt's wait.
     const arrivals = this.events.slice(index + 1).flatMap((later) => later.kind === "reply" ? [later.arrivedAt ?? sentAt] : []);
@@ -817,18 +827,42 @@ export class ConversationHistory {
   }
 
   /** Merge a durable supervisor turn in the machine's sequence, keeping its own stamp (cas-1f13). */
-  hydrateReply(reply: ConversationHistoryReply, now: number = Date.now()): void {
+  /**
+   * cas-d043 G03: a reply this browser kept (the journal) carries no machine
+   * stamp, only when it was stored. It is placed at the time the last visit
+   * showed it when known, and the machine's own stamp replaces that once the
+   * machine's history page brings it. Its stored time used to stand in for
+   * the stamp, so a reload marked yesterday's blocker "machine clock ahead"
+   * the visit never showed.
+   */
+  hydrateKeptReply(reply: ConversationHistoryReply, now: number = Date.now()): void {
+    const key = `r:${reply.notification_id}`;
+    const shown = this.arrivals.get(key);
+    if (!this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) this.keptTimes.add(reply.notification_id);
+    this.hydrateReply(shown === undefined ? reply : { ...reply, at: new Date(shown).toISOString() }, now, true);
+  }
+  /** Kept replies whose time is not yet the machine's stamp (cas-d043 G03). */
+  private readonly keptTimes = new Set<number>();
+
+  hydrateReply(reply: ConversationHistoryReply, now: number = Date.now(), kept = false): void {
     const { at, ...live } = reply;
     const stamped = ConversationHistory.timestamp(at);
+    if (!kept && stamped !== undefined && this.keptTimes.delete(reply.notification_id)) {
+      const existing = this.events.find((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id);
+      if (existing) existing.at = stamped;
+    }
     if (this.foreign(reply.session)) {
       this.keepEarlier({ kind: "reply", value: { ...live, reply_to: live.reply_to ?? null, kind: live.kind ?? "answer", attachments: live.attachments ?? [] }, at: stamped, session: reply.session }, reply.session!);
       return;
     }
-    this.observeStamp(stamped, now);
+    // A kept reply's time is not the machine's stamp, so it measures nothing
+    // about the machine's clock (cas-d043 G03).
+    if (!kept) this.observeStamp(stamped, now);
     // cas-9e33: a turn a visit saw arrive live keeps the mark that visit gave it.
     const marked = this.liveMarks.get(`r:${reply.notification_id}`);
     const shownAt = this.arrivals.get(`r:${reply.notification_id}`);
-    this.reply(live, stamped, reply.session, shownAt, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable", marked === true, marked !== undefined);
+    const arrival = kept && shownAt !== undefined ? Math.min(shownAt, now) : this.arrivalFor(`r:${reply.notification_id}`, stamped, now);
+    this.reply(live, stamped, reply.session, shownAt, arrival, "durable", marked === true, marked !== undefined);
   }
 }
 

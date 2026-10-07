@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, type ConversationEvent } from "./conversation-history";
 import { blockerEvidence, cellTone, clockLabel, coalesceText, dayLabel, foldsAsStatus, messageBlocks, shownTimes, stampLabel, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 import type { OperatorReply, OperatorTurnKind } from "./types";
@@ -251,7 +251,9 @@ describe("thread order is stable under a machine clock ahead, a reconnect and a 
     expect(days(history, now + 60_000)).toEqual(["Today"]);
     // The future stamp shows its arrival and says the clock is ahead; the
     // live answer from the same machine says so too (F02).
-    expect(groups(history, now + 60_000)).toEqual(["supervisor 13:36 ahead", "you 13:36", "supervisor 13:37 ahead"]);
+    // cas-d043 H14: the 12:36 answer keeps its own time, not merged under
+    // the later arrival and its clock-ahead flag.
+    expect(groups(history, now + 60_000)).toEqual(["supervisor 12:36", "supervisor 13:36 ahead", "you 13:36", "supervisor 13:37 ahead"]);
   });
   it("orders a 13:41 blocker from a clock 5 minutes ahead before the 13:36 session start and shows it at 13:36", () => {
     const history = new ConversationHistory();
@@ -464,5 +466,39 @@ describe("a reload keeps each turn's time (cas-8d52, journey F11)", () => {
     second.hydrateReply({ ...reply(3, "blocker"), at: iso(at(9, 5)) } as never, at(9, 20));
     expect(shownLabels(second, at(9, 20))).toEqual(["09:02"]);
     expect(second.arrivalsRecord().skew, "a turn not seen live measures nothing").toBeUndefined();
+  });
+});
+
+describe("turns minutes apart keep their own time (cas-d043 H14)", () => {
+  it("splits a run of answers 8 minutes apart, and keeps a run a minute apart together", () => {
+    const at = new Date(2026, 9, 6, 12, 0).getTime();
+    const answer = (id: number, when: number): ConversationEvent => ({ kind: "reply", value: reply(id, "answer", `Answer ${id}`), at: when } as ConversationEvent);
+    const shown = (events: ConversationEvent[]) => threadModel(events, { now: at + 600_000 }).filter((item) => item.type === "group").map((item) => item.type === "group" ? `${item.turns.length}@${item.time}` : "");
+    expect(shown([answer(1, at), answer(2, at + 8 * 60_000)])).toEqual(["1@12:00", "1@12:08"]);
+    expect(shown([answer(1, at), answer(2, at + 60_000)])).toEqual(["2@12:01"]);
+  });
+});
+
+describe("a kept reply is marked the same before and after a reload (cas-d043 G03)", () => {
+  it("does not take the time it was stored for the machine's stamp", () => {
+    const now = Date.UTC(2026, 8, 30, 12, 0);
+    const yesterday = Date.UTC(2026, 8, 29, 17, 20);
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const marks = (history: ConversationHistory, at: number) => shownTimes(history.events, at).map((time) => time.clockAhead);
+    const blocker = { ...reply(900, "blocker", "The ledger import is red."), at: iso(yesterday), session: "S" };
+    const visit = new ConversationHistory();
+    visit.currentSession = "S";
+    visit.hydrateReply(blocker as never, now);
+    expect(marks(visit, now)).toEqual([false]);
+    // Reload: the journal restores the kept reply first, stored at 12:00 today.
+    const reload = new ConversationHistory();
+    reload.currentSession = "S";
+    reload.seedArrivals(visit.arrivalsRecord());
+    reload.hydrateKeptReply({ ...reply(900, "blocker", "The ledger import is red."), at: iso(now), session: "S" } as never, now + 60_000);
+    expect(marks(reload, now + 60_000), "before the machine answers").toEqual([false]);
+    // Then the machine's page brings its own stamp: still as the visit showed it.
+    reload.hydrateReply(blocker as never, now + 60_000);
+    expect(marks(reload, now + 60_000), "after the machine's page").toEqual([false]);
+    expect(reload.events[0]!.at).toBe(yesterday);
   });
 });

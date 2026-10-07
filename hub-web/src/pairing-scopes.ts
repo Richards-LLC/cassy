@@ -31,6 +31,8 @@ export const HUB_ADMIN_SCOPE: Scope = "hub-admin";
 
 /** What hub:admin lets a browser do, beside its box. */
 export const HUB_ADMIN_CONSENT = "See and revoke this machine's other browser installations";
+/** The rest of what hub:admin allows, under its box (cas-d043 G08). */
+export const HUB_ADMIN_NOTE = "Also lets this browser take control of a session from another device.";
 
 /** Scopes outside the default pairing that a form offers only when an invitation grants them. */
 const OPTIONAL_INVITATION_SCOPES: readonly Scope[] = [LAUNCH_SCOPE, FACTORY_OPERATE_SCOPE, FACTORY_MANAGE_SCOPE, HUB_ADMIN_SCOPE];

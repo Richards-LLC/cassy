@@ -32,6 +32,12 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
   await journey.stage("One tab sends; its confirmation is visible in both tabs", async () => {
     await Promise.all([hub.up("atlas"), other.up("atlas")]);
     await expect.poll(() => hub.sends.length + other.sends.length, { timeout: 20_000 }).toBe(1);
+    // Both tabs project the same active claim before any receipt arrives.
+    // Retry here would allow the still-running send to cross the wire twice.
+    for (const tab of [page, peer]) {
+      await expect(tab.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+      await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
+    }
     const owner = hub.sends.length ? hub : other;
     owner.deliverLatest(PELICAN);
     for (const tab of [page, peer]) {
@@ -53,8 +59,27 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
   await journey.stage("Both live tabs see a send whose receipt has not arrived", async () => {
     await journey.open(); await choose(page);
     await peer.goto(page.url()); await choose(peer);
+    for (const tab of [page, peer]) await tab.evaluate(() => {
+      const observed: number[] = [];
+      const observer = new MutationObserver(() => {
+        if (document.querySelector('.conversation-retry')) observed.push(performance.now());
+      });
+      observer.observe(document.querySelector('[role="log"]')!, { childList: true, subtree: true });
+      Object.assign(window, { peerRetryObservation: { observed, stop: () => observer.disconnect() } });
+    });
     await send(page, "Retry this same instruction");
     await expect.poll(() => hub.sends.length + other.sends.length).toBe(1);
+    for (const tab of [page, peer]) {
+      await expect(tab.getByRole("log")).toContainText("Retry this same instruction");
+      await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
+      expect(await tab.evaluate(() => {
+        const observation = (window as unknown as { peerRetryObservation: { observed: number[]; stop: () => void } }).peerRetryObservation;
+        observation.stop(); return observation.observed;
+      }), "no transient Retry before the peer's receipt deadline (cas-fb48)").toEqual([]);
+    }
+    // The receipt timeout belongs to the durable claim, including on a peer.
+    // Advance both clocks explicitly; do not wait out 15s on every repeat.
+    await Promise.all([page.clock.fastForward(15_000), peer.clock.fastForward(15_000)]);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toBeVisible({ timeout: 20_000 });
     }
@@ -139,6 +164,7 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     expect(new Set(sends.map((row) => row.client_ref)).size).toBe(2);
     await Promise.all([page.reload(), second.reload()]);
     await choose(page); await choose(second);
+    await Promise.all([page.clock.fastForward(15_000), second.clock.fastForward(15_000)]);
     await expect(page.getByRole("log")).toContainText("2 messages not confirmed");
     await expect.poll(() => [...hub.sends, ...other.sends].length).toBe(2);
     expect(errors).toEqual([]);

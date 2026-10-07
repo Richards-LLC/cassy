@@ -1,5 +1,5 @@
 import { cloudBrand, escapeHtml } from './cloud-brand';
-import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNREACHABLE, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
+import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNREACHABLE, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
 import type { FleetControlGate } from './fleet-permissions';
 import { commandTokensMarkup } from './launch-session';
 import { FACTORY_MANAGE_CAPABILITY, FACTORY_OPERATE_CAPABILITY } from './pairing-scopes';
@@ -66,7 +66,7 @@ export function fleetPermissionsMarkup(row: Pick<PairedMachineRow, 'id' | 'label
  * count, so it says so instead of "0 paired machines · Not paired"; a machine
  * never live in this visit is "Connecting…", not "Reconnecting" (journey F14).
  */
-export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number, build: string, loading = false): string {
+export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number | undefined, build: string, loading = false): string {
   const connected = rows.filter(row => row.connected).length;
   const machine = loading ? 'Paired machines' : rows.length === 1 ? rows[0].label : `${rows.length} paired machines`;
   const labels = rows.map(row => row.connectionState
@@ -76,7 +76,10 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // another machine's first retry look like a reconnect (cas-f698).
   // Needs pairing and Unreachable (a failure that will not retry) never
   // reconnect on their own, so neither may make the footer say Reconnecting.
-  const retryable = rows.filter((_row, index) => labels[index] !== NEEDS_PAIRING && labels[index] !== UNREACHABLE);
+  const retryable = rows.filter((_row, index) => labels[index] !== NEEDS_PAIRING && labels[index] !== UNREACHABLE && labels[index] !== BROWSER_UNSUPPORTED);
+  // cas-d043 G04: a browser permission blocking every retrying machine is
+  // the browser's doing; the footer says so rather than "Can't reach".
+  const blocked = retryable.length > 0 && retryable.every(row => labels[rows.indexOf(row)] === BROWSER_BLOCKED);
   const unreachable = retryable.length > 0 && retryable.every(row => row.connection === CANT_REACH_RETRYING);
   // cas-a6f0 (journey F8): machines still live with heartbeats unanswered
   // are unsteady, as the header and the row say, not reconnecting.
@@ -91,12 +94,13 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
     : !rows.length ? 'Not paired'
     : !retryable.length ? labels[0]
     : unsteady ? UNSTEADY
+    : blocked ? BROWSER_BLOCKED
     : retryable.some(row => row.everConnected) ? 'Reconnecting'
     : unreachable ? CANT_REACH_RETRYING : 'Connecting…';
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}`}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
 }
 
 /** "Shed NAS · Linux" reads "Shed NAS" where room is short. */
@@ -107,6 +111,8 @@ function shortMachineName(label: string): string {
 /** A machine's connection in the footer's words, put before its name: "Can't reach", "Reconnecting to", "Needs pairing:" (cas-0739). */
 function outageWords(connection: string): string {
   if (connection === CANT_REACH_RETRYING || connection === UNREACHABLE) return "Can't reach";
+  if (connection === BROWSER_BLOCKED) return 'Browser is blocking';
+  if (connection === BROWSER_UNSUPPORTED) return "Browser can't connect to";
   if (connection === NEEDS_PAIRING) return 'Needs pairing:';
   if (connection === UNSTEADY) return 'Unsteady:';
   if (connection === 'Reconnecting') return 'Reconnecting to';

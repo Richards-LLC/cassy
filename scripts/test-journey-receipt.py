@@ -131,7 +131,33 @@ print(json.dumps({'journeys': rows}))
     def test_selector_error_and_unreadable_base_fail_closed(self):
         self.assertNotEqual(self.plan('--affected', '0' * 40).returncode, 0)
         (self.repo / 'scripts/journeys-for-diff.py').write_text('raise SystemExit(7)\n')
+        self.git('add', '.')
+        self.git('commit', '-q', '-m', 'broken committed selector')
         self.assertNotEqual(self.plan('--affected', self.base).returncode, 0)
+
+    def test_selector_is_bound_to_reviewed_head_across_checkout(self):
+        selector = self.repo / 'scripts/journeys-for-diff.py'
+        selector.write_text(selector.read_text().replace('HUB-J7', 'HUB-J12'))
+        (self.repo / 'hub-web/src').mkdir()
+        (self.repo / 'hub-web/src/ask.ts').write_text('export const ask = 1')
+        self.git('add', '.')
+        self.git('commit', '-q', '-m', 'reviewed selector and source')
+        head = self.git('rev-parse', 'HEAD')
+        expected = receipt.selection(self.repo, self.base, head, False)
+        self.assertEqual([row['id'] for row in expected], ['HUB-J12'])
+        self.git('checkout', '-q', self.base)
+        self.assertEqual(receipt.selection(self.repo, self.base, head, False), expected)
+        self.assertEqual(receipt.selection(self.repo, self.base, head, True), expected)
+        selector.write_text('raise SystemExit(7)\n')
+        self.assertEqual(receipt.selection(self.repo, self.base, head, False), expected)
+
+    def test_missing_reviewed_selector_cannot_use_checkout_copy(self):
+        self.git('rm', 'scripts/journeys-for-diff.py')
+        self.git('commit', '-q', '-m', 'remove reviewed selector')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-q', self.base)
+        with self.assertRaises(subprocess.CalledProcessError):
+            receipt.selection(self.repo, self.base, head, False)
 
     def test_empty_wrapper_no_browser_and_archives_previous_receipt(self):
         # No node_modules exists. Both default and explicit empty selections

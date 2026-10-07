@@ -1,4 +1,5 @@
 import { MAX_PENDING_SENDS, validPendingSend, type PendingSend } from "./conversation-store";
+import { RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import type { MessageQueued, OperatorReply, StoredMachine } from "./types";
 
 /** Credentials rotate; this installation/conversation identity does not. */
@@ -303,6 +304,8 @@ export class CommanderJournal {
             const row = validSendRow(get.result) ? get.result : undefined;
             if (row?.receipt) { result = "delivered"; return; }
             if (!row?.send || row.send.state === "held" || row.revision !== this.observed.get(key)) return;
+            // Even a stale Retry control cannot reopen a peer's active claim.
+            if (row.send.state === "sending" && row.send.sentAt !== undefined && this.now() < row.send.sentAt + RECEIPT_TIMEOUT_MS) return;
             if (row.send.target !== expected.target || row.send.text !== expected.text || row.send.replyTo !== expected.replyTo) return;
             const send = { ...row.send, state: "held" as const, at: this.now(), heldAt: this.now(), sentAt: undefined, error: undefined };
             revision = row.revision + 1;

@@ -6281,6 +6281,59 @@ async fn inbox_poll_claims_a_transport_delivered_row_after_a_declined_wake() {
     );
 }
 
+/// cas-ad92: the hook-free path. A Claude teams handoff keeps the daemon's
+/// `transport_claimed` receipt, so a plain poll after the pointer wake comes
+/// back empty while Claude Code holds the teams copy back. The wake names the
+/// id; `inbox_poll notification_id=<id>` from the recipient returns the body.
+#[tokio::test]
+async fn inbox_poll_named_by_a_wake_returns_a_transport_claimed_row() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("registered-worker")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-worker-id");
+    env.register_worker_with_id("registered-worker-id", "registered-worker", None);
+    let queue = env.prompt_queue();
+    let id = queue
+        .enqueue("supervisor", "registered-worker", "claimed body for the woken worker")
+        .expect("enqueue");
+    let theirs = queue
+        .enqueue("supervisor", "other-worker", "another worker's body")
+        .expect("enqueue");
+    for (row, recipient) in [(id, "registered-worker"), (theirs, "other-worker")] {
+        assert!(queue.claim_recipient_transport(row, recipient).expect("claim"));
+        queue
+            .record_recipient_surfaced(row, recipient, cas_store::SurfacingSource::TransportClaimed)
+            .expect("post-handoff receipt");
+        queue.mark_transport_delivered(row).expect("delivered");
+    }
+
+    let plain = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("plain poll");
+    assert_eq!(get_text(&plain), "No unread messages for registered-worker");
+
+    let mut foreign = coord_req("inbox_poll");
+    foreign.notification_id = Some(theirs);
+    let foreign = env.service.coordination(Parameters(foreign)).await.expect("foreign poll");
+    assert!(!get_text(&foreign).contains("another worker's body"), "{}", get_text(&foreign));
+
+    let mut named = coord_req("inbox_poll");
+    named.notification_id = Some(id);
+    let named = env.service.coordination(Parameters(named)).await.expect("named poll");
+    assert!(
+        get_text(&named).contains("claimed body for the woken worker"),
+        "the poll the wake names must hand over the body: {}",
+        get_text(&named)
+    );
+    let report = queue.message_delivery_report(id).expect("report").expect("row");
+    assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::InboxPoll));
+    assert!(report.confirmed_at.is_none(), "message_ack stays the terminal mark");
+}
+
 /// GH #888: an old parked lifecycle relay must not be redelivered after a
 /// later close decision advances the task's merge boundary.
 #[tokio::test]

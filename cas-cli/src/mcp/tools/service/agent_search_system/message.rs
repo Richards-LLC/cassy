@@ -2587,7 +2587,28 @@ impl CasService {
                 .as_ref()
                 .is_some_and(|agent| agent.role == cas_types::AgentRole::Supervisor),
         );
+        // cas-ad92: a pointer wake names its notification id. Hand that row
+        // over even while the daemon's transport still holds it claimed:
+        // Claude Code shows the teams copy only at the next turn boundary,
+        // and without hooks (cas-0f5b) this poll is the woken agent's only
+        // way to read the body now. Only rows addressed to this caller match.
+        let named: Vec<i64> = req.notification_id.into_iter().collect();
         let mut messages: Vec<cas_store::QueuedPrompt> = Vec::new();
+        for alias in aliases.iter().filter(|_| !named.is_empty()) {
+            for row in queue
+                .poll_named_for_recipient(alias, factory_session.as_deref(), &named)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to poll recipient inbox: {error}"),
+                    )
+                })?
+            {
+                if !messages.iter().any(|existing| existing.id == row.id) {
+                    messages.push(row);
+                }
+            }
+        }
         for alias in &aliases {
             let remaining = limit.saturating_sub(messages.len());
             if remaining == 0 {
@@ -2797,7 +2818,8 @@ impl CasService {
                     continue;
                 }
                 InboxRedelivery::MarkRedelivery
-                    if inbox_row_is_stale_replay(
+                    if !named.contains(&message.id)
+                        && inbox_row_is_stale_replay(
                         message.processed_at,
                         recipient_had_delivery(
                             queue

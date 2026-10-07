@@ -433,7 +433,8 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
 pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -> String {
     match notification_id {
         Some(id) => format!(
-            "CAS wake: message {id} from {source} is in your inbox — see inbox (body not repeated here)."
+            "CAS wake: message {id} from {source} is in your inbox — see inbox: \
+             inbox_poll notification_id={id} (body not repeated here)."
         ),
         None => format!(
             "CAS wake: a message from {source} is in your inbox — see inbox (body not repeated here)."
@@ -1845,6 +1846,9 @@ mod tests {
         let wake = pointer_wake_payload("supervisor", Some(24535));
         assert!(wake.contains("24535"), "{wake}");
         assert!(wake.contains("see inbox"), "{wake}");
+        // cas-ad92: the named poll returns the row even while the transport
+        // still holds it claimed, so the wake says exactly how to read it.
+        assert!(wake.contains("inbox_poll notification_id=24535"), "{wake}");
         assert_eq!(wake.lines().count(), 1, "one line, not a second message");
 
         // An id-less wake still points at the inbox rather than claiming an id.

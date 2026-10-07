@@ -251,7 +251,7 @@ pub(crate) fn qa_evidence_close_gate_for_delivery(
     };
     let journeys = changed
         .as_deref()
-        .map(|paths| catalog_journeys_for(repo, paths))
+        .map(|paths| catalog_journeys_for(repo, Some(&head), paths))
         .unwrap_or_default();
     let mut reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
     if let Some(changed) = changed.as_deref().filter(|p| crate::qa_evidence::journeys::affects_hub(p)) {

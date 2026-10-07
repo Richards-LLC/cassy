@@ -409,8 +409,12 @@ export function fitMachineLine(line: HTMLElement | null | undefined, available: 
   if (machine.scrollWidth + gap + codename.scrollWidth <= available + 1) return;
   os?.classList.add("sr-only");
   if (machine.scrollWidth > MACHINE_KEEP_CH * ch) line.classList.add("machine-long");
-  const kept = Math.min(machine.scrollWidth, MACHINE_KEEP_CH * ch);
-  if (kept + gap + Math.min(codename.scrollWidth, CODENAME_KEEP_CH * ch) > available + 1) line.classList.add("codename-squeezed");
+  // cas-d043 QA round 1: the machine is never cut while any of the codename
+  // shows. It stays whole beside at least CODENAME_KEEP_CH of codename, or the
+  // codename steps aside and the machine has the line to itself (and only
+  // then ellipsises). Two pixels of slack absorb sub-pixel rounding, which
+  // otherwise drew "Build Server Rack Sev… · patient…" on a 390px phone.
+  if (machine.scrollWidth + gap + Math.min(codename.scrollWidth, CODENAME_KEEP_CH * ch) > available - 2) line.classList.add("codename-squeezed");
 }
 
 /** The conversation header's host line, fitted to the room beside its connection state. */

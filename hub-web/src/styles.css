@@ -1836,6 +1836,8 @@ dialog form > *,
 .conversation-identity .host-where:has(> .host-machine) { display: flex; }
 .conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }
+/* cas-d043: beside a showing codename the machine never shrinks; only the codename does. */
+.conversation-identity .host-where:not(.codename-squeezed) > .host-machine:has(~ .codename) { flex-shrink: 0; }
 .conversation-identity .host-sep { flex: none; white-space: pre; }
 .conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
 /* cas-8526: what steps aside is hidden from sight only (the .sr-only
@@ -2210,6 +2212,7 @@ button.chip:disabled { cursor: default; }
 /* cas-766c: the same order as the header's host line. */
 .thread .empty .proj2-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2.machine-long > .proj2-machine { min-width: 16ch; }
+.thread .empty .proj2:not(.codename-squeezed) > .proj2-machine:has(~ .codename) { flex-shrink: 0; }
 .thread .empty .proj2-sep { flex: none; white-space: pre; }
 .thread .empty .proj2-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }

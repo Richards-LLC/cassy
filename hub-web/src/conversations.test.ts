@@ -650,11 +650,21 @@ describe("fitMachineLine (cas-766c)", () => {
     fitMachineLine(where, 200);
     expect(state(where)).toEqual([]);
   });
-  it("drops the OS word first, then lets the codename ellipsise beside the machine", () => {
-    const where = line({ machine: 240, machineNoOs: 200, codename: 300 });
-    // Machine kept at 16ch (96px) + 18px separator + 8ch (48px) codename = 162px fits in 200.
+  it("drops the OS word first, then lets the codename ellipsise beside the whole machine", () => {
+    const where = line({ machine: 160, machineNoOs: 120, codename: 300 });
+    // The whole machine (120px) + 18px separator + 8ch (48px) codename = 186px fits in 200.
     fitMachineLine(where, 200);
     expect(state(where)).toEqual(["os-dropped", "machine-long"]);
+  });
+  it("never cuts the machine while the codename shows (cas-d043 QA round 1)", () => {
+    // 200px machine + 18 + 48 = 266px: the codename steps aside rather than cut "Build Server Rack Seven".
+    const where = line({ machine: 240, machineNoOs: 200, codename: 300 });
+    fitMachineLine(where, 200);
+    expect(state(where)).toEqual(["os-dropped", "machine-long", "codename-squeezed"]);
+    // Within two pixels of fitting is not fitting: rounding drew an ellipsis.
+    const tight = line({ machine: 160, machineNoOs: 133, codename: 300 });
+    fitMachineLine(tight, 200);
+    expect(state(tight)).toContain("codename-squeezed");
   });
   it("steps the codename aside only when the machine and 8ch of codename cannot share the line", () => {
     const where = line({ machine: 240, machineNoOs: 200, codename: 300 });

@@ -62,7 +62,8 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       const ch = parseFloat(getComputedStyle(host).fontSize) * 0.6;
       return {
         machineChars: host.getBoundingClientRect().width / ch,
-        machineCut: host.scrollWidth > host.clientWidth + 1,
+        // cas-d043 QA round 1: any overflow draws an ellipsis, so no tolerance.
+        machineCut: host.scrollWidth > host.clientWidth,
         // cas-8526: a part that steps aside is clipped to 1px, not removed,
         // so "shown" means drawn wider than that.
         osShown: os !== null && os.getBoundingClientRect().width > 1,
@@ -248,6 +249,11 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       await list.getByRole("button", { name: new RegExp(project) }).tap();
       await expect(page.locator(".conversation-identity h1")).toHaveText(project);
       await expectHeaderKeepsMachine(machine, codename);
+      // cas-d043 G01 (QA round 1): on its own header row, each of these
+      // machine names reads whole at 390, its OS word aside first.
+      const name = machine.split(" · ")[0]!;
+      expect(await page.locator(".conversation-identity .host-machine").evaluate((host) => host.scrollWidth <= host.clientWidth), `${name} is whole`).toBe(true);
+      expect(await page.locator(".conversation-identity .host-machine").evaluate((host) => (host as HTMLElement).innerText)).toContain(name);
       // These sessions have not written yet, so the empty card names them too.
       await expect(page.locator(".thread .empty .said")).toBeVisible();
       await expectCardKeepsMachine(machine, codename);

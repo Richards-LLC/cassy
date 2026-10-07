@@ -128,11 +128,9 @@ for (const cell of cells) {
         }
         if ("long" in cell) {
           expect(bounds.machineEllipsises, "long machine names still ellipsise horizontally").toBe(true);
-          // cas-d043 G01: the identity has its own row, so a 51-character
-          // machine keeps 30-odd characters and the codename its 8ch, where
-          // beside the actions the codename had to step aside entirely.
-          expect(bounds.hostClass).toContain("machine-long");
-          expect(bounds.hostClass).not.toContain("codename-squeezed");
+          // cas-d043 QA round 1: a machine this long cannot share the line
+          // whole, so the codename steps aside and the machine has it all.
+          expect(bounds.hostClass).toContain("codename-squeezed");
         }
       });
     });

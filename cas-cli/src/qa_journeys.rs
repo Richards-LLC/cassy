@@ -62,6 +62,30 @@ pub fn select_journeys(
             "journey selection requires a readable ancestor base and exact full head SHA".into(),
         );
     }
+    run_committed_selector(repo, Some(base), head, paths)
+}
+
+/// cas-8132: the catalog journeys `paths` touch, judged by the selector and
+/// catalog committed at `head` (no base: CSS/fixture hunk context is not
+/// needed to name the touched journeys). Used for a delivery's "journeys:"
+/// reason, so it never reads the store checkout's working tree.
+pub fn journeys_for_paths_at(repo: &Path, head: &str, paths: &[String]) -> Result<Vec<String>, String> {
+    let head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])
+        .map(|sha| sha.trim().to_string())
+        .filter(|sha| is_full_sha(sha))
+        .ok_or_else(|| format!("journey selection head {head} is unreadable"))?;
+    if git(repo, &["cat-file", "-e", &format!("{head}:docs/qa/journeys.md")]).is_none() {
+        return Ok(Vec::new());
+    }
+    run_committed_selector(repo, None, &head, Some(paths))
+}
+
+fn run_committed_selector(
+    repo: &Path,
+    base: Option<&str>,
+    head: &str,
+    paths: Option<&[String]>,
+) -> Result<Vec<String>, String> {
     // The store checkout may predate the delivery's selector and catalog.
     // Pin the executable as well as its data to the reviewed revision; an
     // older executable may not understand the HEAD/BASE environment at all.
@@ -74,14 +98,19 @@ pub fn select_journeys(
     } else {
         command.arg("--all");
     }
-    let mut child = command
+    command
         .current_dir(repo)
         .env("CAS_JOURNEYS_ROOT", repo)
-        .env("CAS_JOURNEYS_BASE", base)
         .env("CAS_JOURNEYS_HEAD", head)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(base) = base {
+        command.env("CAS_JOURNEYS_BASE", base);
+    } else {
+        command.env_remove("CAS_JOURNEYS_BASE");
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("journey selection failed to start: {e}"))?;
     let written = child.stdin.take().ok_or_else(|| "selector input is unavailable".to_string())

@@ -122,6 +122,11 @@ Without it the hook warns and retains the existing permission guards.
 Plain npm reads, inline Node code and arbitrary Node scripts retain their
 existing permission decisions. The hub-web build, typecheck, visual-QA
 and verified test entry points also acquire admission when run directly.
+The helper owns the command's process group and ends it when the command
+returns, so it refuses a routed command that backgrounds a job with `&`:
+the suite's receipt launcher would die while a detached runner lived on
+unreported. Run a long suite in the foreground of a persistent session with
+its output redirected to a log, and read the log.
 
 Admission uses `assembly-proof.py`'s fresh host memory snapshot and reserve
 (default: greater of 8 GiB or 25% of physical RAM). A suite needs an assumed
@@ -242,6 +247,33 @@ supervisor. Workers never source an interactive shell to obtain operator
 credentials. Existing explicit project grants and the operator-provisioned
 read-only GitHub token remain available unless denied here; this policy adds
 no credentials to any harness.
+
+### Claude workspace trust and the hook canary
+
+Claude Code runs no hooks (SessionStart, PreToolUse, from any settings source)
+in a workspace it has not trusted, and factory agents launch with `IS_DEMO=true`,
+which skips the trust dialog without trusting. Before cas-0f5b every Claude
+worker therefore ran unguarded: no capped cargo runner, no worker-memory
+admission, no Slack, publication or browser guards. Two pieces now close that:
+
+- **Trust at spawn.** The Claude backend's `prepare_workdir` merges only
+  `projects["<cwd>"].hasTrustDialogAccepted = true` into the agent's
+  `$CLAUDE_CONFIG_DIR/.claude.json` (or `~/.claude.json`), under the shared
+  `.claude.json.cas-lock`, via temp file, fsync and rename, then re-reads it
+  and retries once (live sessions rewrite the file). A config it cannot parse
+  is never rewritten; the launch is refused instead. The supervisor's own
+  checkout is trusted the same way.
+- **The canary refuses.** A factory agent's SessionStart hook writes
+  `.cas/factory/hook-canary/<agent>.json`. Spawn verification (including
+  respawn and recycle) kills a Claude worker whose marker has not appeared
+  within 60 seconds of launch, marks it crashed and tells the supervisor.
+  There is no silent degrade.
+
+Rollout: after this merges, respawn every live Claude worker. Hooks start
+denying things those workers never saw before: raw `cargo`, `&` background
+jobs under worker-memory admission, non-Violet Slack writes, publication and
+unfiltered browser runs. Codex workers are unaffected (their trust was
+already pre-seeded by `codex_trust.rs`).
 
 ### Factory worker account selection
 

@@ -1231,6 +1231,14 @@ impl PtyConfig {
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE".to_string(),
                 "1".to_string(),
             ),
+            // IS_DEMO (since the initial release; no other recorded reason)
+            // skips Claude Code's first-run prompts, including the workspace
+            // trust dialog, so a factory PTY never parks on one. It does NOT
+            // trust the workspace, and an untrusted workspace runs no hooks at
+            // all (cas-0f5b). Trust is therefore recorded before spawn by
+            // the Claude backend's `prepare_workdir`, and the factory's SessionStart
+            // canary refuses a worker whose hooks never ran. Kept: without it
+            // any first-run prompt would still block an unattended pane.
             ("IS_DEMO".to_string(), "true".to_string()),
         ];
 

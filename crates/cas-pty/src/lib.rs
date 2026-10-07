@@ -42,12 +42,17 @@
 //! }
 //! ```
 
+pub mod claude_trust;
 pub mod codex_trust;
 pub mod conformance;
 mod error;
 pub mod opencode;
 mod pty;
 
+pub use claude_trust::{
+    CLAUDE_TRUST_FIELD, ClaudeTrustOutcome, claude_global_config_path,
+    ensure_claude_project_trusted_in,
+};
 pub use codex_trust::{
     CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home, ensure_cas_hooks_trusted,
     ensure_cas_hooks_trusted_in, ensure_project_trusted, ensure_project_trusted_in,

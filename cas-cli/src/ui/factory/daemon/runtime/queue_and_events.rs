@@ -3664,6 +3664,21 @@ impl FactoryDaemon {
         }
     }
 
+    /// cas-0f5b: hold a respawned or recycled worker to the same boot
+    /// verification as a fresh spawn, so its hook canary is checked.
+    fn verify_respawned_worker(&mut self, name: &str, request_id: Option<i64>) {
+        self.spawn_verifications.insert(
+            name.to_string(),
+            SpawnVerification {
+                request_id,
+                launched_at: Instant::now(),
+                registered_at: None,
+                task_id: None,
+                launched_wall: std::time::SystemTime::now(),
+            },
+        );
+    }
+
     pub(super) async fn reconcile_spawn_verifications(&mut self) {
         if self.spawn_verifications.is_empty() {
             return;
@@ -3701,7 +3716,37 @@ impl FactoryDaemon {
                     return Some((worker.clone(), VerificationAction::Failed(detail)));
                 }
 
+                // cas-0f5b: a Claude worker must prove its hooks run (the
+                // SessionStart canary) before it is confirmed; without them it
+                // has no CAS guard, so it is refused, never confirmed.
+                let canary = crate::factory_hook_canary::canary_verdict(
+                    self.app.harness_for(worker) == cas_mux::SupervisorCli::Claude,
+                    crate::factory_hook_canary::fired_since(
+                        self.app.cas_dir(),
+                        worker,
+                        verification.launched_wall,
+                    ),
+                    now.saturating_duration_since(verification.launched_at),
+                    crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
+                );
+                if canary == crate::factory_hook_canary::CanaryVerdict::Failed {
+                    return Some((
+                        worker.clone(),
+                        VerificationAction::Failed(crate::factory_hook_canary::failure_detail(
+                            worker,
+                            crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
+                            &crate::factory_hook_canary::marker_path(self.app.cas_dir(), worker),
+                        )),
+                    ));
+                }
+
                 if registered.contains(worker.as_str()) {
+                    if canary == crate::factory_hook_canary::CanaryVerdict::Pending
+                        && verification.registered_at.is_none()
+                    {
+                        // Registered, but the hook canary has not landed yet.
+                        return None;
+                    }
                     let process_exited = active_agents.iter().any(|agent| {
                         agent.name == *worker
                             && agent.pid.is_some()
@@ -7682,6 +7727,7 @@ impl FactoryDaemon {
                                     launched_at: Instant::now(),
                                     registered_at: None,
                                     task_id: pending_task_id.clone(),
+                                    launched_wall: std::time::SystemTime::now(),
                                 },
                             );
                             // A worker may reuse a retired name (e.g. a Codex worker
@@ -8218,6 +8264,8 @@ impl FactoryDaemon {
                         // clear it from the insert-only dead set so its messages
                         // are no longer dropped as "from a dead worker" (cas-5a5c).
                         self.dead_workers.remove(&name);
+                        // cas-0f5b: a respawn must prove its hooks run too.
+                        self.verify_respawned_worker(&name, None);
                         if self.app.record_enabled() {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
@@ -8265,6 +8313,8 @@ impl FactoryDaemon {
                 match result {
                     Ok(()) => {
                         self.dead_workers.remove(&name);
+                        // cas-0f5b: a recycled worker must prove its hooks run too.
+                        self.verify_respawned_worker(&name, Some(request_id));
                         append_spawn_audit(
                             self.app.cas_dir(),
                             &self.session_name,
@@ -11490,6 +11540,23 @@ mod tests {
         assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
     }
 
+    /// cas-ad92: the post-handoff receipt still hides the row from ordinary
+    /// drains, but the turn a pointer wake starts can take it by id.
+    #[test]
+    fn cas_ad92_transport_receipt_yields_to_the_wake_that_names_it() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store.enqueue_with_session("supervisor", "worker", "wake body", "session").unwrap();
+        assert!(store.claim_recipient_transport(id, "worker").unwrap());
+        FactoryDaemon::record_transport_receipt(&store, id, "worker");
+        store.mark_transport_delivered(id).unwrap();
+        assert!(store.surface_unseen_for_recipient("worker", Some("session"), 10).unwrap().is_empty());
+        let named = store.surface_wake_named_for_recipient("worker", Some("session"), &[id]).unwrap();
+        assert_eq!(named.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec!["wake body"]);
+    }
+
     #[test]
     fn a_legacy_transport_receipt_stays_pollable_until_the_recipient_claims_it() {
         use cas_store::PromptQueueStore;
@@ -13055,6 +13122,7 @@ mod tests {
                 launched_at: Instant::now(),
                 registered_at: None,
                 task_id: None,
+                launched_wall: std::time::SystemTime::now(),
             },
         )]);
 
@@ -13805,6 +13873,7 @@ mod tests {
                 launched_at: Instant::now(),
                 registered_at: None,
                 task_id: Some("cas-aee6".to_string()),
+                launched_wall: std::time::SystemTime::now(),
             },
         )]);
 

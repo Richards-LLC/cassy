@@ -177,6 +177,10 @@ fn surface_factory_inbox_with_transport_delivery(
     let queue = crate::store::open_prompt_queue_store(cas_root).ok()?;
     let task_store = crate::store::open_task_store_local(cas_root).ok();
 
+    let wake_ids = match &surfacing {
+        Surfacing::TurnStart => wake_named_ids(input.submitted_prompt().unwrap_or_default()),
+        Surfacing::ToolBoundary(_) => Vec::new(),
+    };
     let mut rows: Vec<QueuedPrompt> = Vec::new();
     for alias in &aliases {
         let remaining = SURFACE_LIMIT.saturating_sub(rows.len());
@@ -184,9 +188,20 @@ fn surface_factory_inbox_with_transport_delivery(
             break;
         }
         let found = match &surfacing {
-            Surfacing::TurnStart => {
-                queue.surface_unseen_for_recipient(alias, session.as_deref(), remaining)
-            }
+            // cas-ad92: a pointer wake names the row whose body the harness
+            // holds back until the next turn boundary; surface it into the
+            // wake turn first, over the daemon's transport claim.
+            Surfacing::TurnStart => queue
+                .surface_wake_named_for_recipient(alias, session.as_deref(), &wake_ids)
+                .and_then(|mut named| {
+                    let left = remaining.saturating_sub(named.len());
+                    named.extend(queue.surface_unseen_for_recipient(
+                        alias,
+                        session.as_deref(),
+                        left,
+                    )?);
+                    Ok(named)
+                }),
             Surfacing::ToolBoundary(Some(turn)) => queue
                 .surface_unseen_for_recipient_delivered_after(
                     alias,
@@ -272,6 +287,26 @@ fn surface_factory_inbox_with_transport_delivery(
              They are delivered here once — read them before your next step.",
         ),
     })
+}
+
+/// cas-ad92: the message ids named by daemon pointer wakes in a submitted
+/// prompt (`CAS wake: message {id} from …`, see `pointer_wake_payload`).
+/// A named id only selects among rows already addressed to this recipient.
+fn wake_named_ids(prompt: &str) -> Vec<i64> {
+    const MARKER: &str = "CAS wake: message ";
+    let mut ids = Vec::new();
+    for line in prompt.lines() {
+        let Some(rest) = line.trim_start().strip_prefix(MARKER) else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(id) = digits.parse::<i64>()
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 /// Render surfaced rows for injection into the turn.
@@ -374,6 +409,20 @@ mod tests {
         let rendered = render_surfaced(&[spoofed]);
         assert!(rendered.contains("[cas #82 unverified:Daniel@iphone-15 "), "{rendered}");
         assert!(!rendered.contains("in_reply_to=82"), "{rendered}");
+    }
+
+    #[test]
+    fn wake_named_ids_reads_the_daemons_pointer_wake() {
+        let wake = crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload(
+            "supervisor",
+            Some(4182255),
+        );
+        assert_eq!(wake_named_ids(&wake), vec![4182255]);
+        assert_eq!(wake_named_ids(&format!("{wake}\n  {wake}")), vec![4182255]);
+        let anonymous =
+            crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload("supervisor", None);
+        assert!(wake_named_ids(&anonymous).is_empty());
+        assert!(wake_named_ids("please read CAS wake: message 7 later").is_empty());
     }
 
     #[test]

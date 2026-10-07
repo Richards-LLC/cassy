@@ -138,16 +138,29 @@ pub fn user_facing_reasons(
 /// Catalog journeys the given paths touch, via the project's own
 /// `scripts/journeys-for-diff.py --paths` (cas-9be7). Empty when the project
 /// has no catalog or the helper fails; config globs still apply then.
-pub fn catalog_journeys_for(repo: &Path, paths: &[String]) -> Vec<String> {
+///
+/// cas-8132: with `head`, the selector and catalog committed at that delivery
+/// are used (as `select_journeys` does since cas-f365), never the store
+/// checkout's working tree. The store sat on an old main whose 11-journey
+/// catalog marked hub-web surface-wide, so a delivery's "journeys:" reason
+/// read HUB-J1..J11 while journey-eval at the tip selected 16 other IDs.
+/// Without a head (no delivered commit known) the working tree still serves.
+pub fn catalog_journeys_for(repo: &Path, head: Option<&str>, paths: &[String]) -> Vec<String> {
+    let surface: Vec<String> = paths.iter().filter(|path| !is_non_surface_path(path)).cloned().collect();
+    if surface.is_empty() {
+        return Vec::new();
+    }
+    if let Some(head) = head {
+        return crate::qa_evidence::journeys::journeys_for_paths_at(repo, head, &surface).unwrap_or_default();
+    }
     let script = repo.join("scripts/journeys-for-diff.py");
-    let surface: Vec<&String> = paths.iter().filter(|path| !is_non_surface_path(path)).collect();
-    if surface.is_empty() || !script.is_file() || !repo.join("docs/qa/journeys.md").is_file() {
+    if !script.is_file() || !repo.join("docs/qa/journeys.md").is_file() {
         return Vec::new();
     }
     let output = Command::new("python3")
         .arg(&script)
         .arg("--paths")
-        .args(surface)
+        .args(&surface)
         .env("CAS_JOURNEYS_ROOT", repo)
         .current_dir(repo)
         .output();

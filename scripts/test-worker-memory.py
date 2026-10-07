@@ -35,6 +35,11 @@ sys.modules['host_memory'] = host
 worker = load('worker_memory', ROOT / 'scripts/worker-memory.py')
 GIB = 1024**3
 HIGH = {'total_bytes': 64*GIB, 'available_bytes': 60*GIB, 'reserve_bytes': 16*GIB, 'budget_bytes': 44*GIB, 'source': 'fixture'}
+# How long a counted command may take merely to start. This bounds process
+# spawn latency, not admission: a serialized command never starts while its
+# peers hold their release barrier, so a generous bound still fails on serial
+# admission. Two seconds missed by 7 ms at a load average of 11.9 (cas-e4e3).
+SPAWN_DEADLINE_SECS = float(os.environ.get('CAS_TEST_SPAWN_DEADLINE_SECS', '20'))
 TRAIN_ENV_KEYS = ('CAS_RELEASE_TRAIN_INVOCATION_KIND', 'CAS_RELEASE_TRAIN_RUN_DIR',
                   'CAS_RELEASE_TRAIN_STAGE')
 
@@ -73,7 +78,11 @@ class AdmissionTests(unittest.TestCase):
             f"m.proof.memory_budget=lambda env:{budget!r};"
             f"sys.exit(m.run({[str(binary), str(marker), str(release)]!r},directory=pathlib.Path({str(self.pool)!r})))"
         )
-        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3',
+        # A ceiling, not a delay: admission returns as soon as capacity frees.
+        # A waiting launcher must outlive however long the test holds a peer;
+        # a 3 s wait expired under load before the test released `first`
+        # (cas-a753). The expiry tests set their own short wait.
+        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='120',
                    CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS='1')
         child = subprocess.Popen([sys.executable, '-c', launcher], env=env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -84,8 +93,19 @@ class AdmissionTests(unittest.TestCase):
         self.addCleanup(cleanup)
         return child, marker, release
 
+    def wait_started(self, child, marker):
+        """Wait for a launcher's command to start; fail with its output if it gave up."""
+        deadline = time.monotonic() + SPAWN_DEADLINE_SECS
+        while not marker.exists():
+            if child.poll() is not None:
+                stdout, stderr = child.communicate(timeout=5)
+                self.fail(f'{marker.name}: launcher exited {child.returncode} without starting: '
+                          f'{stdout}{stderr}')
+            self.assertLess(time.monotonic(), deadline, f'{marker.name} did not start')
+            time.sleep(.01)
+
     def wait_for_markers(self, markers):
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + SPAWN_DEADLINE_SECS
         while not all(marker.exists() for marker in markers):
             self.assertLess(time.monotonic(), deadline,
                             f'commands did not run concurrently: {[p.name for p in markers if p.exists()]}')
@@ -108,7 +128,7 @@ class AdmissionTests(unittest.TestCase):
         first, one, release_one = self.start_counted_command('playwright', 'first', low)
         self.wait_for_markers([one])
         second, two, release_two = self.start_counted_command('playwright', 'second', low)
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + SPAWN_DEADLINE_SECS
         while True:
             self.assertFalse(two.exists(), 'low budget admitted two browser estimates')
             self.assertLess(time.monotonic(), deadline)
@@ -117,7 +137,7 @@ class AdmissionTests(unittest.TestCase):
         release_one.touch()
         stdout, stderr = first.communicate(timeout=5)
         self.assertEqual(first.returncode, 0, stdout + stderr)
-        self.wait_for_markers([two])
+        self.wait_started(second, two)
         release_two.touch()
         stdout, stderr = second.communicate(timeout=5)
         self.assertEqual(second.returncode, 0, stdout + stderr)
@@ -136,7 +156,7 @@ class AdmissionTests(unittest.TestCase):
         release_one.touch()
         stdout, stderr = first.communicate(timeout=5)
         self.assertEqual(first.returncode, 0, stdout + stderr)
-        self.wait_for_markers([two])
+        self.wait_started(second, two)
         release_two.touch()
         stdout, stderr = second.communicate(timeout=5)
         self.assertEqual(second.returncode, 0, stdout + stderr)
@@ -607,6 +627,35 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
              self.assertRaisesRegex(ValueError, 'memory headroom'):
             worker.run([sys.executable, '-c', 'import time;time.sleep(30)'], env=self.env, directory=self.pool)
         with self.admit('worker'): pass  # aborted command did not strand the lease
+
+    def test_cas_04ebf_background_jobs_are_named_not_cut_down(self):
+        # The cas-7c94 command: the shell returned, run() ended its process
+        # group, and the npm receipt launcher died under a detached runner.
+        refused = [
+            'env JOURNEY_OUTPUT=out nohup npm --prefix hub-web run journeys -- a.journey.ts > run.log 2>&1 < /dev/null & sleep 1',
+            'tsc & vite build', 'cd hub-web && npm run build &', 'npm test&',
+        ]
+        allowed = [
+            'cd hub-web && npm run typecheck > /tmp/log 2>&1', 'npm run build && npm test',
+            "echo 'a & b'", 'npm run journeys |& tee log', 'npm test &>log', 'npm test &>>log',
+            'npm test 2>&1 | tee log', 'tsc || true',
+        ]
+        for command in refused:
+            with self.subTest(refused=command):
+                self.assertTrue(worker.background_job(command))
+        for command in allowed:
+            with self.subTest(allowed=command):
+                self.assertFalse(worker.background_job(command))
+        # End to end: refused before admission, nothing runs, and it says why.
+        marker = self.root / 'ran'
+        result = subprocess.run(
+            [sys.executable, str(ROOT / 'scripts/worker-memory.py'), '--shell-command', f'touch {marker} & true'],
+            env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('background job (&)', result.stderr)
+        self.assertIn('foreground of a persistent session', result.stderr)
+        time.sleep(.2)
+        self.assertFalse(marker.exists(), 'a refused command must not start')
 
 
 if __name__ == '__main__':

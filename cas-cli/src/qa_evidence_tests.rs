@@ -2313,6 +2313,13 @@ print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J7'}]}))
         "raise SystemExit(2)\n",
     )
     .unwrap();
+    // Uncommitted checkout drift cannot replace the reviewed selector.
+    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "full", |_| {});
+    journeys::check_epic_journeys(&ctx).unwrap();
+    git_ok(&fx.repo, &["add", "scripts/journeys-for-diff.py"]);
+    git_ok(&fx.repo, &["commit", "-q", "-m", "broken committed selector"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    let ctx = journey_context(&fx, &notes);
     assert!(
         journeys::check_epic_journeys(&ctx)
             .unwrap_err()

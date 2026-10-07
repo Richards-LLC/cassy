@@ -60,6 +60,17 @@ describe("atomic Commander journal", () => {
     timeout();
     expect(await b.retry(scope, item.id, fence, item)).toBe("kept");
   });
+  it("durable history settles a fresh restored peer claim without a second bubble (cas-fb48)", async () => {
+    const { a, b } = journals(), history = new ConversationHistory();
+    const item = send("peer-history");
+    await a.reconcile(scope, [], [item], fence);
+    await a.dispatch(scope, item.id, fence, () => true);
+    history.restorePending((await b.read(scope)).sends, 1_200);
+    history.hydrateSend({ notification_id: 99, target: item.target, text: item.text, state: "acknowledged", stamped: true, device_id: scope.device, at: new Date(1_200).toISOString() }, 1_200);
+    expect(history.events).toHaveLength(1);
+    expect(history.events[0]).toMatchObject({ value: { id: item.id, notificationId: 99, state: "acknowledged" } });
+    expect(history.pendingSends()).toEqual([]);
+  });
   it("requeues an existing history row after a claim makes no socket write (cas-9dc6)", async () => {
     const db = new IDBFactory(), history = new ConversationHistory();
     const peer = new CommanderJournal(db, async () => fence, () => 1_000, false);

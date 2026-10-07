@@ -393,8 +393,8 @@ export class ConversationHistory {
    * Put messages kept across a reload back in the thread (cas-e7b1), each once.
    * A held message still waits: it has never left this browser, and the
    * caller queues it to go out once. One that was on the wire without a
-   * receipt cannot be known to have arrived, so it comes back "Not confirmed"
-   * (never "Sending…" or delivered) and is not sent again by itself. A
+   * receipt keeps its original confirmation clock, then becomes "Not confirmed"
+   * when that clock expires. Neither state is sent again by itself. A
    * message that was not sent stays not sent. Returns the held ones.
    */
   restorePending(sends: PendingSend[], now: number = Date.now()): PendingSend[] {
@@ -478,10 +478,10 @@ export class ConversationHistory {
       return;
     }
     const at = ConversationHistory.timestamp(message.at);
-    // cas-e7b1: a message restored as "Not confirmed" that the machine's
+    // cas-e7b1: an unsettled message restored from the journal that the machine's
     // history now shows did arrive. It becomes that row instead of a second
     // copy of the message.
-    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && event.value.state === "unconfirmed" && event.value.notificationId === undefined
+    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
       && event.value.sentAt !== undefined && event.value.target === message.target && event.value.text === message.text
       && (at === undefined || at >= event.value.sentAt - RESTORED_MATCH_WINDOW_MS));
     if (restored?.kind === "send") {

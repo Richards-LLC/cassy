@@ -608,6 +608,35 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
             worker.run([sys.executable, '-c', 'import time;time.sleep(30)'], env=self.env, directory=self.pool)
         with self.admit('worker'): pass  # aborted command did not strand the lease
 
+    def test_cas_04ebf_background_jobs_are_named_not_cut_down(self):
+        # The cas-7c94 command: the shell returned, run() ended its process
+        # group, and the npm receipt launcher died under a detached runner.
+        refused = [
+            'env JOURNEY_OUTPUT=out nohup npm --prefix hub-web run journeys -- a.journey.ts > run.log 2>&1 < /dev/null & sleep 1',
+            'tsc & vite build', 'cd hub-web && npm run build &', 'npm test&',
+        ]
+        allowed = [
+            'cd hub-web && npm run typecheck > /tmp/log 2>&1', 'npm run build && npm test',
+            "echo 'a & b'", 'npm run journeys |& tee log', 'npm test &>log', 'npm test &>>log',
+            'npm test 2>&1 | tee log', 'tsc || true',
+        ]
+        for command in refused:
+            with self.subTest(refused=command):
+                self.assertTrue(worker.background_job(command))
+        for command in allowed:
+            with self.subTest(allowed=command):
+                self.assertFalse(worker.background_job(command))
+        # End to end: refused before admission, nothing runs, and it says why.
+        marker = self.root / 'ran'
+        result = subprocess.run(
+            [sys.executable, str(ROOT / 'scripts/worker-memory.py'), '--shell-command', f'touch {marker} & true'],
+            env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('background job (&)', result.stderr)
+        self.assertIn('foreground of a persistent session', result.stderr)
+        time.sleep(.2)
+        self.assertFalse(marker.exists(), 'a refused command must not start')
+
 
 if __name__ == '__main__':
     unittest.main()

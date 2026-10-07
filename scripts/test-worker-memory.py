@@ -78,7 +78,11 @@ class AdmissionTests(unittest.TestCase):
             f"m.proof.memory_budget=lambda env:{budget!r};"
             f"sys.exit(m.run({[str(binary), str(marker), str(release)]!r},directory=pathlib.Path({str(self.pool)!r})))"
         )
-        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3',
+        # A ceiling, not a delay: admission returns as soon as capacity frees.
+        # A waiting launcher must outlive however long the test holds a peer;
+        # a 3 s wait expired under load before the test released `first`
+        # (cas-a753). The expiry tests set their own short wait.
+        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='120',
                    CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS='1')
         child = subprocess.Popen([sys.executable, '-c', launcher], env=env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -88,6 +92,17 @@ class AdmissionTests(unittest.TestCase):
             child.communicate(timeout=5)
         self.addCleanup(cleanup)
         return child, marker, release
+
+    def wait_started(self, child, marker):
+        """Wait for a launcher's command to start; fail with its output if it gave up."""
+        deadline = time.monotonic() + SPAWN_DEADLINE_SECS
+        while not marker.exists():
+            if child.poll() is not None:
+                stdout, stderr = child.communicate(timeout=5)
+                self.fail(f'{marker.name}: launcher exited {child.returncode} without starting: '
+                          f'{stdout}{stderr}')
+            self.assertLess(time.monotonic(), deadline, f'{marker.name} did not start')
+            time.sleep(.01)
 
     def wait_for_markers(self, markers):
         deadline = time.monotonic() + SPAWN_DEADLINE_SECS
@@ -122,7 +137,7 @@ class AdmissionTests(unittest.TestCase):
         release_one.touch()
         stdout, stderr = first.communicate(timeout=5)
         self.assertEqual(first.returncode, 0, stdout + stderr)
-        self.wait_for_markers([two])
+        self.wait_started(second, two)
         release_two.touch()
         stdout, stderr = second.communicate(timeout=5)
         self.assertEqual(second.returncode, 0, stdout + stderr)
@@ -141,7 +156,7 @@ class AdmissionTests(unittest.TestCase):
         release_one.touch()
         stdout, stderr = first.communicate(timeout=5)
         self.assertEqual(first.returncode, 0, stdout + stderr)
-        self.wait_for_markers([two])
+        self.wait_started(second, two)
         release_two.touch()
         stdout, stderr = second.communicate(timeout=5)
         self.assertEqual(second.returncode, 0, stdout + stderr)

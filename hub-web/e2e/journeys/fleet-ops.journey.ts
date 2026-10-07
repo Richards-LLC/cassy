@@ -260,7 +260,7 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await row("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
     await row("brisk-wren-9").getByRole("menuitem", { name: "Stop…" }).click();
     const confirm = row("brisk-wren-9").locator(".fleet-ops-confirm");
-    await expect(confirm.locator(".fleet-ops-question")).toHaveText("Stop brisk-wren-9? Its task cas-1500 goes back to ready.");
+    await expect(confirm.locator(".fleet-ops-question")).toHaveText("Stop brisk-wren-9? Its task cas-1500 goes back to Open, for any worker to pick up.");
     await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
     // Escape closes it, back to the opener; nothing was sent.
     await page.keyboard.press("Escape");
@@ -282,6 +282,8 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "shutdown_workers", workers: ["brisk-wren-9"] }, expected: { worker: "brisk-wren-9", generation: 4 } });
     // No Undo for a destructive action.
     await expect(rail.locator(".fleet-ops-undo")).toHaveCount(0);
+    // cas-d043 G15: the task's chip says the word the confirmation promised.
+    await expect(task("cas-1500").locator(".status-chip")).toHaveText("Open");
   });
 
   await journey.stage("A stale stop says what changed", async () => {
@@ -324,6 +326,9 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
   await journey.stage("A pairing without factory:manage sees Stop disabled and where to add it", async () => {
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click();
     await expect(row("swift-lark-3")).toBeVisible();
+    // cas-d043 G13: the merge was asked on cas-src; the same task id here is another task.
+    await expect(task("cas-1999")).toBeVisible();
+    await expect(task("cas-1999").locator(".fleet-ops-asked")).toHaveCount(0);
     await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
     const stop = row("swift-lark-3").getByRole("menuitem", { name: "Stop…" });
     await expect(stop).toHaveAttribute("aria-disabled", "true");
@@ -365,6 +370,10 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
       await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
       await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toBeVisible();
+      // cas-d043 G01: the sheet covers the header, so it names whose tasks these are.
+      await expect(page.locator(".context-sheet-where")).toHaveText("cas-src on Atlas");
+      await expect(page.locator(".context-sheet-where")).toBeVisible();
+      await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toHaveAccessibleDescription("cas-src on Atlas");
       await expect(agent("swift-lark-3")).toBeVisible();
     });
     await journey.stage("Add a worker on the first machine", async () => {
@@ -399,6 +408,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await page.getByRole("button", { name: "Close tasks & progress" }).click();
       await page.getByRole("button", { name: "‹ Conversations" }).click();
       await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click(); await openFleet();
+      await expect(page.locator(".context-sheet-where")).toHaveText("gabber-studio on Studio Mac");
       await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
       await actions().getByRole("menuitem", { name: "Stop…" }).click();
       await expect(actions().getByRole("button", { name: "Cancel", exact: true })).toBeFocused();

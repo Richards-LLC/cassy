@@ -2105,10 +2105,63 @@ function selectedSurface(): { key: string; surface: TerminalSurface } | undefine
 }
 
 /** The header's Interrupt and Raw output follow what they can do now, without a shell rebuild. */
+/**
+ * cas-d043 H15: the pair dialog's action bar frosts only while fields scroll
+ * on beneath it; with nothing under it, it is the sheet itself (glass.css).
+ */
+const pairBarBound = new WeakSet<HTMLElement>();
+function bindPairBarFrost(dialog: HTMLDialogElement): void {
+  const scroller = dialog.querySelector<HTMLElement>(":scope > .pair-flow, :scope > #pair-form");
+  const bar = scroller?.querySelector<HTMLElement>(":scope > .dialog-actions");
+  if (!scroller || !bar || pairBarBound.has(scroller)) return;
+  pairBarBound.add(scroller);
+  const sync = () => bar.classList.toggle("fields-beneath", scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1);
+  scroller.addEventListener("scroll", sync, { passive: true });
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(sync);
+    observer.observe(scroller);
+    for (const child of scroller.children) observer.observe(child);
+  }
+  sync();
+}
+
+/** The skip link's target: the open conversation's first visible control (cas-d043 G02/H11). */
+function skipToConversation(): void {
+  const main = document.querySelector<HTMLElement>(".conversation-main");
+  const first = [...(main?.querySelectorAll<HTMLElement>("button, [href], input, textarea, [tabindex]:not([tabindex='-1'])") ?? [])]
+    .find((node) => node.getClientRects().length > 0 && !(node as HTMLButtonElement).disabled && !node.closest("[hidden], [inert]"));
+  first?.focus();
+}
+
 function syncConversationActions(): void {
   retireStaleToast();
+  syncControlHolder();
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-raw-output"), document.querySelector<HTMLElement>("#conversation-raw-output-reason"), rawOutputUnavailableReason());
+}
+
+/**
+ * cas-d043 G02: while another device holds control of the open session, the
+ * header says which ("· Studio iPad in control"), so Interrupt taking it over,
+ * or being refused, is never the first the operator hears of it.
+ */
+function syncControlHolder(): void {
+  const host = document.querySelector<HTMLElement>(".conversation-identity .conversation-host");
+  if (!host) return;
+  const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  const lease = key ? leases.get(key) : undefined;
+  const holder = lease && !lease.held_by_me ? lease.controller_label || undefined : undefined;
+  let note = host.querySelector<HTMLElement>(":scope > #conversation-control");
+  if (!holder) {
+    if (note) { note.remove(); fitConversationHost(document); }
+    return;
+  }
+  if (!note) { note = document.createElement("span"); note.id = "conversation-control"; host.append(note); }
+  if (note.dataset.holder === holder) return;
+  note.dataset.holder = holder;
+  const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
+  note.replaceChildren(separator, `${holder} in control`);
+  fitConversationHost(document);
 }
 
 const interruptsInFlight = new Set<string>();
@@ -2136,7 +2189,7 @@ async function interruptSupervisor(): Promise<void> {
       const force = Boolean(holder && machine.scopes.includes("hub-admin"));
       if (!await takeControlForMessage(machine, session, force)) {
         toast(holder
-          ? `${holder} is in control of this session. Interrupt works once it releases control.`
+          ? `${holder} is in control of this session. Interrupt works once it releases control, or from a pairing with administrator access, which can take over.`
           : "Couldn't take control of this session to interrupt it. Check that it's live, then try again.", { thread: key });
         return;
       }
@@ -4109,6 +4162,7 @@ function renderAttention(): void {
     },
   }, {
     animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,
+    ...(selectedMachineId ? { openConversation: { machineId: selectedMachineId, ...(selectedSession ? { session: selectedSession } : {}) } } : {}),
     sessionLabel: (item) => {
       const session = sessions.get(item.machineId)?.find((session) => session.name === item.session);
       return session ? [projectTitle(session.project_dir), session.supervisor].filter(Boolean).join(" · ") || undefined : undefined;
@@ -4157,7 +4211,7 @@ function syncProgressSheetWhere(): void {
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find((item) => item.name === selectedSession) : undefined;
   const where = progressSheetOpen() ? contextSheetWhere({ projectDir: session?.project_dir, supervisor: session?.supervisor, host: machine?.label }) : "";
   if (!where || !heading) { line?.remove(); return; }
-  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; heading.after(line); }
+  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; heading.after(line); }
   if (line.textContent !== where) line.textContent = where;
 }
 /** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
@@ -4331,7 +4385,23 @@ async function performAttentionAction(item: AttentionItem, action: AttentionActi
  * when what it shows changes, so a heartbeat never closes a menu or moves focus.
  */
 const fleetOps = new FleetOpsState();
+/**
+ * When each awaiting-merge task was last asked about, keyed by machine,
+ * session and task id: the same task id on another machine or project is
+ * another task (cas-d043 G13).
+ */
 const fleetAsked = new Map<string, number>();
+const fleetAskedKey = (machineId: string, session: string, taskId: string): string => JSON.stringify([machineId, session, taskId]);
+/** The open conversation's asks, by task id, as the rail reads them. */
+function fleetAskedFor(machineId: string | undefined, session: string | undefined): Map<string, number> {
+  const asked = new Map<string, number>();
+  if (!machineId || !session) return asked;
+  for (const [key, at] of fleetAsked) {
+    const [machine, owner, task] = JSON.parse(key) as [string, string, string];
+    if (machine === machineId && owner === session) asked.set(task, at);
+  }
+  return asked;
+}
 let fleetHeaderPanel: "add" | "focus" | undefined;
 let fleetFocusNext: string | undefined;
 let fleetUndoTimer: number | undefined;
@@ -4381,7 +4451,7 @@ async function runFleetAction(rowKey: string, action: FleetAction): Promise<void
   });
   if (!result || fleetOps.selectionEpoch !== epoch || selectedMachineId !== machineId || selectedSession !== session) return;
   if (result === "succeeded") {
-    if (action.request.op.kind === "request_merge") fleetAsked.set(String(action.request.op.task_id), Date.now());
+    if (action.request.op.kind === "request_merge") fleetAsked.set(fleetAskedKey(machineId, session, String(action.request.op.task_id)), Date.now());
     // Focus stays with the rows (the next row's ⋯ after a Stop); a destructive
     // result with no row left to go to lands on its result line (cas-97d58 F12).
     fleetFocusNext = action.inverse && fleetOps.undo ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
@@ -4412,7 +4482,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     tasks: [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[],
     epics,
     currentEpic,
-    asked: fleetAsked,
+    asked: fleetAskedFor(selectedMachineId, selectedSession),
     relative: (at) => { const label = relativeTimestamp(at); return label === "now" ? "just now" : `${label} ago`; },
     on: {
       toggleMenu: (rowKey) => { const opening = fleetOps.menuFor !== rowKey; fleetOps.toggleMenu(rowKey); rerender(opening ? `${rowKey}:first-item` : `${rowKey}:trigger`); },
@@ -4463,7 +4533,7 @@ function fleetMergeAction(task: FleetTask): FleetAction {
 
 /** What the rail shows, for skipping a rebuild that would change nothing. */
 function fleetOpsSignature(): string {
-  return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, [...fleetAsked].map(([id, at]) => [id, relativeTimestamp(at)])]);
+  return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, [...fleetAskedFor(selectedMachineId, selectedSession)].map(([id, at]) => [id, relativeTimestamp(at)])]);
 }
 
 function renderStatus(status?: Record<string, unknown>): void {
@@ -4852,6 +4922,8 @@ function bindEvents(): void {
   if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
   if (document.querySelector<HTMLButtonElement>("#pair-toggle")) document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
   for (const button of document.querySelectorAll<HTMLButtonElement>("#inbox-toggle, #empty-inbox")) button.onclick = () => void inboxView.open();
+  const skip = document.querySelector<HTMLButtonElement>("#skip-to-conversation");
+  if (skip) skip.onclick = skipToConversation;
   for (const pair of document.querySelectorAll<HTMLButtonElement>("#empty-pair")) {
     pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   }
@@ -4862,6 +4934,7 @@ function bindEvents(): void {
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
   const pairCreate = document.querySelector<HTMLButtonElement>("#pair-create");
   const pairDialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  if (pairDialog) bindPairBarFrost(pairDialog);
   if (pairDialog) bindPairingDialogCancel(
     pairDialog,
     () => ({
@@ -5119,6 +5192,18 @@ function renderMachineRegister(): void {
       if (machine && connection) void openInstallationInventory(document, machine, connection, async () => {
         await installationAccess.forgetRevoked(machine.id, machine.baseUrl, machine.deviceId);
         await forgetPairedMachine(id);
+        // cas-d043 G09: say what happened, once the inventory has closed, and
+        // land on the next step instead of a silent first-run screen.
+        window.setTimeout(() => {
+          toast(`This browser's access to ${machine.label} was revoked.`);
+          const visible = (node: HTMLElement | null): node is HTMLElement => node !== null && node.getClientRects().length > 0;
+          // Paired machines may still be open over the page: its own Pair a machine, then.
+          const open = document.querySelector<HTMLDialogElement>("dialog[open]");
+          const next = open
+            ? [open.querySelector<HTMLElement>("#paired-machines-add")].find(visible)
+            : [document.getElementById("empty-pair"), document.getElementById("pair-toggle"), document.getElementById("paired-machines-toggle")].find(visible);
+          next?.focus();
+        }, 0);
       });
     },
   });

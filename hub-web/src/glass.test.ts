@@ -307,6 +307,8 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     expect(parse(t["--look-glass-bar"])[3]).toBeLessThanOrEqual(0.4);
     // The installations sheet's bar is its footer (outside the scroller): no frost, no extra height (QA F01).
     expect(restValue("dialog.installation-inventory > .dialog-actions", "background")).toBe("transparent");
+    // cas-d043 H15: the pair dialog's bar is the sheet unless fields scroll beneath it.
+    expect(restValue("#pair-dialog > :is(.pair-flow, #pair-form) > .dialog-actions:not(.fields-beneath)", "background")).toBe("transparent");
     expect(restValue("dialog.installation-inventory > .dialog-actions", "margin-top")).toBe("0");
     expect(restValue("dialog .dialog-actions", "border-top")).toMatch(/^1px solid var\(--look-glass-line\)$/);
     expect(restValue("dialog .dialog-actions", "margin-top")).toBe("var(--space-3)");

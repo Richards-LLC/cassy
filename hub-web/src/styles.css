@@ -1047,6 +1047,10 @@ main {
   text-wrap: pretty;
 }
 
+/* cas-d043 G02/H11: out of sight until it takes focus, then a plain pill under the search. */
+.skip-link { position: absolute; width: var(--line-width); height: var(--line-width); padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.skip-link:focus-visible, .skip-link:focus { position: static; width: auto; height: auto; min-height: 36px; margin-top: var(--space-2); padding: 0 var(--space-3); overflow: visible; clip-path: none; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) { .skip-link { display: none; } }
 .sr-only {
   position: absolute;
   width: var(--line-width);
@@ -1562,6 +1566,9 @@ dialog form > *,
 /* cas-5e53 F08: hub:admin consent sits in plain view beside the name fields. */
 .pair-admin-consent { margin: 0; grid-template-columns: 1fr; }
 .pair-admin-consent legend { font-weight: var(--weight-semibold); }
+/* cas-d043 G08: the admin power joins "This browser will be able to:" only while its box is ticked. */
+.pair-summary-admin { display: none; }
+#pair-form:has(input[name="scope"][value="hub-admin"]:checked) .pair-summary-admin { display: inline; }
 
 .pair-alternative {
   color: var(--text-mid);
@@ -1834,7 +1841,7 @@ dialog form > *,
    technique), never display:none, so the line is heard whole at any width. */
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
-#conversation-connection { flex: none; white-space: pre; }
+#conversation-connection, #conversation-control { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 /* The thread's own slot beside the hidden pane host (cas-0546). */
@@ -2368,8 +2375,11 @@ button.chip:disabled { cursor: default; }
   /* The actions always take the last column, whichever others show. */
   .conversation-header-actions { grid-column: -2 / -1; grid-row: 1; gap: 4px; margin: 0; }
   .conversation-topline .conversation-action { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 10px; font-size: var(--fs-xs); }
-  #conversation-raw-output { padding: 0; }
-  #conversation-raw-output .action-label { display: none; } /* aria-label keeps the name */
+  /* cas-d043 G02: the identity has its own row (G01), so Raw output keeps
+     its word beside Interrupt instead of a bare ">_" glyph; the glyph steps
+     aside, as Interrupt's does. */
+  #conversation-raw-output { padding: 0 var(--space-2); }
+  #conversation-raw-output .action-icon { display: none; }
   /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
   #conversation-interrupt { padding: 0 var(--space-2); }
   #conversation-interrupt .action-icon { display: none; }

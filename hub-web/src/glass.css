@@ -433,6 +433,12 @@ html[data-scheme="dark"] {
      needs no frost: only the hairline, and no extra height that would push
      the last Revoke out of the default view at 390 (cas-205e QA F01, F02). */
   :root dialog.installation-inventory > .dialog-actions { margin-top: 0; padding-block: var(--space-2) 0; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  /* cas-d043 H15: inside the glass dialog (a backdrop root) the bar's own
+     frost sampled only the sheet's white and read as a whiter slab in light.
+     The pair dialog's bar is the sheet itself, with its hairline, and frosts
+     only while fields scroll on beneath it (main.ts marks .fields-beneath),
+     so nothing ever shows through it. */
+  :root #pair-dialog > :is(.pair-flow, #pair-form) > .dialog-actions:not(.fields-beneath) { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
   /* Its plain buttons (Close, Back) read as buttons: an outlined pill on glass. */
   :root dialog .dialog-actions button:not(.primary) { background: var(--look-glass-strong); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); }
 

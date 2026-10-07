@@ -46,7 +46,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // link path is named as the alternative, and Pair exists only on the
     // confirmation form an invitation opens directly.
     const entry = source.slice(source.indexOf("// One state, one next action."), source.indexOf("* Render the six scopes against the invitation's ceiling."));
-    expect(entry).toContain("<h2>Pair a machine</h2>");
+    expect(entry).toContain('<h2 id="pair-title">Pair a machine</h2>');
     expect(entry).not.toContain(">Pair</button>");
     expect(entry).not.toContain('type="submit"');
     expect(entry).not.toContain("pairing-disabled-reason\">Pair is disabled");
@@ -540,7 +540,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (!await takeControlForMessage(machine, session, force)) {");
     expect(source).toContain('const took = holder ? `Took control from ${holder}. ` : "";');
     expect(source).toContain("toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`, { thread: key });");
-    expect(source).toContain("Interrupt works once it releases control.");
+    expect(source).toContain("Interrupt works once it releases control, or from a pairing with administrator access, which can take over.");
   });
 
   // Contract: never caches an asynchronously-created terminal against a detached render.

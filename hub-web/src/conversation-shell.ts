@@ -62,6 +62,13 @@ export function conversationSearchPlaceholder(keyboardHint: boolean, shortcut = 
   return shortcut === "Ctrl K" ? CONVERSATION_SEARCH_PLACEHOLDER : `${CONVERSATION_SEARCH_LABEL} (${shortcut})`;
 }
 
+/**
+ * cas-d043 G02/H11: from the search box, the open conversation's Raw output
+ * and Interrupt sat 11–12 Tab stops away, past every row and the footer. The
+ * first stop after the search skips there; it shows only while focused.
+ */
+export const SKIP_TO_CONVERSATION = '<button id="skip-to-conversation" class="skip-link" type="button">Skip to the conversation</button>';
+
 /** The list's visible name search (journey F8): filters rows by project,
  * machine or supervisor. Ctrl/Cmd+K focuses it; pressed again from the field,
  * it opens the command palette. */
@@ -354,7 +361,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div><div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors. <button id="inbox-toggle" class="link-button" type="button" aria-haspopup="dialog">Operator inbox</button></p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div><div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors. <button id="inbox-toggle" class="link-button" type="button" aria-haspopup="dialog">Operator inbox</button></p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}${model.selected ? SKIP_TO_CONVERSATION : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${!model.selected ? networkHelp : ""}
@@ -419,7 +426,9 @@ export function fitConversationHost(root: ParentNode): void {
   const room = identity.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0")
     - (avatar ? avatar.getBoundingClientRect().width + (parseFloat(style.columnGap) || 0) : 0);
   const connection = host.querySelector<HTMLElement>("#conversation-connection");
-  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0));
+  // cas-d043 G02: the device in control, when another one is, keeps its place too.
+  const control = host.querySelector<HTMLElement>("#conversation-control");
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0));
 }
 
 /**

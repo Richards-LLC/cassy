@@ -189,6 +189,17 @@ async fn claude_worker_pane_does_not_touch_codex_config(env: &mut TestEnvGuard) 
         !config.exists(),
         "a non-Codex worker must never create or modify the Codex config"
     );
+    // cas-0f5b: the Claude worker's own pre-spawn step trusts its cwd in
+    // Claude's global config (here the guard's temp HOME), so hooks run.
+    let claude_config = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude.json");
+    let trusted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_config).expect("claude config written")).unwrap();
+    let key = std::fs::canonicalize(&workdir).unwrap().to_string_lossy().to_string();
+    assert_eq!(
+        trusted["projects"][&key]["hasTrustDialogAccepted"],
+        serde_json::Value::Bool(true),
+        "a Claude worker must start in a trusted workspace or its hooks never run"
+    );
 }
 
 /// A failed trust transaction must prevent `Pty::spawn`: Codex only reads this

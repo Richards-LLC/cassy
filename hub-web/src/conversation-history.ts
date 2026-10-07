@@ -373,12 +373,16 @@ export class ConversationHistory {
         delete event.value.unconfirmedAt;
         delete event.value.error;
         reheld.push(current);
-      } else if (current.state !== "held" && event.value.held) {
+      } else if (current.state !== "held") {
         delete event.value.held;
-        event.value.state = current.state === "error" ? "error" : "unconfirmed";
+        // A peer's durable claim starts the same receipt clock as a local
+        // write. Observing it is not evidence that delivery failed.
+        event.value.state = current.state === "sending" && current.sentAt !== undefined && now < current.sentAt + RECEIPT_TIMEOUT_MS
+          ? "sending" : current.state === "error" ? "error" : "unconfirmed";
         event.value.error = current.error;
         event.value.sentAt = current.sentAt;
-        event.value.unconfirmedAt = now;
+        if (event.value.state === "unconfirmed") event.value.unconfirmedAt ??= now;
+        else delete event.value.unconfirmedAt;
         event.value.restored = true;
       }
     }
@@ -404,6 +408,8 @@ export class ConversationHistory {
       } else if (stored.state === "error") {
         value.state = "error";
         value.error = stored.error ?? "This message was not sent.";
+      } else if (stored.state === "sending" && stored.sentAt !== undefined && now < stored.sentAt + RECEIPT_TIMEOUT_MS) {
+        value.sentAt = stored.sentAt;
       } else {
         value.state = "unconfirmed";
         value.unconfirmedAt = now;

@@ -328,6 +328,17 @@ html[data-scheme="dark"] {
   :root .conversation-sidebar { margin: var(--glass-inset) 0 var(--glass-inset) var(--glass-inset); border-radius: var(--glass-radius); }
   :root .conversation-heading { margin: var(--glass-inset) var(--glass-inset) 0; border-radius: 20px; }
   :root .conversation-context { margin: var(--glass-inset) var(--glass-inset) var(--glass-inset) 0; border-radius: var(--glass-radius); }
+  /* cas-d043 H10: the rail's rows ran into its rounded corners and were cut
+     there, with nothing to say the rail scrolls. A short fade of the panel's
+     own glass rides each edge, so a row passing under a corner fades instead
+     of being sliced, and the fade itself says there is more. */
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"]::before,
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"]::after {
+    content: ""; position: sticky; z-index: 2; display: block; height: var(--space-6); pointer-events: none;
+  }
+  /* Each sits in the rail's own padding at rest, so it only covers rows that scroll under it. */
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"]::before { top: 0; margin: calc(-1 * var(--space-6)) calc(-1 * var(--space-4)) 0; background: linear-gradient(var(--look-glass), transparent); }
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"]::after { bottom: 0; margin: 0 calc(-1 * var(--space-4)) calc(-1 * var(--space-6)); background: linear-gradient(transparent, var(--look-glass)); }
   @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
     /* On a phone the list is the whole screen: full-bleed glass, no inset. The
        conversation heading hangs from the top edge, so it keeps the phone

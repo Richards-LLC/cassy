@@ -326,7 +326,7 @@ describe("phone feedback dismissal (cas-c2e7)", () => {
     expect(phoneFleetNotice(document, ctx)).toBeUndefined();
     state.succeeded("agent:swift-lark-3", action, 0);
     const result = undoBar(document, ctx)!;
-    result.querySelector<HTMLButtonElement>('[aria-label="Dismiss fleet notice"]')!.click();
+    result.querySelector<HTMLButtonElement>('[aria-label="Dismiss; Undo stays in Tasks & progress"]')!.click();
     expect(undoBar(document, ctx)).toBeUndefined();
     expect(state.currentUndo(0)).toBeDefined();
     expect(undoBar(document, { ...ctx, phone: false })!.querySelector("button")!.textContent).toBe("Undo");

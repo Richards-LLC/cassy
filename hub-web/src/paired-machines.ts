@@ -66,7 +66,7 @@ export function fleetPermissionsMarkup(row: Pick<PairedMachineRow, 'id' | 'label
  * count, so it says so instead of "0 paired machines · Not paired"; a machine
  * never live in this visit is "Connecting…", not "Reconnecting" (journey F14).
  */
-export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number, build: string, loading = false): string {
+export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number | undefined, build: string, loading = false): string {
   const connected = rows.filter(row => row.connected).length;
   const machine = loading ? 'Paired machines' : rows.length === 1 ? rows[0].label : `${rows.length} paired machines`;
   const labels = rows.map(row => row.connectionState
@@ -100,7 +100,7 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}`}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
 }
 
 /** "Shed NAS · Linux" reads "Shed NAS" where room is short. */

@@ -390,13 +390,28 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await actions().getByRole("menuitem", { name: "Pause" }).click(); await expect(result).toHaveText("swift-lark-3 paused.");
       await page.getByRole("button", { name: "Close tasks & progress" }).click();
       const undo = page.getByRole("button", { name: "Undo", exact: true }); await target(undo);
+      // cas-2796a F03: the × says what dismissing does to Undo.
+      await expect(page.locator("#fleet-phone-undo").getByRole("button", { name: "Dismiss; Undo stays in Tasks & progress", exact: true })).toBeVisible();
       await undo.focus(); await page.keyboard.press("Enter"); await expect(result).toHaveText("swift-lark-3 resumed.");
       await openFleet();
+    });
+    await journey.stage("Dismissing the Undo offer keeps Undo in Tasks & progress (cas-2796a F03)", async () => {
+      await agent("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
+      await actions().getByRole("menuitem", { name: "Pause" }).click(); await expect(result).toHaveText("swift-lark-3 paused.");
+      await page.getByRole("button", { name: "Close tasks & progress" }).click();
+      await page.locator("#fleet-phone-undo").getByRole("button", { name: "Dismiss; Undo stays in Tasks & progress", exact: true }).click();
+      await expect(page.locator("#fleet-phone-undo")).toHaveCount(0);
+      await openFleet();
+      const kept = rail.getByRole("button", { name: "Undo", exact: true });
+      await expect(kept).toBeVisible();
+      await kept.click(); await expect(result).toHaveText("swift-lark-3 resumed.");
     });
     await journey.stage("Search the full-height Assign and Focus pickers", async () => {
       await task("cas-2001").getByRole("button", { name: "Actions for cas-2001" }).click();
       await actions().getByRole("menuitem", { name: "Assign…" }).click();
       const search = actions().getByRole("searchbox", { name: "Search assign cas-2001 to" });
+      // cas-2796a F01: the picker names the task by its title, not its id alone.
+      await expect(actions().getByText("Task: Footer copy", { exact: true })).toBeVisible();
       await expect(search).toBeFocused(); await search.fill("absent"); await expect(actions().getByRole("status")).toContainText("No matches");
       await search.fill("quiet"); await expect(actions().getByRole("menuitem")).toHaveCount(1);
       await actions().getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click(); await expect(result).toHaveText("cas-2001 assigned to quiet-owl-7.");
@@ -431,6 +446,9 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await actions().getByRole("button", { name: "Stop", exact: true }).click();
       await expect(result).toHaveText("swift-lark-3 already restarted."); await expect(agent("swift-lark-3")).toBeVisible();
       expect(hub.operations.at(-1)).toMatchObject({ machine: "studio", session: OTTER, status: 409 });
+      // cas-2796a F02: the refusal is in view in the open sheet, landscape included.
+      await expect(page.locator("#fleet-phone-undo")).toContainText("already restarted");
+      await expect(page.locator("#fleet-phone-undo")).toBeInViewport();
       await page.keyboard.press("Escape"); await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeFocused();
     });
   });

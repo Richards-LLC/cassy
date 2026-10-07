@@ -1,6 +1,7 @@
 import type { PairingPrefill } from "./fragment";
 import type { Scope } from "./types";
 import { PAIRING_SCOPES } from "./pairing-scopes";
+import { browserLabel } from "./browser-label";
 
 export type PairingStep = "create" | "code" | "authorized" | "link";
 
@@ -25,30 +26,6 @@ export interface PairingDraft {
 }
 
 /**
- * The name a browser offers for itself before the operator changes it, as
- * "Chrome on Linux" (cas-d043 G10): every browser defaulted to "Cassy Cloud
- * browser", so two left at the default looked the same in the installations
- * list. Read from the user agent; anything unrecognised keeps a plain name.
- */
-export function defaultBrowserName(userAgent: string): string {
-  const browser = /Edg(e|A|iOS)?\//.test(userAgent) ? "Edge"
-    : /OPR\/|Opera/.test(userAgent) ? "Opera"
-      : /Firefox\/|FxiOS\//.test(userAgent) ? "Firefox"
-        : /SamsungBrowser\//.test(userAgent) ? "Samsung Internet"
-          : /Chrome\/|CriOS\/|Chromium\//.test(userAgent) ? "Chrome"
-            : /Safari\//.test(userAgent) ? "Safari" : undefined;
-  const platform = /iPhone/.test(userAgent) ? "iPhone"
-    : /iPad/.test(userAgent) ? "iPad"
-      : /Android/.test(userAgent) ? "Android"
-        : /CrOS/.test(userAgent) ? "ChromeOS"
-          : /Mac OS X|Macintosh/.test(userAgent) ? "Mac"
-            : /Windows/.test(userAgent) ? "Windows"
-              : /Linux/.test(userAgent) ? "Linux" : undefined;
-  if (browser && platform) return `${browser} on ${platform}`;
-  return browser ?? (platform ? `Browser on ${platform}` : "Cassy Cloud browser");
-}
-
-/**
  * `scopes` is the invitation's ceiling when one is known, never a wider guess.
  * `prefill` is what the machine's own link said about itself; both values stay
  * editable in the form.
@@ -60,7 +37,9 @@ export function createPairingDraft(controllerOrigin: string, scopes?: readonly S
     machineLabel: prefill.suggestedMachineLabel ?? "",
     addressHelpOpen: false,
     technicalOpen: undefined,
-    deviceLabel: defaultBrowserName(globalThis.navigator?.userAgent ?? ""),
+    // cas-d043 G10: "Chrome on Linux", not "Cassy Cloud browser" for every
+    // browser, so two left at the default differ in the installations list.
+    deviceLabel: browserLabel(globalThis.navigator?.userAgent ?? ""),
     operatorLabel: "",
     scopes: scopes ? [...scopes] : [...PAIRING_SCOPES],
     email: "",

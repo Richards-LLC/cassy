@@ -4068,7 +4068,7 @@ function renderConversationList(): void {
     const listState = rows.length > 0 ? { kind: "text" as const, text: conversationNoMatchText(conversationSearchQuery) } : conversationListState(machineCatalogLoaded, [...machines.keys()].map((id) => ({ catalogReceived: fleetCatalogUpdatedAt.has(id), phase: connectionStates.get(id)?.phase, browserBlocked: Boolean(connectionStates.get(id)?.networkAccessHelp) })));
     const markup = listState.kind === "loading" ? conversationSkeletonMarkup() : "";
     if (listState.kind === "loading") { if (empty.dataset.state !== "loading") empty.innerHTML = markup; }
-    else empty.textContent = listState.text;
+    else empty.textContent = rows.length > 0 ? listState.text : [listState.text, keptMessagesLine()].filter(Boolean).join(" ");
     empty.dataset.state = listState.kind;
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
@@ -4089,6 +4089,20 @@ function renderConversationList(): void {
   // The state's width changes the room the machine · codename line has.
   fitConversationHost(document);
   refreshConnectionLog?.();
+}
+
+/**
+ * cas-d043 G03: messages this browser kept during an outage survive a reload,
+ * but until the machine answers there is no conversation to show them in, so
+ * the empty list says they are kept and will go out.
+ */
+function keptMessagesLine(): string {
+  const kept = new Map<string, number>();
+  for (const [key, queue] of heldSends) {
+    const machine = [...machines.values()].find((item) => key.startsWith(`${item.id}:`));
+    if (machine && queue.length && !fleetCatalogUpdatedAt.has(machine.id)) kept.set(machine.label, (kept.get(machine.label) ?? 0) + queue.length);
+  }
+  return [...kept].map(([label, count]) => `${count === 1 ? "1 message" : `${count} messages`} kept for ${label} will go out once it answers.`).join(" ");
 }
 
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
@@ -4631,7 +4645,13 @@ function renderStatus(status?: Record<string, unknown>): void {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();
     const phoneConversation = phoneLayout();
-    const undo = fleetOps.currentUndo(ops.now) ? undoBar(document, { ...ops, phone: phoneConversation })
+    // cas-2796a F03: an Undo whose floating offer was dismissed is still
+    // offered inside the open Tasks & progress sheet until it expires.
+    const offer = fleetOps.currentUndo(ops.now);
+    const dismissedUndo = Boolean(offer && phoneConversation && fleetOps.phoneNoticeDismissed(offer));
+    if (dismissedUndo && progressSheetOpen()) { const inSheet = undoBar(document, { ...ops, phone: false }); if (inSheet) container.append(inSheet); }
+    const undo = offer && !dismissedUndo ? undoBar(document, { ...ops, phone: phoneConversation })
+      : offer ? undefined
       : !phoneConversation && fleetOps.currentResult(ops.now) ? resultBar(document, ops)
         : phoneConversation ? phoneFleetNotice(document, ops) : undefined;
     if (undo && phoneConversation) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
@@ -5163,7 +5183,10 @@ function renderMachineRegister(): void {
   const rows = pairedMachineRows();
   const footer = document.querySelector<HTMLElement>('#hub-footer-badges');
   if (footer) {
-    const markup = machineFooterMarkup(rows, [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0), __HUB_BUILD__, !machineCatalogLoaded);
+    // cas-d043 G03: before any machine has answered with its sessions (a
+    // reload during an outage), the count is unknown, not "0 conversations".
+    const counted = machines.size === 0 || [...machines.keys()].some((id) => fleetCatalogUpdatedAt.has(id));
+    const markup = machineFooterMarkup(rows, counted ? [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0) : undefined, __HUB_BUILD__, !machineCatalogLoaded);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');
     if (!button) footer.innerHTML = markup;

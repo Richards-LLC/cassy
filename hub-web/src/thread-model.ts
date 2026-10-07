@@ -178,6 +178,12 @@ export function foldsAsStatus(message: string): boolean {
   return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message);
 }
 
+/**
+ * Turns this far apart start a new group with their own time (cas-d043 H14):
+ * an answer at 12:00 and another at 12:08 read as two moments, not one.
+ */
+export const GROUP_SPLIT_MS = 5 * 60_000;
+
 /** Derive the painted thread from the history's events. */
 export function threadModel(events: readonly ConversationEvent[], options: ThreadModelOptions = {}): ThreadItem[] {
   const now = options.now ?? Date.now();
@@ -187,7 +193,10 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
   let group: ThreadGroup | undefined;
   let coalesce: ThreadCoalesce | undefined;
 
+  /** The shown time of the open group's latest dated turn (cas-d043 H14). */
+  let groupLastAt: number | undefined;
   const closeGroup = (): void => {
+    groupLastAt = undefined;
     if (!group) return;
     const first = group.turns[0], last = group.turns[group.turns.length - 1];
     if (first) first.first = true;
@@ -247,14 +256,19 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     coalesce = undefined;
 
     const turn = turnOf(event);
-    if (!group || group.side !== turn.side) {
+    // cas-d043 H14: one time shows beneath a group, so turns minutes apart,
+    // or one whose time is a clock-ahead arrival beside one that is not, are
+    // not merged under the later time and flag: they start a new group.
+    const apart = group !== undefined && at !== undefined && groupLastAt !== undefined
+      && (at - groupLastAt >= GROUP_SPLIT_MS || clockAhead !== (group.clockAhead === true));
+    if (!group || group.side !== turn.side || apart) {
       closeGroup();
       group = { type: "group", key: `group:${turn.key}`, side: turn.side, turns: [], time: undefined };
       items.push(group);
     }
     group.turns.push(turn);
     group.time = stampLabel(at, now) ?? group.time;
-    if (at !== undefined) group.clockAhead = clockAhead;
+    if (at !== undefined) { group.clockAhead = clockAhead; groupLastAt = at; }
   });
   closeGroup();
   // An empty durable page owns the empty state. Do not let pagination or a

@@ -1900,6 +1900,18 @@ pub trait PromptQueueStore: Send + Sync {
         ids: &[i64],
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// cas-ad92: the hook-free counterpart of
+    /// [`Self::surface_wake_named_for_recipient`] for an `inbox_poll` that
+    /// names notification ids. Takes the named rows addressed to `recipient`
+    /// over a `transport_claimed` receipt and records `inbox_poll`; it does
+    /// not ack (`message_ack` stays the terminal mark).
+    fn poll_named_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        ids: &[i64],
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// Atomically surface unread rows from a bounded set of senders.
     ///
     /// This source-filtered counterpart leaves unrelated daemon/director
@@ -4137,6 +4149,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             None,
             TransportEligibility::After(turn_started_at),
             &[],
+        )
+    }
+
+    fn poll_named_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        ids: &[i64],
+    ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            ids.len(),
+            SurfacingSource::InboxPoll,
+            None,
+            TransportEligibility::WakeNamed,
+            ids,
         )
     }
 
@@ -13553,6 +13582,15 @@ mod cas_ad92_wake_named_tests {
         assert_eq!(report.recipient_receipt, Some(SurfacingSource::HookSurfaced));
         assert_eq!(report.wake, ObservationStatus::Observed);
         assert!(store.surface_wake_named_for_recipient("worker", Some("s"), &[id]).unwrap().is_empty());
+
+        let polled_id = store.enqueue_with_session("supervisor", "worker", "polled body", "s").unwrap();
+        assert!(store.claim_recipient_transport(polled_id, "worker").unwrap());
+        assert!(store.poll_named_for_recipient("peer", Some("s"), &[polled_id]).unwrap().is_empty());
+        let polled = store.poll_named_for_recipient("worker", Some("s"), &[polled_id]).unwrap();
+        assert_eq!(polled.iter().map(|row| row.id).collect::<Vec<_>>(), vec![polled_id]);
+        let report = store.message_delivery_report(polled_id).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(SurfacingSource::InboxPoll));
+        assert!(report.confirmed_at.is_none(), "message_ack stays the terminal mark");
 
         // A late post-handoff receipt or a release never demotes the render.
         store.record_recipient_surfaced(id, "worker", SurfacingSource::TransportClaimed).unwrap();

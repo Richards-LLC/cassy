@@ -35,6 +35,11 @@ sys.modules['host_memory'] = host
 worker = load('worker_memory', ROOT / 'scripts/worker-memory.py')
 GIB = 1024**3
 HIGH = {'total_bytes': 64*GIB, 'available_bytes': 60*GIB, 'reserve_bytes': 16*GIB, 'budget_bytes': 44*GIB, 'source': 'fixture'}
+# How long a counted command may take merely to start. This bounds process
+# spawn latency, not admission: a serialized command never starts while its
+# peers hold their release barrier, so a generous bound still fails on serial
+# admission. Two seconds missed by 7 ms at a load average of 11.9 (cas-e4e3).
+SPAWN_DEADLINE_SECS = float(os.environ.get('CAS_TEST_SPAWN_DEADLINE_SECS', '20'))
 TRAIN_ENV_KEYS = ('CAS_RELEASE_TRAIN_INVOCATION_KIND', 'CAS_RELEASE_TRAIN_RUN_DIR',
                   'CAS_RELEASE_TRAIN_STAGE')
 
@@ -85,7 +90,7 @@ class AdmissionTests(unittest.TestCase):
         return child, marker, release
 
     def wait_for_markers(self, markers):
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + SPAWN_DEADLINE_SECS
         while not all(marker.exists() for marker in markers):
             self.assertLess(time.monotonic(), deadline,
                             f'commands did not run concurrently: {[p.name for p in markers if p.exists()]}')
@@ -108,7 +113,7 @@ class AdmissionTests(unittest.TestCase):
         first, one, release_one = self.start_counted_command('playwright', 'first', low)
         self.wait_for_markers([one])
         second, two, release_two = self.start_counted_command('playwright', 'second', low)
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + SPAWN_DEADLINE_SECS
         while True:
             self.assertFalse(two.exists(), 'low budget admitted two browser estimates')
             self.assertLess(time.monotonic(), deadline)

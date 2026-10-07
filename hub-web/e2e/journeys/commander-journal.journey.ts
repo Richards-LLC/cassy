@@ -62,7 +62,7 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
     for (const tab of [page, peer]) await tab.evaluate(() => {
       const observed: number[] = [];
       const observer = new MutationObserver(() => {
-        if (document.querySelector('.conversation-retry')) observed.push(Date.now());
+        if (document.querySelector('.conversation-retry')) observed.push(performance.now());
       });
       observer.observe(document.querySelector('[role="log"]')!, { childList: true, subtree: true });
       Object.assign(window, { peerRetryObservation: { observed, stop: () => observer.disconnect() } });

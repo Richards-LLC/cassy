@@ -8,6 +8,10 @@ use std::process::Command;
 pub const SELECTION_PREFIX: &str = "affected-journeys:";
 pub const RECEIPT_CITATION: &str = "journey-receipt:";
 
+#[cfg(test)]
+#[path = "qa_journeys_tests.rs"]
+mod tests;
+
 #[derive(Debug, Deserialize)]
 struct JourneyResult {
     id: String,

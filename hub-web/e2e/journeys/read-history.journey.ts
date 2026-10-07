@@ -368,6 +368,8 @@ for (const [name, viewport, rest] of [
       const shown = await shownInThread();
       expect(shown.top, "the focused Load earlier is not above the thread").toBeGreaterThanOrEqual(0);
       expect(shown.bottom, "the focused Load earlier is not below the thread").toBeGreaterThanOrEqual(0);
+      // cas-d043 H07: it shows its ring on the aurora.
+      expect(await loadEarlier.evaluate((node) => { const style = getComputedStyle(node); return style.outlineStyle !== "none" && parseFloat(style.outlineWidth) >= 2; }), "the focused Load earlier shows a ring").toBe(true);
     });
 
     await journey.stage(`Enter still loads the start of the conversation (${name})`, async () => {

@@ -43,12 +43,24 @@ export const UNREACHABLE = "Unreachable";
  */
 export const UNSTEADY = "Unsteady";
 export const UNSTEADY_SENTENCE = "Connection unsteady — checking…";
-export type MachineConnectionLabelState = Pick<ConnectionSnapshot, "phase" | "degraded" | "fatal" | "authFailure">;
+/**
+ * cas-d043 G04: the cause is this browser, not the machine. A browser
+ * permission (Local network access) blocks the connection, or the browser
+ * lacks a feature Cassy Cloud needs (a fatal failure: every fatal transport
+ * failure is an UnsupportedBrowserError). The status word, the footer and the
+ * empty thread say so, as the banner does, instead of "Unreachable" or
+ * "Can't reach · retrying", which read as the machine's fault.
+ */
+export const BROWSER_BLOCKED = "Blocked by browser";
+export const BROWSER_UNSUPPORTED = "Browser can't connect";
+export type MachineConnectionLabelState = Pick<ConnectionSnapshot, "phase" | "degraded" | "fatal" | "authFailure" | "networkAccessHelp">;
 
 /** Shared machine words; the caller supplies this visit's live history. */
 export function machineConnectionLabel(state: MachineConnectionLabelState | undefined, everConnected = true): string {
   if (!state) return "Idle";
   if (state.phase === "live") return state.degraded ? UNSTEADY : "Live";
+  if (state.phase === "failed" && state.fatal === true && !state.authFailure) return BROWSER_UNSUPPORTED;
+  if (state.networkAccessHelp && !state.authFailure && (state.phase === "failed" || state.phase === "backoff")) return BROWSER_BLOCKED;
   // Never live and already failed (cas-b789): name the failed attempts while retries continue.
   const retrying = state.phase === "backoff" || (state.phase === "failed" && state.fatal !== true && !state.authFailure);
   if (retrying && !everConnected) return CANT_REACH_RETRYING;

@@ -1047,6 +1047,10 @@ main {
   text-wrap: pretty;
 }
 
+/* cas-d043 G02/H11: out of sight until it takes focus, then a plain pill under the search. */
+.conversation-shell .skip-link { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; min-height: 0; margin: 0; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+.conversation-shell .skip-link:focus-visible, .conversation-shell .skip-link:focus { position: static; width: auto; height: auto; min-height: 36px; margin-top: var(--space-2); padding: 0 var(--space-3); overflow: visible; clip: auto; clip-path: none; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) { .skip-link { display: none; } }
 .sr-only {
   position: absolute;
   width: var(--line-width);
@@ -1562,6 +1566,9 @@ dialog form > *,
 /* cas-5e53 F08: hub:admin consent sits in plain view beside the name fields. */
 .pair-admin-consent { margin: 0; grid-template-columns: 1fr; }
 .pair-admin-consent legend { font-weight: var(--weight-semibold); }
+/* cas-d043 G08: the admin power joins "This browser will be able to:" only while its box is ticked. */
+.pair-summary-admin { display: none; }
+#pair-form:has(input[name="scope"][value="hub-admin"]:checked) .pair-summary-admin { display: inline; }
 
 .pair-alternative {
   color: var(--text-mid);
@@ -1627,10 +1634,11 @@ dialog form > *,
 
   /* Toasts span the top of a narrow screen, under the status bar. */
   #toast { left: var(--space-3); right: var(--space-3); top: calc(var(--space-3) + env(safe-area-inset-top)); max-width: none; }
-  /* With a conversation open, the toast drops below the one-row thread header
-     (56 px: 44 px targets + 6 px padding) so the back link, project and host
-     stay readable (cas-002e). */
-  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
+  /* With a conversation open, the toast drops below the thread header so the
+     back link, project and host stay readable (cas-002e). The header is two
+     rows now, the actions above the identity (cas-d043 G01): 6 + 44 px, the
+     36 px identity row with its padding, 6 px, and Glass's 8 px inset. */
+  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 112px + var(--space-2)); }
 
   /* == Unit 4: Phone attention and composer == */
   .attention-group-label { max-width: 100%; }
@@ -1828,18 +1836,26 @@ dialog form > *,
 .conversation-identity .host-where:has(> .host-machine) { display: flex; }
 .conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }
+/* cas-d043: beside a showing codename the machine never shrinks; only the codename does. */
+.conversation-identity .host-where:not(.codename-squeezed) > .host-machine:has(~ .codename) { flex-shrink: 0; }
 .conversation-identity .host-sep { flex: none; white-space: pre; }
 .conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
 /* cas-8526: what steps aside is hidden from sight only (the .sr-only
    technique), never display:none, so the line is heard whole at any width. */
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
-#conversation-connection { flex: none; white-space: pre; }
+#conversation-connection, #conversation-control { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 /* The thread's own slot beside the hidden pane host (cas-0546). */
 .conversation-mount { min-height: 0; min-width: 0; }
 .conversation-pane-slot .conversation-thread-slot { height: 100%; min-height: 0; }
+/* cas-d043 G14: the outage banner lies over the thread's top, where it cut
+   the "Today" divider in half and hid "No earlier history". The thread makes
+   room for it with a spacer of the banner's height (main.ts measures it):
+   at the top of history the first lines move below the banner, and a reader
+   further down keeps their place (scroll anchoring), as before. */
+.conversation-pane-slot .pane-grid.terminal-disconnected .conversation-reading.thread::before { content: ""; display: block; flex: none; height: var(--outage-banner-space, 0px); }
 
 /* ---- Pebble thread (cas-d167) --------------------------------------------
  * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:
@@ -1860,6 +1876,10 @@ dialog form > *,
 .thread .thead .id span:empty { display: none; }
 .thread .conversation-load-earlier { align-self: center; margin: 10px auto 0; padding: 7px 14px; border: var(--line-width) solid var(--line-subtle); border-radius: 999px; background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) 12px/1.2 var(--font-ui); }
 .thread .conversation-load-earlier[hidden] { display: none; }
+/* cas-d043 H07: focus lands here after a reconnect (a script, so not always
+   :focus-visible), and on the aurora its fill reads 1.06–1.19:1, so it keeps
+   the same plain ring as "No earlier history" whenever it has focus. */
+.thread .conversation-load-earlier:focus { outline: 2px solid var(--ink); outline-offset: 3px; }
 /* Loading an older page: the label is the loading signal, so it stays legible
  * (ink-mid at full opacity, not the global disabled .42) and carries the
  * thread's three-dot working mark. */
@@ -2088,7 +2108,10 @@ button.chip:disabled { cursor: default; }
 .pinned-ask svg.chevron, .pinned-ask svg.close { width: 16px; height: 16px; flex: none; }
 .pinned-bar { display: flex; align-items: center; gap: 4px; align-self: stretch; max-width: min(100%, 560px); }
 .pinned-expand { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; min-height: 40px; padding: 0 14px 0 18px; border: 0; border-radius: 999px; background: var(--ask-bg); color: var(--ask-fg); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.3 var(--font-ui); text-align: left; cursor: pointer; }
-.pinned-expand:hover { box-shadow: var(--lift-strong); }
+/* cas-053c (cas-d043): the generic button:hover wash outranked the bar's
+   amber fill and left its dark text on navy at 1.17:1 in dark (and on a
+   phone the hover sticks after a tap). The fill stays; hover only lifts. */
+.pinned-expand:hover, .pinned-expand:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--ask-bg); color: var(--ask-fg); box-shadow: var(--lift-strong); }
 .pinned-bar-label { flex: none; font-weight: var(--weight-semibold); }
 .pinned-bar-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Open, the question scrolls inside its card past about a quarter of the screen; the choices stay in view. */
@@ -2189,6 +2212,7 @@ button.chip:disabled { cursor: default; }
 /* cas-766c: the same order as the header's host line. */
 .thread .empty .proj2-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2.machine-long > .proj2-machine { min-width: 16ch; }
+.thread .empty .proj2:not(.codename-squeezed) > .proj2-machine:has(~ .codename) { flex-shrink: 0; }
 .thread .empty .proj2-sep { flex: none; white-space: pre; }
 .thread .empty .proj2-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
@@ -2353,13 +2377,20 @@ button.chip:disabled { cursor: default; }
   #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
   #conversation-back .back-glyph { font: var(--weight-regular) 30px/1 var(--font-ui); }
   #conversation-back .back-label { display: none; } /* aria-label keeps the full name */
-  .conversation-identity { grid-column: 2; grid-row: 1; gap: 10px; }
+  /* cas-d043 G01: the identity takes its own full-width row beneath the back
+     link and the actions, always (cas-97d58 F07 did it only with the
+     attention chip). Beside Raw output and Interrupt it had about 150px, so a
+     plain "Atlas" read "A… · Reconnecting" and "Build Server" "Build Se…". */
+  .conversation-identity { grid-column: 1 / -1; grid-row: 2; gap: 10px; padding: 2px var(--space-1) 2px 40px; }
   .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
   /* The actions always take the last column, whichever others show. */
   .conversation-header-actions { grid-column: -2 / -1; grid-row: 1; gap: 4px; margin: 0; }
   .conversation-topline .conversation-action { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 10px; font-size: var(--fs-xs); }
-  #conversation-raw-output { padding: 0; }
-  #conversation-raw-output .action-label { display: none; } /* aria-label keeps the name */
+  /* cas-d043 G02: the identity has its own row (G01), so Raw output keeps
+     its word beside Interrupt instead of a bare ">_" glyph; the glyph steps
+     aside, as Interrupt's does. */
+  #conversation-raw-output { padding: 0 var(--space-2); }
+  #conversation-raw-output .action-icon { display: none; }
   /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
   #conversation-interrupt { padding: 0 var(--space-2); }
   #conversation-interrupt .action-icon { display: none; }
@@ -2367,12 +2398,6 @@ button.chip:disabled { cursor: default; }
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */
   .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
-  /* cas-97d58 F07: with the attention chip, Raw output and Interrupt sharing
-     the row, the identity was squeezed to "Accou…" over "A… · Live". Then it
-     takes its own full-width row, so the title and the machine line read
-     whole; the one-row header (cas-1776) stays whenever there is room. */
-  .conversation-heading:has(#conversation-attention:not([hidden])) .conversation-identity { grid-column: 1 / -1; grid-row: 2; padding: 2px var(--space-1) 2px 40px; }
-
   #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
   #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
@@ -2420,7 +2445,14 @@ button.chip:disabled { cursor: default; }
   /* cas-8526: off the short landscape header, not out of its spoken name or
      its connection status. */
   .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
-  .conversation-identity { gap: var(--space-2); }
+  /* One row again, so the toast sits under 56 px (cas-002e). */
+  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
+  /* With the machine line hidden the title alone fits beside the actions, so
+     a short screen (a phone with its keyboard up) keeps the one-row header
+     and the thread keeps its room (cas-d043 G01). The attention chip still
+     takes the row, so the identity stays beneath it then. */
+  .conversation-identity { gap: var(--space-2); grid-column: 2; grid-row: 1; padding: 0; }
+  .conversation-heading:has(#conversation-attention:not([hidden])) .conversation-identity { grid-column: 1 / -1; grid-row: 2; padding: 0 var(--space-1) 0 40px; }
   .conversation-composer { padding-top: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
   .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); padding-top: 10px; padding-bottom: 10px; }
   .conversation-composer .composer-clip { width: var(--rail-item-min); height: var(--rail-item-min); }
@@ -2801,6 +2833,9 @@ button.chip:disabled { cursor: default; }
 
 /* S6: the phone enters its own fleet from the conversation, then takes one action. */
 #conversation-fleet { display: none; }
+/* The desktop rail sits beside the header that names the machine; the phone sheet covers it (cas-d043 G01). */
+.context-sheet-where { display: none; }
+.fleet-sheet-open > .conversation-context .context-sheet-where { display: block; margin: 0 0 var(--space-3); font: var(--weight-regular) var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-mid); overflow-wrap: anywhere; }
 .fleet-action-sheet { color: var(--text-hi); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   #conversation-fleet { display: flex; align-items: center; justify-content: center; min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font-size: var(--fs-lg); }
@@ -2822,6 +2857,13 @@ button.chip:disabled { cursor: default; }
   #conversation-composer-slot:has(#fleet-phone-undo) { flex-shrink: 0; }
   #fleet-phone-undo { margin: 0 var(--space-3) var(--space-2); border: var(--line-width) solid var(--line-strong); box-shadow: var(--lift); }
   .conversation-context > #fleet-phone-undo { margin: var(--space-3) 0 0; }
+  /* cas-2796a F02: in a short landscape sheet the notice was appended below
+     the fold. It rides the sheet's bottom edge while the rows scroll, and
+     the rows keep clear of it when focus moves among them. */
+  @media (max-height: 30rem) {
+    .conversation-context > #fleet-phone-undo { position: sticky; bottom: 0; z-index: 3; }
+    .conversation-shell.fleet-sheet-open > .conversation-context:has(> #fleet-phone-undo) { scroll-padding-bottom: calc(var(--rail-item-min) + var(--space-6)); }
+  }
   #fleet-phone-undo > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   #fleet-phone-undo > button { flex: none; min-width: var(--rail-item-min); }
   .fleet-ops-picker h2 { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }

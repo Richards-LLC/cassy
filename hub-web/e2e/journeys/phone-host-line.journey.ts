@@ -128,6 +128,8 @@ for (const cell of cells) {
         }
         if ("long" in cell) {
           expect(bounds.machineEllipsises, "long machine names still ellipsise horizontally").toBe(true);
+          // cas-d043 QA round 1: a machine this long cannot share the line
+          // whole, so the codename steps aside and the machine has it all.
           expect(bounds.hostClass).toContain("codename-squeezed");
         }
       });

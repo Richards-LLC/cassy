@@ -114,6 +114,17 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
     expect(await page.locator("#status-view").evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     hub.supervisorSays(PELICAN, "Choose a route with a readable question.\n\n" + "More detail about this decision. ".repeat(60), { kind: "ask", options: [] });
     await expect(page.locator(".pinned-expand")).toBeVisible();
+    // cas-053c (cas-d043): hovering the bar keeps its amber fill in both
+    // schemes; the generic hover wash put its text at 1.17:1 in dark.
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.mouse.move(0, 0);
+      const rest = await page.locator(".pinned-expand").evaluate((node) => getComputedStyle(node).backgroundColor);
+      await page.locator(".pinned-expand").hover();
+      await expect.poll(() => page.locator(".pinned-expand").evaluate((node) => getComputedStyle(node).backgroundColor), `${scheme}: the hovered bar keeps its fill`).toBe(rest);
+    }
+    await page.mouse.move(0, 0);
+    await page.emulateMedia({ colorScheme: "light" });
     await expect(page.getByRole("log").locator("button.chip")).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 440 });
     await page.getByRole("textbox", { name: "Your message" }).focus();

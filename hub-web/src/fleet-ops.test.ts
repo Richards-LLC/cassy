@@ -42,7 +42,7 @@ describe("fleet actions send the brief's operations with their preconditions (ca
     expect([pause!.label, restart!.label, stop!.label]).toEqual(["Pause", "Restart…", "Stop…"]);
     expect(restart).toMatchObject({ destructive: true, operation: "restart-worker" });
     expect(restart!.inverse).toBeUndefined();
-    expect(stop!.question).toBe("Stop swift-lark-3? Its task cas-1234 goes back to ready.");
+    expect(stop!.question).toBe("Stop swift-lark-3? Its task cas-1234 goes back to Open, for any worker to pick up.");
     expect(stop!.request).toEqual({ op: { kind: "shutdown_workers", workers: ["swift-lark-3"] }, expected: { worker: "swift-lark-3", generation: 2 } });
     expect(stopAction(lark, true).request.op).toMatchObject({ force: true });
   });
@@ -200,7 +200,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const buttons = [...view.querySelectorAll<HTMLButtonElement>(".fleet-ops-confirm button")];
     expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Stop"]);
     expect(buttons[1]!.classList.contains("danger")).toBe(true);
-    expect(view.querySelector(".fleet-ops-question")?.textContent).toBe("Stop swift-lark-3? Its task cas-1234 goes back to ready.");
+    expect(view.querySelector(".fleet-ops-question")?.textContent).toBe("Stop swift-lark-3? Its task cas-1234 goes back to Open, for any worker to pick up.");
     buttons[1]!.dispatchEvent(new MouseEvent("click", { detail: 2 }));
     expect(confirm).not.toHaveBeenCalled();
     buttons[1]!.dispatchEvent(new MouseEvent("click", { detail: 1 }));
@@ -326,7 +326,7 @@ describe("phone feedback dismissal (cas-c2e7)", () => {
     expect(phoneFleetNotice(document, ctx)).toBeUndefined();
     state.succeeded("agent:swift-lark-3", action, 0);
     const result = undoBar(document, ctx)!;
-    result.querySelector<HTMLButtonElement>('[aria-label="Dismiss fleet notice"]')!.click();
+    result.querySelector<HTMLButtonElement>('[aria-label="Dismiss; Undo stays in Tasks & progress"]')!.click();
     expect(undoBar(document, ctx)).toBeUndefined();
     expect(state.currentUndo(0)).toBeDefined();
     expect(undoBar(document, { ...ctx, phone: false })!.querySelector("button")!.textContent).toBe("Undo");

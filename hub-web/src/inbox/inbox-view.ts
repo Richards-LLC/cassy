@@ -54,26 +54,7 @@ function commandStateMarkup(state: CommandState, machine?: string): HTMLElement 
   return el("span", { class: "operator-inbox-command-state", "data-state": state }, commandStatusLabel(state, machine));
 }
 
-/**
- * cas-97d58 F21: the name a person would give this browser ("Chrome on
- * Linux", "Safari on iPhone"), not "Commander on Linux x86_64".
- */
-export function browserLabel(userAgent: string): string {
-  const browser = /Edg\//.test(userAgent) ? "Edge"
-    : /Firefox\//.test(userAgent) ? "Firefox"
-      : /Chrome\/|CriOS\//.test(userAgent) ? "Chrome"
-        : /Safari\//.test(userAgent) ? "Safari"
-          : "Browser";
-  const device = /iPhone/.test(userAgent) ? "iPhone"
-    : /iPad/.test(userAgent) ? "iPad"
-      : /Android/.test(userAgent) ? "Android"
-        : /Mac OS X|Macintosh/.test(userAgent) ? "Mac"
-          : /Windows/.test(userAgent) ? "Windows"
-            : /CrOS/.test(userAgent) ? "ChromeOS"
-              : /Linux/.test(userAgent) ? "Linux"
-                : "this device";
-  return `${browser} on ${device}`;
-}
+export { browserLabel } from "../browser-label";
 
 function codename(session: string): string {
   return /([a-z]+-[a-z]+-\d+)$/i.exec(session)?.[1] ?? session;
@@ -229,7 +210,7 @@ export class InboxView {
 
   private approvalMarkup(state: Extract<InboxState, { kind: "awaiting_approval" }>): HTMLElement {
     const section = el("div", { class: "operator-inbox-approval" });
-    section.append(el("p", { class: "operator-inbox-lead" }, "Approve this browser from your Petra Stella account. Check that the code matches."));
+    section.append(el("p", { class: "operator-inbox-lead" }, "Approve this browser from your Cassy Cloud account. Check that the code matches."));
     section.append(el("div", { class: "pair-code operator-inbox-code", "aria-label": "Sign-in code" }, state.userCode));
     const link = el("a", { href: state.approvalUrl, target: "_blank", rel: "noopener noreferrer", class: "button primary", id: "operator-inbox-approve-link" }, "Approve on Cassy Cloud");
     section.append(link);
@@ -348,7 +329,10 @@ export class InboxView {
     if (!machine || !granted) {
       form.append(el("p", { class: "operator-inbox-hint" }, !machine
         ? "This machine is not enrolled for offline replies."
-        : "This browser can read this conversation but not reply. To reply from it, sign out of the inbox, sign in again and allow replies when you approve it."));
+        // cas-d043 G05: what replying takes, and what signing out costs. A
+        // grant's reply access is fixed when it is approved; asking for it in
+        // place needs Cassy Cloud to upgrade a grant, which it cannot yet.
+        : "This browser can read this conversation but not reply. To reply from it, sign out of the inbox, sign in again and allow replies when you approve it. Signing out removes the messages kept in this browser."));
       return form;
     }
     const label = el("label", { for: "operator-inbox-reply" }, `Reply — ${machine.label ?? "the machine"} gets it when it’s back`);

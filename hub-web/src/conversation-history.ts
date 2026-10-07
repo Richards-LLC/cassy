@@ -827,18 +827,42 @@ export class ConversationHistory {
   }
 
   /** Merge a durable supervisor turn in the machine's sequence, keeping its own stamp (cas-1f13). */
-  hydrateReply(reply: ConversationHistoryReply, now: number = Date.now()): void {
+  /**
+   * cas-d043 G03: a reply this browser kept (the journal) carries no machine
+   * stamp, only when it was stored. It is placed at the time the last visit
+   * showed it when known, and the machine's own stamp replaces that once the
+   * machine's history page brings it. Its stored time used to stand in for
+   * the stamp, so a reload marked yesterday's blocker "machine clock ahead"
+   * the visit never showed.
+   */
+  hydrateKeptReply(reply: ConversationHistoryReply, now: number = Date.now()): void {
+    const key = `r:${reply.notification_id}`;
+    const shown = this.arrivals.get(key);
+    if (!this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) this.keptTimes.add(reply.notification_id);
+    this.hydrateReply(shown === undefined ? reply : { ...reply, at: new Date(shown).toISOString() }, now, true);
+  }
+  /** Kept replies whose time is not yet the machine's stamp (cas-d043 G03). */
+  private readonly keptTimes = new Set<number>();
+
+  hydrateReply(reply: ConversationHistoryReply, now: number = Date.now(), kept = false): void {
     const { at, ...live } = reply;
     const stamped = ConversationHistory.timestamp(at);
+    if (!kept && stamped !== undefined && this.keptTimes.delete(reply.notification_id)) {
+      const existing = this.events.find((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id);
+      if (existing) existing.at = stamped;
+    }
     if (this.foreign(reply.session)) {
       this.keepEarlier({ kind: "reply", value: { ...live, reply_to: live.reply_to ?? null, kind: live.kind ?? "answer", attachments: live.attachments ?? [] }, at: stamped, session: reply.session }, reply.session!);
       return;
     }
-    this.observeStamp(stamped, now);
+    // A kept reply's time is not the machine's stamp, so it measures nothing
+    // about the machine's clock (cas-d043 G03).
+    if (!kept) this.observeStamp(stamped, now);
     // cas-9e33: a turn a visit saw arrive live keeps the mark that visit gave it.
     const marked = this.liveMarks.get(`r:${reply.notification_id}`);
     const shownAt = this.arrivals.get(`r:${reply.notification_id}`);
-    this.reply(live, stamped, reply.session, shownAt, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable", marked === true, marked !== undefined);
+    const arrival = kept && shownAt !== undefined ? Math.min(shownAt, now) : this.arrivalFor(`r:${reply.notification_id}`, stamped, now);
+    this.reply(live, stamped, reply.session, shownAt, arrival, "durable", marked === true, marked !== undefined);
   }
 }
 

@@ -26,14 +26,14 @@ import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
-import { applyActionAvailability, arrangeConversationShell, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
+import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
+import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, fatalConnectionRecovery, lostConnectionBanner, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -145,7 +145,7 @@ const attachStates = new Map<string, AttachSnapshot>();
 const sessionsEverLive = new Set<string>();
 /** Connection labels a conversation row shows in place of its last turn (cas-a447). */
 // cas-a6f0: an unsteady machine is named on the row too, as the header names it.
-const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING]);
+const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING, BROWSER_BLOCKED, BROWSER_UNSUPPORTED]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
@@ -219,7 +219,17 @@ function syncConversationContext(): void {
   }
   const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
   syncContextRail(document, { history, progress: contextProgress || progressSheetOpen(), attention: contextAttention });
+  markRailEdges();
 }
+
+/** cas-d043 H10: which edges of the rail have rows beyond them, for glass.css's edge fades. */
+function markRailEdges(rail: Element | null = document.querySelector(".conversation-context")): void {
+  if (!(rail instanceof HTMLElement)) return;
+  rail.toggleAttribute("data-more-above", rail.scrollTop > 1);
+  rail.toggleAttribute("data-more-below", rail.scrollHeight - rail.scrollTop - rail.clientHeight > 1);
+}
+document.addEventListener("scroll", (event) => { if (event.target instanceof HTMLElement && event.target.matches(".conversation-context")) markRailEdges(event.target); }, true);
+window.addEventListener("resize", () => markRailEdges());
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
 /** Pane output lights the working line now and schedules the check that puts it out. */
 function refreshWorkingLines(): void {
@@ -1622,11 +1632,14 @@ function openingDelay(key: string, now = Date.now()): number {
 
 function clearDisconnectedState(grid: HTMLElement): void {
   grid.classList.remove("terminal-disconnected");
+  grid.style.removeProperty("--outage-banner-space");
   grid.querySelector(".terminal-disconnected-banner")?.remove();
   const shown = document.querySelector<HTMLElement>("#toast");
   if (shown) placeToastClearOfBanner(shown);
 }
 
+/** The open Connection log's summary writer, run with every header update (cas-d043 G04). */
+let refreshConnectionLog: (() => void) | undefined;
 function openConnectionLog(machineId: string): void {
   let dialog = document.querySelector<HTMLDialogElement>("#connection-log");
   if (!dialog) {
@@ -1634,19 +1647,21 @@ function openConnectionLog(machineId: string): void {
     dialog.id = "connection-log";
     dialog.className = "connection-log";
     dialog.setAttribute("aria-label", "Connection log");
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence"></p><pre>Running diagnostics…</pre></details></section>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow"></p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence"></p><pre>Running diagnostics…</pre></details></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
   const summary = dialog.querySelector<HTMLElement>(".connection-log-summary")!;
   const technical = dialog.querySelector<HTMLElement>(".connection-log-evidence")!;
   const machineLabel = machines.get(machineId)?.label ?? "this machine";
+  // cas-d043 G04: the eyebrow names the machine; "Evidence ledger" was jargon.
+  dialog.querySelector<HTMLElement>(".connection-log-eyebrow")!.textContent = machines.get(machineId)?.label ?? "Machine";
   const download = dialog.querySelector<HTMLButtonElement>(".connection-log-export")!;
   download.disabled = true;
   const update = () => {
-    const connection = connections.get(machineId);
-    const machineState = connection?.snapshot();
-    const state = machineState?.phase !== "live" || machineState.degraded ? machineState : selectedSession ? connection?.attachSnapshot(selectedSession) ?? machineState : machineState;
+    // cas-d043 G04: the state the header and footer show, from the same
+    // source, so the log never says "Connecting now" beside a Live header.
+    const state = machineId === selectedMachineId && selectedSession ? conversationStatusState(machineId, selectedSession) : machineFooterConnection(machineId);
     const cause = state?.cause;
     // cas-97d58 F08: what happens next, in the live state's own words; never
     // "No retry scheduled" while the rail says it is checking.
@@ -1663,8 +1678,11 @@ function openConnectionLog(machineId: string): void {
     technical.hidden = technicalText === "";
   };
   update();
+  // The countdown ticks each second; a change of state is written on the
+  // same render that changes the header's word (renderConversationList).
   const timer = window.setInterval(update, 1000);
-  dialog.addEventListener("close", () => window.clearInterval(timer), { once: true });
+  refreshConnectionLog = update;
+  dialog.addEventListener("close", () => { window.clearInterval(timer); if (refreshConnectionLog === update) refreshConnectionLog = undefined; }, { once: true });
   output.textContent = "Running diagnostics…";
   dialog.showModal();
   void connections.get(machineId)?.diagnose().then((result) => {
@@ -1782,6 +1800,9 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     }
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
+    // cas-d043 G14: the thread's top spacer, the banner's height and its inset.
+    const space = `${Math.ceil(banner.getBoundingClientRect().height + 2 * 8)}px`;
+    if (grid.style.getPropertyValue("--outage-banner-space") !== space) grid.style.setProperty("--outage-banner-space", space);
     // A toast already up when the banner arrives moves clear of it (cas-00cc).
     const shown = document.querySelector<HTMLElement>("#toast.visible");
     if (shown) placeToastClearOfBanner(shown);
@@ -2098,10 +2119,63 @@ function selectedSurface(): { key: string; surface: TerminalSurface } | undefine
 }
 
 /** The header's Interrupt and Raw output follow what they can do now, without a shell rebuild. */
+/**
+ * cas-d043 H15: the pair dialog's action bar frosts only while fields scroll
+ * on beneath it; with nothing under it, it is the sheet itself (glass.css).
+ */
+const pairBarBound = new WeakSet<HTMLElement>();
+function bindPairBarFrost(dialog: HTMLDialogElement): void {
+  const scroller = dialog.querySelector<HTMLElement>(":scope > .pair-flow, :scope > #pair-form");
+  const bar = scroller?.querySelector<HTMLElement>(":scope > .dialog-actions");
+  if (!scroller || !bar || pairBarBound.has(scroller)) return;
+  pairBarBound.add(scroller);
+  const sync = () => bar.classList.toggle("fields-beneath", scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1);
+  scroller.addEventListener("scroll", sync, { passive: true });
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(sync);
+    observer.observe(scroller);
+    for (const child of scroller.children) observer.observe(child);
+  }
+  sync();
+}
+
+/** The skip link's target: the open conversation's first visible control (cas-d043 G02/H11). */
+function skipToConversation(): void {
+  const main = document.querySelector<HTMLElement>(".conversation-main");
+  const first = [...(main?.querySelectorAll<HTMLElement>("button, [href], input, textarea, [tabindex]:not([tabindex='-1'])") ?? [])]
+    .find((node) => node.getClientRects().length > 0 && !(node as HTMLButtonElement).disabled && !node.closest("[hidden], [inert]"));
+  first?.focus();
+}
+
 function syncConversationActions(): void {
   retireStaleToast();
+  syncControlHolder();
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-raw-output"), document.querySelector<HTMLElement>("#conversation-raw-output-reason"), rawOutputUnavailableReason());
+}
+
+/**
+ * cas-d043 G02: while another device holds control of the open session, the
+ * header says which ("· Studio iPad in control"), so Interrupt taking it over,
+ * or being refused, is never the first the operator hears of it.
+ */
+function syncControlHolder(): void {
+  const host = document.querySelector<HTMLElement>(".conversation-identity .conversation-host");
+  if (!host) return;
+  const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  const lease = key ? leases.get(key) : undefined;
+  const holder = lease && !lease.held_by_me ? lease.controller_label || undefined : undefined;
+  let note = host.querySelector<HTMLElement>(":scope > #conversation-control");
+  if (!holder) {
+    if (note) { note.remove(); fitConversationHost(document); }
+    return;
+  }
+  if (!note) { note = document.createElement("span"); note.id = "conversation-control"; host.append(note); }
+  if (note.dataset.holder === holder) return;
+  note.dataset.holder = holder;
+  const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
+  note.replaceChildren(separator, `${holder} in control`);
+  fitConversationHost(document);
 }
 
 const interruptsInFlight = new Set<string>();
@@ -2129,7 +2203,7 @@ async function interruptSupervisor(): Promise<void> {
       const force = Boolean(holder && machine.scopes.includes("hub-admin"));
       if (!await takeControlForMessage(machine, session, force)) {
         toast(holder
-          ? `${holder} is in control of this session. Interrupt works once it releases control.`
+          ? `${holder} is in control of this session. Interrupt works once it releases control, or from a pairing with administrator access, which can take over.`
           : "Couldn't take control of this session to interrupt it. Check that it's live, then try again.", { thread: key });
         return;
       }
@@ -3061,7 +3135,7 @@ sendJournal.onChange = () => {
         scheduleReceiptCheck(key);
         for (const row of snapshot.replies) {
           if (isOperatorNotice(row.reply)) continue;
-          history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+          history.hydrateKeptReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
         }
         if (sessionIsUp(machine.id, scope.session)) void flushHeldSends(machine, scope.session);
       }
@@ -3125,7 +3199,7 @@ function restoreStoredSends(machine: StoredMachine): void {
       const history = conversationHistory(key, scope.session);
       for (const row of snapshot.replies) {
         if (isOperatorNotice(row.reply)) continue;
-        history.hydrateReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
+        history.hydrateKeptReply({ ...row.reply, device_persisted: true, at: new Date(row.persistedAt).toISOString(), session: scope.session });
       }
       for (const held of history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts)) {
         const since = held.heldAt ?? held.at;
@@ -4008,7 +4082,7 @@ function renderConversationList(): void {
     const listState = rows.length > 0 ? { kind: "text" as const, text: conversationNoMatchText(conversationSearchQuery) } : conversationListState(machineCatalogLoaded, [...machines.keys()].map((id) => ({ catalogReceived: fleetCatalogUpdatedAt.has(id), phase: connectionStates.get(id)?.phase, browserBlocked: Boolean(connectionStates.get(id)?.networkAccessHelp) })));
     const markup = listState.kind === "loading" ? conversationSkeletonMarkup() : "";
     if (listState.kind === "loading") { if (empty.dataset.state !== "loading") empty.innerHTML = markup; }
-    else empty.textContent = listState.text;
+    else empty.textContent = rows.length > 0 ? listState.text : [listState.text, keptMessagesLine()].filter(Boolean).join(" ");
     empty.dataset.state = listState.kind;
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
@@ -4028,6 +4102,21 @@ function renderConversationList(): void {
   }
   // The state's width changes the room the machine · codename line has.
   fitConversationHost(document);
+  refreshConnectionLog?.();
+}
+
+/**
+ * cas-d043 G03: messages this browser kept during an outage survive a reload,
+ * but until the machine answers there is no conversation to show them in, so
+ * the empty list says they are kept and will go out.
+ */
+function keptMessagesLine(): string {
+  const kept = new Map<string, number>();
+  for (const [key, queue] of heldSends) {
+    const machine = [...machines.values()].find((item) => key.startsWith(`${item.id}:`));
+    if (machine && queue.length && !fleetCatalogUpdatedAt.has(machine.id)) kept.set(machine.label, (kept.get(machine.label) ?? 0) + queue.length);
+  }
+  return [...kept].map(([label, count]) => `${count === 1 ? "1 message" : `${count} messages`} kept for ${label} will go out once it answers.`).join(" ");
 }
 
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
@@ -4043,13 +4132,18 @@ function conversationHeaderLabel(machineId: string, session: string | undefined)
  * back; the thread says "Opening the conversation…".
  */
 function conversationStatusLabel(machineId: string, session: string | undefined): string {
+  return fleetConnectionLabel(conversationStatusState(machineId, session), machineId);
+}
+
+/** The state behind the conversation's connection word, which the Connection log reads too (cas-d043 G04). */
+function conversationStatusState(machineId: string, session: string | undefined): ConnectionState | undefined {
   const machine = connectionStates.get(machineId);
   if (session && machine?.phase === "live") {
     const key = sessionKey(machineId, session);
     const attach = attachStates.get(key);
-    if (attach && !sessionsEverLive.has(key) && (attachInProgress(attach) || firstAttachRetry(attach, false))) return fleetConnectionLabel(machine, machineId);
+    if (attach && !sessionsEverLive.has(key) && (attachInProgress(attach) || firstAttachRetry(attach, false))) return machine;
   }
-  return fleetConnectionLabel(conversationConnection(machineId, session), machineId);
+  return conversationConnection(machineId, session);
 }
 
 /**
@@ -4096,11 +4190,13 @@ function renderAttention(): void {
     },
   }, {
     animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text,
+    ...(selectedMachineId ? { openConversation: { machineId: selectedMachineId, ...(selectedSession ? { session: selectedSession } : {}) } } : {}),
     sessionLabel: (item) => {
       const session = sessions.get(item.machineId)?.find((session) => session.name === item.session);
       return session ? [projectTitle(session.project_dir), session.supervisor].filter(Boolean).join(" · ") || undefined : undefined;
     },
   });
+  markRailEdges();
   // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
   syncConversationAttention(selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }
@@ -4136,11 +4232,23 @@ function syncConversationAttention(count: number): void {
   if (progressSheetOpen() && (!phoneLayout() || !selectedSession || progressSheetSession !== sessionKey(selectedMachineId ?? "", selectedSession))) progressSheetSession = undefined;
   applyAttentionSheet();
 }
+/** The phone Tasks sheet names whose tasks it holds, while it covers the header that does (cas-d043 G01). */
+function syncProgressSheetWhere(): void {
+  const heading = document.querySelector<HTMLElement>("#context-progress-heading");
+  let line = document.querySelector<HTMLElement>(".conversation-context .context-sheet-where");
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find((item) => item.name === selectedSession) : undefined;
+  const where = progressSheetOpen() ? contextSheetWhere({ projectDir: session?.project_dir, supervisor: session?.supervisor, host: machine?.label }) : "";
+  if (!where || !heading) { line?.remove(); return; }
+  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; heading.after(line); }
+  if (line.textContent !== where) line.textContent = where;
+}
 /** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
 let sheetFocus: HTMLElement | undefined;
 /** The same control's redraw-proof key (cas-a5c6 QA F03). */
 let sheetFocusKey: string | undefined;
 function applyAttentionSheet(): void {
+  syncProgressSheetWhere();
   applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), contextSheetOpen(), progressSheetOpen() ? "progress" : "attention");
   const fleetEntry = document.querySelector<HTMLButtonElement>("#conversation-fleet");
   fleetEntry?.setAttribute("aria-expanded", String(progressSheetOpen()));
@@ -4235,6 +4343,10 @@ function openProgressSheet(): void {
   if (!selectedMachineId || !selectedSession) return;
   attentionSheetOpen = false;
   progressSheetSession = sessionKey(selectedMachineId, selectedSession);
+  // An Undo dismissed from the floating notice lives in the sheet (cas-2796a
+  // F03): opening it redraws the rail once (closing it needs no redraw).
+  const status = document.querySelector<HTMLElement>("#status-view");
+  if (status && fleetOps.currentUndo(Date.now())) { delete status.dataset.signature; renderStatus(statuses.get(progressSheetSession)); }
   applyAttentionSheet();
   document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close")?.focus();
 }
@@ -4277,7 +4389,7 @@ function attentionOutage(): { readonly text: string; readonly word: string } | u
       };
     });
   if (!down.length) return undefined;
-  return { text: `Not all clear. ${down.map((item) => item.text).join("; ")}.`, word: down.every((item) => item.phase === UNSTEADY) ? UNSTEADY : down.every((item) => item.fatal) ? "Unreachable" : "Reconnecting" };
+  return { text: `Not all clear. ${down.map((item) => item.text).join("; ")}.`, word: down.every((item) => item.phase === UNSTEADY) ? UNSTEADY : down.every((item) => item.fatal) ? BROWSER_UNSUPPORTED : "Reconnecting" };
 }
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {
@@ -4306,7 +4418,23 @@ async function performAttentionAction(item: AttentionItem, action: AttentionActi
  * when what it shows changes, so a heartbeat never closes a menu or moves focus.
  */
 const fleetOps = new FleetOpsState();
+/**
+ * When each awaiting-merge task was last asked about, keyed by machine,
+ * session and task id: the same task id on another machine or project is
+ * another task (cas-d043 G13).
+ */
 const fleetAsked = new Map<string, number>();
+const fleetAskedKey = (machineId: string, session: string, taskId: string): string => JSON.stringify([machineId, session, taskId]);
+/** The open conversation's asks, by task id, as the rail reads them. */
+function fleetAskedFor(machineId: string | undefined, session: string | undefined): Map<string, number> {
+  const asked = new Map<string, number>();
+  if (!machineId || !session) return asked;
+  for (const [key, at] of fleetAsked) {
+    const [machine, owner, task] = JSON.parse(key) as [string, string, string];
+    if (machine === machineId && owner === session) asked.set(task, at);
+  }
+  return asked;
+}
 let fleetHeaderPanel: "add" | "focus" | undefined;
 let fleetFocusNext: string | undefined;
 let fleetUndoTimer: number | undefined;
@@ -4356,7 +4484,7 @@ async function runFleetAction(rowKey: string, action: FleetAction): Promise<void
   });
   if (!result || fleetOps.selectionEpoch !== epoch || selectedMachineId !== machineId || selectedSession !== session) return;
   if (result === "succeeded") {
-    if (action.request.op.kind === "request_merge") fleetAsked.set(String(action.request.op.task_id), Date.now());
+    if (action.request.op.kind === "request_merge") fleetAsked.set(fleetAskedKey(machineId, session, String(action.request.op.task_id)), Date.now());
     // Focus stays with the rows (the next row's ⋯ after a Stop); a destructive
     // result with no row left to go to lands on its result line (cas-97d58 F12).
     fleetFocusNext = action.inverse && fleetOps.undo ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
@@ -4387,7 +4515,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     tasks: [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[],
     epics,
     currentEpic,
-    asked: fleetAsked,
+    asked: fleetAskedFor(selectedMachineId, selectedSession),
     relative: (at) => { const label = relativeTimestamp(at); return label === "now" ? "just now" : `${label} ago`; },
     on: {
       toggleMenu: (rowKey) => { const opening = fleetOps.menuFor !== rowKey; fleetOps.toggleMenu(rowKey); rerender(opening ? `${rowKey}:first-item` : `${rowKey}:trigger`); },
@@ -4438,7 +4566,7 @@ function fleetMergeAction(task: FleetTask): FleetAction {
 
 /** What the rail shows, for skipping a rebuild that would change nothing. */
 function fleetOpsSignature(): string {
-  return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, [...fleetAsked].map(([id, at]) => [id, relativeTimestamp(at)])]);
+  return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, [...fleetAskedFor(selectedMachineId, selectedSession)].map(([id, at]) => [id, relativeTimestamp(at)])]);
 }
 
 function renderStatus(status?: Record<string, unknown>): void {
@@ -4482,8 +4610,12 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (at < 0) return;
     const alive = (key: string) => container.querySelector<HTMLElement>(`[data-fleet-focus="${CSS.escape(key)}"]`);
     const neighbour = priorTriggers.slice(at + 1).map(alive).find(Boolean);
-    if (neighbour) { neighbour.focus({ preventScroll: false }); return; }
     const result = container.querySelector<HTMLElement>('[data-fleet-focus="result"]');
+    // cas-d043 G06: focus moves on to the next row, and the result line
+    // ("swift-lark-3 stopped.") is brought into view too, instead of sitting
+    // above the fold whenever another row follows.
+    // The focused row is scrolled to last, so it stays in sight when both can't be.
+    if (neighbour) { neighbour.focus({ preventScroll: false }); result?.scrollIntoView({ block: "nearest" }); neighbour.scrollIntoView({ block: "nearest" }); return; }
     if (result) { result.focus({ preventScroll: false }); return; }
     container.tabIndex = -1;
     container.focus({ preventScroll: false });
@@ -4532,7 +4664,13 @@ function renderStatus(status?: Record<string, unknown>): void {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();
     const phoneConversation = phoneLayout();
-    const undo = fleetOps.currentUndo(ops.now) ? undoBar(document, { ...ops, phone: phoneConversation })
+    // cas-2796a F03: an Undo whose floating offer was dismissed is still
+    // offered inside the open Tasks & progress sheet until it expires.
+    const offer = fleetOps.currentUndo(ops.now);
+    const dismissedUndo = Boolean(offer && phoneConversation && fleetOps.phoneNoticeDismissed(offer));
+    if (dismissedUndo && progressSheetOpen()) { const inSheet = undoBar(document, { ...ops, phone: false }); if (inSheet) container.append(inSheet); }
+    const undo = offer && !dismissedUndo ? undoBar(document, { ...ops, phone: phoneConversation })
+      : offer ? undefined
       : !phoneConversation && fleetOps.currentResult(ops.now) ? resultBar(document, ops)
         : phoneConversation ? phoneFleetNotice(document, ops) : undefined;
     if (undo && phoneConversation) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
@@ -4565,6 +4703,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.append(row);
   }
   contextProgress = Boolean(summary) || workers.length > 0 || tasks.length > 0;
+  markRailEdges();
   if (!contextProgress) {
     const empty = document.createElement("p");
     empty.className = "status-empty";
@@ -4823,6 +4962,8 @@ function bindEvents(): void {
   if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
   if (document.querySelector<HTMLButtonElement>("#pair-toggle")) document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
   for (const button of document.querySelectorAll<HTMLButtonElement>("#inbox-toggle, #empty-inbox")) button.onclick = () => void inboxView.open();
+  const skip = document.querySelector<HTMLButtonElement>("#skip-to-conversation");
+  if (skip) skip.onclick = skipToConversation;
   for (const pair of document.querySelectorAll<HTMLButtonElement>("#empty-pair")) {
     pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   }
@@ -4833,6 +4974,7 @@ function bindEvents(): void {
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
   const pairCreate = document.querySelector<HTMLButtonElement>("#pair-create");
   const pairDialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  if (pairDialog) bindPairBarFrost(pairDialog);
   if (pairDialog) bindPairingDialogCancel(
     pairDialog,
     () => ({
@@ -5061,7 +5203,10 @@ function renderMachineRegister(): void {
   const rows = pairedMachineRows();
   const footer = document.querySelector<HTMLElement>('#hub-footer-badges');
   if (footer) {
-    const markup = machineFooterMarkup(rows, [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0), __HUB_BUILD__, !machineCatalogLoaded);
+    // cas-d043 G03: before any machine has answered with its sessions (a
+    // reload during an outage), the count is unknown, not "0 conversations".
+    const counted = machines.size === 0 || [...machines.keys()].some((id) => fleetCatalogUpdatedAt.has(id));
+    const markup = machineFooterMarkup(rows, counted ? [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0) : undefined, __HUB_BUILD__, !machineCatalogLoaded);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');
     if (!button) footer.innerHTML = markup;
@@ -5090,6 +5235,18 @@ function renderMachineRegister(): void {
       if (machine && connection) void openInstallationInventory(document, machine, connection, async () => {
         await installationAccess.forgetRevoked(machine.id, machine.baseUrl, machine.deviceId);
         await forgetPairedMachine(id);
+        // cas-d043 G09: say what happened, once the inventory has closed, and
+        // land on the next step instead of a silent first-run screen.
+        window.setTimeout(() => {
+          toast(`This browser's access to ${machine.label} was revoked.`);
+          const visible = (node: HTMLElement | null): node is HTMLElement => node !== null && node.getClientRects().length > 0;
+          // Paired machines may still be open over the page: its own Pair a machine, then.
+          const open = document.querySelector<HTMLDialogElement>("dialog[open]");
+          const next = open
+            ? [open.querySelector<HTMLElement>("#paired-machines-add")].find(visible)
+            : [document.getElementById("empty-pair"), document.getElementById("pair-toggle"), document.getElementById("paired-machines-toggle")].find(visible);
+          next?.focus();
+        }, 0);
       });
     },
   });

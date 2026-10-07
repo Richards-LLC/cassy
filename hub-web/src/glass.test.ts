@@ -430,8 +430,8 @@ describe("Glass structure", () => {
 describe("the rail's rounded corners (cas-d043 H10)", () => {
   it("fades rows under each edge with the panel's own glass instead of slicing them", () => {
     const flat = glass.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ");
-    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]::before \{[^}]*top: 0;[^}]*linear-gradient\(var\(--look-glass\), transparent\)/);
-    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]::after \{[^}]*bottom: 0;[^}]*linear-gradient\(transparent, var\(--look-glass\)\)/);
+    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]\[data-more-above\]::before \{[^}]*top: 0;[^}]*linear-gradient\(var\(--look-glass-strong\), transparent\)/);
+    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]\[data-more-below\]::after \{[^}]*bottom: 0;[^}]*linear-gradient\(transparent, var\(--look-glass-strong\)\)/);
     expect(flat).toMatch(/::after \{ content: ""; position: sticky;[^}]*pointer-events: none;/);
   });
 });

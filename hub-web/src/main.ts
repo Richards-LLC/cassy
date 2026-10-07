@@ -219,7 +219,17 @@ function syncConversationContext(): void {
   }
   const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
   syncContextRail(document, { history, progress: contextProgress || progressSheetOpen(), attention: contextAttention });
+  markRailEdges();
 }
+
+/** cas-d043 H10: which edges of the rail have rows beyond them, for glass.css's edge fades. */
+function markRailEdges(rail: Element | null = document.querySelector(".conversation-context")): void {
+  if (!(rail instanceof HTMLElement)) return;
+  rail.toggleAttribute("data-more-above", rail.scrollTop > 1);
+  rail.toggleAttribute("data-more-below", rail.scrollHeight - rail.scrollTop - rail.clientHeight > 1);
+}
+document.addEventListener("scroll", (event) => { if (event.target instanceof HTMLElement && event.target.matches(".conversation-context")) markRailEdges(event.target); }, true);
+window.addEventListener("resize", () => markRailEdges());
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
 /** Pane output lights the working line now and schedules the check that puts it out. */
 function refreshWorkingLines(): void {
@@ -4186,6 +4196,7 @@ function renderAttention(): void {
       return session ? [projectTitle(session.project_dir), session.supervisor].filter(Boolean).join(" · ") || undefined : undefined;
     },
   });
+  markRailEdges();
   // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
   syncConversationAttention(selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }
@@ -4332,8 +4343,10 @@ function openProgressSheet(): void {
   if (!selectedMachineId || !selectedSession) return;
   attentionSheetOpen = false;
   progressSheetSession = sessionKey(selectedMachineId, selectedSession);
-  // An Undo dismissed from the floating notice lives in the sheet (cas-2796a F03).
-  renderStatus(statuses.get(progressSheetSession));
+  // An Undo dismissed from the floating notice lives in the sheet (cas-2796a
+  // F03): opening it redraws the rail once (closing it needs no redraw).
+  const status = document.querySelector<HTMLElement>("#status-view");
+  if (status && fleetOps.currentUndo(Date.now())) { delete status.dataset.signature; renderStatus(statuses.get(progressSheetSession)); }
   applyAttentionSheet();
   document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close")?.focus();
 }
@@ -4561,7 +4574,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
-  const signature = JSON.stringify([phoneLayout(), progressSheetOpen(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -4690,6 +4703,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.append(row);
   }
   contextProgress = Boolean(summary) || workers.length > 0 || tasks.length > 0;
+  markRailEdges();
   if (!contextProgress) {
     const empty = document.createElement("p");
     empty.className = "status-empty";

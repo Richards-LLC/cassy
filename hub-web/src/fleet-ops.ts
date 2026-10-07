@@ -144,7 +144,8 @@ export function stopAction(agent: FleetAgent, force = false): FleetAction {
     question: force
       ? `Force stop ${agent.name}? It stops at once, without finishing its current step.`
       : agent.current_task
-        ? `Stop ${agent.name}? Its task ${agent.current_task} goes back to ready.`
+        // cas-d043 G15: in the word its chip then shows ("Open"), not "ready".
+        ? `Stop ${agent.name}? Its task ${agent.current_task} goes back to Open, for any worker to pick up.`
         : `Stop ${agent.name}?`,
   };
 }

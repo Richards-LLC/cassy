@@ -30,6 +30,18 @@ export interface AttentionPanelOptions {
   outage?: string;
   animateIds?: ReadonlySet<string>;
   reclassifyIds?: ReadonlySet<string>;
+  /**
+   * cas-d043 G12: the conversation on screen. "Open conversation" on an item
+   * about it would reopen what is already open and change nothing, so the
+   * item offers only Dismiss.
+   */
+  openConversation?: { readonly machineId: string; readonly session?: string };
+}
+
+/** The item's action, less one that would only reopen the conversation already open (cas-d043 G12). */
+export function effectiveAttentionAction(item: Pick<AttentionItem, "machineId" | "session">, action: AttentionAction, open?: AttentionPanelOptions["openConversation"]): AttentionAction {
+  if (action !== "view_pane" || !open || !item.session) return action;
+  return item.machineId === open.machineId && item.session === open.session ? "none" : action;
 }
 
 const ACTION_LABEL: Record<Exclude<AttentionAction, "none">, string> = {
@@ -159,8 +171,8 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
 
   const actions = document.createElement("div");
   actions.className = "attention-actions";
-  if (card.content.action !== "none") {
-    const action = card.content.action;
+  const action = effectiveAttentionAction(card.latest, card.content.action, options.openConversation);
+  if (action !== "none") {
     const act = button(ACTION_LABEL[action], "attention-action", () => {
       void Promise.resolve(callbacks.act(card.latest, action)).then(() => {
         if (severity === "critical") return callbacks.dismiss(card.items);
@@ -172,7 +184,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   const dismiss = button("Dismiss", severity !== "critical" ? "attention-dismiss" : "attention-explicit-dismiss", () => void callbacks.dismiss(card.items));
   dismiss.setAttribute("aria-label", `Dismiss ${severity} event`);
   dismiss.dataset.role = "dismiss";
-  if (card.content.action === "none") dismiss.classList.add("attention-action");
+  if (action === "none") dismiss.classList.add("attention-action");
   actions.append(dismiss);
   actions.append(renderPayload(card, callbacks));
   article.append(actions);
@@ -229,6 +241,7 @@ export function renderAttentionPanel(
     items,
     items.map((item) => ownerLabel(item, options)),
     options.outage ?? null,
+    options.openConversation ?? null,
     [...(options.animateIds ?? [])].filter((id) => items.some((item) => item.id === id)),
     [...(options.reclassifyIds ?? [])].filter((id) => items.some((item) => item.id === id)),
   ]);

@@ -177,3 +177,33 @@ describe("the Re-pair dialog's command (cas-093d F02)", () => {
     expect(doc.querySelector(".pair-command")).toBeNull();
   });
 });
+
+describe("the pairing dialog's name and admin consent (cas-d043 G08, G11)", () => {
+  const origin = "https://commander.example";
+  const base = { cleanupFailed: false, cleanupContext: { cause: "cancel" as const, storeOpen: false, rollbackPending: false }, status: "", createInFlight: false, exchangeInFlight: false, relayOrigin: origin, pageOrigin: origin };
+  const parse = (html: string) => new DOMParser().parseFromString(html, "text/html");
+  const nameOf = (doc: Document) => {
+    const dialog = doc.querySelector("dialog")!;
+    return doc.getElementById(dialog.getAttribute("aria-labelledby") ?? "")?.textContent;
+  };
+
+  it("names every variant of the dialog by its heading", () => {
+    const draft = createPairingDraft(origin);
+    expect(nameOf(parse(pairDialogMarkup({ ...base, pendingPairing: null, draft })))).toBe("Pair a machine");
+    expect(nameOf(parse(pairDialogMarkup({ ...base, pendingPairing: { kind: "invitation", token: "A".repeat(43), hubId: "atlas", scopes: ["machine-read"] }, draft })))).toBe("Pair a machine");
+    expect(nameOf(parse(pairDialogMarkup({ ...base, cleanupFailed: true, pendingPairing: null, draft })))).toBeTruthy();
+  });
+
+  it("labels hub:admin in plain words and claims it only once ticked", () => {
+    const granted = ["machine-read", "session-read", "pane-read", "hub-admin"] as const;
+    const draft = { ...createPairingDraft(origin, ["machine-read", "session-read", "pane-read"]), machineLabel: "Atlas" };
+    const doc = parse(pairDialogMarkup({ ...base, pendingPairing: { kind: "invitation", token: "A".repeat(43), hubId: "atlas", scopes: [...granted] }, draft }));
+    const label = doc.querySelector(".pair-admin-consent label.scope")!;
+    expect(label.firstChild?.nextSibling?.textContent).toBe("See and revoke other browsers on Atlas");
+    expect(doc.querySelector<HTMLInputElement>('.pair-admin-consent input[value="hub-admin"]')!.checked).toBe(false);
+    // The lead names the power in a part CSS shows only while the box is ticked.
+    const admin = doc.querySelector(".pair-summary .pair-summary-admin");
+    expect(admin?.textContent).toBe(" · See and revoke other browsers on Atlas");
+    expect(doc.querySelector(".pair-summary")!.textContent!.replace(admin!.textContent!, "")).not.toContain("revoke");
+  });
+});

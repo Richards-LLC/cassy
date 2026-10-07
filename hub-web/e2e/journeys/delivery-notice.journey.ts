@@ -260,6 +260,9 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
+    // cas-d043 G03: yesterday's blocker reads as the visit showed it; the time
+    // this browser stored it is not a machine stamp to measure a clock by.
+    await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 17:20");
     // cas-b113: resolved watchdog notices must not return from the device
     // journal as conversation blockers, nor make the rail wait on me.
     await expect(log.locator(".bub", { hasText: NOTICE_TEXT })).toHaveCount(0);

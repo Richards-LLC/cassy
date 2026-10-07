@@ -46,7 +46,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // link path is named as the alternative, and Pair exists only on the
     // confirmation form an invitation opens directly.
     const entry = source.slice(source.indexOf("// One state, one next action."), source.indexOf("* Render the six scopes against the invitation's ceiling."));
-    expect(entry).toContain("<h2>Pair a machine</h2>");
+    expect(entry).toContain('<h2 id="pair-title">Pair a machine</h2>');
     expect(entry).not.toContain(">Pair</button>");
     expect(entry).not.toContain('type="submit"');
     expect(entry).not.toContain("pairing-disabled-reason\">Pair is disabled");
@@ -540,7 +540,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (!await takeControlForMessage(machine, session, force)) {");
     expect(source).toContain('const took = holder ? `Took control from ${holder}. ` : "";');
     expect(source).toContain("toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`, { thread: key });");
-    expect(source).toContain("Interrupt works once it releases control.");
+    expect(source).toContain("Interrupt works once it releases control, or from a pairing with administrator access, which can take over.");
   });
 
   // Contract: never caches an asynchronously-created terminal against a detached render.
@@ -1030,7 +1030,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // transport alarm resolves itself once the socket is live again.
     expect(source).toContain('conversationStatusLabel(machine.id, session.name)');
     // The header and the empty thread read one helper (cas-010f).
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(machineId, session), machineId)');
+    expect(source).toContain('fleetConnectionLabel(conversationStatusState(machineId, session), machineId)');
+    expect(source).toContain('  return conversationConnection(machineId, session);');
     expect(source).toContain('const label = conversationHeaderLabel(selectedMachineId, selectedSession);');
     expect(source).toContain('connection: () => conversationHeaderLabel(threadMachineId, threadSession),');
     // The empty thread waits for this session's first page, requested or not yet (cas-010f).

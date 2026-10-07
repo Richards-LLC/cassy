@@ -328,6 +328,19 @@ html[data-scheme="dark"] {
   :root .conversation-sidebar { margin: var(--glass-inset) 0 var(--glass-inset) var(--glass-inset); border-radius: var(--glass-radius); }
   :root .conversation-heading { margin: var(--glass-inset) var(--glass-inset) 0; border-radius: 20px; }
   :root .conversation-context { margin: var(--glass-inset) var(--glass-inset) var(--glass-inset) 0; border-radius: var(--glass-radius); }
+  /* cas-d043 H10: the rail's rows ran into its rounded corners and were cut
+     there, with nothing to say the rail scrolls. While rows lie beyond an
+     edge (main.ts marks data-more-above / data-more-below), a short fade of
+     the panel's own glass rides that edge, so a row passing under a corner
+     fades instead of being sliced, and the fade says there is more. With
+     nothing beyond, there is no fade and no band. */
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"][data-more-above]::before,
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"][data-more-below]::after {
+    content: ""; position: sticky; z-index: 2; display: block; height: var(--space-8); pointer-events: none;
+  }
+  /* Each sits in the rail's own padding, so it takes no room of its own. */
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"][data-more-above]::before { top: 0; margin: calc(-1 * var(--space-6)) calc(-1 * var(--space-4)) calc(var(--space-6) - var(--space-8)); background: linear-gradient(var(--look-glass-strong), transparent); }
+  :root .conversation-shell:not(.attention-sheet-open) > .conversation-context[data-open="true"][data-more-below]::after { bottom: 0; margin: calc(var(--space-6) - var(--space-8)) calc(-1 * var(--space-4)) calc(-1 * var(--space-6)); background: linear-gradient(transparent, var(--look-glass-strong)); }
   @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
     /* On a phone the list is the whole screen: full-bleed glass, no inset. The
        conversation heading hangs from the top edge, so it keeps the phone
@@ -433,6 +446,12 @@ html[data-scheme="dark"] {
      needs no frost: only the hairline, and no extra height that would push
      the last Revoke out of the default view at 390 (cas-205e QA F01, F02). */
   :root dialog.installation-inventory > .dialog-actions { margin-top: 0; padding-block: var(--space-2) 0; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  /* cas-d043 H15: inside the glass dialog (a backdrop root) the bar's own
+     frost sampled only the sheet's white and read as a whiter slab in light.
+     The pair dialog's bar is the sheet itself, with its hairline, and frosts
+     only while fields scroll on beneath it (main.ts marks .fields-beneath),
+     so nothing ever shows through it. */
+  :root #pair-dialog > :is(.pair-flow, #pair-form) > .dialog-actions:not(.fields-beneath) { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
   /* Its plain buttons (Close, Back) read as buttons: an outlined pill on glass. */
   :root dialog .dialog-actions button:not(.primary) { background: var(--look-glass-strong); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); }
 

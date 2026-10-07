@@ -307,6 +307,8 @@ describe.each([["light", light], ["dark", dark]] as const)("Glass %s", (scheme, 
     expect(parse(t["--look-glass-bar"])[3]).toBeLessThanOrEqual(0.4);
     // The installations sheet's bar is its footer (outside the scroller): no frost, no extra height (QA F01).
     expect(restValue("dialog.installation-inventory > .dialog-actions", "background")).toBe("transparent");
+    // cas-d043 H15: the pair dialog's bar is the sheet unless fields scroll beneath it.
+    expect(restValue("#pair-dialog > :is(.pair-flow, #pair-form) > .dialog-actions:not(.fields-beneath)", "background")).toBe("transparent");
     expect(restValue("dialog.installation-inventory > .dialog-actions", "margin-top")).toBe("0");
     expect(restValue("dialog .dialog-actions", "border-top")).toMatch(/^1px solid var\(--look-glass-line\)$/);
     expect(restValue("dialog .dialog-actions", "margin-top")).toBe("var(--space-3)");
@@ -422,5 +424,14 @@ describe("Glass structure", () => {
     expect(youGradient.length).toBeGreaterThan(0);
     for (const selector of youGradient) expect(selector).toContain(':not(:is([data-state="error"], [data-state="unconfirmed"]))');
     expect(rules).toContain(':root .thread .turn.you .bub:is([data-state="error"], [data-state="unconfirmed"]) { background: var(--look-glass-strong); }');
+  });
+});
+
+describe("the rail's rounded corners (cas-d043 H10)", () => {
+  it("fades rows under each edge with the panel's own glass instead of slicing them", () => {
+    const flat = glass.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ");
+    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]\[data-more-above\]::before \{[^}]*top: 0;[^}]*linear-gradient\(var\(--look-glass-strong\), transparent\)/);
+    expect(flat).toMatch(/\.conversation-context\[data-open="true"\]\[data-more-below\]::after \{[^}]*bottom: 0;[^}]*linear-gradient\(transparent, var\(--look-glass-strong\)\)/);
+    expect(flat).toMatch(/::after \{ content: ""; position: sticky;[^}]*pointer-events: none;/);
   });
 });

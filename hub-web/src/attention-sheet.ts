@@ -35,9 +35,13 @@ export function applySheetSemantics(shell: HTMLElement | null, modal: boolean, s
     rail.setAttribute("role", "dialog");
     rail.setAttribute("aria-modal", "true");
     rail.setAttribute("aria-label", section === "progress" ? "Tasks & progress" : LABEL_OPEN);
+    // cas-d043 G01: whose tasks, as its description, so its name stays "Tasks & progress".
+    const where = rail.querySelector<HTMLElement>(".context-sheet-where");
+    if (section === "progress" && where?.id) rail.setAttribute("aria-describedby", where.id); else rail.removeAttribute("aria-describedby");
   } else {
     rail.removeAttribute("role");
     rail.removeAttribute("aria-modal");
+    rail.removeAttribute("aria-describedby");
     rail.setAttribute("aria-label", LABEL_RAIL);
   }
 }

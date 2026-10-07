@@ -90,11 +90,15 @@ def default_artifacts(root: Path, task_id: str) -> Path:
 def selection(repo: Path, base: str, head: str, full: bool) -> list[dict]:
     git(repo, 'merge-base', '--is-ancestor', base, head)
     paths = git(repo, 'diff', '--name-only', base, head).splitlines()
-    command = ['python3', str(repo / 'scripts/journeys-for-diff.py'), '--all' if full else '--paths']
+    # Match the close gate: the selector executable belongs to the reviewed
+    # revision, just like its catalog and source graph. A different checkout's
+    # older selector may ignore CAS_JOURNEYS_HEAD entirely.
+    source = git(repo, 'show', f'{head}:scripts/journeys-for-diff.py')
+    command = ['python3', '-', '--all' if full else '--paths']
     if not full:
         command += paths
     env = dict(os.environ, CAS_JOURNEYS_ROOT=str(repo), CAS_JOURNEYS_BASE=base, CAS_JOURNEYS_HEAD=head)
-    out = subprocess.run(command, cwd=repo, env=env, check=True, capture_output=True, text=True)
+    out = subprocess.run(command, input=source, cwd=repo, env=env, check=True, capture_output=True, text=True)
     rows = json.loads(out.stdout)['journeys']
     ids = [r['id'] for r in rows]
     if len(ids) != len(set(ids)) or any(not re.fullmatch(r'[A-Z]+-J\d+', i) for i in ids):

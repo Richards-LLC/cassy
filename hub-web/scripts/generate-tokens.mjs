@@ -80,6 +80,8 @@ try {
     "--browser-notice-height": "32px",
     // Layout viewport height; the visualViewport fallback overrides it inline while a phone keyboard is up (cas-edc9).
     "--keyboard-viewport-height": "100dvh",
+    // The thread's room above its first line for the outage banner; main.ts sets it on the pane grid while the banner shows (cas-d043 G14).
+    "--outage-banner-space": "0px",
     "--attention-payload-max-height": "180px",
     "--attention-motion-duration": token("motion.reveal"),
     "--motion-easing": `cubic-bezier(${token("motion.easing").join(", ")})`,

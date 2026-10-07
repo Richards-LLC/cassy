@@ -89,9 +89,16 @@ export function machineConnection(
     if (effective?.phase !== "live") return machine;
     machine = effective;
   }
+  // cas-d043 H09: another conversation on this machine is answering now, so
+  // the machine is reachable; a session's own retry (a peer that exited and
+  // has not left the catalog yet) is that conversation's, and must not set
+  // the machine's footer to Reconnecting. A failure retrying cannot fix
+  // still counts.
+  const answering = sessions.some(({ attach, responding }) => responding === true && attach?.phase === "live");
   for (const { attach, wasLive } of sessions) {
     if (!wasLive && attach && (firstAttachInProgress(attach) || firstAttachRetry(attach, wasLive))) continue;
     if (wasLive && attach && sessionOnlyReconnect(attach)) continue;
+    if (answering && attach && attach.phase !== "live" && attach.fatal !== true && !attach.authFailure) continue;
     const effective = sessionConnection(machine, attach, wasLive);
     if (effective && effective.phase !== "live") return effective;
   }

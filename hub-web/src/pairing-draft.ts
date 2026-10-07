@@ -1,6 +1,7 @@
 import type { PairingPrefill } from "./fragment";
 import type { Scope } from "./types";
 import { PAIRING_SCOPES } from "./pairing-scopes";
+import { browserLabel } from "./browser-label";
 
 export type PairingStep = "create" | "code" | "authorized" | "link";
 
@@ -36,7 +37,9 @@ export function createPairingDraft(controllerOrigin: string, scopes?: readonly S
     machineLabel: prefill.suggestedMachineLabel ?? "",
     addressHelpOpen: false,
     technicalOpen: undefined,
-    deviceLabel: "Cassy Cloud browser",
+    // cas-d043 G10: "Chrome on Linux", not "Cassy Cloud browser" for every
+    // browser, so two left at the default differ in the installations list.
+    deviceLabel: browserLabel(globalThis.navigator?.userAgent ?? ""),
     operatorLabel: "",
     scopes: scopes ? [...scopes] : [...PAIRING_SCOPES],
     email: "",

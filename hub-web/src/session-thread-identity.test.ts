@@ -150,6 +150,11 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(emptyThreadCopy({ ...base, connection: "Unreachable", resolved: false }).said).toBe("Atlas · Linux can't be reached — messages from the cas-src supervisor will load once it's back.");
     expect(emptyThreadCopy({ connection: "Needs pairing", resolved: false }).said).toBe("This machine needs pairing again before messages from this supervisor can load.");
     expect(emptyThreadCopy({ connection: "Reconnecting", resolved: true }).said).toContain("Reconnecting to this machine");
+    // cas-d043 G04: a cause in this browser is never "can't be reached … once it's back".
+    expect(emptyThreadCopy({ ...base, connection: "Browser can't connect", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. This browser can't connect to Atlas · Linux — update your browser, then reload this page to see anything new.");
+    expect(emptyThreadCopy({ ...base, connection: "Browser can't connect", resolved: false })).toEqual({ state: "waiting", said: "This browser can't connect to Atlas · Linux, so messages from the cas-src supervisor can't load. Update your browser, then reload this page." });
+    expect(emptyThreadCopy({ ...base, connection: "Blocked by browser", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. This browser is blocking its connection to Atlas · Linux — allow Local network access for this site to see anything new.");
+    expect(emptyThreadCopy({ ...base, connection: "Blocked by browser", resolved: false }).said).toContain("This browser is blocking its connection to Atlas · Linux");
   });
 
   it("words the empty thread's activity plainly", () => {

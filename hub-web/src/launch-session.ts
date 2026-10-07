@@ -11,7 +11,7 @@
 //        202/200 {session, attached} · error {error, detail} · 403 scope_denied
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { LAUNCH_SCOPE, canEnableSessionLaunch, launchGrantCommand } from "./pairing-scopes";
-import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
+import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import type { Scope } from "./types";
 
 /** The supervisors POST /v1/sessions accepts (hub/server.rs launch_session_blocking). */
@@ -183,6 +183,9 @@ export function launchMachineOption(machine: LaunchMachine): string {
 export function launchOfflineNotice(machine: Pick<LaunchMachine, "label" | "connection">): string {
   const { label, connection } = machine;
   if (connection === NEEDS_PAIRING) return `${label} needs pairing again before it can start sessions.`;
+  // cas-d043 G04: the browser's cause, in the banner's words.
+  if (connection === BROWSER_BLOCKED) return `This browser is blocking its connection to ${label}. Allow Local network access for this site; its projects load once it connects.`;
+  if (connection === BROWSER_UNSUPPORTED) return `This browser can't connect to ${label}. Update your browser, then reload this page.`;
   if (connection === CANT_REACH_RETRYING) return `Can't reach ${label} — retrying. Its projects load once it's back.`;
   if (connection === "Connecting" || connection === "Connecting…" || connection === "Idle") return `Connecting to ${label}… Its projects load once it's connected.`;
   if (connection === "Unreachable") return `Lost connection to ${label}. Its projects load once it's back.`;

@@ -43,6 +43,8 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await inbox.getByLabel("Name this browser").press("Enter");
     await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
     await expect(inbox.getByRole("link", { name: "Approve on Cassy Cloud" })).toHaveAttribute("href", /\/operator\/approve\?code=/);
+    // cas-d043 G05: one brand, the one on the button below it.
+    await expect(inbox.locator(".operator-inbox-lead")).toHaveText("Approve this browser from your Cassy Cloud account. Check that the code matches.");
   });
 
   await journey.stage("Approve it from the account; the weeks of messages are there", async () => {

@@ -492,10 +492,32 @@ pub struct ArtifactRequest {
     #[serde(default)]
     pub path: Option<String>,
 
-    /// Artifact record ID (show)
-    #[schemars(description = "Artifact record ID, e.g. 'art-7f3a9c21' (show)")]
+    /// Artifact record ID (show, post)
+    #[schemars(description = "Artifact record ID, e.g. 'art-7f3a9c21' (show, post)")]
     #[serde(default)]
     pub id: Option<String>,
+
+    /// Slack channel to post the artifact to (post)
+    #[schemars(
+        description = "Slack channel name or id. post resolves the committed artifact through Cloud, checks its SHA-256 against the published record, and uploads it through Violet's file_external route (post)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+
+    /// Parent message to reply under (post)
+    #[schemars(description = "Slack message_id to post the file as a threaded reply under (post)")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+
+    /// Slack file title (post)
+    #[schemars(description = "Slack file title; defaults to the artifact name (post)")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Message text shared with the file (post)
+    #[schemars(description = "Message text Slack shows with the file (post)")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_comment: Option<String>,
 }
 
 /// Unified distilled-knowledge (project wiki) operations request.

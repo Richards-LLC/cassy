@@ -16,6 +16,10 @@ fn req(action: &str) -> ArtifactRequest {
         task_id: None,
         path: None,
         id: None,
+        channel: None,
+        reply_to: None,
+        title: None,
+        initial_comment: None,
     }
 }
 

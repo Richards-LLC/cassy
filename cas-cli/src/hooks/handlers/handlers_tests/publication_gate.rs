@@ -132,3 +132,38 @@ fn recorded_operator_override_allows_and_is_logged_cas_f6ad() {
         "each overridden post is logged on the epic: {notes}"
     );
 }
+
+#[test]
+fn artifact_post_is_a_gated_deliverable_share_cassy_1148() {
+    let _env = TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let store = epic_store(dir.path());
+    let cas = dir.path().join(".cas");
+    // The record belongs to a task under the epic; its id is all the call names.
+    let artifacts = cas_store::SqliteArtifactStore::open(&cas).unwrap();
+    artifacts
+        .record_local(&cas_store::NewArtifact {
+            id: "art-gate1148".into(),
+            task_id: "cas-pub-work".into(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size_bytes: 11,
+            sha256: "b".repeat(64),
+        })
+        .unwrap();
+    let post = json!({"action":"post","id":"art-gate1148","channel":"client-internal"});
+    for tool in ["mcp__cas__artifact", "mcp__cs__artifact", "cas_artifact"] {
+        let reason = denied(handle_pre_tool_use(&input(tool, post.clone(), dir.path()), Some(&cas)).unwrap())
+            .unwrap_or_else(|| panic!("{tool} post must be denied while verification is open"));
+        assert!(reason.contains("cas-pub-verify"), "{reason}");
+    }
+    // Publishing or reading an artifact shares nothing.
+    for action in ["publish", "show", "list"] {
+        let args = json!({"action":action,"id":"art-gate1148","task_id":"cas-pub-work"});
+        assert!(denied(handle_pre_tool_use(&input("mcp__cas__artifact", args, dir.path()), Some(&cas)).unwrap()).is_none());
+    }
+    let mut verify = store.get("cas-pub-verify").unwrap();
+    verify.status = TaskStatus::Closed;
+    store.update(&verify).unwrap();
+    assert!(denied(handle_pre_tool_use(&input("mcp__cas__artifact", post, dir.path()), Some(&cas)).unwrap()).is_none());
+}

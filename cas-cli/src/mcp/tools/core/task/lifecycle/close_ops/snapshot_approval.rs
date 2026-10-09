@@ -355,6 +355,51 @@ mod tests {
     }
 
     #[test]
+    fn cas_b98d_one_content_bound_approval_covers_all_snapshot_lines() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.name", "fixture"]);
+        git(repo, &["config", "user.email", "fixture@example.test"]);
+        let path = "email-queue.locale.spec.ts.snap";
+        let before: String = (0..20)
+            .map(|i| format!("email {i}: {}\n", "x".repeat(4256)))
+            .collect();
+        std::fs::write(repo.join(path), &before).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base emails"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let after = before.replace("\n", "<span data-notification-preferences>Manage preferences</span>\n");
+        std::fs::write(repo.join(path), &after).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "shared footer"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        let check = |tip: &str, notes: &str| {
+            rejection(repo, Some(&base), Some(tip), &[path.into()], notes, "cas-b98d", "mcp__cs__")
+        };
+        let identity = format!("file-sha256:{:x}", Sha256::digest(after.as_bytes()));
+        let error = check(&tip, "").unwrap();
+        assert!(error.contains(&identity), "guidance must bind the complete snapshot: {error}");
+        let note = format!("snapshot-approved: {path} — {identity} — reviewed shared preferences footer in all 20 emails");
+        crate::mcp::tools::traffic_limits::validate_note_body(
+            "decision", &note, &crate::config::Config::default(), "cas-b98d", false, false, None,
+        ).unwrap();
+        assert!(check(&tip, &note).is_none(), "one note must cover the file");
+        assert!(check(&tip, &note.replace(path, "other.snap")).is_some());
+        assert!(check(&tip, &format!("snapshot-approved: {path} — {identity} — ")).is_some());
+        assert!(check(&tip, &note.replace("file-sha256:", "sha256:")).is_some());
+        // This leaves 19 previously reviewed lines in the diff. A line-level
+        // digest cannot bind approval of the whole file after this edit.
+        std::fs::write(repo.join(path), after.replacen("email 0", "unreviewed email 0", 1)).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "post approval edit"]);
+        let edited_tip = git(repo, &["rev-parse", "HEAD"]);
+        assert!(check(&edited_tip, &note).is_some(), "post-approval edit must invalidate the file approval");
+    }
+
+    #[test]
     fn opencode_projection_is_a_snapshot_but_arbitrary_json_is_not() {
         assert!(is_snapshot(
             "crates/cas-mux/src/opencode_projection.snapshot.json"

@@ -490,12 +490,14 @@ pub(crate) fn wake_attempt_narrative(
              (GH #155 signature)."
         }
         (WakeAttempt::Failed, ObservationStatus::Unobserved) => {
-            "wake evidence: Cassy ATTEMPTED a wake and it FAILED (see wake_attempt_detail); the \
-             recipient was never nudged for this message."
+            "wake evidence: Cassy ATTEMPTED a wake and it FAILED (see wake_attempt_detail); no \
+             recorded turn carried this message, so treat it as NOT delivered to a turn."
         }
         (WakeAttempt::NotAttempted, ObservationStatus::Unobserved) => {
             "wake evidence: Cassy never attempted a wake for this message — the idle gate \
-             declined it, or the recipient's channel needs no nudge."
+             declined it, or the recipient is on PTY, where the typed payload is the wake. \
+             A PTY write is not a turn: if none starts, the delivery watchdog records its \
+             nudge or failure here (GH #1153)."
         }
     };
     format!("{line}\n")

@@ -39,6 +39,12 @@ pub(crate) fn wake_daemon_after_enqueue(cas_dir: &Path) {
     }
 }
 
+/// cas-ac97 (GH #1153): wake detail for a PTY-channel delivery. The typed
+/// payload is the only wake this channel has, and it is not a turn until the
+/// recipient's harness records one.
+pub(crate) const PTY_DELIVERY_WAKE_DETAIL: &str = "recipient delivered via PTY: the typed payload is the wake; \
+     turn start unconfirmed until the delivery watchdog reads harness evidence";
+
 /// The result of a delivery that may carry a wake nudge (cas-7a01, GH #155).
 ///
 /// `outcome` is the transport answer the caller has always acted on. `wake` is
@@ -1092,9 +1098,14 @@ impl FactoryDaemon {
             ));
         }
         if channel == DeliveryChannel::Pty {
+            // cas-ac97 (GH #1153): the PTY write is the wake, but a write is
+            // not a turn. The old wording ("the delivery itself is the turn")
+            // asserted a turn nobody had observed; the delivery watchdog reads
+            // the recipient's transcript and records a nudge or failure on
+            // this row when no turn starts.
             return Ok(NudgeReport::not_attempted(
                 primary_outcome,
-                "recipient delivered via PTY; the delivery itself is the turn",
+                PTY_DELIVERY_WAKE_DETAIL,
             ));
         }
         if !wake.allowed {
@@ -1233,7 +1244,7 @@ impl FactoryDaemon {
             // Already PTY-delivered by the primary call above.
             return Ok(NudgeReport::not_attempted(
                 InjectOutcome::Delivered,
-                "recipient channel is PTY; the delivery itself is the turn",
+                PTY_DELIVERY_WAKE_DETAIL,
             ));
         }
 

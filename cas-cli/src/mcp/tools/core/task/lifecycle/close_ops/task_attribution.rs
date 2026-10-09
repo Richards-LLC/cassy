@@ -39,6 +39,18 @@ fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> 
         && references_foreign_task(subject, identity)
 }
 
+/// GH #1151: whether `commit` is another task's work under the subject rule
+/// above. An unreadable commit is not shown to be foreign.
+pub(super) fn commit_claims_another_task(
+    repo: &Path,
+    commit: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    is_safe_git_refname(commit)
+        && git_text(repo, &["log", "-1", "--format=%B", commit, "--"])
+            .is_some_and(|message| subject_claims_another_task(&message, identity))
+}
+
 /// cas-93db: what `branch`'s recent first-parent work claims, under the
 /// subject rule above. Returns the first commit claiming this task, if any,
 /// and the newest commit claiming only another task (its subject line), if

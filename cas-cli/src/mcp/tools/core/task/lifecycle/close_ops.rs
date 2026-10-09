@@ -13432,6 +13432,67 @@ pub(crate) fn resolve_close_delivery_branch(
     ))
 }
 
+/// GH #1133, #1147, #1151: whether a `no-code` task has no commit of its own.
+/// Such a task delivers through its portable proof, so close resolves no
+/// delivery branch for it. The worker's lane may end in another task's
+/// delivery, and an anchor recorded for that delivery by an earlier park is
+/// not this task's either. Own commits are explicit: a commit receipt, a
+/// per-task branch, a recorded code delivery, an anchor not claimed by another
+/// task, or a commit on the lane naming this task. Any of those keeps every
+/// ordinary delivery gate.
+pub(crate) fn no_code_task_without_own_commits(
+    repo_path: &std::path::Path,
+    task: &Task,
+    receipt: Option<&str>,
+) -> bool {
+    let delivery = &task.deliverables;
+    if task.execution_note.as_deref() != Some("no-code")
+        || task.task_type == TaskType::Epic
+        || receipt.is_some()
+        || delivery.integration_batch.is_some()
+        || !delivery.files_changed.is_empty()
+        || delivery.commit_hash.is_some()
+        || delivery.merge_commit.is_some()
+        || delivery.delivery_pr_merge_commit.is_some()
+    {
+        return false;
+    }
+    let identity = TaskCommitIdentity {
+        task_id: Some(task.id.clone()),
+        known_commits: Vec::new(),
+    };
+    if delivery
+        .factory_branch_anchor
+        .iter()
+        .chain(&delivery.historical_factory_branch_anchors)
+        .any(|anchor| !task_attribution::commit_claims_another_task(repo_path, anchor, &identity))
+    {
+        return false;
+    }
+    let Some(assignee) = task.assignee.as_deref() else {
+        return true;
+    };
+    if worker_task_branch_ref(repo_path, assignee, &task.id).is_some() {
+        return false;
+    }
+    let lanes = std::iter::once(format!("factory/{assignee}"))
+        .chain(delivery.parked_branch.clone())
+        .chain(delivery.handoff_branches.iter().cloned());
+    for lane in lanes {
+        let lane = lane.strip_prefix("origin/").unwrap_or(&lane).to_string();
+        for reference in [lane.clone(), format!("origin/{lane}")] {
+            if !is_safe_git_refname(&reference) || !git_ref_exists(repo_path, &reference) {
+                continue;
+            }
+            match task_attribution::branch_task_claims(repo_path, &reference, &identity) {
+                Some((None, _)) => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
 /// MERGE REQUIRED text for a close whose receipt is newer than a parked
 /// delivery anchor that already landed (GH #1022). Commits after a landed
 /// anchor are a new delivery; the supervisor reopens the cycle with
@@ -13517,6 +13578,20 @@ fn run_factory_branch_merge_gate_for_delivery(
                 batch.branch, batch.tip, parent_branch
             ));
         }
+    }
+    // GH #1133, #1147, #1151: a no-code task with no commit of its own is
+    // delivered by its portable proof. Resolve no branch for it, so the
+    // worker lane's other-task commits are neither counted nor parked here.
+    if validated_recovery_branch.is_none()
+        && no_code_task_without_own_commits(repo_path, task, attribution.receipt)
+    {
+        return match no_code_close_proof(&task.id, Some("no-code"), task.external_ref.as_deref(), false) {
+            Ok(Some(proof)) => MergeStateGateOutcome::ProceedWithNote(format!(
+                "decision: no-code delivery proven by external_ref `{proof}`. No commit names this task, so no delivery branch was resolved and the `factory/{assignee}` lane was not measured as this task's work."
+            )),
+            Err(message) => MergeStateGateOutcome::Unresolved(message),
+            Ok(None) => unreachable!("explicit no-code intent requires a proof"),
+        };
     }
     // cas-e33f (GH #1004): after a handoff the assignee (often the
     // supervisor) has no factory branch; measure the branch that actually

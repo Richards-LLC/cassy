@@ -39,49 +39,138 @@ impl AuthFailureEvidence {
     }
 }
 
-/// Codex writes one JSON object per line; the fields we need live under
-/// `payload` on `event_msg` records.
+/// What one Codex transcript record says about the account behind it.
 ///
-/// A turn is an account failure when its `task_complete` carries an `error`
-/// whose `codex_error_info` names an authorization problem. `last_agent_message`
-/// being null is what distinguishes "died before saying anything" from "worked,
-/// then hit a wall", and it is recorded in the message so the supervisor can
-/// tell the two apart.
+/// Shared by the daemon's blocker relay ([`codex_rollout_auth_failure`]) and
+/// the worker liveness reader, so both agree on which provider errors are
+/// fatal (cas-5e3c, GH #1130).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexRecordVerdict {
+    /// The provider refused the turn for a reason no retry fixes: the account
+    /// is unauthorized, or it cannot use the requested model.
+    Fatal(String),
+    /// A terminal turn that did not fail fatally: the harness reached the
+    /// model, so the account and model work.
+    Healthy,
+    /// Any other record, including non-fatal errors such as a dropped stream.
+    Neutral,
+}
+
+/// Classify one Codex record. Only structured error records count; a tool
+/// output that merely quotes an error string is `Neutral`.
+///
+/// Three shapes carry a fatal refusal:
+/// - a rollout `event_msg` `task_complete` whose `error` has an authorization
+///   `codex_error_info`, or whose `error.message` names a refused model (the
+///   real shape of the GH #1130 rollouts: `codex_error_info: "other"` with the
+///   provider's 400 body as a JSON string);
+/// - a rollout `event_msg` whose payload `type` is `error`;
+/// - a bare `{"type":"error","status":400,"error":{...}}` record.
+pub fn codex_record_verdict(record: &serde_json::Value) -> CodexRecordVerdict {
+    let kind = record.get("type").and_then(serde_json::Value::as_str);
+    if kind == Some("error") {
+        return fatal_error_message(record).map_or(CodexRecordVerdict::Neutral, CodexRecordVerdict::Fatal);
+    }
+    if kind != Some("event_msg") {
+        return CodexRecordVerdict::Neutral;
+    }
+    let payload = record.get("payload").unwrap_or(&serde_json::Value::Null);
+    match payload.get("type").and_then(serde_json::Value::as_str) {
+        Some("error") => {
+            fatal_error_message(payload).map_or(CodexRecordVerdict::Neutral, CodexRecordVerdict::Fatal)
+        }
+        Some("task_complete" | "turn_completed") => match payload.get("error") {
+            Some(error) if !error.is_null() => fatal_error_message(error)
+                // Any terminal turn that did not fail fatally closes the
+                // episode, including one that failed for an unrelated reason:
+                // the harness reached the model, so the credential worked.
+                .map_or(CodexRecordVerdict::Healthy, CodexRecordVerdict::Fatal),
+            _ => CodexRecordVerdict::Healthy,
+        },
+        _ => CodexRecordVerdict::Neutral,
+    }
+}
+
+/// The provider's message when `error` is a fatal account or model refusal.
+fn fatal_error_message(error: &serde_json::Value) -> Option<String> {
+    let info = error
+        .get("codex_error_info")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let message = innermost_error_message(error);
+    if codex_error_info_is_auth(info) {
+        return Some(message.unwrap_or_else(|| "Codex refused the turn as unauthorized".to_string()));
+    }
+    message.filter(|message| message_is_model_refusal(message))
+}
+
+/// Codex nests the provider body as a JSON string inside `message`; unwrap it
+/// so the supervisor reads the provider's sentence rather than escaped JSON.
+fn innermost_error_message(value: &serde_json::Value) -> Option<String> {
+    fn walk(value: &serde_json::Value, depth: usize) -> Option<String> {
+        if depth > 4 {
+            return None;
+        }
+        match value {
+            serde_json::Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.starts_with('{')
+                    && let Ok(inner) = serde_json::from_str::<serde_json::Value>(trimmed)
+                    && let Some(found) = walk(&inner, depth + 1)
+                {
+                    return Some(found);
+                }
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            serde_json::Value::Object(object) => ["error", "message"]
+                .into_iter()
+                .filter_map(|key| object.get(key))
+                .find_map(|child| walk(child, depth + 1)),
+            _ => None,
+        }
+    }
+    walk(value, 0)
+}
+
+/// A provider refusal of the requested model, which no retry can fix: the
+/// ChatGPT-account wording from GH #1130 and the generic unknown-model forms.
+/// "Selected model is at capacity" deliberately does not match.
+pub fn message_is_model_refusal(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("not supported when using codex with a chatgpt account") {
+        return true;
+    }
+    lowered.contains("model")
+        && (lowered.contains("is not supported")
+            || lowered.contains("does not exist")
+            || lowered.contains("model_not_found")
+            || lowered.contains("do not have access"))
+}
+
+/// Codex writes one JSON object per line; the fields we need live under
+/// `payload` on `event_msg` records. See [`codex_record_verdict`] for which
+/// records count. `last_agent_message` being null is what distinguishes
+/// "died before saying anything" from "worked, then hit a wall".
 pub fn codex_rollout_auth_failure(tail: &str) -> AuthFailureEvidence {
     let mut latest: Option<AuthFailureEvidence> = None;
     for (index, line) in tail.lines().enumerate() {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let payload = record.get("payload").unwrap_or(&serde_json::Value::Null);
-        if payload.get("type").and_then(serde_json::Value::as_str) != Some("task_complete") {
-            continue;
+        match codex_record_verdict(&record) {
+            CodexRecordVerdict::Neutral => {}
+            CodexRecordVerdict::Healthy => latest = Some(AuthFailureEvidence::Healthy),
+            CodexRecordVerdict::Fatal(message) => {
+                let occurrence = record
+                    .get("timestamp")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| format!("line-{index}"), str::to_owned);
+                latest = Some(AuthFailureEvidence::Failed {
+                    message,
+                    occurrence,
+                });
+            }
         }
-        let error = payload.get("error");
-        let info = error
-            .and_then(|error| error.get("codex_error_info"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        if !codex_error_info_is_auth(info) {
-            // Any terminal turn that did not fail on the account closes the
-            // episode, including one that failed for an unrelated reason: the
-            // harness reached the model, so the credential worked.
-            latest = Some(AuthFailureEvidence::Healthy);
-            continue;
-        }
-        let message = error
-            .and_then(|error| error.get("message"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Codex refused the turn as unauthorized")
-            .to_string();
-        let occurrence = record
-            .get("timestamp")
-            .and_then(serde_json::Value::as_str)
-            .map_or_else(|| format!("line-{index}"), str::to_owned);
-        latest = Some(AuthFailureEvidence::Failed {
-            message,
-            occurrence,
-        });
     }
     latest.unwrap_or(AuthFailureEvidence::Unavailable)
 }
@@ -91,6 +180,78 @@ fn codex_error_info_is_auth(info: &str) -> bool {
         info.to_ascii_lowercase().as_str(),
         "unauthorized" | "unauthenticated" | "auth_error" | "invalid_credentials"
     )
+}
+
+/// Whether a Codex account can run a model, read from its own `CODEX_HOME`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexModelSupport {
+    /// The account's catalogue lists the model, or the account is not a
+    /// ChatGPT account (API-key accounts are not restricted by this list).
+    Supported,
+    /// A fresh ChatGPT-account catalogue that does not list the model: every
+    /// turn would die with "not supported when using Codex with a ChatGPT
+    /// account" (GH #1130).
+    Unsupported { catalog: std::path::PathBuf, listed: Vec<String> },
+    /// No usable evidence. Not a refusal: a missing or stale catalogue says
+    /// nothing about a model released since it was written.
+    Unverified(String),
+}
+
+/// A catalogue older than this may predate the model, so it cannot refuse it.
+const CODEX_CATALOG_MAX_AGE_DAYS: i64 = 7;
+
+/// Codex records the ChatGPT account's model list in `models_cache.json`
+/// beside `auth.json`; a model absent from a fresh list is one the account
+/// cannot run (cas-5e3c).
+pub fn codex_account_model_support(
+    codex_home: &std::path::Path,
+    model: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CodexModelSupport {
+    let read_json = |name: &str| -> Result<serde_json::Value, String> {
+        let path = codex_home.join(name);
+        let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
+    };
+    let auth = match read_json("auth.json") {
+        Ok(auth) => auth,
+        Err(error) => return CodexModelSupport::Unverified(error),
+    };
+    let mode = auth.get("auth_mode").and_then(serde_json::Value::as_str).unwrap_or_default();
+    if !mode.eq_ignore_ascii_case("chatgpt") {
+        return CodexModelSupport::Supported;
+    }
+    let catalog = match read_json("models_cache.json") {
+        Ok(catalog) => catalog,
+        Err(error) => return CodexModelSupport::Unverified(error),
+    };
+    let fresh = catalog
+        .get("fetched_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| (now - at.with_timezone(&chrono::Utc)).num_days() < CODEX_CATALOG_MAX_AGE_DAYS);
+    if !fresh {
+        return CodexModelSupport::Unverified("models_cache.json is missing fetched_at or is stale".to_string());
+    }
+    let listed: Vec<String> = catalog
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("slug").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    if listed.is_empty() {
+        return CodexModelSupport::Unverified("models_cache.json lists no models".to_string());
+    }
+    if listed.iter().any(|slug| slug.eq_ignore_ascii_case(model.trim())) {
+        CodexModelSupport::Supported
+    } else {
+        CodexModelSupport::Unsupported {
+            catalog: codex_home.join("models_cache.json"),
+            listed,
+        }
+    }
 }
 
 /// Claude's JSONL transcript carries assistant/user records rather than a
@@ -206,11 +367,29 @@ pub fn auth_failure_detail(
     account_dir: Option<&str>,
     message: &str,
 ) -> String {
+    // cas-5e3c: an account that cannot use the requested model is not fixed
+    // by logging in again; name the remedy that actually works.
+    let (cause, remedy) = if message_is_model_refusal(message) {
+        ("a model its account cannot use", model_refusal_remedy(account_dir))
+    } else {
+        ("an account failure", auth_failure_remedy(cli, account_dir))
+    };
     format!(
-        "Worker '{worker}' never started work: its {} harness ended the first turn with an account failure — {message} \
-         The worker process may still be heartbeating, so this is not visible as a dead worker. {}",
+        "Worker '{worker}' never started work: its {} harness ended the first turn with {cause} — {message} \
+         The worker process may still be heartbeating, so this is not visible as a dead worker. {remedy}",
         harness_label(cli),
-        auth_failure_remedy(cli, account_dir),
+    )
+}
+
+/// What to do when the account behind a worker refuses its model.
+pub fn model_refusal_remedy(account_dir: Option<&str>) -> String {
+    let account = account_dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map_or_else(|| "the default CODEX_HOME (~/.codex)".to_string(), |dir| format!("CODEX_HOME={dir}"));
+    format!(
+        "Re-issue the spawn with a model listed in {account}'s models_cache.json (explicit `model=`, or another lane), \
+         or with config_dir naming an account that supports it."
     )
 }
 
@@ -225,6 +404,75 @@ mod tests {
 
     const HEALTHY_FIRST_TURN: &str = r#"{"timestamp":"2026-09-03T14:12:58.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
 {"timestamp":"2026-09-03T14:13:30.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Started cas-1234."}}"#;
+
+    #[test]
+    fn unsupported_chatgpt_model_is_a_relayable_failure_until_success() {
+        let failure = r#"{"type":"event_msg","payload":{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#;
+        let evidence = codex_rollout_auth_failure(failure);
+        assert!(evidence.failed(), "{evidence:?}");
+        assert_eq!(codex_rollout_auth_failure(&format!("{failure}\n{HEALTHY_FIRST_TURN}")), AuthFailureEvidence::Healthy);
+    }
+
+    /// Verbatim shape of a real rollout whose ChatGPT account refused the
+    /// model: `codex_error_info` is "other" and the 400 body is a JSON string.
+    const MODEL_REFUSED_TASK_COMPLETE: &str = r#"{"timestamp":"2026-08-18T16:12:37.830Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":null,"error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.\"}}","codex_error_info":"other"},"duration_ms":1568}}"#;
+
+    #[test]
+    fn a_real_model_refused_task_complete_is_a_failure_with_the_providers_sentence() {
+        let AuthFailureEvidence::Failed { message, occurrence } =
+            codex_rollout_auth_failure(MODEL_REFUSED_TASK_COMPLETE)
+        else {
+            panic!("expected a fatal model refusal");
+        };
+        assert_eq!(
+            message,
+            "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."
+        );
+        assert_eq!(occurrence, "2026-08-18T16:12:37.830Z");
+        let detail = auth_failure_detail("w", cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"), &message);
+        assert!(detail.contains("a model its account cannot use"), "{detail}");
+        assert!(detail.contains("CODEX_HOME=~/.codex-alt"), "{detail}");
+        assert!(!detail.contains("codex login"), "{detail}");
+    }
+
+    #[test]
+    fn a_chatgpt_catalogue_decides_model_support_only_when_fresh() {
+        let home = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let write = |mode: &str, fetched: chrono::DateTime<chrono::Utc>| {
+            std::fs::write(home.path().join("auth.json"), format!(r#"{{"auth_mode":"{mode}"}}"#)).unwrap();
+            std::fs::write(
+                home.path().join("models_cache.json"),
+                serde_json::json!({"fetched_at": fetched, "models": [{"slug": "gpt-6-sol"}]}).to_string(),
+            )
+            .unwrap();
+        };
+        assert!(matches!(
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now),
+            CodexModelSupport::Unverified(_)
+        ));
+        write("chatgpt", now);
+        assert_eq!(codex_account_model_support(home.path(), "gpt-6-sol", now), CodexModelSupport::Supported);
+        assert!(matches!(
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now),
+            CodexModelSupport::Unsupported { ref listed, .. } if listed == &["gpt-6-sol"]
+        ));
+        write("chatgpt", now - chrono::Duration::days(30));
+        assert!(matches!(
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now),
+            CodexModelSupport::Unverified(_)
+        ));
+        write("apikey", now);
+        assert_eq!(codex_account_model_support(home.path(), "gpt-6.1-sol", now), CodexModelSupport::Supported);
+    }
+
+    #[test]
+    fn capacity_errors_and_quoted_error_text_are_not_fatal() {
+        let capacity = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"task_complete","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}}"#;
+        assert_eq!(codex_rollout_auth_failure(capacity), AuthFailureEvidence::Healthy);
+        let quoted = r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call_output","output":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}"#;
+        assert_eq!(codex_rollout_auth_failure(quoted), AuthFailureEvidence::Unavailable);
+    }
 
     #[test]
     fn codex_unauthorized_first_turn_is_an_account_failure_with_its_message() {

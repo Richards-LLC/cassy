@@ -238,7 +238,71 @@ fn preflight_account_auth_with(
             crate::factory_auth_health::auth_failure_remedy(spec.cli, account_dir.as_deref()),
         ));
     }
+    preflight_codex_model_support(specs, chrono::Utc::now())
+}
+
+/// Refuse a Codex spawn whose target account cannot run its model, before any
+/// worktree is cut (cas-5e3c, GH #1130).
+///
+/// A ChatGPT-account Codex rejects models outside its catalogue with a 400 on
+/// every turn, while the worker keeps heartbeating. The lane registry cannot
+/// know which account a spawn targets, so the check reads that account's own
+/// `models_cache.json`. Only an affirmative absence from a fresh catalogue
+/// refuses; a missing or stale catalogue is not evidence.
+fn preflight_codex_model_support(
+    specs: &[cas_mux::WorkerSpec],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    use crate::factory_auth_health::{CodexModelSupport, codex_account_model_support};
+    let mut seen = std::collections::BTreeSet::new();
+    for spec in specs {
+        if spec.cli != cas_mux::SupervisorCli::Codex {
+            continue;
+        }
+        let Some(model) = spec.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) else {
+            continue;
+        };
+        let account_dir = spec
+            .config_dir
+            .clone()
+            .or_else(|| spec.requester_config_dir.clone())
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
+        if !seen.insert((account_dir.clone(), model.to_string())) {
+            continue;
+        }
+        let Some(home) = codex_home_path(account_dir.as_deref()) else {
+            continue;
+        };
+        if let CodexModelSupport::Unsupported { catalog, listed } =
+            codex_account_model_support(&home, model, now)
+        {
+            let account = account_dir
+                .as_deref()
+                .map_or_else(|| default_account_label(spec.cli), str::to_string);
+            return Err(format!(
+                "spawn refused: the codex account at {account} is a ChatGPT account whose model catalogue ({}) \
+                 does not list '{model}', so every turn would fail with \"model is not supported when using Codex \
+                 with a ChatGPT account\". Listed: {}. {} No worktree was created and no task was assigned.",
+                catalog.display(),
+                listed.join(", "),
+                crate::factory_auth_health::model_refusal_remedy(account_dir.as_deref()),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// The `CODEX_HOME` a Codex worker runs against: its account directory with
+/// `~` expanded, or the default `~/.codex` (spawns clear `CODEX_HOME`).
+fn codex_home_path(account_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    match account_dir {
+        Some(dir) => match dir.strip_prefix('~') {
+            Some(suffix) => dirs::home_dir().map(|home| home.join(suffix.trim_start_matches('/'))),
+            None => Some(std::path::PathBuf::from(dir)),
+        },
+        None => dirs::home_dir().map(|home| home.join(".codex")),
+    }
 }
 
 /// What to call the account when the caller named no directory.
@@ -10891,6 +10955,26 @@ mod spawn_lifecycle_tests {
         let mut evidence = cas_factory::CapabilityEvidence::new(availability, 0);
         evidence.reason = Some(reason.to_string());
         evidence
+    }
+
+    #[test]
+    fn chatgpt_standard_lane_refuses_a_model_absent_from_target_account_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "models": [{"slug": "gpt-6-sol"}]
+        }).to_string()).unwrap();
+        let (specs, recipe, _) = build_lane_spawn_specs(
+            1, "standard", Some(home.path().to_str().unwrap()), None,
+            &cas_factory::CapabilitySnapshot::default(),
+        ).unwrap();
+        let error = preflight_account_auth_with(&specs, |_, _| {
+            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+        }).expect_err("the target ChatGPT account cannot run this lane recipe");
+        assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
+        assert!(error.contains(home.path().to_str().unwrap()), "{error}");
+        assert!(error.contains("No worktree was created"), "{error}");
     }
 
     #[test]

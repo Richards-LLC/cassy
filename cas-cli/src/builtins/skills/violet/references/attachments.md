@@ -37,8 +37,7 @@ channels the bot belongs to. It also documents a Slack Connect-specific
 `access_denied` ("Unable to access the file (slack connect)"). It has not been
 verified whether a given external org's files open for Violet once it is a
 member. The 2026-10-05 channel returned `not_member`. A hub change to skip an
-unreadable attachment instead of failing the read is tracked on the Violet hub
-repository (see the cas-1184 task note).
+unreadable attachment instead of failing the read is tracked as violet_ps#40.
 
 ## Fallback
 

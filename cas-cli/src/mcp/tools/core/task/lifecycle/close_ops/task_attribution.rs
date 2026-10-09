@@ -538,6 +538,51 @@ pub(super) fn delivery_base(
     (!base.is_empty()).then_some(base)
 }
 
+/// GH #1144: the delivery the QA gate judges when `receipt` is a batch squash.
+///
+/// Several tasks shipped as one squash give that commit every sibling's
+/// files; its message also names this task, so attribution selected the whole
+/// squash and charged a docs-only task for a sibling's UI. When the task has a
+/// recorded delivery anchor that the receipt does not descend from, and the
+/// receipt is a target-reachable single-parent commit whose own delta carries
+/// every path of the anchor's attributed delivery, return the anchor. QA then
+/// judges the task's own delivery, as the recorded integration-batch receipt
+/// path already does. Anything else returns `None` and keeps the receipt.
+pub(super) fn squash_receipt_qa_anchor(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    task: &Task,
+    receipt: Option<&str>,
+) -> Option<String> {
+    let receipt = resolve_task_commit_receipt_sha(repo, receipt?).ok()?;
+    let anchor = task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .map(str::trim)
+        .filter(|anchor| !anchor.is_empty())?;
+    let anchor = resolve_task_commit_receipt_sha(repo, anchor).ok()?;
+    if anchor == receipt
+        || git_commit_is_ancestor(repo, &anchor, &receipt)
+        || crate::git_evidence::git_commit_parent_count(repo, &receipt) != 1
+        || !commit_is_merged_into_parent(repo, &receipt, target)
+    {
+        return None;
+    }
+    let own = paths(repo, target, window, Some(&anchor))?;
+    let carried: HashSet<String> = git_text(
+        repo,
+        &["diff", "--name-only", &format!("{receipt}^1"), &receipt, "--"],
+    )?
+    .lines()
+    .map(str::trim)
+    .filter(|path| !path.is_empty())
+    .map(ToOwned::to_owned)
+    .collect();
+    (!own.is_empty() && own.iter().all(|path| carried.contains(path))).then_some(anchor)
+}
+
 /// Shared candidate selection for whole-delivery and final-snapshot proof.
 /// Preserve side-parent identity, foreign-subject and work-window rules.
 fn attributed_content_commits(

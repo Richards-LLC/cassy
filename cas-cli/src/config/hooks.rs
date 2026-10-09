@@ -248,8 +248,11 @@ fn default_pre_tool_use_timeout() -> u32 {
 }
 
 /// Shared with the generated factory hook settings. Includes normalized
-/// Grok/OpenCode tool names and the CAS proxy dispatch tool.
-pub(crate) const SLACK_POLICY_MATCHER: &str = ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute";
+/// Grok/OpenCode tool names, the CAS proxy dispatch tool, a direct Violet
+/// post, and `artifact` (whose `post` action uploads through Violet,
+/// cassy#1148), so the publication gate sees every Slack share.
+pub(crate) const SLACK_POLICY_MATCHER: &str =
+    ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute|.*violet_post|.*_artifact";
 
 pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
     vec![

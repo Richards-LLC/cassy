@@ -94,7 +94,7 @@
             "type": "command"
           }
         ],
-        "matcher": ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute|Read|Glob|Grep|Write|Edit|Bash|WebFetch|WebSearch|Task|SendMessage|AskUserQuestion|Agent"
+        "matcher": ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute|.*violet_post|.*_artifact|Read|Glob|Grep|Write|Edit|Bash|WebFetch|WebSearch|Task|SendMessage|AskUserQuestion|Agent"
       }
     ],
     "SessionEnd": [

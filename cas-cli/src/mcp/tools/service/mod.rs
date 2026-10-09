@@ -812,7 +812,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable."
+        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked."
     )]
     pub async fn artifact(
         &self,
@@ -822,15 +822,22 @@ impl CasService {
         panic_catch::dispatch_with_catch("artifact", async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
-            let is_mutating = action == "publish";
+            let is_mutating = action == "publish" || action == "post";
 
             let result = match action.as_str() {
                 "publish" => this.inner.artifact_publish(Parameters(req)).await,
                 "show" => this.inner.artifact_show(Parameters(req)).await,
                 "list" => this.inner.artifact_list(Parameters(req)).await,
+                #[cfg(feature = "mcp-proxy")]
+                "post" => this.artifact_post(req).await,
+                #[cfg(not(feature = "mcp-proxy"))]
+                "post" => Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "artifact post reaches Violet through the MCP proxy; rebuild with --features mcp-proxy",
+                )),
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("Unknown artifact action: {action}. Valid: publish, show, list"),
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list, post"),
                 )),
             };
 
@@ -1630,6 +1637,8 @@ impl CasService {
 
 pub(crate) mod agent_liveness;
 pub(crate) mod agent_search_system;
+#[cfg(feature = "mcp-proxy")]
+mod artifact_post;
 mod core;
 mod db_branch_ops;
 #[cfg(feature = "mcp-proxy")]

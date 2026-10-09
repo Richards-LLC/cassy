@@ -1281,6 +1281,9 @@ fn slack_policy_reaches_mcp_tools_with_custom_and_disabled_rule_matchers() {
             "mcp__other_slack__send_message",
             "mcp__cs__mcp_execute",
             "slack_send_message",
+            "mcp__violet__violet_post",
+            "mcp__cas__artifact",
+            "cas_artifact",
         ] {
             assert!(regex.is_match(tool), "{enabled}: {tool}");
         }

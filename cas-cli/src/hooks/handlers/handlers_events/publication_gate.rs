@@ -27,6 +27,7 @@ pub(super) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
         return None;
     }
     let cas_root = cas_root?;
+    let gated = with_artifact_tasks(gated, cas_root);
     let store = crate::store::open_task_store(cas_root).ok()?;
     // The post may name its epic (or a task under it); otherwise the
     // session's own focused epic is the one whose verification it waits on.
@@ -83,6 +84,25 @@ fn violet_posts(tool: &str, input: Option<&Value>) -> Vec<Value> {
             .is_some_and(|(server, method)| server == "violet" && method == "violet_post");
     if direct {
         return input.cloned().into_iter().collect();
+    }
+    // cassy#1148: `artifact action=post` uploads a file through Violet from
+    // inside the runtime, so it shares a deliverable exactly like kind=file.
+    let artifact_tool = lower == "artifact"
+        || lower.ends_with("__artifact")
+        || lower.ends_with("cas_artifact")
+        || lower.ends_with("cs_artifact");
+    if artifact_tool {
+        return input
+            .filter(|input| input.get("action").and_then(Value::as_str) == Some("post"))
+            .map(|input| {
+                let mut post = serde_json::json!({ "kind": "file" });
+                if let Some(id) = input.get("id").and_then(Value::as_str) {
+                    post["artifact_id"] = Value::from(id);
+                }
+                post
+            })
+            .into_iter()
+            .collect();
     }
     if lower.ends_with("mcp_execute") {
         let mut posts = Vec::new();
@@ -144,6 +164,35 @@ fn is_deliverable_post(post: &Value) -> bool {
         _ => false,
     };
     shares_file || post.get("deliverable").and_then(Value::as_bool) == Some(true)
+}
+
+/// An artifact post names its record, not a task: the record's own task says
+/// which epic's verification it waits on.
+fn with_artifact_tasks(posts: Vec<Value>, cas_root: &Path) -> Vec<Value> {
+    if posts
+        .iter()
+        .all(|post| post.get("artifact_id").is_none() || post.get("task_id").is_some())
+    {
+        return posts;
+    }
+    let Ok(artifacts) = cas_store::SqliteArtifactStore::open(cas_root) else {
+        return posts;
+    };
+    posts
+        .into_iter()
+        .map(|mut post| {
+            let task = post
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .filter(|_| post.get("task_id").is_none())
+                .and_then(|id| artifacts.get(id).ok().flatten())
+                .map(|artifact| artifact.task_id);
+            if let Some(task) = task {
+                post["task_id"] = Value::from(task);
+            }
+            post
+        })
+        .collect()
 }
 
 fn explicit_epic(post: &Value, store: &dyn cas_store::TaskStore) -> Option<String> {

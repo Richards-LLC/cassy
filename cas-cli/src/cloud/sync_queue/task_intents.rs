@@ -191,61 +191,68 @@ impl SyncQueue {
         &self,
         intent: &TaskSyncIntent,
         after_validation: H,
-        load_canonical: F,
+        mut load_canonical: F,
     ) -> Result<TaskSyncFulfillResult, CasError>
     where
-        F: FnOnce() -> Result<TaskSyncPayload, CasError>,
+        F: FnMut() -> Result<TaskSyncPayload, CasError>,
         H: FnOnce(),
     {
+        const ATTEMPTS: usize = 3;
         let conn = self.conn.lock().unwrap();
-        // BEGIN IMMEDIATE is load-bearing: after revision validation, the
-        // read-only callback loads canonical state through the task store's
-        // separate connection while this transaction excludes every bypass
-        // writer until the outbox rows commit. Acquiring it retries with
-        // bounded backoff past one busy_timeout window (cas-d5c8).
-        let tx = begin_write(&conn)?;
-        let current_revision = tx
-            .query_row(
-                "SELECT revision, present FROM task_mutation_revisions WHERE entity_id = ?1",
-                params![intent.entity_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? == 1)),
-            )
-            .optional()?;
-        let committed_revision = tx
-            .query_row(
-                "SELECT revision FROM task_mutation_receipts WHERE receipt_id = ?1 AND entity_id = ?2",
-                params![intent.mutation_id, intent.entity_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-
-        match (committed_revision, current_revision) {
-            (Some(committed), Some((current, true))) if committed == current => {}
-            (Some(committed), Some((current, _))) if current > committed => {
-                retire_task_sync_evidence(&tx, &intent.entity_id)?;
-                tx.commit()?;
-                return Ok(TaskSyncFulfillResult::Superseded);
+        let mut after_validation = Some(after_validation);
+        let mut attempt = 0;
+        let (tx, canonical) = loop {
+            attempt += 1;
+            // cas-0e57: load the canonical task BEFORE taking the write lock.
+            // The load runs on the task store's pooled connection, whose
+            // in-process mutex another thread can hold while it waits for
+            // the SQLite write lock. Loading inside this transaction inverted
+            // that order: this thread held the write lock and waited for the
+            // mutex while the other held the mutex and waited for the lock,
+            // until its retry gave up ("database busy for 31.6s across 6
+            // attempts") and every other process queued behind both.
+            // Consistency is unchanged: the in-transaction revision must
+            // equal the revision read before the load, or the attempt retries.
+            let preloaded = match classify_task_sync_intent(&conn, intent)? {
+                TaskSyncIntentClass::Proceed { revision } => Some((revision, load_canonical())),
+                _ => None,
+            };
+            // BEGIN IMMEDIATE is load-bearing: revision validation and the
+            // outbox rows commit while this transaction excludes every bypass
+            // writer. Acquiring it retries with bounded backoff past one
+            // busy_timeout window (cas-d5c8).
+            let tx = begin_write(&conn)?;
+            let revision = match classify_task_sync_intent(&tx, intent)? {
+                TaskSyncIntentClass::Superseded => {
+                    retire_task_sync_evidence(&tx, &intent.entity_id)?;
+                    tx.commit()?;
+                    return Ok(TaskSyncFulfillResult::Superseded);
+                }
+                TaskSyncIntentClass::ProvenPreCommit => {
+                    retire_one_task_sync_intent(&tx, intent)?;
+                    tx.commit()?;
+                    return Ok(TaskSyncFulfillResult::ProvenPreCommit);
+                }
+                TaskSyncIntentClass::Blocked(message) => return Err(CasError::Other(message)),
+                TaskSyncIntentClass::Proceed { revision } => revision,
+            };
+            let canonical = match preloaded {
+                Some((loaded, result)) if loaded == revision => Some(result?),
+                // The task changed between the load and the lock: retry.
+                _ if attempt < ATTEMPTS => continue,
+                // Sustained churn on one task: fall back to loading under the
+                // lock rather than leave the intent unfulfilled.
+                _ => None,
+            };
+            if let Some(hook) = after_validation.take() {
+                hook();
             }
-            (None, Some((current, _))) if current == intent.previous_revision => {
-                retire_one_task_sync_intent(&tx, intent)?;
-                tx.commit()?;
-                return Ok(TaskSyncFulfillResult::ProvenPreCommit);
-            }
-            (None, None) if intent.previous_revision == 0 => {
-                retire_one_task_sync_intent(&tx, intent)?;
-                tx.commit()?;
-                return Ok(TaskSyncFulfillResult::ProvenPreCommit);
-            }
-            (committed, current) => {
-                return Err(CasError::Other(format!(
-                    "task sync recovery blocked for {}: intent revision is unclassified (previous={}, committed={committed:?}, current={current:?}); durable evidence retained",
-                    intent.entity_id, intent.previous_revision
-                )));
-            }
-        }
-
-        after_validation();
-        let canonical = load_canonical()?;
+            let canonical = match canonical {
+                Some(canonical) => canonical,
+                None => load_canonical()?,
+            };
+            break (tx, canonical);
+        };
         let payload = canonical.payload;
         let local_project = crate::cloud::resolve_canonical_id(&self.cas_dir);
         let project_task = serde_json::from_str::<serde_json::Value>(&payload)
@@ -356,6 +363,55 @@ impl SyncQueue {
         tx.commit()?;
         Ok(TaskSyncFulfillResult::Fulfilled)
     }
+}
+
+/// Where a staged task sync intent stands against the store's revision and
+/// receipt evidence.
+enum TaskSyncIntentClass {
+    /// The mutation committed and is current at `revision`: load and enqueue.
+    Proceed { revision: i64 },
+    /// A later mutation superseded this one.
+    Superseded,
+    /// The mutation never committed.
+    ProvenPreCommit,
+    /// The evidence does not classify the intent.
+    Blocked(String),
+}
+
+fn classify_task_sync_intent(
+    conn: &rusqlite::Connection,
+    intent: &TaskSyncIntent,
+) -> Result<TaskSyncIntentClass, CasError> {
+    let current_revision = conn
+        .query_row(
+            "SELECT revision, present FROM task_mutation_revisions WHERE entity_id = ?1",
+            params![intent.entity_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? == 1)),
+        )
+        .optional()?;
+    let committed_revision = conn
+        .query_row(
+            "SELECT revision FROM task_mutation_receipts WHERE receipt_id = ?1 AND entity_id = ?2",
+            params![intent.mutation_id, intent.entity_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(match (committed_revision, current_revision) {
+        (Some(committed), Some((current, true))) if committed == current => {
+            TaskSyncIntentClass::Proceed { revision: current }
+        }
+        (Some(committed), Some((current, _))) if current > committed => {
+            TaskSyncIntentClass::Superseded
+        }
+        (None, Some((current, _))) if current == intent.previous_revision => {
+            TaskSyncIntentClass::ProvenPreCommit
+        }
+        (None, None) if intent.previous_revision == 0 => TaskSyncIntentClass::ProvenPreCommit,
+        (committed, current) => TaskSyncIntentClass::Blocked(format!(
+            "task sync recovery blocked for {}: intent revision is unclassified (previous={}, committed={committed:?}, current={current:?}); durable evidence retained",
+            intent.entity_id, intent.previous_revision
+        )),
+    })
 }
 
 /// Open the write transaction every task sync-intent write runs in (cas-d5c8,

@@ -1248,6 +1248,62 @@ mod tests {
         assert!(!payload.contains("interleaving direct body"));
     }
 
+    /// cas-0e57: fulfillment must not hold the SQLite write lock while it
+    /// waits for the task store's in-process connection mutex. Another thread
+    /// holding that mutex while it waited for the write lock made a lock-order
+    /// inversion that stalled every writer for a full retry budget (31.6s)
+    /// during a fleet boot. Here a thread holds the mutex; while fulfillment
+    /// waits for it, a foreign connection must still be able to write.
+    #[test]
+    fn fulfillment_waits_for_the_store_mutex_without_holding_the_write_lock_cas_0e57() {
+        let (temp, store) = create_test_store();
+        let mut task = Task::new("task-0e57-inversion".to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        store.queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), "");
+        task.title = "canonical body".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        remove_task_enqueue_failure(temp.path());
+        let intent = store
+            .queue
+            .pending_task_sync_intents()
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let db = temp.path().join("cas.db");
+        let pooled = cas_store::shared_db::shared_connection(&db).unwrap();
+        let (held_tx, held_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = pooled.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(1500));
+        });
+        held_rx.recv().unwrap();
+
+        let store = Arc::new(store);
+        let fulfilling = Arc::clone(&store);
+        let fulfiller = std::thread::spawn(move || fulfilling.fulfill_upsert(&intent));
+        std::thread::sleep(Duration::from_millis(300));
+        let probe = rusqlite::Connection::open(&db).unwrap();
+        let write = probe.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
+        holder.join().unwrap();
+        let outcome = fulfiller.join().unwrap().unwrap();
+        assert!(
+            write.is_ok(),
+            "fulfillment held the write lock while waiting for the store mutex: {write:?}"
+        );
+        assert_eq!(outcome, TaskSyncFulfillResult::Fulfilled);
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert!(
+            pending
+                .iter()
+                .any(|row| row.payload.as_deref().is_some_and(|p| p.contains("canonical body"))),
+            "the canonical body must be queued ({} rows)",
+            pending.len()
+        );
+    }
+
     #[test]
     fn conditional_sync_update_never_queues_an_echo_or_overwrites_a_later_edit() {
         let (temp, store) = create_test_store();

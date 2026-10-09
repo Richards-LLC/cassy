@@ -453,7 +453,7 @@ async fn long_note_history_close_stays_well_under_the_tool_budget_cas_3b81() {
     let f = fixture(&mut env);
     let tasks = open_task_store(&f.dir.path().join(".cas")).unwrap();
     let mut task = tasks.get(TASK).unwrap();
-    let history = (0..6_000)
+    let history = (0..12_000)
         .map(|n| match n % 4 {
             0 => format!(
                 "[2026-09-{:02} {:02}:{:02}] 📝 PROGRESS round {n}: pushed {} to {BRANCH}; merged {} into main; QA receipt /tmp/cas-qa/round-{n}/receipt.json",
@@ -489,7 +489,7 @@ async fn long_note_history_close_stays_well_under_the_tool_budget_cas_3b81() {
         .collect::<Vec<_>>()
         .join("\n\n");
     task.notes = format!("{history}\n\n{}", task.notes);
-    assert!(task.notes.len() > 1_500_000, "{}", task.notes.len());
+    assert!(task.notes.len() > 1_800_000, "{}", task.notes.len());
     tasks.update(&task).unwrap();
 
     let started = std::time::Instant::now();

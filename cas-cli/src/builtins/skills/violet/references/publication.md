@@ -2,8 +2,10 @@
 
 A deliverable (a report, a file, any client-bound output) is not shared before
 its verification passes. While the epic's verification tasks are open, a Cassy
-pre-tool check refuses a `violet_post` of `kind: "file"`, and any post marked
-`deliverable: true`, with `verification_pending`, and lists those tasks.
+pre-tool check refuses a `violet_post` that shares a file (`kind: "file"`,
+`kind: "file_external"`, or a `kind: "thread"` reply with `files`), and any
+post marked `deliverable: true`, with `verification_pending`, and lists those
+tasks.
 
 A "final check still running" caveat is not enough: a retraction costs more
 than the wait. Wait for verification, or for the operator's own

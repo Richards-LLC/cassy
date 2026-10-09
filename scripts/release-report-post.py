@@ -489,15 +489,22 @@ class McpClient:
         fail(f"Violet tool {name} returned no JSON envelope")
 
     def read_file(self, channel: str, file_id: str, since: str) -> bytes:
-        """Read an uploaded file through the hub's authenticated file packer."""
+        """Read an uploaded file through the hub's authenticated file packer.
+
+        ``file_id`` scopes the read to this file only (no history or channel
+        directory); ``since`` is retained so an older hub stays bounded. A
+        scripted verifier may request the explicit 8 MiB ``max_bytes`` budget.
+        """
 
         result = self.tool(
             "violet_read",
             {
                 "channel": channel,
+                "file_id": file_id,
                 "since": since,
                 "include_files": True,
                 "include_threads": True,
+                "include_channels": False,
                 "max_messages": 500,
                 "max_files": 50,
                 "max_file_bytes": MAX_HUB_FILE_BYTES,
@@ -510,6 +517,12 @@ class McpClient:
         for file in files:
             if not isinstance(file, dict) or file.get("file_id") != file_id:
                 continue
+            if file.get("skipped") is True:
+                reason = file.get("skip_reason")
+                fail(
+                    "Violet file read skipped the uploaded PDF content "
+                    f"(skip_reason={reason if isinstance(reason, str) else 'unknown'})"
+                )
             content = file.get("content_base64")
             if not isinstance(content, str) or not content:
                 fail("Violet file read returned no uploaded PDF bytes")

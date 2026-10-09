@@ -596,6 +596,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/violet/references/publication.md",
         content: include_str!("builtins/skills/violet/references/publication.md"),
     },
+    BuiltinFile {
+        path: "skills/violet/references/contract.md",
+        content: include_str!("builtins/skills/violet/references/contract.md"),
+    },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
     // sweep — dedupe double-filings, verify-and-close fixed claims, task new
@@ -1256,6 +1260,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/publication.md",
         content: include_str!("builtins/skills/violet/references/publication.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/contract.md",
+        content: include_str!("builtins/skills/violet/references/contract.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
@@ -1920,6 +1928,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/publication.md",
         content: include_str!("builtins/skills/violet/references/publication.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/contract.md",
+        content: include_str!("builtins/skills/violet/references/contract.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     BuiltinFile {

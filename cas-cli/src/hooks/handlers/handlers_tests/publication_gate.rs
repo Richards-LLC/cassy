@@ -76,6 +76,17 @@ fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
             "mcp__violet__violet_post",
             json!({"channel":"client-internal","kind":"message","text":"Report attached","deliverable":true,"task_id":"cas-pub-work"}),
         ),
+        // cas-1206 (GH #1154): the 2026-10-09 contract's other file routes.
+        (
+            "mcp__violet__violet_post",
+            json!({"channel":"client-internal","kind":"file_external","step":"complete","epic_id":"cas-pub-epic",
+                "file_id":"F1","filename":"report.pdf","size_bytes":2_000_000,"sha256":"a".repeat(64)}),
+        ),
+        (
+            "mcp__violet__violet_post",
+            json!({"channel":"client-internal","kind":"thread","epic_id":"cas-pub-epic","text":"Report","idempotency_key":"k",
+                "replies":[{"text":"Summary"},{"text":"PDF","files":[{"filename":"report.pdf","content":"JVBERi0=","content_encoding":"base64"}]}]}),
+        ),
     ] {
         let reason = denied(handle_pre_tool_use(&input(tool, args.clone(), dir.path()), Some(&cas)).unwrap())
             .unwrap_or_else(|| panic!("{tool} {args} must be denied"));
@@ -96,6 +107,10 @@ fn ordinary_messages_and_verified_epics_are_allowed_cas_f6ad() {
     // A status message that shares no deliverable is not gated.
     let message = json!({"channel":"client-internal","kind":"message","text":"Working on it","epic_id":"cas-pub-epic"});
     assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", message, dir.path()), Some(&cas)).unwrap()).is_none());
+    // A text-only ordered thread (cas-1206) shares no file either.
+    let thread = json!({"channel":"client-internal","kind":"thread","text":"Status","idempotency_key":"k",
+        "epic_id":"cas-pub-epic","replies":[{"text":"Was → Now"}]});
+    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", thread, dir.path()), Some(&cas)).unwrap()).is_none());
     // A file post with no epic context has nothing to wait on.
     let unbound = json!({"channel":"client-internal","kind":"file","file":{"filename":"x.txt","content":"x"}});
     assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", unbound, dir.path()), Some(&cas)).unwrap()).is_none());

@@ -63,9 +63,11 @@ class Announce(unittest.TestCase):
             envelope["message_id"], "https://slack.test/" + envelope["message_id"]
         )
         writes = []
+        self.reads = []
 
         def tool(name, arguments):
             if name == "violet_read":
+                self.reads.append(arguments)
                 if read_effect:
                     read_effect()
                 return {"ok": True}
@@ -179,6 +181,10 @@ class Announce(unittest.TestCase):
         self.assertEqual([item.get("reply_to") for item in writes], [None, "1", None, "3"])
         values = dict(line.split("=", 1) for line in self.receipt.read_text().splitlines())
         self.assertEqual(values["DEV_REPLY_ID"], "4")
+        # The membership read is lean: no channel directory, no file bytes.
+        self.assertEqual(len(self.reads), 1)
+        self.assertIs(self.reads[0]["include_channels"], False)
+        self.assertIs(self.reads[0]["include_files"], False)
 
 
 class TokenPreflight(unittest.TestCase):

@@ -413,3 +413,34 @@ fn only_https_or_loopback_urls_are_followed() {
     assert!(!safe_url("https://user:pw@files.slack.com/upload"));
     assert!(!safe_url("file:///etc/passwd"));
 }
+
+/// The violet skill documents every named failure `artifact action=post` can
+/// return, so a new code cannot ship undocumented.
+#[test]
+fn every_post_error_code_is_documented_in_the_violet_contract() {
+    let reference = include_str!("../builtins/skills/violet/references/contract.md");
+    let sources = [
+        include_str!("slack.rs"),
+        include_str!("../mcp/tools/service/artifact_post.rs"),
+    ];
+    let pattern = regex::Regex::new(r#"PostError::new\(\s*"([a-z_]+)""#).unwrap();
+    let mut codes: Vec<&str> = sources
+        .iter()
+        .map(|source| source.split("#[cfg(test)]").next().unwrap())
+        .flat_map(|source| pattern.captures_iter(source).map(|c| c.get(1).unwrap().as_str()))
+        .collect();
+    // The fallback when Violet refuses without a code of its own.
+    codes.push("violet_post_failed");
+    codes.sort_unstable();
+    codes.dedup();
+    assert!(codes.len() >= 10, "expected the post failure codes, found {codes:?}");
+    for code in codes {
+        assert!(
+            reference.contains(&format!("`{code}`")),
+            "violet references/contract.md does not document artifact post code {code:?}"
+        );
+    }
+    for field in ["artifact_id", "message_id", "file_id", "permalink", "sha256_verified"] {
+        assert!(reference.contains(&format!("`{field}`")), "receipt field {field:?}");
+    }
+}

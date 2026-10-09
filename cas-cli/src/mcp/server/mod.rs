@@ -599,7 +599,9 @@ impl CasCore {
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, our_pid);
                 #[cfg(unix)]
                 {
-                    agent.ppid = Some(std::os::unix::process::parent_id());
+                    let ppid = std::os::unix::process::parent_id();
+                    agent.ppid = Some(ppid);
+                    crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
                 }
                 agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
@@ -728,7 +730,9 @@ impl CasCore {
         crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
         #[cfg(unix)]
         {
-            agent.ppid = Some(std::os::unix::process::parent_id());
+            let ppid = std::os::unix::process::parent_id();
+            agent.ppid = Some(ppid);
+            crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
         }
         agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
@@ -918,6 +922,7 @@ impl CasCore {
 }
 
 pub(crate) mod parent_watchdog;
+mod pre_initialize_guard;
 mod prompts;
 mod resources;
 mod runtime;

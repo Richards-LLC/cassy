@@ -11837,6 +11837,83 @@ mod tests {
         );
     }
 
+    /// cas-0e57: the incident shape. A logged-in store (the task-store open
+    /// also opens the cloud sync queue) is briefly write-locked by another
+    /// connection while the supervisor force-stops a worker holding work. The
+    /// safety check must read through the lock, and the shutdown must queue
+    /// once the lock clears within the busy budget.
+    #[tokio::test]
+    async fn shutdown_force_waits_out_a_brief_foreign_write_lock_cas_0e57() {
+        use cas_types::{AgentStatus, Task, TaskStatus};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-locked");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "unrelated-pane");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        crate::cloud::CloudConfig {
+            token: Some("cas-0e57-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut worker = worker_named("locked-worker", "locked-worker-id");
+        worker.factory_session = Some("shutdown-locked".into());
+        worker.status = AgentStatus::Stale;
+        worker.pid = Some(i32::MAX as u32);
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-0e57-held".into(), "Held by the worker".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let locker = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            locker.execute_batch("COMMIT").unwrap();
+        });
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "locked-worker", "force": true
+        }))
+        .unwrap();
+        let result = service.factory_shutdown_workers(request).await;
+        release.join().unwrap();
+        let text = response_text(result.expect("force shutdown waits out a brief write lock"));
+        assert!(text.contains("Queued shutdown request"), "{text}");
+        assert!(text.contains("cas-0e57-held"), "{text}");
+    }
+
+    /// cas-0e57: a safety check that cannot read task state says so, demands
+    /// force like an in-progress task, and does not promise worktree removal.
+    #[test]
+    fn unreadable_task_state_requires_force_and_is_reported_cas_0e57() {
+        let missing = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(missing.path().join("cas.db")).unwrap();
+        let error = shutdown_safety_tasks(missing.path()).expect_err("a directory is not a store");
+        let mut snapshot = ShutdownWorkerSnapshot {
+            worker_name: "w".into(),
+            worker_id: "w-id".into(),
+            task_states: Vec::new(),
+            has_in_progress_task: false,
+            worktree_state: "worktree=/tmp/w".into(),
+            worktree_cleanup_verdict: "worktree /tmp/w will be removed at shutdown".into(),
+            unsafe_worktree: false,
+        };
+        assert!(!snapshot.requires_force());
+        snapshot.mark_task_state_unknown(&error);
+        assert!(snapshot.requires_force());
+        let rendered = snapshot.render();
+        assert!(rendered.contains("unknown (") && rendered.contains(&error), "{rendered}");
+        assert!(rendered.contains("task state unknown"), "{rendered}");
+    }
+
     #[tokio::test]
     async fn shutdown_live_successor_keeps_unread_mail_cas_c653() {
         use cas_types::AgentStatus;

@@ -161,24 +161,41 @@ fn resolve_target_branch_ref(
             "repository proof target branch `{target_branch}` is not a safe Git ref"
         ));
     }
-    for target_ref in [
-        format!("refs/heads/{target_branch}"),
-        format!("refs/remotes/origin/{target_branch}"),
-    ] {
+    let resolve = |target_ref: String| {
         let revision = format!("{target_ref}^{{commit}}");
-        if let Ok(output) = git_output(
+        git_output(
             repository_root,
             &["rev-parse", "--verify", revision.as_str()],
-        ) {
-            let head = String::from_utf8_lossy(&output).trim().to_string();
-            if !head.is_empty() {
-                return Ok((target_ref, head));
-            }
+        )
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output).trim().to_string())
+        .filter(|head| !head.is_empty())
+        .map(|head| (target_ref, head))
+    };
+    let local = resolve(format!("refs/heads/{target_branch}"));
+    let origin = resolve(format!("refs/remotes/origin/{target_branch}"));
+    match (local, origin) {
+        // cas-a06c (GH #1137): a local target strictly behind origin is a
+        // stale view (a primary checkout that cannot fast-forward). Binding it
+        // pointed the verifier at a tree without the delivery already on
+        // origin. A local target equal to, ahead of, or diverged from origin
+        // (a local merge not yet pushed) stays authoritative.
+        (Some(local), Some(origin))
+            if local.1 != origin.1
+                && git_output(
+                    repository_root,
+                    &["merge-base", "--is-ancestor", &local.1, &origin.1],
+                )
+                .is_ok() =>
+        {
+            Ok(origin)
         }
+        (Some(local), _) => Ok(local),
+        (None, Some(origin)) => Ok(origin),
+        (None, None) => Err(format!(
+            "repository proof target branch `{target_branch}` does not resolve locally or as `origin/{target_branch}`"
+        )),
     }
-    Err(format!(
-        "repository proof target branch `{target_branch}` does not resolve locally or as `origin/{target_branch}`"
-    ))
 }
 
 /// Capture the committed tree at a task's declared integration branch.

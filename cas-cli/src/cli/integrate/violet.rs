@@ -1125,6 +1125,18 @@ fn load_machine_credentials_with_installer(
     Ok(loaded)
 }
 
+/// cas-e753: the machine credentials a long-running process may need after
+/// startup, returned as values rather than installed into its environment.
+/// Names already set in the environment are omitted, as for startup loading.
+#[cfg(feature = "mcp-proxy")]
+pub(crate) fn machine_credential_values() -> Result<std::collections::BTreeMap<String, String>> {
+    let mut values = std::collections::BTreeMap::new();
+    load_machine_credentials_with_installer(&[], |name, value| {
+        values.insert(name.to_string(), value.to_string());
+    })?;
+    Ok(values)
+}
+
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------

@@ -72,6 +72,23 @@ impl Config {
                     }
                 };
             }
+            "slack.wake_enabled" => {
+                self.slack.get_or_insert_with(SlackConfig::default).wake_enabled =
+                    Some(value.parse().map_err(|_| {
+                        MemError::Parse("Invalid boolean for slack.wake_enabled".into())
+                    })?)
+            }
+            "slack.violet_bot_user_ids" => {
+                let ids: Vec<String> = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                self.slack
+                    .get_or_insert_with(SlackConfig::default)
+                    .violet_bot_user_ids = (!ids.is_empty()).then_some(ids);
+            }
             // Factory build contention
             "factory.max_concurrent_builders" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);

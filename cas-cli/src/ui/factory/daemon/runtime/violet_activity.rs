@@ -361,10 +361,6 @@ impl WatchBook {
         self.watches.iter().find(|w| w.channel_id == channel_id)
     }
 
-    fn watch_mut(&mut self, channel_id: &str) -> Option<&mut ChannelWatch> {
-        self.watches.iter_mut().find(|w| w.channel_id == channel_id)
-    }
-
     pub(crate) fn active(&self) -> impl Iterator<Item = &ChannelWatch> {
         self.watches.iter().filter(|w| w.is_active())
     }
@@ -470,6 +466,7 @@ impl VioletWake {
         wake
     }
 
+    #[cfg(test)]
     pub(crate) fn book(&self) -> &WatchBook {
         &self.book
     }
@@ -505,6 +502,9 @@ impl VioletWake {
                 report.claimed = claim.events.len();
                 report.denied = claim.denied;
                 for event in claim.events {
+                    if event.attempts > 1 {
+                        tracing::debug!(event = %event.id, attempts = event.attempts, "Violet activity redelivered");
+                    }
                     match self.classify(&event.envelope) {
                         Admission::Hold(envelope) => {
                             self.held

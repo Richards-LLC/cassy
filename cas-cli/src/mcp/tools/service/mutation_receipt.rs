@@ -42,6 +42,29 @@ pub(crate) async fn scope<F: Future>(receipt: Arc<Receipt>, future: F) -> F::Out
     CURRENT.scope(receipt, future).await
 }
 
+/// cas-3b81 (GH #1142): run a handler whose body is synchronous Git and
+/// SQLite work on the blocking pool, keeping this request's receipt in scope.
+///
+/// `task close` never yields on its ordinary path: run inline, it pinned a
+/// runtime worker for its whole run (hundreds of Git spawns). Parallel closes
+/// then queued behind each other and behind every other tool call while the
+/// 55s budget ran, and the deadline could not cancel them anyway. On the
+/// blocking pool, closes run side by side and the runtime stays free to answer
+/// other calls and fire deadlines on time.
+pub(crate) async fn run_on_blocking_pool<F, T>(future: F) -> Result<T, tokio::task::JoinError>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let receipt = current();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || match receipt {
+        Some(receipt) => runtime.block_on(CURRENT.scope(receipt, future)),
+        None => runtime.block_on(future),
+    })
+    .await
+}
+
 pub(crate) fn message_committed(id: i64) {
     if let Some(receipt) = current() {
         let _ = receipt.commit.set(Commit {
@@ -90,5 +113,59 @@ impl Receipt {
 
     pub(crate) fn task_id(&self) -> Option<&str> {
         self.task_id.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// cas-3b81 (GH #1142): with one runtime worker, two synchronous
+    /// close-shaped handlers ran one after the other and a timer queued behind
+    /// both. On the blocking pool they overlap, the runtime stays free, and
+    /// the request's receipt still observes the handler's commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_pool_handlers_overlap_and_keep_their_receipt_cas_3b81() {
+        let started = Instant::now();
+        let slow = |id: &'static str| {
+            let receipt = Receipt::new("task", "close", Some(id));
+            let observed = receipt.clone();
+            let handle = tokio::spawn(scope(receipt, async move {
+                run_on_blocking_pool(async move {
+                    std::thread::sleep(Duration::from_millis(400));
+                    task_terminal_committed(id);
+                })
+                .await
+                .unwrap();
+            }));
+            (handle, observed)
+        };
+        let (first, first_receipt) = slow("cas-a");
+        let (second, second_receipt) = slow("cas-b");
+        let tick = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            started.elapsed()
+        });
+        let tick = tick.await.unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        let total = started.elapsed();
+        assert!(
+            tick < Duration::from_millis(300),
+            "runtime pinned: timer fired after {tick:?}"
+        );
+        assert!(
+            total < Duration::from_millis(750),
+            "handlers serialized: {total:?}"
+        );
+        assert!(first_receipt.terminal.get().is_some());
+        assert!(second_receipt.terminal.get().is_some());
+        assert!(
+            first_receipt
+                .commit
+                .get()
+                .is_some_and(|commit| commit.description.contains("cas-a"))
+        );
     }
 }

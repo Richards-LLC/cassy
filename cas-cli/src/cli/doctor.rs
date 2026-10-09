@@ -8107,6 +8107,8 @@ mod tests {
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn doctor_proxy_reachability_names_project_override_for_missing_violet_credential() {
+        // The remediated probe reaches the machine registration over HTTPS.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let xdg_config_home = env.home().join("xdg");
         env.set("XDG_CONFIG_HOME", &xdg_config_home);

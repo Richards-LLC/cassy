@@ -159,14 +159,14 @@ fn merged_close_blocked_status_key(
 /// Persist one confirmed worker stoppage through the same durable supervisor
 /// relay used by director-detected idle and stall events.  This is deliberately
 /// narrower than a normal-message delivery failure: callers invoke it only
-/// after a bounded wake retry has also produced no pane output.
+/// after a bounded wake retry has also started no harness turn (cas-ac97).
 pub(super) fn enqueue_worker_delivery_stalled_relay(
     cas_dir: &std::path::Path,
     worker: &str,
     message_id: i64,
 ) -> WorkerAttentionRelayOutcome {
     let detail = format!(
-        "Worker {worker} produced no pane output after normal message {message_id} and its bounded retry."
+        "Worker {worker} started no harness turn after normal message {message_id} and its bounded retry."
     );
     enqueue_worker_attention_relay_detail(
         cas_dir,

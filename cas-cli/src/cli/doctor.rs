@@ -8115,8 +8115,12 @@ mod tests {
         let xdg_config_home = env.home().join("xdg");
         env.set("XDG_CONFIG_HOME", &xdg_config_home);
 
-        let missing = "MECHA_SLACK_TOKEN_CASSY_PROXY";
-        env.remove(missing);
+        let missing = "VIOLET_SLACK_TOKEN_CASSY_PROXY";
+        // Clear the installed-machine fallback too, or a leaked legacy
+        // variable would satisfy the reference.
+        for name in cmcp_core::config::violet_credential_names(missing) {
+            env.remove(&name);
+        }
         let machine_token = "CAS_DOCTOR_VIOLET_MACHINE_TOKEN";
         env.set(machine_token, "test-token");
 

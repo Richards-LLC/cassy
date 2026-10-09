@@ -12,17 +12,23 @@ Two values make a machine work, and they are the only two secrets involved:
 | `VIOLET_SLACK_TOKEN_<LABEL>` | Your machine's bearer. Per-machine so one can be revoked without touching anyone else. | `POST /api/clients`, authorized by your Cassy Cloud login |
 | `VIOLET_VERCEL_BYPASS` | The shared edge-protection secret in front of the hub. | The hub's bypass route, Vercel read, or one hidden prompt |
 
+The hub endpoint is `https://violet-hub.vercel.app/mcp/slack`.
 Violet variables take precedence over installed-machine legacy variables;
-empty Violet values also fall back. The shared
+empty Violet values also fall back. That fallback lasts one release. The shared
 [compatibility manifest](../crates/cas-types/src/violet-compatibility.json)
-defines those fallback names and the deployed URL once for the Rust runtime
-and release scripts. Only `cas integrate violet` is accepted.
+defines the endpoint, its former hostname and the fallback names once for the
+Rust runtime and release scripts. Only `cas integrate violet` is accepted.
 
-`cas integrate violet` and `cas update --sync` retire production hub entries
-from project/user proxy files and all installed Claude/Codex account profiles.
-They preserve credential references, unrelated settings and custom endpoints.
-Managed retired skill copies are removed; operator-owned skills are retained.
-Use the endpoint printed by `cas integrate violet` when repairing a registration.
+`cas update --sync` (and `cas sync agents-md`) retire production hub entries
+from project/user proxy files and all installed Claude/Codex account profiles,
+and move them to the endpoint above. Proxy files also switch to the `VIOLET_*`
+credential names, which resolve through the fallback until the credentials
+file is renamed. Unrelated settings and custom endpoints are preserved.
+`cas integrate violet` additionally renames the legacy keys in the credentials
+file to `VIOLET_SLACK_TOKEN_<LABEL>` / `VIOLET_VERCEL_BYPASS` (values are
+never printed) and rewrites the Claude and Codex entries to those names; open a
+new login shell afterwards. Managed retired skill copies are removed;
+operator-owned skills are retained.
 
 Everything Cassy writes references those by **name**. No file in any repo, and
 no line of terminal output, ever holds a value.

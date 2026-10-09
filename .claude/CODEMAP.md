@@ -54,7 +54,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/cli/{hook,sync}/` — hook event dispatch, generated hook configuration, and managed agent-file rendering.
 - `cas-cli/src/cli/{codemap_cmd,project_overview_cmd,knowledge_cmd}.rs` — documentation freshness gates and knowledge operations.
 - `cas-cli/src/cli/{history_cmd,index_cmd,retrieval_parity}.rs` — Git history search, code indexes, and retrieval parity commands.
-- `cas-cli/src/cli/integrate/{violet,violet_retirement}.rs` — `cas integrate violet` (renamed from `mecha_cassy.rs`); `cas-cli/src/cli/doctor/slack_transport.rs` checks the Slack route.
+- `cas-cli/src/cli/integrate/{violet,violet_retirement}.rs` — `cas integrate violet`; `cas-cli/src/cli/doctor/slack_transport.rs` checks the Slack route.
 - `cas-cli/src/cli/{jev,hub_operator,store_choice}.rs` — `cas jev`, operator-inbox commands, and store selection.
 - `cas-cli/src/artifacts/` — publishable-path guard, streaming digest, and the Cloud begin/PUT/complete upload client for published artifacts.
 - `cas-cli/src/cloud/` — cloud sync, devices, teams, proposals, embeddings, aliases, and queued push/pull; `cas-cli/src/cloud/sync_queue/unauthored.rs` ledgers pulled rows this project did not author.

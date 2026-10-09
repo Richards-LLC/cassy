@@ -39,8 +39,8 @@ use url::Url;
 
 use cmcp_core::config::{
     Config as ProxyConfig, ExternalToolConfig, ServerConfig, VIOLET_BYPASS_HEADER,
-    VIOLET_DEFAULT_BYPASS_ENV, VIOLET_SERVER, VIOLET_TOOLS, violet_compatibility,
-    violet_credential_value, violet_hub_url,
+    VIOLET_DEFAULT_BYPASS_ENV, VIOLET_SERVER, VIOLET_TOOLS, canonical_violet_credential_name,
+    violet_compatibility, violet_credential_value, violet_hub_url,
 };
 
 use crate::cloud::{CloudConfig, DeviceConfig};
@@ -980,6 +980,70 @@ fn write_credentials(
     Ok(changed)
 }
 
+/// Rename installed-machine keys in the credentials file to their canonical
+/// `VIOLET_*` names, keeping each line's value text and position. A legacy
+/// line whose canonical name already holds a value is dropped; an empty
+/// canonical line yields to the legacy value it would otherwise have fallen
+/// back to. Returns the canonical names that changed. Idempotent; values never
+/// leave this function.
+fn rename_legacy_credentials(path: &Path, dry_run: bool) -> Result<Vec<String>> {
+    if !ifs::is_regular_file(path) {
+        return Ok(Vec::new());
+    }
+    let existing = ifs::read_capped(path)?;
+    let renames: std::collections::BTreeMap<&str, String> = existing
+        .lines()
+        .filter_map(assignment_name)
+        .filter_map(|name| {
+            let canonical = canonical_violet_credential_name(name);
+            (canonical != name).then_some((name, canonical))
+        })
+        .collect();
+    if renames.is_empty() {
+        return Ok(Vec::new());
+    }
+    let canonical_with_value: std::collections::BTreeSet<String> = existing
+        .lines()
+        .filter_map(assignment_value)
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(name, _)| name)
+        .collect();
+    let mut renamed = std::collections::BTreeSet::new();
+    let mut lines = Vec::new();
+    for line in existing.lines() {
+        match assignment_name(line) {
+            Some(name) if renames.contains_key(name) => {
+                let canonical = &renames[name];
+                renamed.insert(canonical.clone());
+                if canonical_with_value.contains(canonical) {
+                    continue;
+                }
+                let at = line.find(name).expect("assignment name occurs in its line");
+                lines.push(format!(
+                    "{}{canonical}{}",
+                    &line[..at],
+                    &line[at + name.len()..]
+                ));
+            }
+            Some(name)
+                if renames.values().any(|canonical| canonical == name)
+                    && !canonical_with_value.contains(name) =>
+            {
+                // An empty canonical assignment would shadow the renamed value.
+            }
+            _ => lines.push(line.to_string()),
+        }
+    }
+    let mut rendered = lines.join("\n");
+    if existing.ends_with('\n') {
+        rendered.push('\n');
+    }
+    if !dry_run && rendered != existing {
+        write_private_file(path, &rendered)?;
+    }
+    Ok(renamed.into_iter().collect())
+}
+
 fn profile_source_line(credentials: &Path) -> String {
     let path = shell_quote(&credentials.to_string_lossy());
     format!("[ -f '{path}' ] && . '{path}'")
@@ -1196,6 +1260,10 @@ pub struct VioletReport {
     pub registration: WriteState,
     pub credentials_path: PathBuf,
     pub credentials: WriteState,
+    /// Canonical names whose installed-machine keys this run renamed in the
+    /// credentials file. Names only; values are never reported.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub renamed_credentials: Vec<String>,
     pub login_profile_path: Option<PathBuf>,
     pub login_profile: WriteState,
     /// Routes that will actually be admitted from here. A project
@@ -1671,6 +1739,10 @@ fn run_with_credentials(
         .map(profile_write_path)
         .transpose()?;
 
+    // Rename before writing so a provisioned value replaces the renamed line
+    // instead of leaving a legacy duplicate behind.
+    let renamed_credentials = rename_legacy_credentials(&paths.credentials_file, args.dry_run)
+        .with_context(|| format!("renaming keys in {}", paths.credentials_file.display()))?;
     let (credentials_state, profile_state) = match credentials {
         Some(_values) if args.dry_run => (WriteState::Planned, WriteState::Planned),
         Some(values) => {
@@ -1702,6 +1774,16 @@ fn run_with_credentials(
             (credentials_state, profile_state)
         }
         None => (WriteState::Skipped, WriteState::Skipped),
+    };
+    let credentials_state = match credentials_state {
+        WriteState::Skipped | WriteState::AlreadyCurrent if !renamed_credentials.is_empty() => {
+            if args.dry_run {
+                WriteState::Planned
+            } else {
+                WriteState::Written
+            }
+        }
+        state => state,
     };
 
     // The registration is written even when a variable is missing: it names
@@ -1870,6 +1952,7 @@ fn run_with_credentials(
         registration,
         credentials_path: paths.credentials_file.clone(),
         credentials: credentials_state,
+        renamed_credentials,
         login_profile_path,
         login_profile: profile_state,
         allowlist,
@@ -2314,9 +2397,25 @@ fn project_proxy_path() -> Option<PathBuf> {
     ifs::is_regular_file(&path).then_some(path)
 }
 
-/// A default integration refresh keeps this machine's credential references.
-/// Explicit --label/--token-env select a new registration intentionally.
+/// A default integration refresh keeps this machine's credential references,
+/// spelled with their canonical `VIOLET_*` names: the same run renames the
+/// credentials-file keys they expand from. Explicit --label/--token-env select
+/// a new registration intentionally.
 fn existing_machine_env_names(paths: &MachinePaths, url: &str) -> Result<Option<(String, String)>> {
+    Ok(
+        registered_machine_env_names(paths, url)?.map(|(token, bypass)| {
+            (
+                canonical_violet_credential_name(&token),
+                canonical_violet_credential_name(&bypass),
+            )
+        }),
+    )
+}
+
+fn registered_machine_env_names(
+    paths: &MachinePaths,
+    url: &str,
+) -> Result<Option<(String, String)>> {
     let mut config = ProxyConfig::load_from(&paths.user_proxy)?;
     config.retire_legacy_hub_registration();
     if config
@@ -2480,9 +2579,17 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
             .join(", ")
     ));
     outcome.summary.push(format!(
-        "credentials file: {} ({})",
+        "credentials file: {} ({}){}",
         report.credentials.as_str(),
-        report.credentials_path.display()
+        report.credentials_path.display(),
+        if report.renamed_credentials.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; keys renamed to {}",
+                report.renamed_credentials.join(", ")
+            )
+        }
     ));
     if let Some(profile) = &report.login_profile_path {
         outcome.summary.push(format!(
@@ -3095,17 +3202,20 @@ auth = "env:{token}"
     }
 
     #[test]
-    fn default_refresh_keeps_installed_machine_credential_references() {
+    fn default_refresh_keeps_installed_machine_credentials_under_violet_names() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let c = violet_compatibility();
         let token = format!("{}_LAPTOP", c.legacy_token_prefix);
-        let expected = Some((token.clone(), c.legacy_bypass_env.clone()));
+        let expected = Some((
+            "VIOLET_SLACK_TOKEN_LAPTOP".to_string(),
+            VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+        ));
         let mut config = ProxyConfig::default();
         config.add_server(
             c.retired_server.clone(),
             ServerConfig::Http {
-                url: violet_hub_url().to_owned(),
+                url: c.legacy_hub_url.clone(),
                 auth: Some(format!("env:{token}")),
                 headers: HashMap::from([(
                     VIOLET_BYPASS_HEADER.into(),
@@ -3122,7 +3232,7 @@ auth = "env:{token}"
         std::fs::remove_file(&paths.user_proxy).unwrap();
         let path = paths.claude_json.as_deref().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, serde_json::json!({"mcpServers":{(c.retired_server.as_str()):{"url":violet_hub_url(),"headers":{"Authorization":format!("Bearer ${{{token}}}"), VIOLET_BYPASS_HEADER:format!("${{{}}}",c.legacy_bypass_env)}}}}).to_string()).unwrap();
+        std::fs::write(path, serde_json::json!({"mcpServers":{(c.retired_server.as_str()):{"url":c.legacy_hub_url,"headers":{"Authorization":format!("Bearer ${{{token}}}"), VIOLET_BYPASS_HEADER:format!("${{{}}}",c.legacy_bypass_env)}}}}).to_string()).unwrap();
         assert_eq!(
             existing_machine_env_names(&paths, violet_hub_url()).unwrap(),
             expected
@@ -3130,7 +3240,7 @@ auth = "env:{token}"
         std::fs::remove_file(path).unwrap();
         let path = paths.codex_config.as_deref().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("[mcp_servers.{}]\nurl = {:?}\nbearer_token_env_var = {:?}\nenv_http_headers = {{ {} = {:?} }}\n", c.retired_server, violet_hub_url(), token, VIOLET_BYPASS_HEADER, c.legacy_bypass_env)).unwrap();
+        std::fs::write(path, format!("[mcp_servers.{}]\nurl = {:?}\nbearer_token_env_var = {:?}\nenv_http_headers = {{ {} = {:?} }}\n", c.retired_server, c.legacy_hub_url, token, VIOLET_BYPASS_HEADER, c.legacy_bypass_env)).unwrap();
         assert_eq!(
             existing_machine_env_names(&paths, violet_hub_url()).unwrap(),
             expected
@@ -3140,6 +3250,264 @@ auth = "env:{token}"
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn legacy_credentials_file(paths: &MachinePaths, keep: &str) -> String {
+        let c = violet_compatibility();
+        let text = format!(
+            "# machine secrets\nexport KEEP='unrelated'\n{keep}export {}_LAPTOP='{FAKE_TOKEN}'\nexport {}='{FAKE_BYPASS}'\n",
+            c.legacy_token_prefix, c.legacy_bypass_env
+        );
+        std::fs::create_dir_all(paths.credentials_file.parent().unwrap()).unwrap();
+        std::fs::write(&paths.credentials_file, &text).unwrap();
+        text
+    }
+
+    #[test]
+    fn integrate_renames_legacy_credential_keys_idempotently_without_reporting_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        legacy_credentials_file(&paths, "");
+        let args = VioletArgs {
+            no_harness: true,
+            ..test_args()
+        };
+        let report = run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        assert_eq!(
+            report.renamed_credentials,
+            ["VIOLET_SLACK_TOKEN_LAPTOP", VIOLET_DEFAULT_BYPASS_ENV]
+        );
+        assert_eq!(report.credentials, WriteState::Written);
+        let renamed = std::fs::read_to_string(&paths.credentials_file).unwrap();
+        assert_eq!(
+            renamed,
+            format!(
+                "# machine secrets\nexport KEEP='unrelated'\nexport VIOLET_SLACK_TOKEN_LAPTOP='{FAKE_TOKEN}'\nexport VIOLET_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+            )
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&paths.credentials_file)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        for rendered in [
+            serde_json::to_string(&report).unwrap(),
+            format!("{report:?}"),
+        ] {
+            assert!(
+                !contains_any(&rendered, &[FAKE_TOKEN, FAKE_BYPASS]),
+                "{rendered}"
+            );
+        }
+
+        let again = run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        assert!(again.renamed_credentials.is_empty());
+        assert_eq!(again.credentials, WriteState::Skipped);
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            renamed
+        );
+        assert!(
+            !serde_json::to_string(&again)
+                .unwrap()
+                .contains("renamed_credentials")
+        );
+    }
+
+    #[test]
+    fn credential_rename_resolves_both_generations_and_dry_run_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        // A populated canonical key wins; the legacy duplicate is dropped.
+        legacy_credentials_file(&paths, "export VIOLET_SLACK_TOKEN_LAPTOP='newer'\n");
+        assert_eq!(
+            rename_legacy_credentials(&paths.credentials_file, false).unwrap(),
+            ["VIOLET_SLACK_TOKEN_LAPTOP", VIOLET_DEFAULT_BYPASS_ENV]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            format!(
+                "# machine secrets\nexport KEEP='unrelated'\nexport VIOLET_SLACK_TOKEN_LAPTOP='newer'\nexport VIOLET_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+            )
+        );
+        assert!(
+            rename_legacy_credentials(&paths.credentials_file, false)
+                .unwrap()
+                .is_empty()
+        );
+
+        // An empty canonical key would shadow the value it falls back to.
+        legacy_credentials_file(&paths, "export VIOLET_SLACK_TOKEN_LAPTOP=''\n");
+        rename_legacy_credentials(&paths.credentials_file, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            format!(
+                "# machine secrets\nexport KEEP='unrelated'\nexport VIOLET_SLACK_TOKEN_LAPTOP='{FAKE_TOKEN}'\nexport VIOLET_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+            )
+        );
+
+        let original = legacy_credentials_file(&paths, "");
+        assert_eq!(
+            rename_legacy_credentials(&paths.credentials_file, true)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            original
+        );
+        std::fs::remove_file(&paths.credentials_file).unwrap();
+        assert!(
+            rename_legacy_credentials(&paths.credentials_file, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn integrate_moves_an_installed_project_registration_to_violet_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let c = violet_compatibility();
+        let legacy = duplicate_server_block()
+            .replace(violet_hub_url(), &c.legacy_hub_url)
+            .replace(
+                TEST_TOKEN_ENV,
+                &cmcp_core::config::violet_credential_names(TEST_TOKEN_ENV)[1],
+            )
+            .replace(
+                &format!("env:{VIOLET_DEFAULT_BYPASS_ENV}"),
+                &format!("env:{}", c.legacy_bypass_env),
+            );
+        let project = write_project_proxy(
+            dir.path(),
+            &format!("allowlist = [\"violet.violet_read\", \"violet.violet_post\"]\n\n{legacy}"),
+        );
+        let args = VioletArgs {
+            no_harness: true,
+            ..test_args()
+        };
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &ready_env(),
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
+        assert!(report.is_green(), "{report:?}");
+        assert_eq!(report.url, "https://violet-hub.vercel.app/mcp/slack");
+        let project_raw = std::fs::read_to_string(&project).unwrap();
+        assert!(
+            !project_raw.contains("[servers.violet]"),
+            "identical to the machine registration once migrated: {project_raw}"
+        );
+        let machine = std::fs::read_to_string(&paths.user_proxy).unwrap();
+        assert!(
+            machine.contains("url = \"https://violet-hub.vercel.app/mcp/slack\""),
+            "{machine}"
+        );
+        assert!(machine.contains(&format!("auth = \"env:{TEST_TOKEN_ENV}\"")));
+        assert!(machine.contains(&format!("\"env:{VIOLET_DEFAULT_BYPASS_ENV}\"")));
+        for text in [&project_raw, &machine] {
+            for legacy in [
+                c.legacy_hub_url.as_str(),
+                c.legacy_token_prefix.as_str(),
+                c.legacy_bypass_env.as_str(),
+            ] {
+                assert!(!text.contains(legacy), "{legacy} survived:\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_and_violet_skill_carry_no_retired_hub_vocabulary() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let c = violet_compatibility();
+        let legacy_token = cmcp_core::config::violet_credential_names(TEST_TOKEN_ENV)[1].clone();
+        // An installed machine: former hostname, legacy names in the file and
+        // in the environment.
+        let mut config = ProxyConfig::default();
+        config.ensure_violet_registration(
+            violet_hub_url(),
+            TEST_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
+        );
+        config.add_server(
+            VIOLET_SERVER.to_string(),
+            ServerConfig::Http {
+                url: c.legacy_hub_url.clone(),
+                auth: Some(format!("env:{legacy_token}")),
+                headers: HashMap::from([(
+                    VIOLET_BYPASS_HEADER.into(),
+                    format!("env:{}", c.legacy_bypass_env),
+                )]),
+                oauth: false,
+            },
+        );
+        config.save_to(&paths.user_proxy).unwrap();
+        let env = FakeEnv::with(&[
+            (legacy_token.as_str(), FAKE_TOKEN),
+            (c.legacy_bypass_env.as_str(), FAKE_BYPASS),
+        ]);
+        let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
+        assert!(row.message.contains(violet_hub_url()), "{row:?}");
+        assert!(
+            row.message.contains(&format!("{TEST_TOKEN_ENV} set")),
+            "{row:?}"
+        );
+
+        let mut texts = vec![("doctor row", row.message)];
+        for (path, text) in [
+            (
+                "SKILL.md",
+                include_str!("../../builtins/skills/violet/SKILL.md"),
+            ),
+            (
+                "references/attachments.md",
+                include_str!("../../builtins/skills/violet/references/attachments.md"),
+            ),
+            (
+                "references/contract.md",
+                include_str!("../../builtins/skills/violet/references/contract.md"),
+            ),
+            (
+                "references/publication.md",
+                include_str!("../../builtins/skills/violet/references/publication.md"),
+            ),
+            (
+                "references/registration.md",
+                include_str!("../../builtins/skills/violet/references/registration.md"),
+            ),
+        ] {
+            texts.push((path, text.to_string()));
+        }
+        for (source, text) in texts {
+            let lower = text.to_ascii_lowercase();
+            for legacy in [
+                c.legacy_hub_url.as_str(),
+                c.retired_server.as_str(),
+                c.legacy_token_prefix.as_str(),
+                c.legacy_bypass_env.as_str(),
+                c.retired_tools[0].as_str(),
+                c.retired_tools[1].as_str(),
+            ] {
+                assert!(
+                    !lower.contains(&legacy.to_ascii_lowercase()),
+                    "{source} names {legacy}"
+                );
+            }
+        }
     }
 
     fn test_args() -> VioletArgs {

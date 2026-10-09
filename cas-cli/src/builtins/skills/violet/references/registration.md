@@ -7,10 +7,10 @@ the edge.
 Both values live in the machine's credentials file as
 `VIOLET_SLACK_TOKEN_<LABEL>` and `VIOLET_VERCEL_BYPASS` and are exported into the
 environment by the login shell. Configurations below name those variables and
-never hold their values. `cas integrate violet` prefers `VIOLET_*` names and
-falls back to the corresponding legacy variables on existing machines;
-retain whichever env names
-the integration receipt selects.
+never hold their values. `cas integrate violet` renames an existing machine's
+legacy credential keys to these names and rewrites its registrations to match;
+until it runs, credential lookup falls back to the legacy variables for one
+release. Use the env names the integration receipt prints.
 
 ## One command, once per machine
 

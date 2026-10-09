@@ -1864,3 +1864,35 @@ fn cas_fd42_repair_preserves_existing_endpoint_routes_and_retry_metadata() {
         );
     }
 }
+
+/// cas-0e57: every logged-in task-store open runs `open` + `init`. A repeat
+/// init must not take the write lock, and the queue's own writes must wait
+/// out a foreign writer instead of failing at once.
+#[test]
+fn reopen_reads_only_and_writes_wait_for_a_foreign_lock_cas_0e57() {
+    let (temp, queue) = create_test_queue();
+    queue
+        .enqueue(EntityType::Task, "cas-0e57-a", SyncOperation::Upsert, Some("{}"))
+        .unwrap();
+    drop(queue);
+
+    let locker = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "init waited {:?} on a foreign write lock",
+        started.elapsed()
+    );
+
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        locker.execute_batch("COMMIT").unwrap();
+    });
+    queue
+        .enqueue(EntityType::Task, "cas-0e57-b", SyncOperation::Upsert, Some("{}"))
+        .expect("a briefly held write lock is waited out");
+    release.join().unwrap();
+}

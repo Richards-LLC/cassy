@@ -673,7 +673,27 @@ struct ShutdownWorkerSnapshot {
     unsafe_worktree: bool,
 }
 
+/// The task rows the shutdown safety check judges, or why they are unreadable.
+fn shutdown_safety_tasks(cas_root: &std::path::Path) -> Result<Vec<cas_types::Task>, String> {
+    crate::store::open_task_store(cas_root)
+        .map_err(|error| format!("cannot open the task store: {error}"))?
+        .list(None)
+        .map_err(|error| format!("cannot list tasks: {error}"))
+}
+
 impl ShutdownWorkerSnapshot {
+    /// cas-0e57: the worker's tasks could not be read. Unknown task state is
+    /// treated like an in-progress task: shutdown requires force=true, and the
+    /// rendered state says why.
+    fn mark_task_state_unknown(&mut self, error: &str) {
+        self.task_states = vec![format!("unknown ({error})")];
+        self.has_in_progress_task = true;
+        self.worktree_cleanup_verdict = format!(
+            "{} (task state unknown; cleanup is re-checked at shutdown)",
+            self.worktree_cleanup_verdict
+        );
+    }
+
     fn requires_force(&self) -> bool {
         self.has_in_progress_task || self.unsafe_worktree
     }
@@ -3148,31 +3168,31 @@ impl CasService {
             ));
         }
 
-        let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open task store for shutdown safety check: {e}"),
-            )
-        })?;
-        let tasks = task_store.list(None).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to list tasks for shutdown safety check: {e}"),
-            )
-        })?;
+        // cas-0e57: the safety check reads task state; it must not be the
+        // reason a shutdown cannot happen. When the store cannot be read,
+        // every selected worker reports its task state as unknown, which
+        // requires force=true like an in-progress task, and force proceeds.
+        let (tasks, task_state_error) = match shutdown_safety_tasks(&self.inner.cas_root) {
+            Ok(tasks) => (tasks, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         let local_merge_delivery = factory_session_uses_local_merge(factory_session.as_deref());
         let pinned_epic_branch =
             factory_session_pinned_epic_branch(factory_session.as_deref(), &tasks);
         let snapshots: Vec<ShutdownWorkerSnapshot> = selected
             .iter()
             .map(|worker| {
-                shutdown_worker_snapshot(
+                let mut snapshot = shutdown_worker_snapshot(
                     &self.inner.cas_root,
                     worker,
                     &tasks,
                     local_merge_delivery,
                     pinned_epic_branch.as_deref(),
-                )
+                );
+                if let Some(error) = task_state_error.as_deref() {
+                    snapshot.mark_task_state_unknown(error);
+                }
+                snapshot
             })
             .collect();
         let force = req.force.unwrap_or(false);
@@ -11899,6 +11919,83 @@ mod tests {
             agents.get(&supervisor.id).unwrap().status,
             AgentStatus::Idle
         );
+    }
+
+    /// cas-0e57: the incident shape. A logged-in store (the task-store open
+    /// also opens the cloud sync queue) is briefly write-locked by another
+    /// connection while the supervisor force-stops a worker holding work. The
+    /// safety check must read through the lock, and the shutdown must queue
+    /// once the lock clears within the busy budget.
+    #[tokio::test]
+    async fn shutdown_force_waits_out_a_brief_foreign_write_lock_cas_0e57() {
+        use cas_types::{AgentStatus, Task, TaskStatus};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-locked");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "unrelated-pane");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        crate::cloud::CloudConfig {
+            token: Some("cas-0e57-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut worker = worker_named("locked-worker", "locked-worker-id");
+        worker.factory_session = Some("shutdown-locked".into());
+        worker.status = AgentStatus::Stale;
+        worker.pid = Some(i32::MAX as u32);
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-0e57-held".into(), "Held by the worker".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let locker = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            locker.execute_batch("COMMIT").unwrap();
+        });
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "locked-worker", "force": true
+        }))
+        .unwrap();
+        let result = service.factory_shutdown_workers(request).await;
+        release.join().unwrap();
+        let text = response_text(result.expect("force shutdown waits out a brief write lock"));
+        assert!(text.contains("Queued shutdown request"), "{text}");
+        assert!(text.contains("cas-0e57-held"), "{text}");
+    }
+
+    /// cas-0e57: a safety check that cannot read task state says so, demands
+    /// force like an in-progress task, and does not promise worktree removal.
+    #[test]
+    fn unreadable_task_state_requires_force_and_is_reported_cas_0e57() {
+        let missing = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(missing.path().join("cas.db")).unwrap();
+        let error = shutdown_safety_tasks(missing.path()).expect_err("a directory is not a store");
+        let mut snapshot = ShutdownWorkerSnapshot {
+            worker_name: "w".into(),
+            worker_id: "w-id".into(),
+            task_states: Vec::new(),
+            has_in_progress_task: false,
+            worktree_state: "worktree=/tmp/w".into(),
+            worktree_cleanup_verdict: "worktree /tmp/w will be removed at shutdown".into(),
+            unsafe_worktree: false,
+        };
+        assert!(!snapshot.requires_force());
+        snapshot.mark_task_state_unknown(&error);
+        assert!(snapshot.requires_force());
+        let rendered = snapshot.render();
+        assert!(rendered.contains("unknown (") && rendered.contains(&error), "{rendered}");
+        assert!(rendered.contains("task state unknown"), "{rendered}");
     }
 
     #[tokio::test]

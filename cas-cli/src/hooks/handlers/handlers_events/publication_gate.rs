@@ -2,8 +2,9 @@
 //! verification passes. A supervisor posted a client-bound PDF through Violet
 //! while the epic's verification task was still open, with a "final check
 //! still running" caveat; verification then found 18 wrong statements and the
-//! post had to be retracted. This pre-tool check refuses a `violet_post` of
-//! `kind: "file"`, or a message marked `deliverable: true`, while the epic has
+//! post had to be retracted. This pre-tool check refuses a `violet_post` that
+//! shares a file (`kind: "file"`, `"file_external"`, or a `"thread"` reply with
+//! `files`), or any post marked `deliverable: true`, while the epic has
 //! open verification-type tasks. An operator's `PUBLICATION OVERRIDE:` note on
 //! the epic, recorded within the last few hours, lets one through, and each use
 //! is logged back onto the epic.
@@ -59,7 +60,7 @@ pub(super) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
     }
     Some(format!(
         "PUBLICATION BLOCKED (verification_pending): this Violet post shares a deliverable \
-         (kind=file, or deliverable=true) while epic {epic} still has open verification:\n  - {list}\n\n\
+         (kind=file or file_external, a thread reply with files, or deliverable=true) while epic {epic} still has open verification:\n  - {list}\n\n\
          Do not share a deliverable before its verification passes; a \"final check still running\" \
          caveat is not enough. Wait for those tasks to close, then post. Only the operator can \
          authorize an earlier share: record their words on the epic with \
@@ -125,14 +126,24 @@ fn collect_dispatch(code: &Value, posts: &mut Vec<Value>) {
     }
 }
 
-/// `kind: "file"` always shares an artifact; a message shares one when it is
-/// marked `deliverable: true`. An unparseable dispatch fails toward the gate.
+/// `kind: "file"` and `kind: "file_external"` always share an artifact, as
+/// does a `kind: "thread"` whose `replies[]` carry `files` (cas-1206, GH
+/// #1154: the 2026-10-09 contract added both routes); any other post shares
+/// one when it is marked `deliverable: true`. An unparseable dispatch fails
+/// toward the gate.
 fn is_deliverable_post(post: &Value) -> bool {
     if post.is_null() {
         return true;
     }
-    post.get("kind").and_then(Value::as_str) == Some("file")
-        || post.get("deliverable").and_then(Value::as_bool) == Some(true)
+    let shares_file = match post.get("kind").and_then(Value::as_str) {
+        Some("file" | "file_external") => true,
+        Some("thread") => post
+            .get("replies")
+            .and_then(Value::as_array)
+            .is_some_and(|replies| replies.iter().any(|reply| reply.get("files").is_some())),
+        _ => false,
+    };
+    shares_file || post.get("deliverable").and_then(Value::as_bool) == Some(true)
 }
 
 fn explicit_epic(post: &Value, store: &dyn cas_store::TaskStore) -> Option<String> {

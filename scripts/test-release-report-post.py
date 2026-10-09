@@ -116,6 +116,9 @@ def handler_for(state: StubState):
                     assert arguments["include_threads"] is True
                     assert arguments["max_file_bytes"] == 4 * 1024 * 1024
                     assert arguments["max_files"] == 50
+                    # Scoped file read: only this file, no channel directory.
+                    assert arguments["file_id"] == "F-report"
+                    assert arguments["include_channels"] is False
                     state.read_since = arguments["since"]
                     # The hub's bounded response excludes older roots while
                     # retaining the selected User root and its reply.
@@ -132,6 +135,9 @@ def handler_for(state: StubState):
                         read_file["content_base64"] = base64.b64encode(state.read_pdf).decode("ascii")
                     if state.read_mode == "size_mismatch":
                         read_file["size_bytes"] += 1
+                    if state.read_mode == "skipped":
+                        read_file.pop("content_base64", None)
+                        read_file.update(skipped=True, skip_reason="exceeds_max_bytes")
                     result = {
                         "_id": request_id,
                         "content": [
@@ -625,6 +631,7 @@ def main() -> int:
             "missing_base64": (pdf, "no uploaded PDF bytes"),
             "invalid_base64": (pdf, "invalid uploaded PDF bytes"),
             "size_mismatch": (pdf, "inconsistent uploaded PDF size"),
+            "skipped": (pdf, "skip_reason=exceeds_max_bytes"),
             "substituted_same_length": (bytes([pdf[0] ^ 1]) + pdf[1:], "SHA-256 does not match"),
         }
         for mode, (read_pdf, expected_failure) in fallback_negatives.items():
@@ -681,7 +688,7 @@ def main() -> int:
             assert fields is None, mode
         state.file_mode = "ok"
         print(
-            "release-report-post stub: 6 integrity/endpoint + 6 hub-read "
+            "release-report-post stub: 6 integrity/endpoint + 7 hub-read "
             "+ 2 timestamp-boundary + 3 upload-size scenarios passed"
         )
     finally:

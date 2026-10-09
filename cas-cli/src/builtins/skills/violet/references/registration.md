@@ -75,7 +75,7 @@ Dispatch through the proxy. `mcp_execute` takes a single `code` string holding
 the JSON dispatch; it has no `server`, `tool` or `args` parameters:
 
 ```text
-mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
+mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50,"include_channels":false}}'
 ```
 
 A project `allowlist` replaces the machine allowlist entirely, so list every
@@ -153,7 +153,10 @@ It applies the same channel rule and exits 0 with a JSON receipt on stdout, 1
 on a Slack or API error, 2 on missing credentials or bad arguments, and 3 on an
 unallowlisted or non-member channel. Capture that JSON without shell tracing or
 verbose HTTP output. This is for proxy-less execution, not a way around the hub
-from a connected worker.
+from a connected worker. The exception is a local file: from any session,
+`post --file <path>` or `post --thread <draft.json>` (replies listing
+`files: [{path}]`) reads the bytes from disk, so no base64 passes through the
+model.
 
 ## Verify without leaking
 

@@ -5644,14 +5644,51 @@ fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
     }
 }
 
+/// cas-7a98 (GH #1128): explain a missing credential that comes from a
+/// project `.cas/proxy.toml` block rather than from the machine registration.
+///
+/// The proxy's generic remedy for a Violet credential is `cas integrate
+/// violet`, but integrate deliberately keeps a project block that overrides
+/// the machine registration, so following it never clears the failure. When
+/// the project file supplied the failing definition, name that file, the
+/// block and the variable, and say how to make the checkout inherit again.
+#[cfg(feature = "mcp-proxy")]
+fn project_override_missing_credential_detail(
+    server: &str,
+    error_code: Option<&str>,
+    source: Option<&Path>,
+    project_path: &Path,
+    shadowed_machine_path: Option<&Path>,
+) -> Option<String> {
+    let variable = error_code?.strip_prefix("missing_credential_env:")?;
+    if source != Some(project_path) {
+        return None;
+    }
+    let project = project_path.display();
+    Some(match shadowed_machine_path {
+        Some(machine) => format!(
+            "missing required environment variable {variable}, named by `auth` in the \
+             [servers.{server}] block of {project}, which shadows the machine registration \
+             in {machine}; remove that block from {project} so this checkout inherits the \
+             machine registration, or set {variable}",
+            machine = machine.display()
+        ),
+        None => format!(
+            "missing required environment variable {variable}, named by `auth` in the \
+             [servers.{server}] block of {project}; set {variable} or correct that block's \
+             `auth`, or remove the block"
+        ),
+    })
+}
+
 #[cfg(feature = "mcp-proxy")]
 fn proxy_upstream_reachability_check(cas_root: &Path) -> Check {
     const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
     let proxy_path = cas_root.join("proxy.toml");
-    let config = match cmcp_core::config::Config::load_merged(
-        proxy_path.exists().then_some(proxy_path.as_path()),
-    ) {
-        Ok(config) => config,
+    let project_path = proxy_path.exists().then_some(proxy_path.as_path());
+    let (config, sources) = match cmcp_core::config::Config::load_merged_with_sources(project_path)
+    {
+        Ok(loaded) => loaded,
         Err(error) => {
             return Check {
                 name: "MCP upstream reachability".to_string(),
@@ -5697,16 +5734,40 @@ fn proxy_upstream_reachability_check(cas_root: &Path) -> Check {
         }
     };
 
+    // cas-7a98 (GH #1128): the machine registrations a project block may be
+    // shadowing. Read separately because the merged view has already replaced
+    // them with the project definitions.
+    let machine_path = cmcp_core::config::Scope::User.config_path().ok();
+    let machine_servers = machine_path
+        .as_deref()
+        .and_then(|path| cmcp_core::config::Config::load_from(path).ok())
+        .map(|config| config.servers)
+        .unwrap_or_default();
+
     let mut reachable = Vec::new();
     let mut unavailable = Vec::new();
     for server in snapshot.servers {
         if server.state == cmcp_core::UpstreamState::Healthy {
             reachable.push(server.name);
         } else {
-            let detail = server
-                .last_error
-                .or(server.last_error_code)
-                .unwrap_or_else(|| "no diagnostic detail".to_string());
+            let project_override = project_path.and_then(|project| {
+                project_override_missing_credential_detail(
+                    &server.name,
+                    server.last_error_code.as_deref(),
+                    sources.get(&server.name).map(PathBuf::as_path),
+                    project,
+                    machine_servers
+                        .contains_key(&server.name)
+                        .then_some(machine_path.as_deref())
+                        .flatten(),
+                )
+            });
+            let detail = project_override.unwrap_or_else(|| {
+                server
+                    .last_error
+                    .or(server.last_error_code)
+                    .unwrap_or_else(|| "no diagnostic detail".to_string())
+            });
             unavailable.push(format!("{} ({detail})", server.name));
         }
     }
@@ -8098,6 +8159,25 @@ mod tests {
             !check.message.contains("cas integrate violet"),
             "{}",
             check.message
+        );
+        assert!(
+            check.message.contains(&user_path.display().to_string()),
+            "the shadowed machine registration is named: {}",
+            check.message
+        );
+
+        // Following the remediation clears the diagnosis: with the project
+        // block removed the checkout inherits the machine registration, whose
+        // credential resolves, so the missing variable is no longer reported.
+        let mut remediated = cmcp_core::config::Config::load_from(&project_path).unwrap();
+        remediated.servers.remove("violet");
+        remediated.save_to(&project_path).unwrap();
+        let after = proxy_upstream_reachability_check(&cas_root);
+        assert!(!after.message.contains(missing), "{}", after.message);
+        assert!(
+            !after.message.contains(&project_path.display().to_string()),
+            "{}",
+            after.message
         );
     }
 

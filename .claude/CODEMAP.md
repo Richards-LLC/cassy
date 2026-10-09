@@ -1,9 +1,11 @@
 # cas — Codemap
+
 > Auto-generated structural map. Regenerate with `/codemap` when the layout drifts (modules added, removed, or renamed).
 
 Rust workspace for the CAS coding-agent system. Product/domain material belongs in `docs/PRODUCT_OVERVIEW.md`; this file is a navigational index.
 
 ## Top-level layout
+
 - `.cargo/` — workspace Cargo configuration and platform build settings.
 - `.claude/` — rendered Claude agents, settings, workflows, and this codemap.
 - `.codex/` — rendered Codex agents, hooks, and local configuration.
@@ -24,6 +26,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - Root config/docs — `Cargo.toml`, `README.md`, `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, and `.mcp.json`.
 
 ## Workspace / packages
+
 - `cas-cli` — binary `cas`; composes all service crates and owns user-facing commands.
 - `crates/cas-types` — shared domain, wire, provenance, task, agent, memory, hook, and verification types.
 - `crates/cas-store` — SQLite stores, queues, history, knowledge, archives, verification, and vector persistence.
@@ -43,6 +46,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `crates/ghostty_vt` and `crates/ghostty_vt_sys` — safe Rust terminal wrapper and low-level Ghostty FFI.
 
 ## cas-cli/src — application hub
+
 `cas-cli/src/{main.rs,lib.rs}` start and export the CLI; `cas-cli/src/lib.rs` owns the `panic = "unwind"` guard and test-environment boundaries.
 - `cas-cli/src/cli/` — clap dispatch for artifact, auth, cloud, config, factory, hub, knowledge, memory, provider, status, update, and worktree flows.
 - `cas-cli/src/cli/factory/` — factory lifecycle, daemon attach, probes, parity checks, queries, worktrees, and wedged-worker recovery.
@@ -76,6 +80,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/retrieval_eval.rs` and `cas-cli/src/retrieval_parity/` — labeled scoring against committed retrieval fixtures and diffs.
 
 ## Factory coordination surfaces
+
 - `cas-cli/src/ui/factory/app/` — bare-`cas` TUI state, panels, selection, rendering, worker/epic views, and worktree actions.
 - `cas-cli/src/ui/factory/director/` — mission/task/worker coordination, prompts, reminders, events, radar, and supervisor-stall tests.
 - `cas-cli/src/ui/factory/daemon/` — PTY-owning daemon; `cas-cli/src/ui/factory/daemon/runtime/` covers lifecycle, delivery, CI watch, relay, teams, queue/events, and merge sweep.
@@ -87,6 +92,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `crates/cas-factory/policy/lane-registry.toml` — checked-in provider lanes and capability registry consumed by routing.
 
 ## MCP service and tool tree
+
 - `cas-cli/src/mcp/{daemon.rs,socket.rs,server/}` — daemon lifecycle, Unix transport, runtime, parent watchdog, prompts, and resources.
 - `cas-cli/src/mcp/tools/core/` — task, memory, knowledge, artifact, search, rules, skills, workflow, system, opinion, maintenance, and coordination handlers.
 - `cas-cli/src/mcp/tools/core/guidance.rs` — request-local caller and supervisor prefixes for executable recovery hints.
@@ -104,6 +110,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/mcp/tools/{mod.rs,mod_tests.rs,traffic_limits.rs}` — tool registration, action-surface tests, and dispatch limits.
 
 ## Builtins, tests, and supporting clients
+
 - `cas-cli/src/builtins/` — embedded managed prompts, agents, skills, harness mirrors, and `cas-cli/src/builtins/reference-history.json` sync manifest.
 - `cas-cli/src/builtins/agents/task-verifier.body.md` — the only managed agent; `cas-cli/src/builtins/jobs/` — duplicate, learning, rule, and session-summary job prompts (formerly agents).
 - `cas-cli/src/builtins/codex/skills/` — Codex-only skills (e.g. `cas-codex-supervisor-checklist.md`, `cas-retro/`); the Grok tree was removed.
@@ -130,6 +137,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `slack-bridge/src/` — Slack router/daemon entrypoints, commands, sessions, filtering, formatting, and tests.
 
 ## Crates — key module roots
+
 - `crates/cas-store/src/{task_store,prompt_queue_store,supervisor_queue_store,spawn_queue_store}.rs` — durable task and coordination queues; `prompt_queue_store/{operator_delivery,operator_cloud,device_receipts}.rs` back the operator outbox (migrations m263–m265).
 - `crates/cas-store/src/agent_store/` plus `crates/cas-store/src/{knowledge_store,history_store,code_vector_store,retrieval_store}.rs` — agents, knowledge, history, vectors, and retrieval outcomes.
 - `crates/cas-store/src/{verification_store,external_verification_gate,surfaced_artifact_store,version_store}.rs` — verification, injected-context artifacts, and rule/skill versions.

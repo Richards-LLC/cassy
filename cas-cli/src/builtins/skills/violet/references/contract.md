@@ -144,6 +144,59 @@ file: inspect Slack before replaying. Reaction receipts add
 `reaction {name, action, changed}`; the bot removes only its own reactions, and
 `reaction_not_owned` names the case where the reaction belongs to someone else.
 
+## Posting local files with `cas violet`
+
+Never put file content in a `violet_post` call. From any repository, give the
+command a path and it reads the bytes from disk:
+
+```text
+cas violet post   --channel <name> [--text "…"] [--reply-to <message_id>] [--file <path>]... [--json]
+cas violet thread --channel <name> --text "…" --reply "…" [--reply-file <path>]... [--reply "…"]... --idempotency-key <key> [--json]
+cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | --message <message_id> [--cursor <c>] [--max-messages N] [--json]
+```
+
+- **post**: with no `--file`, a `kind: "message"`. With files (1–10), `--text`
+  becomes `initial_comment`. Each file is sent as `content_encoding: "text"`
+  when its bytes are UTF-8 without binary control characters (and carry no
+  PDF, PNG, JPEG, ZIP or GIF signature), otherwise as base64, with its
+  `size_bytes` and `sha256` declared. Up to 1048576 bytes in total go inline in
+  one call (`file` or `files[]`); anything larger uses `file_external`: begin,
+  each file streamed from disk to its `upload_url` (which is never printed),
+  then complete.
+- **thread**: one `kind: "thread"` call. Replies keep the order given; each
+  `--reply-file` attaches to the `--reply` before it. Files across the whole
+  thread go inline up to 1048576 bytes; above that every file is uploaded
+  first and its reply carries the external metadata. A failure keeps
+  `posted[]`, `failed_index` and `resume_safe`; follow the ordered-thread rules
+  above.
+- **read**: `violet_read` with `include_channels: false`. A channel read
+  requires `--since`. Downloaded file bytes are dropped from the output
+  (`content_omitted: true`); sizes and hashes stay.
+
+Human output is a verdict line, the message and file receipts (`message_id`,
+permalink, file ids, `sha256_verified`) and a hint. `--json` prints the hub's
+receipt, or its error receipt, as one document. Every `ok: false` exits
+non-zero, and the hub's own codes (`not_member`, `file_too_large`,
+`file_integrity_mismatch`, …) pass through unchanged. The command's own codes:
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_input` | a flag is missing or out of range, a path is empty or not a file, or more than 10 files per message or 20 replies |
+| `local_request_failed` | a file could not be read, or changed while being posted |
+| `not_configured` | no `[servers.violet]` registration here; run `cas integrate violet` |
+| `missing_credential` | a credential variable named by the registration is unset (named, never printed) |
+| `invalid_token` | HTTP 401: the hub rejected the bearer (or the Vercel bypass); run `cas integrate violet`, then `cas doctor` |
+| `hub_unreachable` | the hub did not answer; a write may be unconfirmed, inspect before retrying |
+| `hub_bad_response` | the hub's answer is not a Violet receipt; a write may be unconfirmed |
+| `denied_by_policy` | the proxy allowlist or worker policy does not admit the route |
+| `publication_blocked` | the post shares a file while its epic's verification is open ([publication](publication.md)) |
+| `violet_upload_failed` | the direct upload was refused; nothing was shared |
+| `violet_post_failed` | the hub refused without a code of its own |
+
+An error that lists `uploads_begun` means Slack allocated those uploads: check
+the channel before posting again. `cas doctor` shows readiness on its Violet
+row: hub reachable and bearer accepted, or `invalid_token` for a bad bearer.
+
 ## Posting a published artifact by ID
 
 To share a file that `artifact action=publish` already committed to Cloud,

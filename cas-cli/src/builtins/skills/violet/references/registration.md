@@ -147,16 +147,16 @@ another.
 
 ## Proxy-less one-shot
 
-A bounded `codex exec` or `claude -p` process with no live proxy uses the hub
-project's `scripts/slack-post.sh` with `post`, `upload`, or `read`.
-It applies the same channel rule and exits 0 with a JSON receipt on stdout, 1
-on a Slack or API error, 2 on missing credentials or bad arguments, and 3 on an
-unallowlisted or non-member channel. Capture that JSON without shell tracing or
-verbose HTTP output. This is for proxy-less execution, not a way around the hub
-from a connected worker. The exception is a local file: from any session,
-`post --file <path>` or `post --thread <draft.json>` (replies listing
-`files: [{path}]`) reads the bytes from disk, so no base64 passes through the
-model.
+A bounded `codex exec` or `claude -p` process with no live proxy runs
+`cas violet post|thread|read`. The command connects with this machine's
+`[servers.violet]` registration and credentials (the project's
+`.cas/proxy.toml` and worker policy apply inside a Cassy project), prints the
+hub's receipt, and exits non-zero on `ok: false`. Add `--json` to capture the
+receipt as one JSON document; never add shell tracing or verbose HTTP output.
+It is also the route for a local file from any session:
+`cas violet post --channel <name> --file <path>` reads the bytes from disk, so
+no base64 passes through the model. Codes are in
+[contract.md](contract.md#posting-local-files-with-cas-violet).
 
 ## Verify without leaking
 

@@ -22,5 +22,7 @@ pub use codemap::{
 pub use message_display::handle_message_display;
 pub use notifications::{handle_notification, handle_permission_request, handle_pre_compact};
 pub use pre_tool::handle_pre_tool_use;
+/// `cas violet post|thread` applies the same deliverable gate as a `violet_post` tool call.
+pub(crate) use publication_gate::denial as violet_publication_denial;
 #[cfg(test)]
 pub(crate) use pre_tool::is_harness_session_scratchpad;

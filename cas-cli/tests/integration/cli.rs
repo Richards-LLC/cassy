@@ -65,5 +65,7 @@ mod update_sync_report_attribution_test;
 mod viktor_distribution_test;
 #[path = "../viktor_key_setup_test.rs"]
 mod viktor_key_setup_test;
+#[path = "../violet_cli_test.rs"]
+mod violet_cli_test;
 #[path = "../violet_json_test.rs"]
 mod violet_json_test;

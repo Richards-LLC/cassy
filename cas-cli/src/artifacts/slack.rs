@@ -154,7 +154,7 @@ fn byte_agent(redirects: u32) -> ureq::Agent {
 }
 
 /// `https`, or loopback `http` so a test double can stand in.
-fn safe_url(raw: &str) -> bool {
+pub(crate) fn safe_url(raw: &str) -> bool {
     url::Url::parse(raw).is_ok_and(|url| {
         url.username().is_empty()
             && url.password().is_none()

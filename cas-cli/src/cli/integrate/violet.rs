@@ -191,8 +191,15 @@ impl EnvState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "result", rename_all = "kebab-case")]
 pub enum ProbeOutcome {
-    /// The hub answered with this exact tool list.
-    Tools { tools: Vec<String> },
+    /// The hub answered with this exact tool list. `schema_problems` names
+    /// every way the served `violet_post` input schema would be dropped or
+    /// misread by a harness (see [`violet_post_schema_problems`]); empty when
+    /// the schema is usable or the hub did not offer `violet_post`.
+    Tools {
+        tools: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        schema_problems: Vec<String>,
+    },
     /// HTTP 401. Reported with header state only, never a value.
     Unauthorized,
     /// Any other transport failure, carrying the proxy's error code.
@@ -204,6 +211,65 @@ pub enum ProbeOutcome {
 /// An authenticated `tools/list` against the hub.
 pub trait HubProbe {
     fn list_tools(&self, server: &ServerConfig) -> ProbeOutcome;
+}
+
+/// The hub tool whose input schema is checked by [`violet_post_schema_problems`].
+pub const VIOLET_POST_TOOL: &str = "violet_post";
+
+/// `kind` values every `violet_post` schema must offer. Without `edit` and
+/// `delete`, agents send `kind=message` with a `message_id`, the hub rejects
+/// it, and they conclude a post cannot be changed (GH #1051).
+pub const VIOLET_POST_REQUIRED_KINDS: [&str; 5] = ["message", "file", "reaction", "edit", "delete"];
+
+/// Name every way a served `violet_post` input schema would be dropped or
+/// misread by a harness; empty means usable.
+///
+/// Claude Code and Codex register the hub as a direct HTTP MCP server, so
+/// this schema reaches agents with no Cassy layer in between (cas-96c0).
+/// Claude Code drops a tool whose schema has a top-level `anyOf`, `oneOf` or
+/// `allOf`, which is how `violet_post` vanished from Claude sessions until
+/// violet_ps#26. A missing `kind` enum, or one without `edit`/`delete`, is
+/// how agents came to believe edits were impossible.
+pub fn violet_post_schema_problems(schema: &serde_json::Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let Some(root) = schema.as_object() else {
+        return vec!["input schema is not a JSON object".to_string()];
+    };
+    if root.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        problems.push("input schema root is not type=object".to_string());
+    }
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        if root.contains_key(combinator) {
+            problems.push(format!(
+                "input schema has a top-level {combinator}, so Claude Code drops the tool"
+            ));
+        }
+    }
+    let kinds: Option<Vec<&str>> = root
+        .get("properties")
+        .and_then(|properties| properties.get("kind"))
+        .and_then(|kind| kind.get("enum"))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect()
+        });
+    match kinds {
+        None => problems.push("properties.kind is not an enum".to_string()),
+        Some(kinds) => {
+            let missing: Vec<&str> = VIOLET_POST_REQUIRED_KINDS
+                .iter()
+                .copied()
+                .filter(|required| !kinds.contains(required))
+                .collect();
+            if !missing.is_empty() {
+                problems.push(format!("kind enum lacks {}", missing.join(", ")));
+            }
+        }
+    }
+    problems
 }
 
 /// Live probe: passes the effective server unchanged to the proxy, which
@@ -247,11 +313,17 @@ impl HubProbe for ProxyHubProbe {
             let outcome = match record {
                 Some(server) if server.state == cmcp_core::UpstreamState::Healthy => {
                     let catalog = engine.catalog_entries_by_server().await;
-                    let tools = catalog
-                        .get(VIOLET_SERVER)
-                        .map(|entries| entries.iter().map(|e| e.name.clone()).collect())
+                    let entries = catalog.get(VIOLET_SERVER).map(Vec::as_slice).unwrap_or(&[]);
+                    let tools = entries.iter().map(|e| e.name.clone()).collect();
+                    let schema_problems = entries
+                        .iter()
+                        .find(|e| e.name == VIOLET_POST_TOOL)
+                        .map(|e| violet_post_schema_problems(&e.input_schema))
                         .unwrap_or_default();
-                    ProbeOutcome::Tools { tools }
+                    ProbeOutcome::Tools {
+                        tools,
+                        schema_problems,
+                    }
                 }
                 Some(server) => match server.last_error_code.as_deref() {
                     Some("authentication_required") => ProbeOutcome::Unauthorized,
@@ -1138,8 +1210,9 @@ impl VioletReport {
     }
 
     /// Green means: effective credential references usable, registration on disk, and
-    /// the hub answered with exactly the allowlisted tools. A skipped probe is
-    /// deliberately *not* green — an unverified setup has never been proven.
+    /// the hub answered with exactly the allowlisted tools and a usable
+    /// `violet_post` schema. A skipped probe is deliberately *not* green — an
+    /// unverified setup has never been proven.
     pub fn is_green(&self) -> bool {
         self.credentials_ready()
             && matches!(
@@ -1147,7 +1220,7 @@ impl VioletReport {
                 WriteState::Written | WriteState::AlreadyCurrent
             )
             && self.drift.is_empty()
-            && matches!(&self.probe, ProbeOutcome::Tools { .. })
+            && matches!(&self.probe, ProbeOutcome::Tools { schema_problems, .. } if schema_problems.is_empty())
     }
 }
 
@@ -1738,7 +1811,7 @@ fn run_with_credentials(
         &paths.user_proxy,
     );
     let (drift, drift_message) = match &probe_outcome {
-        ProbeOutcome::Tools { tools } => {
+        ProbeOutcome::Tools { tools, .. } => {
             let drift = tool_drift(&allowlist, tools);
             let message =
                 (!drift.is_empty()).then(|| drift.describe(tools, &allowlist, Some(source)));
@@ -1810,6 +1883,9 @@ fn build_remedy(
         return Some(drift);
     }
     match probe {
+        ProbeOutcome::Tools {
+            schema_problems, ..
+        } if !schema_problems.is_empty() => Some(schema_problem_remedy(schema_problems)),
         ProbeOutcome::Unauthorized => Some(format!(
             "The hub rejected this machine's bearer (HTTP 401; Authorization: Bearer <set>). \
              Confirm `cas login`, then run `cas integrate violet` again."
@@ -1820,6 +1896,16 @@ fn build_remedy(
         )),
         _ => None,
     }
+}
+
+/// The hub, not Cassy, owns the `violet_post` schema: harnesses receive it
+/// directly, so the only remedy is a hub fix.
+fn schema_problem_remedy(problems: &[String]) -> String {
+    format!(
+        "The hub serves an unusable {VIOLET_POST_TOOL} schema: {}. Harnesses receive it \
+         directly from the hub, so report it in Richards-LLC/violet_ps (see violet_ps#26).",
+        problems.join("; ")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2117,9 +2203,23 @@ pub fn doctor_row(
         .join(", ");
 
     match probe.list_tools(server) {
-        ProbeOutcome::Tools { tools } => {
+        ProbeOutcome::Tools {
+            tools,
+            schema_problems,
+        } => {
             let drift = tool_drift(&allowlist, &tools);
-            if drift.is_empty() {
+            if !schema_problems.is_empty() {
+                // Claude Code drops a tool it cannot read, so a broken schema
+                // is an outage for every Claude session even though the
+                // tool list itself looks right.
+                DoctorRow {
+                    severity: DoctorSeverity::Error,
+                    message: format!(
+                        "hub {endpoint}: {}",
+                        schema_problem_remedy(&schema_problems)
+                    ),
+                }
+            } else if drift.is_empty() {
                 DoctorRow {
                     severity: DoctorSeverity::Ok,
                     message: format!(
@@ -2408,11 +2508,22 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
         ));
     }
     match &report.probe {
-        ProbeOutcome::Tools { tools } => outcome.summary.push(format!(
-            "authenticated tools/list: {} tool(s): {}",
-            tools.len(),
-            tools.join(", ")
-        )),
+        ProbeOutcome::Tools {
+            tools,
+            schema_problems,
+        } => {
+            outcome.summary.push(format!(
+                "authenticated tools/list: {} tool(s): {}",
+                tools.len(),
+                tools.join(", ")
+            ));
+            if !schema_problems.is_empty() {
+                outcome.summary.push(format!(
+                    "{VIOLET_POST_TOOL} schema: {}",
+                    schema_problems.join("; ")
+                ));
+            }
+        }
         ProbeOutcome::Unauthorized => outcome.summary.push(
             "authenticated tools/list: refused (HTTP 401; Authorization: Bearer <set>)".to_string(),
         ),
@@ -2793,6 +2904,7 @@ mod tests {
     fn live_tools() -> ProbeOutcome {
         ProbeOutcome::Tools {
             tools: VIOLET_TOOLS.iter().map(|t| t.to_string()).collect(),
+            schema_problems: Vec::new(),
         }
     }
 
@@ -3303,7 +3415,8 @@ auth = "env:{token}"
         assert_eq!(
             report.probe,
             ProbeOutcome::Tools {
-                tools: vec!["violet_read".to_string(), "violet_post".to_string()]
+                tools: vec!["violet_read".to_string(), "violet_post".to_string()],
+                schema_problems: Vec::new(),
             }
         );
         assert!(
@@ -3711,11 +3824,118 @@ auth = "env:{token}"
             &env,
             &FakeProbe(ProbeOutcome::Tools {
                 tools: vec!["violet_read".to_string(), "violet_broadcast".to_string()],
+                schema_problems: Vec::new(),
             }),
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("violet_broadcast"), "{row:?}");
         assert!(row.message.contains("cas integrate violet"), "{row:?}");
+    }
+
+    /// The `violet_post` input schema both Claude Code and Codex received from
+    /// the hub on 2026-10-09, after violet_ps#26 (cas-96c0).
+    fn served_violet_post_schema() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/violet/violet_post_input_schema_20261009.json"
+        ))
+        .unwrap()
+    }
+
+    /// The shape the hub served before violet_ps#26: one top-level `anyOf`
+    /// branch per kind and no root `properties`. Claude Code dropped the
+    /// tool, and Codex agents read it as "kind is always message" (GH #1051).
+    fn pre_fix_any_of_violet_post_schema() -> serde_json::Value {
+        let branch = |kind: &str, required: &[&str]| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "kind": {"const": kind},
+                    "message_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": required,
+            })
+        };
+        serde_json::json!({
+            "type": "object",
+            "anyOf": [
+                branch("message", &["channel", "kind", "text"]),
+                branch("file", &["channel", "kind"]),
+                branch("reaction", &["channel", "kind", "message_id"]),
+                branch("edit", &["channel", "kind", "message_id", "text"]),
+                branch("delete", &["channel", "kind", "message_id"]),
+            ],
+        })
+    }
+
+    #[test]
+    fn served_violet_post_schema_is_object_root_with_edit_and_delete_kinds() {
+        let schema = served_violet_post_schema();
+        assert_eq!(violet_post_schema_problems(&schema), Vec::<String>::new());
+        // Pin the corrective guidance agents read when they try to edit with
+        // kind=message (GH #1051).
+        let message_id = schema["properties"]["message_id"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(message_id.contains("kind=edit"), "{message_id}");
+        let kind = schema["properties"]["kind"]["description"]
+            .as_str()
+            .unwrap();
+        for shape in ["edit: message_id, text", "delete: message_id"] {
+            assert!(kind.contains(shape), "{kind}");
+        }
+    }
+
+    #[test]
+    fn pre_fix_any_of_violet_post_schema_is_reported() {
+        let problems = violet_post_schema_problems(&pre_fix_any_of_violet_post_schema());
+        assert!(
+            problems.iter().any(|p| p.contains("top-level anyOf")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("kind is not an enum")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn violet_post_schema_without_edit_and_delete_kinds_is_reported() {
+        let mut schema = served_violet_post_schema();
+        schema["properties"]["kind"]["enum"] = serde_json::json!(["message", "file", "reaction"]);
+        assert_eq!(
+            violet_post_schema_problems(&schema),
+            vec!["kind enum lacks edit, delete".to_string()]
+        );
+    }
+
+    #[test]
+    fn doctor_and_receipt_are_red_when_the_hub_serves_an_unusable_violet_post_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: violet_hub_url().to_string(),
+            no_harness: true,
+            ..test_args()
+        };
+        let broken = ProbeOutcome::Tools {
+            tools: VIOLET_TOOLS.iter().map(|t| t.to_string()).collect(),
+            schema_problems: violet_post_schema_problems(&pre_fix_any_of_violet_post_schema()),
+        };
+
+        let report = run(&args, None, &paths, &env, &FakeProbe(broken.clone())).unwrap();
+        assert!(!report.is_green(), "{report:?}");
+        let remedy = report.remedy.as_deref().unwrap();
+        assert!(remedy.contains("violet_ps"), "{remedy}");
+        assert!(remedy.contains("top-level anyOf"), "{remedy}");
+
+        let row = doctor_row(None, &paths, &env, &FakeProbe(broken));
+        assert_eq!(row.severity, DoctorSeverity::Error, "{row:?}");
+        assert!(row.message.contains("violet_post"), "{row:?}");
+        assert!(row.message.contains("top-level anyOf"), "{row:?}");
     }
 
     /// A machine whose project file still lists the retired `slack_*` names

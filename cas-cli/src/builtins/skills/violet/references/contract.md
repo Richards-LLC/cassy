@@ -143,3 +143,47 @@ Slack's copy (files up to 16 MiB). A failed completion can still have shared a
 file: inspect Slack before replaying. Reaction receipts add
 `reaction {name, action, changed}`; the bot removes only its own reactions, and
 `reaction_not_owned` names the case where the reaction belongs to someone else.
+
+## Posting a published artifact by ID
+
+To share a file that `artifact action=publish` already committed to Cloud,
+call the Cassy `artifact` tool instead of building a `violet_post`:
+
+```text
+artifact action=post id=<art-…> channel=<name or id> [reply_to=<message_id>] [title=<text>] [initial_comment=<text>]
+```
+
+Cassy resolves the record through Cloud with this installation's Cloud login,
+downloads it, and refuses bytes whose size or SHA-256 differ from the published
+record (records are 1 byte to 25 MiB). It then runs Violet's `file_external`
+begin, direct upload and complete steps through the registered proxy. The caller
+never handles bytes, signed URLs or upload URLs.
+
+The receipt lists `artifact_id`, `channel_id`, `message_id`, `file_id`,
+`permalink`, `size_bytes`, `sha256` and `sha256_verified`, and the permalink is
+saved on the artifact record. `sha256_verified: false` means Violet did not
+hash the Slack copy, either because the file is over 16 MiB or because the hub
+reported no hash. Check it with `violet_read` `file_id` before calling it
+verified.
+
+| Code | Meaning |
+| --- | --- |
+| `artifact_id_missing` / `artifact_channel_missing` | `id` or `channel` was not given |
+| `artifact_not_found` | no published artifact by that ID in this project or Cloud account |
+| `artifact_not_in_cloud` | the record is not committed to Cloud; publish it again while logged in |
+| `cloud_auth_missing` | not logged in to Cassy Cloud; run `cas cloud login` |
+| `cloud_resolve_failed` / `artifact_store_failed` | Cloud or the local artifact store could not be read |
+| `artifact_size_invalid` | the record's size is outside the publishable range |
+| `artifact_size_mismatch` / `artifact_checksum_mismatch` | the downloaded bytes differ from the record; nothing was posted |
+| `artifact_download_failed` | the artifact bytes could not be fetched |
+| `violet_unavailable` | no proxy is configured or the Violet call failed; run `cas integrate violet` |
+| `violet_upload_failed` | the direct upload was refused; nothing was shared |
+| `violet_invalid_receipt` | Violet's receipt is unreadable or names another file |
+| `slack_integrity_mismatch` | Violet reports a Slack copy whose size or SHA-256 differs |
+| `violet_post_failed` | Violet refused without a code of its own |
+
+Violet's own codes, such as `file_integrity_mismatch`, pass through unchanged.
+An error that carries a `file_id` means Slack allocated an upload: check the
+channel before posting again. The publication gate treats `artifact
+action=post` as a `kind: "file"` share, so it is refused while the artifact's
+epic still has open verification.

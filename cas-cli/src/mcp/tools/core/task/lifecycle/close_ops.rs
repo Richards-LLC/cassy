@@ -7595,23 +7595,45 @@ impl CasCore {
             // measured against the live (origin) target. A reused factory
             // branch otherwise charged an earlier, already-merged task's UI
             // commits to a backend-only task.
+            // GH #1144: a batch-squash receipt carries sibling tasks' files;
+            // judge this task's recorded delivery anchor instead.
+            let squash_anchor = commit_receipt_window.as_ref().and_then(|window| {
+                task_attribution::squash_receipt_qa_anchor(
+                    &evidence_repo,
+                    &resolved_parent_branch,
+                    window,
+                    &task,
+                    req.commit_receipt.as_deref(),
+                )
+            });
+            if let Some(anchor) = squash_anchor.as_deref() {
+                append_close_decision_note(
+                    task_store.as_ref(),
+                    &mut task,
+                    &format!(
+                        "QA evidence scoped to delivery anchor {anchor}: commit_receipt {} is a batch squash carrying that delivery's paths.",
+                        req.commit_receipt.as_deref().unwrap_or("").trim()
+                    ),
+                );
+            }
+            let qa_receipt = squash_anchor.as_deref().or(delivery_receipt);
             let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
                 task_attribution::qa_paths(
                     &evidence_repo,
                     &resolved_parent_branch,
                     window,
-                    delivery_receipt,
+                    qa_receipt,
                 )
             });
             let journey_base = commit_receipt_window.as_ref().and_then(|window| {
-                task_attribution::delivery_base(&evidence_repo, &resolved_parent_branch, window, delivery_receipt)
+                task_attribution::delivery_base(&evidence_repo, &resolved_parent_branch, window, qa_receipt)
             });
             match super::qa_evidence_gate::qa_evidence_close_gate_for_delivery(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
-                delivery_receipt,
+                qa_receipt,
                 attributed_paths.as_deref(),
                 journey_base.as_deref(),
             ) {

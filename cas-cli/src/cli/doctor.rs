@@ -8043,6 +8043,64 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_reachability_names_project_override_for_missing_violet_credential() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let xdg_config_home = env.home().join("xdg");
+        env.set("XDG_CONFIG_HOME", &xdg_config_home);
+
+        let missing = "MECHA_SLACK_TOKEN_CASSY_PROXY";
+        env.remove(missing);
+        let machine_token = "CAS_DOCTOR_VIOLET_MACHINE_TOKEN";
+        env.set(machine_token, "test-token");
+
+        let user_path = xdg_config_home.join("code-mode-mcp/config.toml");
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let project_path = cas_root.join("proxy.toml");
+
+        let mut user_config = cmcp_core::config::Config::default();
+        user_config.add_server(
+            "violet".to_string(),
+            cmcp_core::config::ServerConfig::Http {
+                url: "https://violet.example.invalid/mcp".to_string(),
+                auth: Some(format!("env:{machine_token}")),
+                headers: std::collections::HashMap::new(),
+                oauth: false,
+            },
+        );
+        user_config.save_to(&user_path).unwrap();
+
+        let mut project_config = cmcp_core::config::Config::default();
+        project_config.add_server(
+            "violet".to_string(),
+            cmcp_core::config::ServerConfig::Http {
+                url: "https://violet.example.invalid/mcp".to_string(),
+                auth: Some(format!("env:{missing}")),
+                headers: std::collections::HashMap::new(),
+                oauth: false,
+            },
+        );
+        project_config.save_to(&project_path).unwrap();
+
+        let check = proxy_upstream_reachability_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains(missing), "{}", check.message);
+        assert!(
+            check.message.contains(&project_path.display().to_string()),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("remove"), "{}", check.message);
+        assert!(
+            !check.message.contains("cas integrate violet"),
+            "{}",
+            check.message
+        );
+    }
+
     #[test]
     fn foreign_rows_check_warns_when_a_peer_db_could_not_be_read_cas_fc6fa() {
         use crate::cli::foreign_rows::{ForeignRowReport, UnreadablePeer};

@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "description": "Required only for kind=reaction: add or remove.",
+      "enum": [
+        "add",
+        "remove"
+      ],
+      "type": "string"
+    },
+    "channel": {
+      "description": "Required for every kind: member channel ID or name.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "deliverable": {
+      "description": "Optional Cassy publication metadata; accepted and ignored by the hub.",
+      "type": "boolean"
+    },
+    "epic_id": {
+      "description": "Optional Cassy epic metadata; accepted and ignored by the hub.",
+      "type": "string"
+    },
+    "file": {
+      "additionalProperties": false,
+      "description": "For kind=file use this single file object or files[], never both: filename and content; content_encoding is text (default) or base64. Decoded content maximum 1048576 bytes. Optional content_type, sha256, size_bytes, title.",
+      "properties": {
+        "content": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "content_encoding": {
+          "default": "text",
+          "enum": [
+            "text",
+            "base64"
+          ],
+          "type": "string"
+        },
+        "content_type": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "filename": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "size_bytes": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "filename",
+        "content"
+      ],
+      "type": "object"
+    },
+    "file_id": {
+      "description": "Required for single-file external step=complete: use file_id returned by begin; with files[] put each file_id in its entry.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "filename": {
+      "description": "Required for single-file external steps (omit with files[]); use file.filename for kind=file.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "files": {
+      "description": "Optional alternative to single file/metadata: 1\u201310 files, one shared initial_comment/reply_to. kind=file entries use filename/content (text or base64), aggregate decoded limit 1048576 bytes. kind=file_external entries use filename/size_bytes/sha256/title?, and complete also requires file_id for every entry. External flow carries no bytes in MCP requests.",
+      "items": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "content_encoding": {
+                "default": "text",
+                "enum": [
+                  "text",
+                  "base64"
+                ],
+                "type": "string"
+              },
+              "content_type": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "filename": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "sha256": {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              "size_bytes": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "filename",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "file_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "filename": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "sha256": {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              "size_bytes": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "title": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "filename",
+              "size_bytes",
+              "sha256"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array"
+    },
+    "idempotency_key": {
+      "description": "Required only for kind=thread: stable key (1\u2013200 characters) scoped to caller/channel. Reuse with identical content to obtain receipts or resume a confirmed pre-write failure. Active/unconfirmed writes are never automatically replayed.",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "initial_comment": {
+      "description": "Optional comment for file or either file_external step; supplied to Slack on complete.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "kind": {
+      "description": "message: text, optional reply_to; file: nested file or files[], optional initial_comment/reply_to; file_external: step plus filename/size_bytes/sha256 or files[] (complete also needs file_id per file); reaction: message_id, reaction, action; edit: message_id, text; delete: message_id; thread: text, replies[], idempotency_key.",
+      "enum": [
+        "message",
+        "file",
+        "file_external",
+        "reaction",
+        "edit",
+        "delete",
+        "thread"
+      ],
+      "type": "string"
+    },
+    "message_id": {
+      "description": "Required for reaction, edit, or delete. To change text use kind=edit, not kind=message.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "operator_override": {
+      "description": "Optional Cassy override metadata; accepted and ignored by the hub.",
+      "type": "string"
+    },
+    "reaction": {
+      "description": "Required only for kind=reaction: canonical emoji name without colons.",
+      "maxLength": 100,
+      "pattern": "^[a-z0-9_+-]+$",
+      "type": "string"
+    },
+    "replies": {
+      "description": "Required only for kind=thread: 1\u201320 ordered replies, each text and/or files[]. Files use inline content or previously uploaded external file_id/filename/size_bytes/sha256/title? metadata. Maximum 10 files per reply and 1048576 aggregate inline bytes across the whole thread. Encode local files client-side or prepare external uploads before calling.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "content": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "content_encoding": {
+                      "default": "text",
+                      "enum": [
+                        "text",
+                        "base64"
+                      ],
+                      "type": "string"
+                    },
+                    "content_type": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filename": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "sha256": {
+                      "pattern": "^[a-f0-9]{64}$",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "title": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "filename",
+                    "content"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "file_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filename": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "sha256": {
+                      "pattern": "^[a-f0-9]{64}$",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991,
+                      "type": "integer"
+                    },
+                    "title": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "filename",
+                    "size_bytes",
+                    "sha256",
+                    "file_id"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "type": "array"
+          },
+          "text": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "type": "array"
+    },
+    "reply_to": {
+      "description": "Optional parent message ID for message, file, or either file_external step.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "sha256": {
+      "description": "Required 64 hexadecimal SHA-256 characters for single-file external steps (omit with files[]).",
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "size_bytes": {
+      "description": "Required positive byte length for single-file external steps (omit with files[]). Hub external ceiling is 1000000000 bytes per file; Slack workspace policy may impose a lower limit. Above 1048576 decoded bytes use external uploads, never inline base64.",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
+    },
+    "step": {
+      "description": "Required only for kind=file_external: begin returns upload_url/file_id; upload bytes directly, then complete with the same metadata.",
+      "enum": [
+        "begin",
+        "complete"
+      ],
+      "type": "string"
+    },
+    "task_id": {
+      "description": "Optional Cassy task metadata; accepted and ignored by the hub.",
+      "type": "string"
+    },
+    "text": {
+      "description": "Required for kind=message, kind=edit, or kind=thread (top-level text); edit also requires message_id.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "title": {
+      "description": "Optional title for single-file external steps (use per-entry title with files[]); supplied to Slack on complete.",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "channel",
+    "kind"
+  ],
+  "type": "object"
+}

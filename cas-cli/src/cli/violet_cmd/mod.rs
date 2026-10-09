@@ -137,7 +137,7 @@ pub fn execute(
         gate: &gate,
         connect: &mut connect,
     };
-    run(&args.command, &mut context, &mut out).map_err(anyhow::Error::new)
+    run_violet(&args.command, &mut context, &mut out).map_err(anyhow::Error::new)
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -155,7 +155,7 @@ fn connect_live(_cas_root: Option<&Path>) -> Result<Box<dyn Hub>, VioletError> {
 
 /// Run one subcommand, printing its receipt (or, under `--json`, its error
 /// receipt) to `out`. The returned error is what makes the exit non-zero.
-pub fn run(
+pub fn run_violet(
     command: &VioletCommand,
     context: &mut RunContext<'_>,
     out: &mut dyn Write,

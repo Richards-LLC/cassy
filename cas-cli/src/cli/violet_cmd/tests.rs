@@ -125,7 +125,7 @@ fn run_cli(
         connect: &mut connect,
     };
     let mut out = Vec::new();
-    let result = run(&parsed.command, &mut context, &mut out);
+    let result = run_violet(&parsed.command, &mut context, &mut out);
     (String::from_utf8(out).unwrap(), result)
 }
 
@@ -867,6 +867,7 @@ fn every_local_code_is_documented_in_the_violet_skill() {
         "violet SKILL.md is {} bytes",
         skill.len()
     );
+    // pin: every error code the command raises must be documented for agents; the codes are string literals in these sources, so the doc-coverage check reads them.
     let sources = [
         include_str!("mod.rs"),
         include_str!("hub.rs"),

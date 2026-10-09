@@ -440,9 +440,63 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const add = (type, item, details = {}) => findings.push(findingFor(type, item, details));
     const addInfo = (type, item, details = {}) => infos.push(findingFor(type, item, details));
     const visibleText = textNodes.filter((item) => !item.ignored && !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
+    // cas-3791 (GH #1150): a region marked as loading (aria-busy="true", or a
+    // data-*-pending / data-*-loading attribute) may hide cached text while a
+    // placeholder holds its place. That text is reserved, not lost, only when
+    // the loading marker itself hides it and the nearest placeholder the
+    // marker reveals paints non-empty text. Text hidden regardless of the
+    // marker, or whose placeholder is blank, transparent, hidden or zero-size,
+    // remains a finding. The marker is removed and restored synchronously, so
+    // the page never renders the toggled state.
+    const PENDING_ATTRIBUTE = /^data-(?:[\w-]+-)?(?:pending|loading)$/;
+    const pendingMarkers = (element) => [...element.attributes]
+      .filter(({ name, value }) => (name === 'aria-busy' && value === 'true') || (PENDING_ATTRIBUTE.test(name) && value !== 'false'))
+      .map(({ name, value }) => [name, value]);
+    const painted = (item) => item.text.trim().length > 0 && !item.ignored && !item.ariaHidden && !item.hidden
+      && item.opacity > 0 && item.foreground && item.colorAlpha > 0 && item.box.width > 0 && item.box.height > 0;
+    const pendingScopes = new Map();
+    const pendingState = (scope) => {
+      if (pendingScopes.has(scope)) return pendingScopes.get(scope);
+      const shown = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+      };
+      const elements = [...scope.querySelectorAll('*')];
+      const shownBefore = elements.map(shown);
+      const scoped = textNodes.filter((item) => scope.contains(item.element));
+      const markers = pendingMarkers(scope);
+      for (const [name] of markers) scope.removeAttribute(name);
+      let state;
+      try {
+        state = {
+          revealed: new Set(scoped.filter((item) => (item.hidden || item.opacity <= 0) && !visibility(item.element).hidden)),
+          placeholders: elements.filter((element, index) => shownBefore[index] && !shown(element)),
+        };
+      } finally {
+        for (const [name, value] of markers) scope.setAttribute(name, value);
+      }
+      pendingScopes.set(scope, state);
+      return state;
+    };
+    const reservedByPendingState = (item) => {
+      let scope = item.element;
+      while (scope && !pendingMarkers(scope).length) scope = scope.parentElement;
+      if (!scope) return false;
+      const { revealed, placeholders } = pendingState(scope);
+      if (!revealed.has(item)) return false;
+      for (let container = item.element.parentElement; container; container = container.parentElement) {
+        const local = placeholders.filter((placeholder) => container.contains(placeholder));
+        if (local.length) {
+          return local.some((placeholder) => textNodes.some((candidate) => placeholder.contains(candidate.element) && painted(candidate)));
+        }
+        if (container === scope) return false;
+      }
+      return false;
+    };
     for (const item of textNodes) {
       if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
       if (item.hidden || item.opacity <= 0 || item.colorAlpha === 0) {
+        if (reservedByPendingState(item)) continue;
         add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.colorAlpha === 0 ? 'color-alpha-0' : 'visibility-hidden' });
         continue;
       }

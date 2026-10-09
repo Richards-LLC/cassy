@@ -209,6 +209,54 @@ test('aria-hidden drawer content is ignored while unhidden drawer content remain
   assert.match(invisibleFindings[0].elementPath, /machine-drawer/);
 });
 
+for (const [name, inspect] of [['repository', runVisualQa], ['builtin', runBuiltinVisualQa]]) {
+  test(`${name} ignores only text a loading marker hides behind a painted placeholder (cas-3791)`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), `visual-qa-pending-prices-${name}-`));
+    const original = await readFile(fixture('pending-prices.html'), 'utf8');
+    let runId = 0;
+    const run = async (html) => {
+      const id = runId++;
+      const url = join(dir, `case-${id}.html`);
+      const artifactDir = join(dir, `artifacts-${id}`);
+      await mkdir(artifactDir, { recursive: true });
+      await writeFile(url, html);
+      return inspect({
+        urls: [url],
+        artifactDir,
+        strict: true,
+        schemes: ['light'],
+        viewports: [{ name: 'phone', width: 390, height: 844 }],
+      });
+    };
+
+    const ariaBusy = original.replaceAll('[data-pricing-client-pending]', '[aria-busy="true"]').replace(' data-pricing-client-pending', ' aria-busy="true"');
+    for (const [label, html] of [['#1150 repro', original], ['aria-busy region', ariaBusy]]) {
+      const positive = await run(html);
+      assert.equal(positive.status, 'PASS', `${label}: ${JSON.stringify(positive.findings, null, 2)}`);
+      assert.deepEqual(positive.findings.filter(({ type }) => type === 'invisible-text'), []);
+    }
+
+    const unrelated = original.replace('</section>', '<p class="unrelated-hidden" style="visibility:hidden">Unrelated hidden card text</p></section>');
+    const hiddenCachesWithoutMarkers = (html) => html.replace('</style>', '.plan-price > :not(.pricing-price-placeholder), .plan-highlight { visibility:hidden !important; }</style>');
+    const negatives = [
+      ['blank placeholder', original.replaceAll('—', ''), '$7.00*'],
+      ['one card blank, the other painted', original.replace(/—(?![\s\S]*—)/, ''), '$99.00'],
+      ['missing JavaScript marker', hiddenCachesWithoutMarkers(original.replace(' data-pricing-js', '')), '$7.00*'],
+      ['missing pending marker', hiddenCachesWithoutMarkers(original.replace(' data-pricing-client-pending', '')), '$7.00*'],
+      ['hidden placeholder', original.replace('</style>', '.pricing-price-placeholder { visibility: hidden !important; }</style>'), '$7.00*'],
+      ['transparent placeholder', original.replace('</style>', '.pricing-price-placeholder { color: transparent !important; }</style>'), '$7.00*'],
+      ['zero-size placeholder', original.replace('</style>', '.pricing-price-placeholder { display:inline-block!important; width:0!important; height:0!important; font-size:0!important; overflow:hidden!important; }</style>'), '$7.00*'],
+      ['unrelated hidden card text', unrelated, 'Unrelated hidden card text'],
+    ];
+    for (const [label, html, expectedText] of negatives) {
+      const result = await run(html);
+      const invisible = result.findings.filter(({ type }) => type === 'invisible-text');
+      assert.equal(result.status, 'FAIL', `${label} unexpectedly passed strict QA`);
+      assert.ok(invisible.some(({ textSample }) => textSample.includes(expectedText)), `${label}: ${JSON.stringify(invisible, null, 2)}`);
+    }
+  });
+}
+
 test('invalid allowlist selectors are informational failures of configuration', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-invalid-allowlist-'));
   const allowlistPath = join(artifactDir, 'allowlist.json');

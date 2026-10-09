@@ -135,7 +135,6 @@ async fn run_server_impl() -> anyhow::Result<()> {
     use crate::mcp::daemon::{EmbeddedDaemonConfig, spawn_daemon};
     use crate::mcp::tools::CasService;
     use rmcp::ServiceExt;
-    use rmcp::transport::stdio;
 
     let cas_root = resolve_mcp_serve_root()?;
 
@@ -156,6 +155,13 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // why stdin EOF is not sufficient and why the server reaps itself rather
     // than being reaped.
     let parent_watchdog = crate::mcp::server::parent_watchdog::spawn();
+
+    // cas-2a49 (GH #1143): start reading stdin now, ahead of the multi-second
+    // store, daemon and proxy boot. A client's pre-initialize version probe
+    // (Claude Code's `server/discover`) then gets an immediate Method-not-found
+    // reply instead of reaching rmcp first, which made this process exit.
+    let guarded_stdin =
+        crate::mcp::server::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
 
     // This is deliberately before every remaining background path and every
     // store opener. All MCP configurations — including freshly spawned
@@ -469,7 +475,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
         if proxy_active { ", proxy active" } else { "" }
     );
 
-    let server = service.serve(stdio()).await?;
+    let server = service.serve((guarded_stdin, tokio::io::stdout())).await?;
     // Two ways out: the transport ends (stdin EOF / client disconnect), or the
     // watchdog proves the harness that spawned us is gone. The second exists
     // because the first never fires when the stdin write end outlives the

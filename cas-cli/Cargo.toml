@@ -144,7 +144,7 @@ libc = "0.2"
 notify-rust = "4.11"
 
 # Async runtime (for AI extraction and MCP server)
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "signal", "sync", "time"] }
 
 # WebSocket support (for factory server)
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }

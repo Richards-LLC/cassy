@@ -8096,9 +8096,11 @@ mod tests {
             );
             assert!(
                 check.message.contains(&format!(
-                    "neon (missing required environment variable {missing})"
+                    "neon (missing required environment variable {missing}, named by `auth` in \
+                     the [servers.neon] block of {}",
+                    cas_root.join("proxy.toml").display()
                 )),
-                "{}",
+                "cas-7a98: a project-supplied credential names its file: {}",
                 check.message
             );
         });

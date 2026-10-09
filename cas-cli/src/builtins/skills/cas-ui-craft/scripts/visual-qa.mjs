@@ -440,7 +440,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const add = (type, item, details = {}) => findings.push(findingFor(type, item, details));
     const addInfo = (type, item, details = {}) => infos.push(findingFor(type, item, details));
     const visibleText = textNodes.filter((item) => !item.ignored && !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
-    // cas-3791 (GH #1150): a region marked as loading (aria-busy="true", or a
+    // GH #1150: a region marked as loading (aria-busy="true", or a
     // data-*-pending / data-*-loading attribute) may hide cached text while a
     // placeholder holds its place. That text is reserved, not lost, only when
     // the loading marker itself hides it and the nearest placeholder the

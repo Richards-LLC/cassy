@@ -1107,7 +1107,7 @@ fn load_proxy_config(cas_root: &std::path::Path) -> anyhow::Result<cmcp_core::co
 /// Resolve role from durable registration first, with the spawn stamp as the
 /// bootstrap fallback. A registered supervisor keeps its full upstream set.
 #[cfg(feature = "mcp-proxy")]
-fn worker_proxy_policy(cas_root: &std::path::Path) -> anyhow::Result<Option<cas_types::factory_worker_policy::FactoryWorkerPolicy>> {
+pub(crate) fn worker_proxy_policy(cas_root: &std::path::Path) -> anyhow::Result<Option<cas_types::factory_worker_policy::FactoryWorkerPolicy>> {
     let session = std::env::var("CAS_SESSION_ID").ok().filter(|id| !id.is_empty())
         .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok());
     let role = session.and_then(|id| {

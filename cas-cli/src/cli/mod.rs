@@ -71,6 +71,7 @@ mod sync;
 mod update;
 pub mod update_transaction;
 pub(crate) mod viktor;
+mod violet_cmd;
 
 use std::path::{Path, PathBuf};
 
@@ -284,6 +285,9 @@ pub enum Commands {
     /// Show credential-safe provisioning status for the managed Viktor gateway
     Viktor(ViktorArgs),
 
+    /// Post local files and messages to Slack through the Violet hub, or read a channel
+    Violet(violet_cmd::VioletArgs),
+
     /// Manage configuration
     #[command(subcommand)]
     Config(ConfigCommands),
@@ -445,6 +449,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Open(_)
         | Commands::Doctor(_)
         | Commands::Viktor(_)
+        | Commands::Violet(_)
         | Commands::Jev(_)
         | Commands::Update(_)
         | Commands::Changelog(_)
@@ -671,6 +676,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Serve => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
         Commands::Viktor(_) => "viktor".to_string(),
+        Commands::Violet(_) => "violet".to_string(),
         Commands::Jev(_) => "jev".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
@@ -803,6 +809,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Serve => serve_execute(),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
         Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
+        Commands::Violet(args) => violet_cmd::execute(args, cli, cas_root),
         Commands::Jev(cmd) => jev::execute(cmd, require_cas_root(cas_root)?),
         Commands::Config(cmd) => {
             let root = guarded_write_root(config_store_guard(cmd), require_cas_root(cas_root)?)?;

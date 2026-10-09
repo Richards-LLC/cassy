@@ -2318,7 +2318,8 @@ pub fn doctor_row(
                 DoctorRow {
                     severity: DoctorSeverity::Ok,
                     message: format!(
-                        "registered ({credentials}); hub {endpoint} answered with {} tool(s): {}",
+                        "registered ({credentials}); hub {endpoint} reachable and bearer accepted, \
+                         answered with {} tool(s): {}; `cas violet post|thread|read` ready",
                         tools.len(),
                         tools.join(", ")
                     ),
@@ -2350,14 +2351,15 @@ pub fn doctor_row(
         ProbeOutcome::Unauthorized => DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
-                "hub {endpoint} rejected this machine (HTTP 401; Authorization: Bearer <set>). Confirm \
-                 `cas login`, then run `cas integrate violet`"
+                "hub {endpoint} rejected this machine (HTTP 401 invalid_token; Authorization: Bearer \
+                 <set>): the bearer is bad, so `cas violet` cannot post. Confirm `cas login`, then run \
+                 `cas integrate violet`"
             ),
         },
         ProbeOutcome::Unreachable { code } => DoctorRow {
             severity: DoctorSeverity::Warning,
             message: format!(
-                "registered, but {} (hub: {endpoint}); run `cas integrate violet` once connectivity is back",
+                "registered, but {} (hub: {endpoint}), so `cas violet` cannot reach it; run `cas integrate violet` once connectivity is back",
                 probe_failure_detail(&code)
             ),
         },
@@ -4131,6 +4133,9 @@ auth = "env:{token}"
         let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
         assert!(row.message.contains("violet_read"), "{row:?}");
+        // GH #1157: the row states `cas violet` readiness, not just registration.
+        assert!(row.message.contains("reachable and bearer accepted"), "{row:?}");
+        assert!(row.message.contains("`cas violet post|thread|read` ready"), "{row:?}");
         assert!(!row.message.contains(FAKE_TOKEN));
     }
 
@@ -4812,6 +4817,9 @@ auth = "env:{token}"
         let row = doctor_row(None, &paths, &env, &FakeProbe(ProbeOutcome::Unauthorized));
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("401"), "{row:?}");
+        assert!(row.message.contains("invalid_token"), "{row:?}");
+        assert!(row.message.contains("the bearer is bad"), "{row:?}");
+        assert!(row.message.contains("`cas violet` cannot post"), "{row:?}");
         assert!(!row.message.contains(FAKE_TOKEN));
     }
 }

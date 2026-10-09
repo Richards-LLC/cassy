@@ -61,5 +61,5 @@ pub use server::{
 };
 /// cas-e753: the factory daemon connects its own Violet-only proxy engine.
 #[cfg(feature = "mcp-proxy")]
-pub(crate) use server::{install_proxy_policy, load_proxy_config_for_process};
+pub(crate) use server::{install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy};
 pub use tools::CasService;

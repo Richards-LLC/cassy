@@ -18,7 +18,7 @@ const OVERRIDE_WINDOW_HOURS: i64 = 6;
 /// The note marker an operator's override carries on the epic.
 pub(super) const OVERRIDE_MARKER: &str = "PUBLICATION OVERRIDE:";
 
-pub(super) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>) -> Option<String> {
+pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>) -> Option<String> {
     let gated: Vec<Value> = violet_posts(tool, input)
         .into_iter()
         .filter(is_deliverable_post)

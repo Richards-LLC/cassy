@@ -812,7 +812,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post sends a committed artifact to a Slack channel through Violet by id, SHA-256-checked."
+        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked."
     )]
     pub async fn artifact(
         &self,

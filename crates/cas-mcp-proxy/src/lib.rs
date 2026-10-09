@@ -1860,6 +1860,7 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
                 .iter()
                 .map(|arg| expand_environment_placeholders(arg))
                 .collect::<Result<Vec<_>>>()?;
+            let env_clone = with_pinned_timezone(command, &args_clone, env_clone);
             let transport = TokioChildProcess::new(cmd.configure(move |cmd| {
                 cmd.args(&args_clone);
                 for (k, v) in &env_clone {
@@ -1914,6 +1915,35 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
         generation: CONNECTION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         last_successful_call: AtomicU64::new(0),
     })
+}
+
+/// Node Postgres MCP servers whose drivers turn `timestamp without time zone`
+/// into a JS `Date` in the child's local zone and then serialize it with a
+/// `Z` suffix. On an EDT host a stored `14:34:21` came back as `18:34:21Z`
+/// (GH #1127). The `pg-types` parser behind `@neondatabase/serverless` and
+/// `node-postgres` reads naive values in `process.env.TZ`.
+const UTC_PINNED_STDIO_PACKAGES: &[&str] = &["mcp-server-neon", "server-postgres"];
+
+/// Pin `TZ=UTC` for the Postgres MCP servers above so naive timestamps are
+/// reported as stored instead of shifted by the host offset. An explicit
+/// `TZ` in the server's configured `env` wins. Other stdio servers keep the
+/// host zone: Playwright, for one, emulates the browser timezone from it.
+fn with_pinned_timezone(
+    command: &str,
+    args: &[String],
+    mut env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let names_pinned_package = std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .any(|part| {
+            UTC_PINNED_STDIO_PACKAGES
+                .iter()
+                .any(|package| part.contains(package))
+        });
+    if names_pinned_package && !env.iter().any(|(key, _)| key == "TZ") {
+        env.push(("TZ".to_string(), "UTC".to_string()));
+    }
+    env
 }
 
 fn http_transport_config(
@@ -2143,6 +2173,56 @@ fn collect_result(
         && let Ok(json) = serde_json::to_string_pretty(structured)
     {
         text_parts.push(json);
+    }
+}
+
+#[cfg(test)]
+mod gh_1127_timezone_tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn neon_stdio_child_runs_in_utc_so_naive_timestamps_are_not_shifted() {
+        let env = with_pinned_timezone(
+            "/home/u/.nvm/versions/node/v24/bin/npx",
+            &args(&["-y", "@neondatabase/mcp-server-neon@0.6.5", "start"]),
+            vec![("NEON_API_KEY".to_string(), "k".to_string())],
+        );
+        assert!(
+            env.contains(&("TZ".to_string(), "UTC".to_string())),
+            "{env:?}"
+        );
+        assert!(env.contains(&("NEON_API_KEY".to_string(), "k".to_string())));
+
+        let postgres = with_pinned_timezone(
+            "npx",
+            &args(&[
+                "-y",
+                "@modelcontextprotocol/server-postgres",
+                "postgres://db",
+            ]),
+            Vec::new(),
+        );
+        assert_eq!(postgres, vec![("TZ".to_string(), "UTC".to_string())]);
+    }
+
+    #[test]
+    fn an_operator_timezone_wins_and_other_servers_keep_the_host_zone() {
+        let configured = vec![("TZ".to_string(), "America/New_York".to_string())];
+        assert_eq!(
+            with_pinned_timezone(
+                "npx",
+                &args(&["@neondatabase/mcp-server-neon"]),
+                configured.clone()
+            ),
+            configured
+        );
+        assert!(
+            with_pinned_timezone("npx", &args(&["@playwright/mcp@latest"]), Vec::new()).is_empty()
+        );
     }
 }
 

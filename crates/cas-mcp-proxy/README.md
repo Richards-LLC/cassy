@@ -54,6 +54,13 @@ health and doctor output; it is never passed through as a literal placeholder.
 The legacy `env:VAR` credential reference remains supported for HTTP/SSE
 credentials and stdio environment values.
 
+Stdio children whose command or args name `mcp-server-neon` or
+`server-postgres` start with `TZ=UTC`. Their Node Postgres drivers read
+`timestamp without time zone` values in the child's local zone and then print
+them with a `Z` suffix, which shifted stored UTC values by the host offset.
+A `TZ` set in the server's `env` takes precedence. Other stdio servers keep
+the host zone.
+
 **HTTP** — streamable HTTP connection:
 ```toml
 [servers.sentry]

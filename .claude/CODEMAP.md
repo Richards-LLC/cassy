@@ -48,6 +48,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 ## cas-cli/src — application hub
 
 `cas-cli/src/{main.rs,lib.rs}` start and export the CLI; `cas-cli/src/lib.rs` owns the `panic = "unwind"` guard and test-environment boundaries.
+
 - `cas-cli/src/cli/` — clap dispatch for artifact, auth, cloud, config, factory, hub, knowledge, memory, provider, status, update, and worktree flows.
 - `cas-cli/src/cli/factory/` — factory lifecycle, daemon attach, probes, parity checks, queries, worktrees, and wedged-worker recovery.
 - `cas-cli/src/cli/{hook,sync}/` — hook event dispatch, generated hook configuration, and managed agent-file rendering.

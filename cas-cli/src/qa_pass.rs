@@ -709,7 +709,15 @@ pub fn render_epic_qa_section(cas_root: &Path, children: &[Task]) -> String {
 /// beside its ledger: `bundle.json` with `producer: "independent-qa"`, the
 /// delivery's task id, and `head_sha` equal to the reviewed tip. Returns the
 /// bundle path, or why it cannot back a verdict.
-pub fn validate_round_bundle(ledger_path: &Path, pass: &QaPass) -> Result<std::path::PathBuf, String> {
+///
+/// cas-5488 (GH #1152): the visual-QA pass claim backs an approval only. A
+/// rejection asserts no pass, so the bounds comparison never blocks it; a
+/// reviewer who found a real defect can always record it.
+pub fn validate_round_bundle(
+    ledger_path: &Path,
+    pass: &QaPass,
+    verdict: cas_types::QaVerdict,
+) -> Result<std::path::PathBuf, String> {
     let dir = ledger_path
         .parent()
         .ok_or_else(|| "ledger_path has no parent directory".to_string())?;
@@ -753,7 +761,7 @@ pub fn validate_round_bundle(ledger_path: &Path, pass: &QaPass) -> Result<std::p
     // base build's run over the same pages, and passes when the tip added no
     // finding the base does not have.
     let status = field("visual_qa_status");
-    if matches!(status, "pass" | "scoped") {
+    if verdict == cas_types::QaVerdict::Approved && matches!(status, "pass" | "scoped") {
         let inside = |key: &str, default: &str| -> Result<std::path::PathBuf, String> {
             let relative = value
                 .pointer(&format!("/files/{key}"))
@@ -1717,7 +1725,7 @@ mod tests {
         let ledger = dir.path().join("LEDGER.md");
         std::fs::write(&ledger, "# ledger").unwrap();
         let round = pass("aaaa1111", cas_types::QaPassState::Claimed);
-        assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("no evidence bundle"));
+        assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err().contains("no evidence bundle"));
         let write = |producer: &str, head: &str| {
             std::fs::write(
                 dir.path().join("bundle.json"),
@@ -1727,11 +1735,11 @@ mod tests {
             .unwrap();
         };
         write("cas-qa-craft", "aaaa1111");
-        assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("producer"));
+        assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err().contains("producer"));
         write("independent-qa", "bbbb2222");
-        assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("head_sha"));
+        assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err().contains("head_sha"));
         write("independent-qa", "aaaa1111");
-        assert!(validate_round_bundle(&ledger, &round).is_ok());
+        assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).is_ok());
     }
 
     /// cas-6eb1: the generated QA task states the rejection bar, the evidence
@@ -1819,25 +1827,25 @@ mod tests {
             .unwrap();
         };
         // Claimed, never run.
-        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        let refused = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
         assert!(refused.contains("missing or unreadable"), "{refused}");
         let later = round.requested_at + chrono::Duration::seconds(60);
         // Run against the production origin.
         report("PASS", later, "https://hub.petrastella.io/commander/");
-        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        let refused = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
         assert!(refused.contains("not a local build"), "{refused}");
         // A local run from before the round opened.
         let earlier = round.requested_at - chrono::Duration::hours(1);
         report("PASS", earlier, "http://127.0.0.1:28511/commander/");
-        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        let refused = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
         assert!(refused.contains("before round 1 opened"), "{refused}");
         // A failed local run.
         report("FAIL", later, "http://127.0.0.1:28511/commander/");
-        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        let refused = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
         assert!(refused.contains("status \"FAIL\""), "{refused}");
         // A passing local run after the round opened backs the claim.
         report("PASS", later, "http://127.0.0.1:28511/commander/");
-        assert!(validate_round_bundle(&ledger, &round).is_ok());
+        assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).is_ok());
     }
 
     /// cas-e371 (GH #1023 finding 1): the rejection bar no longer turns a
@@ -2211,13 +2219,13 @@ mod tests {
             .unwrap();
         };
         bundle(serde_json::json!({"visual_qa_json": "visual-qa/visual-qa.json"}));
-        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        let refused = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
         assert!(refused.contains("visual_qa_baseline_json"), "{refused}");
         bundle(serde_json::json!({
             "visual_qa_json": "visual-qa/visual-qa.json",
             "visual_qa_baseline_json": "visual-qa-baseline/visual-qa.json"
         }));
-        validate_round_bundle(&ledger, &round).expect("every tip finding is on the base build");
+        validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).expect("every tip finding is on the base build");
         // A finding the base build does not have is the delivery's.
         let mut introduced = finding(28511);
         introduced["selector"] = serde_json::json!("#send");
@@ -2226,7 +2234,7 @@ mod tests {
             28511,
             serde_json::json!([finding(28511), introduced]),
         );
-        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        let refused = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
         assert!(refused.contains("introduced 1 visual-QA finding"), "{refused}");
         assert!(refused.contains("#send"), "{refused}");
     }

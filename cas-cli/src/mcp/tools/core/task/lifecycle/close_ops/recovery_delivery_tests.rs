@@ -433,3 +433,80 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
     assert_eq!(rounds[0].bound_head, f.final_tip);
     assert_eq!(rounds[0].branch, BRANCH);
 }
+
+/// cas-3b81 (GH #1142): a close's cost does not grow with the task's note
+/// history. The timed-out incident tasks were old, with long histories; this
+/// close carries a ~2 MB history of receipts, SHAs and proof lines, takes the
+/// same commit_receipt gate path as a fresh task, and stays far inside the
+/// 55s tool budget.
+#[tokio::test]
+async fn long_note_history_close_stays_well_under_the_tool_budget_cas_3b81() {
+    let mut short_env = TestEnvGuard::temp_home();
+    let short = fixture(&mut short_env);
+    let started = std::time::Instant::now();
+    let short_output = close_output(&short).await;
+    let short_elapsed = started.elapsed();
+    drop(short);
+    drop(short_env);
+
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let tasks = open_task_store(&f.dir.path().join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    let history = (0..6_000)
+        .map(|n| match n % 4 {
+            0 => format!(
+                "[2026-09-{:02} {:02}:{:02}] 📝 PROGRESS round {n}: pushed {} to {BRANCH}; merged {} into main; QA receipt /tmp/cas-qa/round-{n}/receipt.json",
+                1 + n % 28,
+                n % 24,
+                n % 60,
+                f.predecessor,
+                f.old,
+            ),
+            1 => format!(
+                "[2026-09-{:02} {:02}:{:02}] SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof -p cas --lib result=PASS base={} head={}",
+                1 + n % 28,
+                n % 24,
+                n % 60,
+                f.old,
+                f.final_tip,
+            ),
+            2 => format!(
+                "[2026-09-{:02} {:02}:{:02}] 🧪 LOADED_PROOF cargo test -j16 x3 loops result=PASS on {}",
+                1 + n % 28,
+                n % 24,
+                n % 60,
+                f.predecessor,
+            ),
+            _ => format!(
+                "[2026-09-{:02} {:02}:{:02}] ✅ DECISION round {n} reviewed footer.css at {}; Closed: no, still parked on {OLD_BRANCH}",
+                1 + n % 28,
+                n % 24,
+                n % 60,
+                f.final_tip,
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    task.notes = format!("{history}\n\n{}", task.notes);
+    assert!(task.notes.len() > 1_500_000, "{}", task.notes.len());
+    tasks.update(&task).unwrap();
+
+    let started = std::time::Instant::now();
+    let output = close_output(&f).await;
+    let elapsed = started.elapsed();
+    eprintln!(
+        "cas-3b81 close timing: short notes {short_elapsed:?}, {} byte notes {elapsed:?}",
+        task.notes.len()
+    );
+    assert!(output.contains("MERGE REQUIRED"), "{output}");
+    assert!(short_output.contains("MERGE REQUIRED"), "{short_output}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "long-note close took {elapsed:?}; the tool budget is 55s"
+    );
+    assert!(
+        elapsed <= short_elapsed * 3 + std::time::Duration::from_secs(3),
+        "close cost grew with note history: short {short_elapsed:?}, long {elapsed:?}"
+    );
+}

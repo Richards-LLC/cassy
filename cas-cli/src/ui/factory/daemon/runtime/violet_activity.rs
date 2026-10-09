@@ -1201,7 +1201,7 @@ impl ProxyChannelReader {
     /// credentials file, so the daemon never rewrites its own environment.
     pub(crate) async fn connect(cas_dir: &Path, caller: cmcp_core::ProxyCaller) -> Result<Self, String> {
         use cmcp_core::config::{ServerConfig, VIOLET_SERVER};
-        let mut config = crate::mcp::server::load_proxy_config_for_process(cas_dir)
+        let mut config = crate::mcp::load_proxy_config_for_process(cas_dir)
             .map_err(|e| format!("proxy config: {e}"))?;
         let mut server = config
             .servers
@@ -1232,7 +1232,7 @@ impl ProxyChannelReader {
         let engine = cmcp_core::ProxyEngine::from_configs(config.servers.clone())
             .await
             .map_err(|e| format!("could not connect to Violet: {e}"))?;
-        crate::mcp::server::install_proxy_policy(&engine, &config).await;
+        crate::mcp::install_proxy_policy(&engine, &config).await;
         Ok(Self { engine: std::sync::Arc::new(engine), caller })
     }
 

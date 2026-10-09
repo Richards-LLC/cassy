@@ -45,6 +45,16 @@ pub(super) fn measure(repo: &Path, task: &Task, target: &str) -> Result<Measurem
     let target = super::super::qa_dispatch::freshest_target_ref(repo, target);
     let target = resolve_ref_commit_sha(repo, &target)
         .ok_or("cannot resolve the integration target for evidence measurement")?;
+    // GH #1151: a no-code task with no commit of its own keeps its evidence
+    // in the artifact. Record the target it was judged against and no paths;
+    // the worker lane is never measured as its delivery.
+    if super::no_code_task_without_own_commits(repo, task, &target, None) {
+        return Ok(Measurement {
+            base: target.clone(),
+            tip: target,
+            paths: Vec::new(),
+        });
+    }
     let delivery = if let Some(anchor) = task.deliverables.factory_branch_anchor.as_ref() {
         anchor.clone()
     } else {

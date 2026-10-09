@@ -600,6 +600,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/violet/references/contract.md",
         content: include_str!("builtins/skills/violet/references/contract.md"),
     },
+    BuiltinFile {
+        path: "skills/violet/references/attachments.md",
+        content: include_str!("builtins/skills/violet/references/attachments.md"),
+    },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
     // sweep — dedupe double-filings, verify-and-close fixed claims, task new
@@ -1264,6 +1268,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/contract.md",
         content: include_str!("builtins/skills/violet/references/contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/attachments.md",
+        content: include_str!("builtins/skills/violet/references/attachments.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
@@ -1932,6 +1940,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/contract.md",
         content: include_str!("builtins/skills/violet/references/contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/attachments.md",
+        content: include_str!("builtins/skills/violet/references/attachments.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     BuiltinFile {
@@ -5592,6 +5604,48 @@ This is the body content."#;
                 assert!(
                     skill.content.contains(phrase),
                     "{label} violet SKILL.md must say {phrase:?} (cas-4e45)"
+                );
+            }
+        }
+    }
+
+    /// cas-1184 (GH #1129): attachments, including Slack Connect files from
+    /// external orgs, have a Violet-only read route that names the exact error
+    /// each failing route returns and an operator fallback.
+    #[test]
+    fn test_builtin_violet_skill_names_attachment_read_route() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let find = |path: &str| {
+                catalog
+                    .iter()
+                    .find(|b| b.path == path)
+                    .unwrap_or_else(|| panic!("{path} missing from {label}"))
+                    .content
+            };
+            let skill = find("skills/violet/SKILL.md");
+            assert!(
+                skill.contains("references/attachments.md") && skill.contains("Slack Connect"),
+                "{label} violet SKILL.md must route attachment reads (cas-1184)"
+            );
+            let reference = find("skills/violet/references/attachments.md");
+            for phrase in [
+                "`include_files: false`",
+                "`file_id`",
+                "`not_member`",
+                "`access_denied`",
+                "`upstream_unavailable`",
+                "`file_unavailable`",
+                "`execution_failed: file_not_found`",
+                "Never post in the channel to ask",
+                "Never conclude from the text alone",
+            ] {
+                assert!(
+                    reference.contains(phrase),
+                    "{label} violet attachments reference must say {phrase:?} (cas-1184)"
                 );
             }
         }

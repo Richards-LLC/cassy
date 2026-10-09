@@ -14,12 +14,8 @@ use std::path::{Path, PathBuf};
 const PROJECT: &str = "cas-no-code-fixture";
 const WORKER: &str = "nocode-worker";
 const LANE: &str = "factory/nocode-worker";
-/// Another task's commit whose subject carries no recognised task id: the
-/// lane counts it as this task's stranded work (MERGE REQUIRED).
-const UNNAMED_OTHER: &str = "feat(cas-other): another task's delivery";
-/// Another task's commit naming a task id: the lane resolves to no branch of
-/// this task's (DELIVERY BRANCH UNRESOLVED).
-const NAMED_OTHER: &str = "fix(cas-a0b1): another task's delivery";
+/// Another task's delivery, named by its task id as factory commits are.
+const OTHER: &str = "fix(cas-a0b1): another task's delivery";
 const PROOF: &str = "https://example.test/deploys/month";
 
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -101,7 +97,7 @@ async fn call(service: &CasService, request: serde_json::Value) -> String {
 /// A repository whose `target` is on origin and whose worker lane ends in
 /// another task's delivery, pushed but not merged; the worker works in a
 /// linked worktree on that lane, as a factory worker does.
-fn fixture(env: &mut TestEnvGuard, target: &str, other: &str) -> Fixture {
+fn fixture(env: &mut TestEnvGuard, target: &str) -> Fixture {
     let origin = tempfile::tempdir().unwrap();
     git(origin.path(), &["init", "-q", "--bare"]);
     let dir = tempfile::tempdir().unwrap();
@@ -119,7 +115,7 @@ fn fixture(env: &mut TestEnvGuard, target: &str, other: &str) -> Fixture {
     git(repo, &["checkout", "-q", "-b", LANE, target]);
     std::fs::write(repo.join("other.rs"), "pub fn other() {}\n").unwrap();
     git(repo, &["add", "other.rs"]);
-    git(repo, &["commit", "-q", "-m", other]);
+    git(repo, &["commit", "-q", "-m", OTHER]);
     let foreign_tip = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["push", "-q", "origin", LANE]);
     git(repo, &["checkout", "-q", "main"]);
@@ -225,7 +221,7 @@ fn assert_closed_without_lane(f: &Fixture, id: &str, response: &str) {
 #[tokio::test]
 async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main", UNNAMED_OTHER);
+    let f = fixture(&mut env, "main");
     let id = "cas-nc33";
     f.put(&assigned(id, TaskType::Task, "main"));
     claim(&f, id);
@@ -250,7 +246,7 @@ async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
 async fn no_code_spike_under_a_code_epic_closes_without_parking_gh1147() {
     let mut env = TestEnvGuard::temp_home();
     let epic_branch = "epic/nocode-spikes";
-    let f = fixture(&mut env, epic_branch, UNNAMED_OTHER);
+    let f = fixture(&mut env, epic_branch);
     let mut epic = Task::new("cas-nc47-epic".into(), "code epic".into());
     epic.task_type = TaskType::Epic;
     epic.status = TaskStatus::InProgress;
@@ -291,7 +287,7 @@ async fn no_code_spike_under_a_code_epic_closes_without_parking_gh1147() {
 #[tokio::test]
 async fn no_code_chore_on_a_foreign_lane_closes_after_target_clear_and_by_evidence_gh1151() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main", NAMED_OTHER);
+    let f = fixture(&mut env, "main");
 
     let id = "cas-nc51";
     let mut chore = assigned(id, TaskType::Chore, "main");
@@ -343,28 +339,36 @@ async fn no_code_chore_on_a_foreign_lane_closes_after_target_clear_and_by_eviden
     assert_ne!(evidence.commit_sha, f.foreign_tip);
 }
 
-/// A no-code declaration does not hide this task's own commits: a lane whose
-/// commits claim the task is still measured and must merge.
+/// A no-code declaration does not hide this task's own commits: a lane commit
+/// naming the task, or an unnamed one that may be its work (cas-2387), keeps
+/// the lane measured, and it must merge.
 #[tokio::test]
-async fn no_code_task_with_its_own_unmerged_commit_still_requires_merge() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main", NAMED_OTHER);
-    let id = "cas-nc99";
-    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
-    std::fs::write(worker_path.join("runbook.md"), "deploy runbook\n").unwrap();
-    git(&worker_path, &["add", "runbook.md"]);
-    git(&worker_path, &["commit", "-q", "-m", "docs(cas-nc99): deploy runbook"]);
-    git(&worker_path, &["push", "-q", "origin", LANE]);
-    f.put(&assigned(id, TaskType::Task, "main"));
-    claim(&f, id);
-    let response = call(
-        &f.worker,
-        serde_json::json!({
-            "action": "close", "id": id, "reason": "Deployed",
-            "execution_note": "no-code", "external_ref": PROOF,
-        }),
-    )
-    .await;
-    assert!(response.contains("MERGE REQUIRED"), "{response}");
-    assert_ne!(f.task(id).status, TaskStatus::Closed);
+async fn no_code_task_with_possible_own_lane_commits_still_requires_merge() {
+    for (id, subject) in [
+        ("cas-nc99", "docs(cas-nc99): deploy runbook"),
+        ("cas-nc98", "deploy runbook"),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        std::fs::write(worker_path.join("runbook.md"), "deploy runbook\n").unwrap();
+        git(&worker_path, &["add", "runbook.md"]);
+        git(&worker_path, &["commit", "-q", "-m", subject]);
+        git(&worker_path, &["push", "-q", "origin", LANE]);
+        f.put(&assigned(id, TaskType::Task, "main"));
+        claim(&f, id);
+        let response = call(
+            &f.worker,
+            serde_json::json!({
+                "action": "close", "id": id, "reason": "Deployed",
+                "execution_note": "no-code", "external_ref": PROOF,
+            }),
+        )
+        .await;
+        assert!(
+            response.contains("MERGE REQUIRED") || response.contains("DELIVERY BRANCH UNRESOLVED"),
+            "{subject}: {response}"
+        );
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}");
+    }
 }

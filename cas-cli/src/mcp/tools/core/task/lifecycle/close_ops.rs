@@ -9188,6 +9188,7 @@ impl CasCore {
                 .as_deref()
                 .unwrap_or(close_project_root.as_path()),
             &task,
+            &resolved_parent_branch,
             delivery_receipt,
         );
         let effective_has_reviewable = receipt_has_reviewable
@@ -9674,7 +9675,7 @@ impl CasCore {
                 .collect();
             if !retired.is_empty() {
                 let note = format!(
-                    "[{}] DECISION: no-code close retired lane records that belong to other tasks' deliveries: {}.",
+                    "[{}] DECISION: no-code close retired lane records that are not this task's delivery: {}.",
                     now.format("%Y-%m-%d %H:%M"),
                     retired.join(", ")
                 );
@@ -13478,11 +13479,13 @@ pub(crate) fn resolve_close_delivery_branch(
 /// delivery, and an anchor recorded for that delivery by an earlier park is
 /// not this task's either. Own commits are explicit: a commit receipt, a
 /// per-task branch, a recorded code delivery, an anchor not claimed by another
-/// task, or a commit on the lane naming this task. Any of those keeps every
-/// ordinary delivery gate.
+/// task, a commit on the lane naming this task, or an unmerged lane commit
+/// that does not claim another task (unnamed work may be this task's, see
+/// cas-2387). Any of those keeps every ordinary delivery gate.
 pub(crate) fn no_code_task_without_own_commits(
     repo_path: &std::path::Path,
     task: &Task,
+    target: &str,
     receipt: Option<&str>,
 ) -> bool {
     let delivery = &task.deliverables;
@@ -13524,9 +13527,14 @@ pub(crate) fn no_code_task_without_own_commits(
             if !is_safe_git_refname(&reference) || !git_ref_exists(repo_path, &reference) {
                 continue;
             }
-            match task_attribution::branch_task_claims(repo_path, &reference, &identity) {
-                Some((None, _)) => {}
-                _ => return false,
+            if !matches!(
+                task_attribution::branch_task_claims(repo_path, &reference, &identity),
+                Some((None, _))
+            ) || task_attribution::lane_commits_all_claim_other_tasks(
+                repo_path, &reference, target, &identity,
+            ) != Some(true)
+            {
+                return false;
             }
         }
     }
@@ -13623,11 +13631,19 @@ fn run_factory_branch_merge_gate_for_delivery(
     // delivered by its portable proof. Resolve no branch for it, so the
     // worker lane's other-task commits are neither counted nor parked here.
     if validated_recovery_branch.is_none()
-        && no_code_task_without_own_commits(repo_path, task, attribution.receipt)
+        && no_code_task_without_own_commits(repo_path, task, parent_branch, attribution.receipt)
     {
+        let lane = format!("factory/{assignee}");
+        let lane_state = if git_ref_exists(repo_path, &lane)
+            || git_ref_exists(repo_path, &format!("origin/{lane}"))
+        {
+            "holds no commit of this task's and was not measured as its work"
+        } else {
+            "is missing locally and on origin"
+        };
         return match no_code_close_proof(&task.id, Some("no-code"), task.external_ref.as_deref(), false) {
             Ok(Some(proof)) => MergeStateGateOutcome::ProceedWithNote(format!(
-                "decision: no-code delivery proven by external_ref `{proof}`. No commit names this task, so no delivery branch was resolved and the `factory/{assignee}` lane was not measured as this task's work."
+                "decision: no-code delivery proven by external_ref `{proof}`. No delivery branch was resolved: the `{lane}` lane {lane_state}. No branch commit count was measured."
             )),
             Err(message) => MergeStateGateOutcome::Unresolved(message),
             Ok(None) => unreachable!("explicit no-code intent requires a proof"),

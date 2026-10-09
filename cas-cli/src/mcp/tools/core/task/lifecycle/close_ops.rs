@@ -9180,9 +9180,19 @@ impl CasCore {
         });
         // cas-ba4a: a parked delivery is judged on its anchor alone; the
         // branch-wide probes below would count the worker's next task.
+        // GH #1133, #1147, #1151: a no-code task with no commit of its own
+        // has no branch history to judge. The worker lane's unclaimed
+        // commits belong to other tasks, not to this no-code declaration.
+        let no_code_without_own_commits = no_code_task_without_own_commits(
+            worker_worktree_path
+                .as_deref()
+                .unwrap_or(close_project_root.as_path()),
+            &task,
+            delivery_receipt,
+        );
         let effective_has_reviewable = receipt_has_reviewable
             || task.execution_note.as_deref() == Some("value-only")
-            || if parked_head.is_some() {
+            || if parked_head.is_some() || no_code_without_own_commits {
                 false
             } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window

@@ -55,6 +55,12 @@ impl SyncQueue {
     pub fn open(cas_dir: &Path) -> Result<Self, CasError> {
         let db_path = cas_dir.join("cas.db");
         let conn = Connection::open(&db_path)?;
+        // cas-0e57: without a busy handler every statement on this connection
+        // fails the instant another connection holds the write lock. The task
+        // store opens this queue on every logged-in open, so shutdown_workers'
+        // safety check and spawn_workers failed with "database is locked"
+        // while the database was accepting writes.
+        conn.busy_timeout(cas_store::SQLITE_BUSY_TIMEOUT)?;
 
         // Enable WAL mode for better concurrency
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;

@@ -609,7 +609,27 @@ struct ShutdownWorkerSnapshot {
     unsafe_worktree: bool,
 }
 
+/// The task rows the shutdown safety check judges, or why they are unreadable.
+fn shutdown_safety_tasks(cas_root: &std::path::Path) -> Result<Vec<cas_types::Task>, String> {
+    crate::store::open_task_store(cas_root)
+        .map_err(|error| format!("cannot open the task store: {error}"))?
+        .list(None)
+        .map_err(|error| format!("cannot list tasks: {error}"))
+}
+
 impl ShutdownWorkerSnapshot {
+    /// cas-0e57: the worker's tasks could not be read. Unknown task state is
+    /// treated like an in-progress task: shutdown requires force=true, and the
+    /// rendered state says why.
+    fn mark_task_state_unknown(&mut self, error: &str) {
+        self.task_states = vec![format!("unknown ({error})")];
+        self.has_in_progress_task = true;
+        self.worktree_cleanup_verdict = format!(
+            "{} (task state unknown; cleanup is re-checked at shutdown)",
+            self.worktree_cleanup_verdict
+        );
+    }
+
     fn requires_force(&self) -> bool {
         self.has_in_progress_task || self.unsafe_worktree
     }
@@ -3084,31 +3104,31 @@ impl CasService {
             ));
         }
 
-        let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open task store for shutdown safety check: {e}"),
-            )
-        })?;
-        let tasks = task_store.list(None).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to list tasks for shutdown safety check: {e}"),
-            )
-        })?;
+        // cas-0e57: the safety check reads task state; it must not be the
+        // reason a shutdown cannot happen. When the store cannot be read,
+        // every selected worker reports its task state as unknown, which
+        // requires force=true like an in-progress task, and force proceeds.
+        let (tasks, task_state_error) = match shutdown_safety_tasks(&self.inner.cas_root) {
+            Ok(tasks) => (tasks, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         let local_merge_delivery = factory_session_uses_local_merge(factory_session.as_deref());
         let pinned_epic_branch =
             factory_session_pinned_epic_branch(factory_session.as_deref(), &tasks);
         let snapshots: Vec<ShutdownWorkerSnapshot> = selected
             .iter()
             .map(|worker| {
-                shutdown_worker_snapshot(
+                let mut snapshot = shutdown_worker_snapshot(
                     &self.inner.cas_root,
                     worker,
                     &tasks,
                     local_merge_delivery,
                     pinned_epic_branch.as_deref(),
-                )
+                );
+                if let Some(error) = task_state_error.as_deref() {
+                    snapshot.mark_task_state_unknown(error);
+                }
+                snapshot
             })
             .collect();
         let force = req.force.unwrap_or(false);

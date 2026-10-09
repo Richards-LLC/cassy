@@ -100,7 +100,11 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("never leaves the command palette flagged open after it closes (cas-dfc8)", async () => {
     const source = await readSource("main.ts");
     // Any close of the palette settles the flag render() reopens it from.
-    expect(source).toContain("palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };");
+    expect(source).toMatch(/palette\.onclose = \(\) => \{\s*if \(!palette\.isConnected \|\| palette\.open\) return;\s*commandPaletteOpen = false;/);
+    // cas-3c25: closing in place adopts the closed-palette signature, so the
+    // next unrelated render does not rebuild the shell under the operator's focus.
+    expect(source).toContain("if (lastShellSignatureWithPaletteClosed !== undefined) lastShellSignature = lastShellSignatureWithPaletteClosed;");
+    expect(source).toContain("lastShellSignatureWithPaletteClosed = shellSignature({ ...signatureParts, commandPaletteOpen: false }) + signatureTail;");
     // Paired machines replaces the palette and clears the flag itself too.
     // cas-460a: it also remembers its opener so its close can hand focus back.
     expect(source).toContain("const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");

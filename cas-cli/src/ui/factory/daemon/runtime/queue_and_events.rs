@@ -3666,7 +3666,15 @@ impl FactoryDaemon {
 
     /// cas-0f5b: hold a respawned or recycled worker to the same boot
     /// verification as a fresh spawn, so its hook canary is checked.
-    fn verify_respawned_worker(&mut self, name: &str, request_id: Option<i64>) {
+    ///
+    /// `launch_floor` must be captured before the PTY was started; see
+    /// [`crate::factory_hook_canary::launch_floor`] (cas-2a49).
+    fn verify_respawned_worker(
+        &mut self,
+        name: &str,
+        request_id: Option<i64>,
+        launch_floor: std::time::SystemTime,
+    ) {
         self.spawn_verifications.insert(
             name.to_string(),
             SpawnVerification {
@@ -3674,7 +3682,7 @@ impl FactoryDaemon {
                 launched_at: Instant::now(),
                 registered_at: None,
                 task_id: None,
-                launched_wall: std::time::SystemTime::now(),
+                launched_wall: launch_floor,
             },
         );
     }
@@ -3732,10 +3740,11 @@ impl FactoryDaemon {
                 if canary == crate::factory_hook_canary::CanaryVerdict::Failed {
                     return Some((
                         worker.clone(),
-                        VerificationAction::Failed(crate::factory_hook_canary::failure_detail(
+                        VerificationAction::Failed(crate::factory_hook_canary::failure_detail_since(
+                            self.app.cas_dir(),
                             worker,
                             crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
-                            &crate::factory_hook_canary::marker_path(self.app.cas_dir(), worker),
+                            verification.launched_wall,
                         )),
                     ));
                 }
@@ -7689,6 +7698,10 @@ impl FactoryDaemon {
                         );
                     }
                     let task_id_for_finish = pending_task_id.clone();
+                    // cas-2a49: `finish_worker_spawn` starts the PTY and then
+                    // does store and git bookkeeping, so the canary floor is
+                    // taken before the call, not after it returns.
+                    let launch_floor = crate::factory_hook_canary::launch_floor();
                     match self.app.finish_worker_spawn(
                         result,
                         teams_config,
@@ -7727,7 +7740,7 @@ impl FactoryDaemon {
                                     launched_at: Instant::now(),
                                     registered_at: None,
                                     task_id: pending_task_id.clone(),
-                                    launched_wall: std::time::SystemTime::now(),
+                                    launched_wall: launch_floor,
                                 },
                             );
                             // A worker may reuse a retired name (e.g. a Codex worker
@@ -8258,6 +8271,7 @@ impl FactoryDaemon {
                     crate::ui::theme::register_agent_color(&tc.agent_name, &tc.agent_color);
                 }
                 // Respawn reuses existing worktree - fast enough to run synchronously
+                let launch_floor = crate::factory_hook_canary::launch_floor();
                 match self.app.respawn_worker(&name, teams_config) {
                     Ok(()) => {
                         // The respawned worker is live again under the same name;
@@ -8265,7 +8279,7 @@ impl FactoryDaemon {
                         // are no longer dropped as "from a dead worker" (cas-5a5c).
                         self.dead_workers.remove(&name);
                         // cas-0f5b: a respawn must prove its hooks run too.
-                        self.verify_respawned_worker(&name, None);
+                        self.verify_respawned_worker(&name, None, launch_floor);
                         if self.app.record_enabled() {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
@@ -8306,15 +8320,17 @@ impl FactoryDaemon {
                         )
                     })?;
                     self.app.shutdown_worker_for_recycle(&name).await?;
+                    let launch_floor = crate::factory_hook_canary::launch_floor();
                     self.app
                         .respawn_worker_with_spec(&name, teams_config, Some(spec))
+                        .map(|()| launch_floor)
                 }
                 .await;
                 match result {
-                    Ok(()) => {
+                    Ok(launch_floor) => {
                         self.dead_workers.remove(&name);
                         // cas-0f5b: a recycled worker must prove its hooks run too.
-                        self.verify_respawned_worker(&name, Some(request_id));
+                        self.verify_respawned_worker(&name, Some(request_id), launch_floor);
                         append_spawn_audit(
                             self.app.cas_dir(),
                             &self.session_name,

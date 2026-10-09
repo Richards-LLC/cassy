@@ -160,8 +160,12 @@ struct SpawnVerification {
     /// registration so the binding is re-confirmed (and the worker briefed)
     /// at the only moment the worker is provably alive.
     task_id: Option<String>,
-    /// cas-0f5b: wall-clock launch time; the hook canary (SessionStart marker)
-    /// must be written after it, so a previous worker's marker never counts.
+    /// cas-0f5b: wall-clock launch floor; the hook canary (SessionStart marker)
+    /// must be written at or after it, so a previous worker's marker never
+    /// counts. cas-2a49: captured BEFORE the PTY starts
+    /// ([`crate::factory_hook_canary::launch_floor`]), never after the spawn
+    /// call returns, or a hook that ran during the spawn's own bookkeeping
+    /// reads as stale.
     launched_wall: std::time::SystemTime,
 }
 

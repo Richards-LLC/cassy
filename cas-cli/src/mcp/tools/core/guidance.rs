@@ -14,6 +14,14 @@ pub(crate) async fn with_caller_prefix<T>(
     CALLER_PREFIX.scope((prefix, supervisor), future).await
 }
 
+/// The request's rendering context, when one is in scope. Work moved off the
+/// request task (the blocking pool, cas-3b81) re-enters it with
+/// [`with_caller_prefix`]; task-locals do not follow `spawn_blocking`
+/// (cas-0081d).
+pub(crate) fn current_caller_context() -> Option<(&'static str, Option<&'static str>)> {
+    CALLER_PREFIX.try_with(|context| *context).ok()
+}
+
 /// Free lifecycle gates use the service caller captured inside panic dispatch.
 /// Direct core/CLI callers retain the existing process-own harness fallback.
 pub(crate) fn caller_prefix() -> &'static str {

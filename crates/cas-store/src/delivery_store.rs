@@ -294,6 +294,25 @@ pub fn create_worker_delivery(
     Ok(transaction)
 }
 
+fn same_immutable_receipt_payload(
+    persisted: &WorkerCompletionReceipt,
+    receipt: &WorkerCompletionReceipt,
+) -> bool {
+    persisted.id == receipt.id
+        && persisted.task_id == receipt.task_id
+        && persisted.worker_agent_id == receipt.worker_agent_id
+        && persisted.worker_name == receipt.worker_name
+        && persisted.repo_selector == receipt.repo_selector
+        && persisted.source_branch == receipt.source_branch
+        && persisted.commit_sha == receipt.commit_sha
+        && persisted.merge_base_sha == receipt.merge_base_sha
+        && persisted.target_branch == receipt.target_branch
+        && persisted.target_sha == receipt.target_sha
+        && persisted.proof_reference == receipt.proof_reference
+        && persisted.scope_summary == receipt.scope_summary
+        && persisted.artifact_path == receipt.artifact_path
+}
+
 fn create_worker_delivery_with_conn(
     conn: &Connection,
     receipt: &WorkerCompletionReceipt,
@@ -331,20 +350,7 @@ fn create_worker_delivery_with_conn(
         params![receipt.id],
         receipt_from_row,
     )?;
-    let same_immutable_payload = persisted.id == receipt.id
-        && persisted.task_id == receipt.task_id
-        && persisted.worker_agent_id == receipt.worker_agent_id
-        && persisted.worker_name == receipt.worker_name
-        && persisted.repo_selector == receipt.repo_selector
-        && persisted.source_branch == receipt.source_branch
-        && persisted.commit_sha == receipt.commit_sha
-        && persisted.merge_base_sha == receipt.merge_base_sha
-        && persisted.target_branch == receipt.target_branch
-        && persisted.target_sha == receipt.target_sha
-        && persisted.proof_reference == receipt.proof_reference
-        && persisted.scope_summary == receipt.scope_summary
-        && persisted.artifact_path == receipt.artifact_path;
-    if !same_immutable_payload {
+    if !same_immutable_receipt_payload(&persisted, receipt) {
         return Err(StoreError::Parse(
             "immutable worker completion receipt mismatch".to_string(),
         ));
@@ -458,6 +464,14 @@ pub fn create_worker_delivery_with_dispatch_for_lease(
                 .unwrap_or(false)
     });
     if !valid {
+        // cas-0081d: two exact submissions of one receipt by the lease owner
+        // both read the lease before either wrote. The first persists the
+        // boundary and releases the lease, so the second arrives here with no
+        // lease to match. It is an exact replay of a boundary this session
+        // already persisted, which a lease-less retry may always re-read.
+        if let Some(replay) = exact_receipt_replay_with_conn(&tx, receipt, actor_agent_id)? {
+            return Ok(replay);
+        }
         return Err(StoreError::Parse(
             "exact active task lease changed, expired, or no longer belongs to the authenticated worker session"
                 .to_string(),
@@ -479,6 +493,72 @@ pub fn create_worker_delivery_with_dispatch_for_lease(
     let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
     tx.commit()?;
     Ok((transaction, dispatch))
+}
+
+/// The already-persisted delivery and dispatch for this exact receipt, when
+/// the caller is the live worker session that persisted it and no other
+/// session holds the task lease. Read-only: it writes nothing, so a refused
+/// lease still never creates a boundary.
+fn exact_receipt_replay_with_conn(
+    conn: &Connection,
+    receipt: &WorkerCompletionReceipt,
+    actor_agent_id: &str,
+) -> Result<Option<(WorkerDeliveryTransaction, VerificationDispatch)>> {
+    if receipt.worker_agent_id != actor_agent_id {
+        return Ok(None);
+    }
+    let foreign_lease: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_leases
+         WHERE task_id = ?1 AND status = 'active' AND agent_id != ?2)",
+        params![receipt.task_id, actor_agent_id],
+        |row| row.get(0),
+    )?;
+    let live_worker: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents
+         WHERE id = ?1 AND role = 'worker' AND status IN ('active', 'idle'))",
+        params![actor_agent_id],
+        |row| row.get(0),
+    )?;
+    if foreign_lease || !live_worker {
+        return Ok(None);
+    }
+    let persisted = conn
+        .query_row(
+            "SELECT id, task_id, worker_agent_id, worker_name, repo_selector, source_branch,
+                    commit_sha, merge_base_sha, target_branch, target_sha, proof_reference,
+                    scope_summary, artifact_path, created_at
+             FROM worker_completion_receipts WHERE id = ?1",
+            params![receipt.id],
+            receipt_from_row,
+        )
+        .optional()?;
+    let Some(persisted) = persisted else {
+        return Ok(None);
+    };
+    if !same_immutable_receipt_payload(&persisted, receipt) {
+        return Ok(None);
+    }
+    let transaction = conn
+        .query_row(
+            "SELECT id, receipt_id, task_id, state, supervisor_agent_id, verification_id,
+                    merge_commit_sha, last_error_code, last_error_detail, created_at, updated_at
+             FROM worker_delivery_transactions WHERE receipt_id = ?1",
+            params![receipt.id],
+            transaction_from_row,
+        )
+        .optional()?;
+    let Some(transaction) = transaction else {
+        return Ok(None);
+    };
+    let dispatch = crate::verification_store::get_latest_verification_dispatch_with_conn(
+        conn,
+        &receipt.task_id,
+    )?
+    .filter(|dispatch| {
+        dispatch.receipt_id.as_deref() == Some(receipt.id.as_str())
+            && dispatch.delivery_transaction_id.as_deref() == Some(transaction.id.as_str())
+    });
+    Ok(dispatch.map(|dispatch| (transaction, dispatch)))
 }
 
 pub fn worker_delivery_transaction_id(receipt_id: &str) -> String {
@@ -1221,6 +1301,118 @@ mod tests {
                 "{scenario} authority persisted receipt, transaction, or dispatch"
             );
         }
+    }
+
+    /// cas-0081d: two exact submissions by the lease owner both pass the
+    /// pre-transaction lease read; the first persists and releases the lease.
+    /// The second must re-read that same boundary, not fail as if its
+    /// authority were stale, and must persist nothing new. A different
+    /// session's lease still refuses it.
+    #[test]
+    fn exact_receipt_replay_after_its_own_lease_release_returns_the_persisted_boundary() {
+        let root = TempDir::new().unwrap();
+        let store = SqliteAgentStore::open(root.path()).unwrap();
+        store.init().unwrap();
+        register_worker(&store, "worker-session", "worker");
+        register_worker(&store, "replacement-session", "worker");
+        let ClaimResult::Success(lease) = store
+            .try_claim("cas-delivery", "worker-session", 600, Some("owner"))
+            .unwrap()
+        else {
+            panic!("fixture lease must be claimed")
+        };
+        let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        let deadline = Utc::now() + chrono::Duration::minutes(10);
+        let (first, first_dispatch) = create_worker_delivery_with_dispatch_for_lease(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            lease.epoch,
+            "verifier-owner",
+            deadline,
+        )
+        .unwrap();
+        assert!(
+            store
+                .release_lease_if_owner_epoch(
+                    "cas-delivery",
+                    "worker-session",
+                    lease.epoch,
+                    "handoff"
+                )
+                .unwrap()
+        );
+        let after_first = delivery_boundary_counts(root.path(), &receipt.id);
+
+        let (replay, replay_dispatch) = create_worker_delivery_with_dispatch_for_lease(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            lease.epoch,
+            "verifier-owner",
+            deadline,
+        )
+        .expect("exact replay by the persisting session re-reads its boundary");
+        assert_eq!(replay.id, first.id);
+        assert_eq!(replay_dispatch.id, first_dispatch.id);
+        assert_eq!(
+            delivery_boundary_counts(root.path(), &receipt.id),
+            after_first
+        );
+        assert_eq!(
+            list_worker_delivery_events(root.path(), &first.id)
+                .unwrap()
+                .len(),
+            1,
+            "a replay emits no second event"
+        );
+
+        // Another session's receipt for the same boundary is never a replay.
+        let mut foreign = receipt.clone();
+        foreign.worker_agent_id = "replacement-session".to_string();
+        assert!(
+            create_worker_delivery_with_dispatch_for_lease(
+                root.path(),
+                &foreign,
+                WorkerDeliveryState::AwaitingVerification,
+                "replacement-session",
+                lease.epoch,
+                "verifier-owner",
+                deadline,
+            )
+            .is_err()
+        );
+
+        // Once a different session holds the lease, the original session's
+        // replay fails closed as before.
+        assert!(matches!(
+            store
+                .try_claim(
+                    "cas-delivery",
+                    "replacement-session",
+                    600,
+                    Some("replacement")
+                )
+                .unwrap(),
+            ClaimResult::Success(_)
+        ));
+        let error = create_worker_delivery_with_dispatch_for_lease(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            lease.epoch,
+            "verifier-owner",
+            deadline,
+        )
+        .expect_err("a foreign lease refuses the replay");
+        assert!(error.to_string().contains("exact active task lease"));
+        assert_eq!(
+            delivery_boundary_counts(root.path(), &receipt.id),
+            after_first
+        );
     }
 
     #[test]

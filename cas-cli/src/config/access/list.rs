@@ -33,6 +33,14 @@ impl Config {
                 "slack.transport".to_string(),
                 self.get("slack.transport").unwrap(),
             ),
+            (
+                "slack.wake_enabled".to_string(),
+                self.get("slack.wake_enabled").unwrap(),
+            ),
+            (
+                "slack.violet_bot_user_ids".to_string(),
+                self.get("slack.violet_bot_user_ids").unwrap(),
+            ),
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
             ("sync.target".to_string(), self.sync.target.clone()),

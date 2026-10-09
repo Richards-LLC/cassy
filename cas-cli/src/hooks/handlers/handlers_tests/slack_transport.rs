@@ -127,6 +127,7 @@ fn slack_transport_registry_get_set_list_merge_and_roundtrip() {
     assert_eq!(empty.get("slack.transport").as_deref(), Some("any"));
     config.slack = Some(SlackConfig {
         transport: SlackTransport::Violet,
+        ..SlackConfig::default()
     });
     config.merge_missing(&empty);
     assert_eq!(config.get("slack.transport").as_deref(), Some("violet"));

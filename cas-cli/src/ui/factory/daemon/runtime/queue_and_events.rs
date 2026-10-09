@@ -1298,6 +1298,12 @@ pub enum SupervisorWakeClass {
     /// delivery parked for merge and needs an independent reviewer spawned
     /// before it may merge.
     QaDispatch,
+    /// cas-e753 (GH #1145): Slack activity for this project, claimed from the
+    /// Violet relay by the daemon and framed as `<cas-violet-activity>`. Its
+    /// own class so wake policy can treat it apart from lifecycle wakes; the
+    /// daemon already coalesces it per channel. Daemon-stamped only: no
+    /// registered sender can raise it.
+    SlackActivity,
 }
 
 /// Who CAS observed writing a queued row, resolved for the wake gate
@@ -4488,6 +4494,9 @@ impl FactoryDaemon {
                 if crate::prompt_revalidation::parse_qa_dispatch_envelope(prompt).is_some() {
                     return Some(SupervisorWakeClass::QaDispatch);
                 }
+                if super::violet_activity::parse_violet_activity_envelope(prompt).is_some() {
+                    return Some(SupervisorWakeClass::SlackActivity);
+                }
                 // cas-619f: CAS itself escalates a delivery whose independent
                 // QA was rejected `qa.max_rounds` times with a blocker
                 // envelope. Daemon-stamped, so the envelope is CAS's own.
@@ -4684,7 +4693,7 @@ impl FactoryDaemon {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
                 WakeSender::Daemon | WakeSender::Registered { .. } => {
-                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, blocker or verification-dispatch envelopes (cas-dab2, cas-d9a8, cas-8725)"
+                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, blocker, verification-dispatch or Slack-activity envelopes (cas-dab2, cas-d9a8, cas-8725, cas-e753)"
                 }
             });
         };
@@ -4715,6 +4724,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::QaDispatch => {
                 "supervisor pane is quiet and the row is a CAS independent-QA dispatch"
+            }
+            SupervisorWakeClass::SlackActivity => {
+                "supervisor pane is quiet and the row is CAS-relayed Slack activity for this project"
             }
         })
     }

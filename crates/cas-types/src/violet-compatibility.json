@@ -1,6 +1,7 @@
 {
-  "purpose": "Only compatibility data: retire the former production registration and skill; prefer canonical credentials and fall back for installed machines. No legacy tool is registered.",
-  "hub_url": "https://mecha-cassy.vercel.app/mcp/slack",
+  "purpose": "Only compatibility data: retire the former production registration, hostname and skill; prefer canonical credentials and fall back for installed machines for one release. No legacy tool is registered.",
+  "hub_url": "https://violet-hub.vercel.app/mcp/slack",
+  "legacy_hub_url": "https://mecha-cassy.vercel.app/mcp/slack",
   "retired_server": "mecha-cassy",
   "retired_tools": [
     "mecha_read",

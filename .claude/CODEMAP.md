@@ -146,6 +146,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `crates/*/{tests,benches}/` plus inline `#[cfg(test)]` modules provide lower-level integration and unit coverage.
 
 ## Cross-cutting
+
 - **Managed files:** sources live in `cas-cli/src/builtins/`; sync renders the `.claude/` and `.codex/` mirrors (`.grok/` and `.opencode/` are rendered locally, not checked in).
 - **Docs:** `cas-cli/docs/` holds architecture/contributing/migration/proxy/TUI/worktree material; `docs/` holds durable project records.
 - **CI/release:** `.github/`, `scripts/` (incl. `release-train.d/`, `release-{completion,interventions,learning,integration-gates}.py`, `assembly-proof.py`, `check-changelog-lint.sh`), `CHANGELOG.md`, `docs/release-notes/`, and `docs/release-reports/` hold gates and receipts.
@@ -159,6 +160,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - **Generated/local state:** `target/`, `dist/`, `node_modules/`, `hub-web/dist/`, `.cas/`, and `vendor/` are not source-map entries.
 
 ## Entrypoints
+
 - CLI: `cas-cli/src/main.rs` → `cas`.
 - Library: `cas-cli/src/lib.rs` → crate `cas`.
 - Factory TUI: `cas-cli/src/ui/factory/app/mod.rs` → bare `cas`.

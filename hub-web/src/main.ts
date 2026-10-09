@@ -3601,6 +3601,9 @@ function render(captureDraft = true): void {
   const focusedControl = document.activeElement instanceof HTMLElement && document.activeElement.id
     && document.activeElement.id !== "message-text" && app.contains(document.activeElement)
     && !document.activeElement.closest("dialog") ? document.activeElement.id : undefined;
+  // cas-3c25: a keyboard user's ring comes back with their focus. A scripted
+  // focus() after the old node left the page would otherwise drop it.
+  const focusedControlVisible = focusedControl !== undefined && document.activeElement?.matches(":focus-visible") === true;
   const selected = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
@@ -3813,7 +3816,7 @@ function render(captureDraft = true): void {
   // and focus() on a hidden control does nothing, so a rebuild left focus on
   // the page.
   if (!composerWasFocused && focusedControl && (document.activeElement === document.body || document.activeElement === null)) {
-    document.getElementById(focusedControl)?.focus({ preventScroll: true });
+    document.getElementById(focusedControl)?.focus({ preventScroll: true, focusVisible: focusedControlVisible } as FocusOptions);
   }
 }
 
@@ -5092,7 +5095,12 @@ app.addEventListener("pointerup", (event) => { if (event.pointerType === "touch"
 app.addEventListener("click", () => deferredRender.clicked(), true);
 app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);
 app.addEventListener("focusout", () => {
-  queueMicrotask(() => {
+  // cas-3c25: wait a task, not a microtask. A keyboard Tab dispatches
+  // focusout before the next control has focus, so a microtask saw <body>,
+  // rebuilt the shell with nothing to restore, and replaced the control Tab
+  // was moving to: focus fell to <body> and the next Tab started from the
+  // top of the page. Once focus has settled, the rebuild restores it.
+  window.setTimeout(() => {
     // Moving between two fields is still composing; only a focus that has left
     // every editable control releases the rebuild.
     const active = document.activeElement;

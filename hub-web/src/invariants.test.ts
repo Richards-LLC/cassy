@@ -206,6 +206,12 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("touchWindow: (run) => window.setTimeout(run, 600),");
     expect(main).toContain('app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);');
     expect(main).toContain("afterGesture: (run) => window.setTimeout(run, 0),");
+    // cas-3c25 (HUB-J18): a keyboard Tab is mid-transit during focusout, so
+    // the owed rebuild waits a task for focus to settle, then restores the
+    // rebuilt control with its ring.
+    expect(main).toMatch(/app\.addEventListener\("focusout", \(\) => \{[\s\S]{0,600}?window\.setTimeout\(\(\) => \{/);
+    expect(main).not.toMatch(/app\.addEventListener\("focusout", \(\) => \{\s*queueMicrotask/);
+    expect(main).toContain("focus({ preventScroll: true, focusVisible: focusedControlVisible } as FocusOptions)");
   });
 
   // Contract: keeps pairing failures inside the open dialog and cancellation cleanup visible (cas-7d55 F1/F2/F3/F6).

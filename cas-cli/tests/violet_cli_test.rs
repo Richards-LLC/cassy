@@ -16,12 +16,16 @@ fn violet(root: &Path) -> Command {
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
     let mut command = Command::new(cas::test_paths::cas_binary());
+    // Legacy credential names come from the compatibility manifest, never
+    // spelled here.
+    let legacy = cas_types::violet_compatibility::violet_compatibility();
     for (key, _) in std::env::vars_os() {
         let key_text = key.to_string_lossy();
         if key_text.starts_with("CAS_")
             || key_text.starts_with("VIOLET_")
-            || key_text.starts_with("MECHA_")
             || key_text.starts_with("SLACK_")
+            || key_text.starts_with(legacy.legacy_token_prefix.as_str())
+            || key_text == legacy.legacy_bypass_env
         {
             command.env_remove(key);
         }

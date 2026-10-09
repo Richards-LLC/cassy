@@ -10894,6 +10894,26 @@ mod spawn_lifecycle_tests {
     }
 
     #[test]
+    fn chatgpt_standard_lane_refuses_a_model_absent_from_target_account_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "models": [{"slug": "gpt-6-sol"}]
+        }).to_string()).unwrap();
+        let (specs, recipe, _) = build_lane_spawn_specs(
+            1, "standard", Some(home.path().to_str().unwrap()), None,
+            &cas_factory::CapabilitySnapshot::default(),
+        ).unwrap();
+        let error = preflight_account_auth_with(&specs, |_, _| {
+            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+        }).expect_err("the target ChatGPT account cannot run this lane recipe");
+        assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
+        assert!(error.contains(home.path().to_str().unwrap()), "{error}");
+        assert!(error.contains("No worktree was created"), "{error}");
+    }
+
+    #[test]
     fn a_logged_out_account_refuses_the_spawn_by_name_before_any_worktree_exists() {
         let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"))];
         let error = preflight_account_auth_with(&specs, |_, _| {

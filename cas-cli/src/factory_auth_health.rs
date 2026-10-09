@@ -227,6 +227,14 @@ mod tests {
 {"timestamp":"2026-09-03T14:13:30.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Started cas-1234."}}"#;
 
     #[test]
+    fn unsupported_chatgpt_model_is_a_relayable_failure_until_success() {
+        let failure = r#"{"type":"event_msg","payload":{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#;
+        let evidence = codex_rollout_auth_failure(failure);
+        assert!(evidence.failed(), "{evidence:?}");
+        assert_eq!(codex_rollout_auth_failure(&format!("{failure}\n{HEALTHY_FIRST_TURN}")), AuthFailureEvidence::Healthy);
+    }
+
+    #[test]
     fn codex_unauthorized_first_turn_is_an_account_failure_with_its_message() {
         let evidence = codex_rollout_auth_failure(UNAUTHORIZED_FIRST_TURN);
         let AuthFailureEvidence::Failed {

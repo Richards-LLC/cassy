@@ -1256,9 +1256,17 @@ Markdown fixtures beneath those paths still require web tests. The no-build
 fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
 
 Closing a task that changes a committed `*.snap` or
-`opencode_projection.snapshot.json` requires a task decision note:
+`opencode_projection.snapshot.json` requires one task decision note per
+changed snapshot file:
+`snapshot-approved: <relative file> — file-sha256:<64 lowercase hex digits> — <why>`.
+The digest covers the file's complete blob at the delivered tip, so one note
+approves every changed line in it (a shared partial that alters 20 rendered
+lines needs one note, not 20). Any later edit to the file changes the digest
+and requires a new approval. The refusal prints the exact token for every
+unapproved file. A snapshot deleted at the tip has no blob and uses the
+line-level form, which also remains accepted for any file:
 `snapshot-approved: <relative file> — <actual +added or -removed line> — <why>`.
-The equivalent digest form is
+The equivalent line-digest form is
 `snapshot-approved: <relative file> — sha256:<64 lowercase hex digits> — <why>`.
 SHA256 covers the complete UTF-8 diff line, including its leading `+`/`-` and
 whitespace, excluding the newline. The refusal prints this bounded form when

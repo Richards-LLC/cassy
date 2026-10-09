@@ -534,7 +534,6 @@ impl CasService {
             let elapsed = start.elapsed();
             let summary = late_close_summary(&joined);
             let recorded = tokio::task::spawn_blocking(move || {
-                use crate::store::TaskStore as _;
                 let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
                 let status = store
                     .get(&task_id)

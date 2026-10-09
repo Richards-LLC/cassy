@@ -419,6 +419,7 @@ fn only_https_or_loopback_urls_are_followed() {
 #[test]
 fn every_post_error_code_is_documented_in_the_violet_contract() {
     let reference = include_str!("../builtins/skills/violet/references/contract.md");
+    // pin: the violet contract must document every PostError code the post path can return; reading the implementation is how a new code is caught undocumented.
     let sources = [
         include_str!("slack.rs"),
         include_str!("../mcp/tools/service/artifact_post.rs"),

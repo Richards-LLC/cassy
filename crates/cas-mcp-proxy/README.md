@@ -39,6 +39,7 @@ managed Viktor default.
 ### Supported transports
 
 **Stdio** — spawns a child process:
+
 ```toml
 [servers.my-server]
 transport = "stdio"
@@ -62,6 +63,7 @@ A `TZ` set in the server's `env` takes precedence. Other stdio servers keep
 the host zone.
 
 **HTTP** — streamable HTTP connection:
+
 ```toml
 [servers.sentry]
 transport = "http"
@@ -70,6 +72,7 @@ auth = "your-token"
 ```
 
 **SSE** — server-sent events:
+
 ```toml
 [servers.my-sse]
 transport = "sse"
@@ -169,11 +172,13 @@ copy request arguments or upstream output.
 The dispatch formats remain:
 
 **JSON dispatch** (preferred):
+
 ```json
 { "server": "github", "tool": "list_issues", "args": { "repo": "myorg/app" } }
 ```
 
 **Batch** (parallel execution):
+
 ```json
 [
   { "server": "github", "tool": "list_issues", "args": { "repo": "app" } },
@@ -182,7 +187,8 @@ The dispatch formats remain:
 ```
 
 **Dot-call syntax** (fallback):
-```
+
+```text
 github.list_issues({"repo": "myorg/app"})
 ```
 

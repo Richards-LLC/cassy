@@ -9655,6 +9655,36 @@ impl CasCore {
         task.closed_at = Some(now);
         task.updated_at = now;
         task.deliverables.pre_close_hook = declared_hook_evidence;
+        // GH #1151: an earlier park could anchor a no-code task to the
+        // worker lane's other-task delivery. Every recorded anchor was shown
+        // to be another task's, so none survives as this task's delivery
+        // receipt for the epic close guard.
+        if no_code_without_own_commits
+            && close_disposition != TaskCloseDisposition::NegativeResult
+        {
+            let retired: Vec<String> = task
+                .deliverables
+                .factory_branch_anchor
+                .take()
+                .into_iter()
+                .chain(std::mem::take(
+                    &mut task.deliverables.historical_factory_branch_anchors,
+                ))
+                .chain(task.deliverables.parked_branch.take())
+                .collect();
+            if !retired.is_empty() {
+                let note = format!(
+                    "[{}] DECISION: no-code close retired lane records that belong to other tasks' deliveries: {}.",
+                    now.format("%Y-%m-%d %H:%M"),
+                    retired.join(", ")
+                );
+                task.notes = if task.notes.is_empty() {
+                    note
+                } else {
+                    format!("{}\n\n{note}", task.notes)
+                };
+            }
+        }
         task.deliverables.negative_result =
             negative_result_receipt
                 .as_ref()

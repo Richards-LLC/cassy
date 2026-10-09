@@ -38318,3 +38318,7 @@ mod identical_delivery_tests;
 #[cfg(test)]
 #[path = "close_ops/recovery_delivery_tests.rs"]
 mod recovery_delivery_tests;
+
+#[cfg(test)]
+#[path = "close_ops/no_code_close_tests.rs"]
+mod no_code_close_tests;

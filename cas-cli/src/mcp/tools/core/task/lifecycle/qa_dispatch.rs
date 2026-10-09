@@ -2129,6 +2129,131 @@ mod squash_close_tests {
         let changed = git(repo, &["rev-parse", "HEAD"]);
         assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", Some(&changed), None), QaCloseGate::Refuse(_)), "a matching older patch must not prove the supplied changed receipt");
     }
+
+    /// cas-a06c (GH #1137): gabber-studio's backend-only deliveries were
+    /// classified user-facing via an email template none of them touched.
+    /// The main checkout's local target was ~1000 commits behind origin, and
+    /// diffing the delivery from merge-base(local target, delivery) pulled in
+    /// every target commit since, including that template. This rebuilds the
+    /// shape: a stale local `main`, an unrelated template change and then the
+    /// squashed backend delivery on `origin/main`, closed with its receipt.
+    #[test]
+    fn backend_squash_is_not_user_facing_through_a_stale_local_target_cas_a06c() {
+        let mut env = TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let cas_dir = repo.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+        )
+        .unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        tasks.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "test-worker-session".into(),
+                "worker".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("test-worker-session".into());
+
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(repo, &["add", ".gitignore"]);
+        git(repo, &["commit", "-q", "-m", "seed"]);
+        let stale = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(repo.join("apps/backend/src/email/templates/en")).unwrap();
+        std::fs::write(
+            repo.join("apps/backend/src/email/templates/en/6xyr-jan-email.html"),
+            "<p>Rebuilt from source</p>\n",
+        )
+        .unwrap();
+        git(repo, &["add", "apps"]);
+        git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fix(email): rebuild templates (#2615)",
+            ],
+        );
+        git(repo, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::create_dir_all(repo.join("apps/backend/src/sms")).unwrap();
+        std::fs::write(
+            repo.join("apps/backend/src/sms/consent.service.ts"),
+            "export const persistReply = true;\n",
+        )
+        .unwrap();
+        git(repo, &["add", "apps/backend/src/sms"]);
+        git(
+            repo,
+            &["commit", "-q", "-m", "fix(cas-be01): persist consent reply"],
+        );
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--squash", "factory/worker"]);
+        git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "Persist the consent reply (cas-be01) (#3078)",
+            ],
+        );
+        let squash = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", &squash]);
+        // The primary checkout keeps the stale local target, as gabber's did.
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["branch", "-f", "main", &stale]);
+
+        let mut task = Task::new("cas-be01".into(), "Persist consent replies".into());
+        task.assignee = Some("worker".into());
+        task.status = TaskStatus::InProgress;
+        task.risk = vec![TaskRisk::None];
+        tasks.add(&task).unwrap();
+
+        // The pre-v3.46.0 measurement (raw local target, before cas-3760)
+        // really does pull the untouched template into this delivery.
+        let stale_view = crate::qa_pass::changed_paths_for_delivery(repo, "main", &squash).unwrap();
+        assert!(
+            stale_view
+                .iter()
+                .any(|path| path.ends_with("6xyr-jan-email.html")),
+            "fixture must reproduce the GH #1137 stale-target diff: {stale_view:?}"
+        );
+        assert_eq!(freshest_target_ref(repo, "main"), "origin/main");
+
+        let gate = core.independent_qa_close_gate(&task, repo, "main", Some(&squash), None);
+        assert!(
+            matches!(gate, QaCloseGate::Clear),
+            "a backend-only delivery must close without a QA round"
+        );
+        assert!(
+            cas_store::list_qa_passes(&cas_dir, &task.id)
+                .unwrap()
+                .is_empty(),
+            "no round may be opened from the stale-target diff"
+        );
+        let dispatched = core.dispatch_independent_qa(&task, repo, "main", Some(&squash));
+        assert!(dispatched.is_none(), "{dispatched:?}");
+        assert!(
+            cas_store::list_qa_passes(&cas_dir, &task.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 /// cas-00eb: cas-6e3a recorded anchor `b65630c82`, pushed a test fix and a

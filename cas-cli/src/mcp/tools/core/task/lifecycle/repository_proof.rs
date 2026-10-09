@@ -956,4 +956,60 @@ mod tests {
             RepositoryProofStatus::Unchanged
         );
     }
+    /// cas-a06c (GH #1137): gabber's verification dispatches bound the main
+    /// checkout's local `staging` (e446dd4dd), ~1000 commits behind
+    /// `origin/staging`, which already carried the squashed delivery. The
+    /// verifier was pointed at a tree without the delivery. A local target
+    /// that is strictly behind origin is stale; bind origin's tip instead.
+    #[test]
+    fn target_proof_binds_origin_when_the_local_target_is_behind_cas_a06c() {
+        let repo = tempfile::tempdir().expect("repository");
+        let path = repo.path();
+        git(path, &["init", "-q", "-b", "primary"]);
+        std::fs::write(path.join("seed.txt"), "seed\n").expect("seed");
+        git(path, &["add", "seed.txt"]);
+        git(path, &["commit", "-q", "-m", "seed"]);
+        git(path, &["branch", "target"]);
+        let stale = head(path);
+        git(path, &["checkout", "-q", "-b", "delivery"]);
+        std::fs::write(path.join("delivered.txt"), "delivered\n").expect("delivered");
+        git(path, &["add", "delivered.txt"]);
+        git(path, &["commit", "-q", "-m", "squashed delivery on origin"]);
+        let origin_tip = head(path);
+        git(
+            path,
+            &["update-ref", "refs/remotes/origin/target", &origin_tip],
+        );
+        git(path, &["checkout", "-q", "primary"]);
+        assert_eq!(
+            rev_parse(path, "target").expect("target"),
+            stale,
+            "local target stays stale"
+        );
+
+        let proof = capture_repository_proof_at_target(path, "target", vec![origin_tip.clone()])
+            .expect("target proof");
+
+        assert_eq!(
+            proof.head_commit, origin_tip,
+            "bound the stale local target"
+        );
+        assert_eq!(
+            evaluate_repository_proof(&proof).expect("unchanged origin target proof"),
+            RepositoryProofStatus::Unchanged
+        );
+
+        // A local target ahead of origin (merged here, not yet pushed) is
+        // the fresher view and stays bound.
+        git(path, &["checkout", "-q", "target"]);
+        git(path, &["merge", "-q", "--ff-only", "delivery"]);
+        std::fs::write(path.join("local.txt"), "local merge\n").expect("local");
+        git(path, &["add", "local.txt"]);
+        git(path, &["commit", "-q", "-m", "local merge not pushed"]);
+        let local_tip = head(path);
+        git(path, &["checkout", "-q", "primary"]);
+        let proof = capture_repository_proof_at_target(path, "target", Vec::new())
+            .expect("local-ahead proof");
+        assert_eq!(proof.head_commit, local_tip);
+    }
 }

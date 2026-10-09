@@ -307,13 +307,14 @@ mod tests {
             |_| true,
             |pid, st| pid == 7 && st == 71
         ));
-        // A reparenting target is never consulted.
+        // A reparenting target is never consulted, even when every live
+        // process other than the dead child would match its fingerprint.
         let mut reparented = restarted_mcp_child_row(Some(70));
         reparented.ppid = Some(1);
         assert!(!agent_process_is_alive_with(
             &reparented,
             |_| true,
-            |_, _| true
+            |pid, _| pid != 9
         ));
         // Both processes gone: the harness really exited.
         let gone = restarted_mcp_child_row(Some(70));

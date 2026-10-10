@@ -4939,6 +4939,70 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-3147: the hook takes roots and grants only from the operator
+    /// policy file (a `[factory.write_roots]` table in config.toml is
+    /// ignored), applies a grant to the supervisor and to the worker holding
+    /// the task, drops it once the task closes, and always protects the
+    /// policy directory.
+    #[test]
+    fn cas_3147_hook_policy_comes_from_the_operator_file_and_ends_at_task_close() {
+        use crate::config::operator_policy::{
+            OperatorWriteGrant, OperatorWriteMode, OperatorWritePolicy, OperatorWriteRoot,
+            save_operator_policy,
+        };
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let managed = project.path().canonicalize().unwrap().join("managed");
+        let granted = project.path().canonicalize().unwrap().join("granted");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::create_dir_all(&granted).unwrap();
+        std::fs::write(
+            cas_root.join("config.toml"),
+            format!("[factory.write_roots]\npaths = [\"{}\"]\n", granted.display()),
+        )
+        .unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
+        let mut task = cas_types::Task::new("cas-1169a".into(), "INGEST request files".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        save_operator_policy(
+            &cas_root,
+            &OperatorWritePolicy {
+                roots: vec![OperatorWriteRoot {
+                    path: managed.clone(),
+                    modes: [OperatorWriteMode::Create, OperatorWriteMode::Edit].into_iter().collect(),
+                }],
+                grants: vec![OperatorWriteGrant {
+                    task: task.id.clone(),
+                    path: granted.clone(),
+                    modes: [OperatorWriteMode::Create].into_iter().collect(),
+                    reason: "INGEST request files".into(),
+                    granted_at: "2026-10-10T18:00:00Z".into(),
+                }],
+            },
+        )
+        .unwrap();
+        let input = tool_input("Write", serde_json::json!({"file_path": "x"}), project.path());
+
+        let mut stores = ToolHookStores::new(&cas_root);
+        let (policy, supervisor_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, true);
+        assert_eq!(policy.protected, vec![cas_root.join("operator")]);
+        assert_eq!(policy.roots.len(), 2, "the file's root and grant, not config.toml: {policy:?}");
+        assert!(policy.roots.iter().any(|root| root.path == managed && root.task_id.is_none()));
+        assert!(policy.roots.iter().any(|root| root.path == granted && root.task_id.as_deref() == Some("cas-1169a")));
+        assert!(supervisor_tasks.contains("cas-1169a"), "the supervisor uses an open task's grant");
+        let (_, unleased_worker_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, false);
+        assert!(unleased_worker_tasks.is_empty(), "a worker without the task's lease gets no grant");
+
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let mut stores = ToolHookStores::new(&cas_root);
+        let (closed, closed_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, true);
+        assert!(closed_tasks.is_empty(), "a grant ends when its task closes");
+        assert!(closed.roots.iter().all(|root| root.task_id.is_none()), "{closed:?}");
+        assert_eq!(closed.protected, vec![cas_root.join("operator")]);
+    }
+
     /// cas-3147: an agent shell cannot run the operator-only commands,
     /// however the command is wrapped.
     #[test]

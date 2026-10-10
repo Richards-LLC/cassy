@@ -1067,7 +1067,10 @@ fn get_source_changes(
 /// Get git changes for a directory
 fn get_git_changes(repo_path: &Path) -> Vec<FileChangeInfo> {
     // Run git status --porcelain
+    // cas-39f3: a read-only poll of another agent's worktree must not take
+    // its optional index lock; a concurrent commit there would then fail.
     let status_output = match Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["status", "--porcelain"])
         .current_dir(repo_path)
         .output()

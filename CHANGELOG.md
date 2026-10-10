@@ -80,6 +80,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   profiles on the machine that already use Violet are repaired too, replacing
   a pasted token or retired variable names with env references.
 
+### Fixed — MCP proxy (#1168)
+
+- An MCP upstream that drops after a transport error now reconnects on the
+  next call once its backoff is due. It used to stay "absent" for the rest of
+  the session, with advice to restore a credential that was fine.
+- Every upstream call has a client-side timeout, 90 seconds by default
+  (`call_timeout_secs` in `proxy.toml`), so a hung upstream no longer holds a
+  call for about 1,000 seconds. A timed-out connection is dropped and
+  reconnects like any other failure.
+- `proxy_health` reflects what calls actually see: whether the upstream is
+  connected, its last success, and its last failure. It is updated as soon as
+  a call changes that state.
+- The "absent" message names the real next step: restore a missing or
+  rejected credential, install a missing executable, or wait for the
+  automatic reconnect (or restart) after a dropped connection.
+
 ### Fixed — visual QA
 
 - `--strict` no longer passes on a page that shows only a loading spinner

@@ -154,6 +154,7 @@ capable, `black-translucent` status bar; the shell already pads for
 `safe-area-inset-top`).
 
 Rules:
+
 - Never recolour the mark with `--color-action` or `currentColor`, or draw it
   as flat ink; the tile and its three ribbon fills are the brand.
 - The tile never sits on another violet fill (a `.primary` control, the

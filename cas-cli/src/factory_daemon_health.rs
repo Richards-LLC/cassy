@@ -65,6 +65,18 @@ pub struct DaemonLoopStatus {
     /// Outcome of the most recent spawn-queue reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reset: Option<String>,
+    /// Pass latency since the previous snapshot (GH #1165), measured from the
+    /// top of a pass to its end, excluding the idle sleep. `None` when no
+    /// pass completed in the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pass_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_pass_ms: Option<u64>,
+    /// Passes in the window, and how many took 100 ms or longer.
+    #[serde(default)]
+    pub window_passes: u64,
+    #[serde(default)]
+    pub passes_over_100ms: u64,
 }
 
 /// A supervisor's request to restart the spawn queue.
@@ -292,6 +304,10 @@ mod tests {
             loop_thread_wait: None,
             helpers_killed: Vec::new(),
             last_reset: None,
+            max_pass_ms: None,
+            p99_pass_ms: None,
+            window_passes: 0,
+            passes_over_100ms: 0,
         }
     }
 

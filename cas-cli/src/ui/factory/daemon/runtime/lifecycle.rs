@@ -2065,6 +2065,7 @@ impl FactoryDaemon {
             // retries on a later pass and panels keep their last snapshot.
             // `run` is driven by `Runtime::block_on`, so this thread-local
             // scope stays on this thread across the awaits below.
+            loop_progress.begin_pass();
             let pass_store_budget = cas_store::wait_budget::bound_waits_for(
                 super::store_worker::PASS_STORE_WAIT_BUDGET,
             );

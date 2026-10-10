@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use fs2::FileExt;
@@ -101,24 +101,57 @@ fn process_shared_lock(path: PathBuf) -> Arc<ProcessSharedLock> {
 pub(crate) struct SharedTaskSyncLease(Arc<ProcessSharedLock>);
 
 impl SharedTaskSyncLease {
-    fn acquire(path: PathBuf) -> std::io::Result<Self> {
+    /// Waits only behind an exclusive holder, a pre-GH #1165 binary; every
+    /// current holder takes the lease shared. The wait polls with the
+    /// in-process state unlocked, so a sibling thread with a deadline is
+    /// never stuck behind this one's wait.
+    fn acquire(path: PathBuf, deadline: Option<Instant>) -> std::io::Result<Self> {
         let lock = process_shared_lock(path);
-        {
-            let mut state = lock
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if state.0 == 0 {
-                // Blocks only behind an exclusive holder: a pre-GH #1165
-                // binary. Every current holder takes the lease shared.
+        let mut poll = LOCK_POLL_MIN;
+        loop {
+            {
+                let mut state = lock
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state.0 > 0 {
+                    state.0 += 1;
+                    break;
+                }
                 let file = open_lock_file(&lock.path)?;
-                FileExt::lock_shared(&file)?;
-                state.1 = Some(file);
+                if try_lock(&file, false)? {
+                    state.1 = Some(file);
+                    state.0 = 1;
+                    break;
+                }
             }
-            state.0 += 1;
+            poll = wait_for_next_poll(deadline, poll)?;
         }
         Ok(Self(lock))
     }
+}
+
+const LOCK_POLL_MIN: Duration = Duration::from_millis(2);
+const LOCK_POLL_MAX: Duration = Duration::from_millis(50);
+
+/// Sleep before the next try-lock poll, never past `deadline`; `WouldBlock`
+/// once the deadline has passed. Returns the next poll interval.
+fn wait_for_next_poll(deadline: Option<Instant>, poll: Duration) -> std::io::Result<Duration> {
+    let sleep = match deadline {
+        None => poll,
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "task-sync mutation lease still held when the wait budget ran out",
+                ));
+            }
+            poll.min(remaining)
+        }
+    };
+    std::thread::sleep(sleep);
+    Ok((poll * 2).min(LOCK_POLL_MAX))
 }
 
 impl Drop for SharedTaskSyncLease {
@@ -230,7 +263,20 @@ impl SyncQueue {
         &self,
         entity_ids: &[S],
     ) -> Result<TaskSyncMutationGuard, CasError> {
-        let shared = SharedTaskSyncLease::acquire(self.task_sync_lock_path())?;
+        self.lock_task_sync_mutations_within(entity_ids, None)
+    }
+
+    /// [`Self::lock_task_sync_mutations`] with a wait budget: `None` waits as
+    /// long as it takes; `Some(budget)` fails with an `io::ErrorKind::WouldBlock`
+    /// error (as `CasError::Io`) once `budget` has passed without the leases,
+    /// so a loop thread can fail fast instead of queueing (GH #1165).
+    pub(crate) fn lock_task_sync_mutations_within<S: AsRef<str>>(
+        &self,
+        entity_ids: &[S],
+        budget: Option<Duration>,
+    ) -> Result<TaskSyncMutationGuard, CasError> {
+        let deadline = budget.map(|budget| Instant::now() + budget);
+        let shared = SharedTaskSyncLease::acquire(self.task_sync_lock_path(), deadline)?;
         let mut stripes: Vec<u64> = entity_ids
             .iter()
             .map(|id| task_sync_stripe(id.as_ref()))
@@ -244,7 +290,15 @@ impl SyncQueue {
         };
         for stripe in stripes {
             let file = open_lock_file(&self.task_sync_stripe_path(stripe))?;
-            file.lock_exclusive()?;
+            if deadline.is_none() {
+                file.lock_exclusive()?;
+            } else {
+                let mut poll = LOCK_POLL_MIN;
+                while !try_lock(&file, true)? {
+                    // On WouldBlock the guard drops and releases what it holds.
+                    poll = wait_for_next_poll(deadline, poll)?;
+                }
+            }
             guard.stripes.push(file);
         }
         Ok(guard)
@@ -907,6 +961,66 @@ mod tests {
         );
         drop(first);
         legacy.try_lock_exclusive().unwrap();
+        FileExt::unlock(&legacy).unwrap();
+    }
+
+    /// A loop-thread caller with a wait budget fails fast with WouldBlock
+    /// instead of queueing behind a held stripe or a pre-GH #1165 exclusive
+    /// holder, and releases whatever it had taken.
+    #[test]
+    fn bounded_mutation_lock_fails_fast_with_would_block() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+        let budget = Some(std::time::Duration::from_millis(60));
+        // Stripes are taken in ascending order: "cas-bounded" (6) is taken,
+        // then the wait on the held "cas-other" (9) runs out.
+        assert!(task_sync_stripe("cas-bounded") < task_sync_stripe("cas-other"));
+        let held = queue.lock_task_sync_mutations(&["cas-other"]).unwrap();
+        let contender = Arc::clone(&queue);
+        let (started, result) = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = contender
+                .lock_task_sync_mutations_within(&["cas-other", "cas-bounded"], budget)
+                .map(|_| ());
+            (started.elapsed(), result)
+        })
+        .join()
+        .unwrap();
+        match result {
+            Err(CasError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock)
+            }
+            other => panic!("expected WouldBlock, got {other:?}"),
+        }
+        assert!(
+            started >= std::time::Duration::from_millis(60),
+            "{started:?}"
+        );
+        assert!(
+            started < std::time::Duration::from_millis(500),
+            "{started:?}"
+        );
+        // The failed attempt released the stripe it had already taken.
+        let other =
+            open_lock_file(&queue.task_sync_stripe_path(task_sync_stripe("cas-bounded"))).unwrap();
+        other.try_lock_exclusive().unwrap();
+        FileExt::unlock(&other).unwrap();
+        drop(held);
+        drop(
+            queue
+                .lock_task_sync_mutations_within(&["cas-other"], budget)
+                .unwrap(),
+        );
+
+        let legacy = open_lock_file(&temp.path().join(TASK_SYNC_INTENT_LOCK)).unwrap();
+        legacy.lock_exclusive().unwrap();
+        let started = std::time::Instant::now();
+        let error = queue
+            .lock_task_sync_mutations_within(&["cas-bounded"], budget)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(matches!(&error, CasError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
         FileExt::unlock(&legacy).unwrap();
     }
 

@@ -1442,7 +1442,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         std::fs::create_dir_all(&slots).unwrap();
         let _held = acquire_slot(&slots, 1).unwrap();
 
-        let args: Vec<String> = ["check", "-p", "cas", "--lib"].iter().map(|arg| arg.to_string()).collect();
+        let args: Vec<String> = ["-p", "cas", "--lib"].iter().map(|arg| arg.to_string()).collect();
         let error = execute_at(&root, &args, &repo, Path::new("/nonexistent/cargo"))
             .expect_err("the only builder slot is held");
         assert!(error.to_string().contains("max_concurrent_builders=1"), "{error}");

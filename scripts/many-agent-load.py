@@ -712,6 +712,14 @@ def summarize_daemon(sampler: DaemonSampler | None, alive: bool) -> dict:
         # Over the whole run, p99 < 100 ms exactly when fewer than 1% of the
         # timed passes took 100 ms or more.
         summary["pass_p99_under_100ms"] = timed > 0 and over / timed < 0.01
+        # Window series, so slow passes can be lined up with the agent load.
+        summary["windows"] = [
+            {"written_at": s.get("written_at"), "phase": s.get("phase"),
+             "passes": s.get("window_passes", 0), "over_100ms": s.get("passes_over_100ms", 0),
+             "p99_ms": s.get("p99_pass_ms"), "max_ms": s.get("max_pass_ms")}
+            for s in windows
+            if s.get("passes_over_100ms", 0) > 0 or (s.get("max_pass_ms") or 0) >= 100
+        ]
         summary["pass_p99_ms"] = max(p99s, default=None)
         summary["verdict_basis"] = ("daemon-reported per-pass timings: p99 < 100 ms iff under 1% "
                                     "of timed passes took 100 ms or more (pass_p99_ms is the "

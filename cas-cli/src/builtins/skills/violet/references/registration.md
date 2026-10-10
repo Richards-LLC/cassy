@@ -58,6 +58,14 @@ shared secret. If `POST /api/clients` is absent, setup fails closed naming
 the Violet tracker issue (`cas config get issues.components.violet`) and never
 mints locally.
 
+`--channel <name|id>` maps a Slack channel to this project, so Violet activity
+there wakes this project's supervisor. It sends `PUT /api/channels/<channel>`
+with the project's canonical Cloud id and the same Cassy Cloud login, and the
+receipt prints the resolved channel id. Violet must already be a member: a
+`not_a_member` refusal means invite @Violet to the channel first. A channel
+another project owns is refused as `channel_mapped` unless `--channel-replace`
+is passed. `--channel-remove <C…|G…>` removes a mapping by channel id.
+
 The hand-written shapes below remain the reference for repairing a machine by
 hand or for a project that has never named the hub routes itself.
 

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use cmcp_core::config::{
@@ -89,6 +89,17 @@ pub struct VioletArgs {
     /// Report what would change without writing anything.
     #[arg(long)]
     pub dry_run: bool,
+    /// Map this Slack channel (name or C…/G… id) to this project, so Violet
+    /// activity there wakes this project's supervisor. Violet must already be
+    /// a member of the channel.
+    #[arg(long, value_name = "CHANNEL")]
+    pub channel: Option<String>,
+    /// With --channel: take the channel over from the project it maps to now.
+    #[arg(long, requires = "channel")]
+    pub channel_replace: bool,
+    /// Remove this project's mapping for a channel, by its C…/G… id.
+    #[arg(long, value_name = "CHANNEL_ID", conflicts_with = "channel")]
+    pub channel_remove: Option<String>,
 }
 
 impl VioletArgs {
@@ -371,6 +382,12 @@ enum HubClientError {
     Unauthorized,
     Forbidden,
     LabelTaken,
+    /// `409 not_a_member`: Violet is not in the channel.
+    NotAMember,
+    /// `409 channel_mapped`: another project owns the channel.
+    ChannelMapped,
+    /// `404 not_found` from a mapping route.
+    NotFound,
     HttpStatus(u16),
     Transport(String),
     InvalidResponse,
@@ -383,6 +400,9 @@ impl std::fmt::Display for HubClientError {
             Self::Unauthorized => write!(f, "unauthorized"),
             Self::Forbidden => write!(f, "forbidden"),
             Self::LabelTaken => write!(f, "label taken"),
+            Self::NotAMember => write!(f, "not a member"),
+            Self::ChannelMapped => write!(f, "channel mapped to another project"),
+            Self::NotFound => write!(f, "not found"),
             Self::HttpStatus(status) => write!(f, "HTTP {status}"),
             Self::Transport(error) => write!(f, "transport error: {error}"),
             Self::InvalidResponse => write!(f, "invalid response"),
@@ -402,6 +422,55 @@ trait HubClient {
         hub_url: &str,
         cloud_token: &str,
     ) -> std::result::Result<String, HubClientError>;
+    /// `PUT /api/channels/{channel}` with `{project_id, replace}`.
+    fn map_channel(
+        &self,
+        _hub_url: &str,
+        _cloud_token: &str,
+        _channel: &str,
+        _project_id: &str,
+        _replace: bool,
+    ) -> std::result::Result<ChannelMapping, HubClientError> {
+        Err(HubClientError::RouteUnavailable)
+    }
+    /// `DELETE /api/channels/{channel_id}`.
+    fn unmap_channel(
+        &self,
+        _hub_url: &str,
+        _cloud_token: &str,
+        _channel_id: &str,
+    ) -> std::result::Result<(), HubClientError> {
+        Err(HubClientError::RouteUnavailable)
+    }
+}
+
+/// The hub's channel→project mapping route (violet_ps push-wake §1.5).
+pub const HUB_CHANNEL_ROUTE: &str = "/api/channels";
+
+/// One row of the hub's channel→project mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ChannelMapping {
+    channel_id: String,
+    channel_name: String,
+    project_id: String,
+}
+
+/// The hub's JSON `error` code from a failed response body, if any.
+fn hub_error_code(response: ureq::Response) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(&response.into_string().ok()?)
+        .ok()?
+        .get("error")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn classify_channel_status(status: u16, code: Option<&str>) -> HubClientError {
+    match (status, code) {
+        (409, Some("not_a_member")) => HubClientError::NotAMember,
+        (409, Some("channel_mapped")) => HubClientError::ChannelMapped,
+        (404, Some("not_found")) => HubClientError::NotFound,
+        _ => classify_hub_status(status),
+    }
 }
 
 fn hub_route_url(hub_url: &str, route: &str) -> std::result::Result<String, HubClientError> {
@@ -424,6 +493,51 @@ fn classify_hub_status(status: u16) -> HubClientError {
 struct ProcessHubClient;
 
 impl HubClient for ProcessHubClient {
+    fn map_channel(
+        &self,
+        hub_url: &str,
+        cloud_token: &str,
+        channel: &str,
+        project_id: &str,
+        replace: bool,
+    ) -> std::result::Result<ChannelMapping, HubClientError> {
+        let url = hub_route_url(hub_url, &format!("{HUB_CHANNEL_ROUTE}/{channel}"))?;
+        match ureq::put(&url)
+            .set("Authorization", &format!("Bearer {cloud_token}"))
+            .set("Content-Type", "application/json")
+            .send_json(serde_json::json!({ "project_id": project_id, "replace": replace }))
+        {
+            Ok(response) => response
+                .into_json::<ChannelMapping>()
+                .map_err(|_| HubClientError::InvalidResponse),
+            Err(ureq::Error::Status(status, response)) => Err(classify_channel_status(
+                status,
+                hub_error_code(response).as_deref(),
+            )),
+            Err(ureq::Error::Transport(error)) => Err(HubClientError::Transport(error.to_string())),
+        }
+    }
+
+    fn unmap_channel(
+        &self,
+        hub_url: &str,
+        cloud_token: &str,
+        channel_id: &str,
+    ) -> std::result::Result<(), HubClientError> {
+        let url = hub_route_url(hub_url, &format!("{HUB_CHANNEL_ROUTE}/{channel_id}"))?;
+        match ureq::delete(&url)
+            .set("Authorization", &format!("Bearer {cloud_token}"))
+            .call()
+        {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(status, response)) => Err(classify_channel_status(
+                status,
+                hub_error_code(response).as_deref(),
+            )),
+            Err(ureq::Error::Transport(error)) => Err(HubClientError::Transport(error.to_string())),
+        }
+    }
+
     fn create_client(
         &self,
         hub_url: &str,
@@ -748,6 +862,116 @@ fn provision_credentials_with_cloud_token(
         }
     };
     Ok((actual_label, CredentialValues { token, bypass }))
+}
+
+// ---------------------------------------------------------------------------
+// Channel → project mapping (cas-a897)
+// ---------------------------------------------------------------------------
+
+/// What `--channel`, `--channel-replace` and `--channel-remove` asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChannelRequest {
+    channel: Option<String>,
+    replace: bool,
+    remove: Option<String>,
+}
+
+impl ChannelRequest {
+    fn from_args(args: &VioletArgs) -> Self {
+        Self {
+            channel: args.channel.clone(),
+            replace: args.channel_replace,
+            remove: args.channel_remove.clone(),
+        }
+    }
+}
+
+/// A Slack channel name or id as one URL path segment: `#` stripped, and only
+/// the characters Slack names and ids use.
+fn channel_segment(raw: &str) -> Result<String> {
+    let channel = raw.trim().trim_start_matches('#');
+    anyhow::ensure!(
+        !channel.is_empty()
+            && channel
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "{raw:?} is not a Slack channel name or id"
+    );
+    Ok(channel.to_string())
+}
+
+/// Map (or unmap) a Slack channel for this project through the hub, with the
+/// Cassy Cloud login that also authorizes `POST {HUB_CLIENT_ROUTE}`. Returns
+/// the receipt line, or `None` when nothing was asked.
+fn register_channel_mapping(
+    request: &ChannelRequest,
+    hub_url: &str,
+    cloud_token: Option<&str>,
+    project_id: Option<&str>,
+    hub: &dyn HubClient,
+) -> Result<Option<String>> {
+    if request.channel.is_none() && request.remove.is_none() {
+        return Ok(None);
+    }
+    let cloud_token = cloud_token.ok_or_else(|| {
+        anyhow::anyhow!(
+            "mapping a Slack channel needs a Cassy Cloud login (hub route {HUB_CHANNEL_ROUTE}); \
+             run `cas login` and retry"
+        )
+    })?;
+    if let Some(raw) = &request.remove {
+        let channel_id = channel_segment(raw)?;
+        anyhow::ensure!(
+            channel_id.starts_with(['C', 'G'])
+                && channel_id
+                    .chars()
+                    .skip(1)
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "--channel-remove takes the channel id (C… or G…), not a name: {raw}"
+        );
+        return match hub.unmap_channel(hub_url, cloud_token, &channel_id) {
+            Ok(()) => Ok(Some(format!("channel mapping: unmapped {channel_id}"))),
+            Err(HubClientError::NotFound) => Ok(Some(format!(
+                "channel mapping: {channel_id} was not mapped"
+            ))),
+            Err(error) => Err(channel_mapping_error(&error, &channel_id)),
+        };
+    }
+    let raw = request.channel.as_deref().unwrap_or_default();
+    let channel = channel_segment(raw)?;
+    let project_id = project_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot map #{channel}: this project has no canonical Cloud id; set one with \
+             `cas cloud project set` and retry"
+        )
+    })?;
+    let mapping = hub
+        .map_channel(hub_url, cloud_token, &channel, project_id, request.replace)
+        .map_err(|error| channel_mapping_error(&error, &channel))?;
+    Ok(Some(format!(
+        "channel mapping: #{} ({}) → {}",
+        mapping.channel_name, mapping.channel_id, mapping.project_id
+    )))
+}
+
+fn channel_mapping_error(error: &HubClientError, channel: &str) -> anyhow::Error {
+    match error {
+        HubClientError::NotAMember => anyhow::anyhow!(
+            "the hub refused to map #{channel}: invite @Violet to #{channel} first, then re-run"
+        ),
+        HubClientError::ChannelMapped => anyhow::anyhow!(
+            "#{channel} is already mapped to another project; re-run with --channel-replace if \
+             this project should own it"
+        ),
+        HubClientError::Unauthorized | HubClientError::Forbidden => anyhow::anyhow!(
+            "the hub rejected the Cassy Cloud login for {HUB_CHANNEL_ROUTE} ({error}); run \
+             `cas login` and retry"
+        ),
+        HubClientError::RouteUnavailable => anyhow::anyhow!(
+            "this hub has no channel mapping route ({HUB_CHANNEL_ROUTE}); update the hub first"
+        ),
+        other => anyhow::anyhow!("hub route {HUB_CHANNEL_ROUTE} failed for #{channel}: {other}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2830,6 +3054,28 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
         println!("{}", serde_json::to_string_pretty(&report)?);
     }
 
+    // cas-a897: map (or unmap) a Slack channel for push wakes. Runs after the
+    // registration so a refusal here never leaves the machine half-registered.
+    let channel_line = if args.dry_run {
+        args.channel
+            .as_ref()
+            .map(|channel| format!("channel mapping: would map {channel} (dry run)"))
+    } else {
+        let cloud_token = CloudConfig::load_effective()
+            .token
+            .filter(|token| !token.trim().is_empty());
+        let project_id = crate::store::find_cas_root()
+            .ok()
+            .and_then(|cas_root| crate::cloud::resolve_canonical_id(&cas_root));
+        register_channel_mapping(
+            &ChannelRequest::from_args(args),
+            &args.url,
+            cloud_token.as_deref(),
+            project_id.as_deref(),
+            &ProcessHubClient,
+        )?
+    };
+
     // "Already configured" is a claim about dispatch, not about one file: a
     // project proxy this run had to repair means the machine was *not*
     // already configured, however untouched the machine file was.
@@ -2860,6 +3106,9 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
 
     let mut outcome = IntegrationOutcome::new(Platform::Violet, IntegrationAction::Init, status);
     outcome.summary.push(format!("hub: {}", report.url));
+    if let Some(line) = channel_line {
+        outcome.summary.push(line);
+    }
     outcome.summary.push(format!(
         "credentials: {}",
         report
@@ -5401,6 +5650,213 @@ auth = "env:{token}"
         assert_eq!(
             std::fs::read_to_string(&untouched).unwrap(),
             untouched_before
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-a897: `cas integrate violet --channel` maps a Slack channel to this
+    // project through the hub's channel→project API
+    // -----------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct FakeChannelHub {
+        maps: RefCell<Vec<(String, String, String, String, bool)>>,
+        unmaps: RefCell<Vec<(String, String, String)>>,
+        map_result: RefCell<Option<std::result::Result<ChannelMapping, HubClientError>>>,
+    }
+
+    impl HubClient for FakeChannelHub {
+        fn create_client(
+            &self,
+            _hub_url: &str,
+            _cloud_token: &str,
+            _label: &str,
+        ) -> std::result::Result<(String, Option<String>), HubClientError> {
+            unreachable!("channel mapping never mints a client")
+        }
+
+        fn fetch_bypass(
+            &self,
+            _hub_url: &str,
+            _cloud_token: &str,
+        ) -> std::result::Result<String, HubClientError> {
+            unreachable!("channel mapping never reads the bypass")
+        }
+
+        fn map_channel(
+            &self,
+            hub_url: &str,
+            cloud_token: &str,
+            channel: &str,
+            project_id: &str,
+            replace: bool,
+        ) -> std::result::Result<ChannelMapping, HubClientError> {
+            self.maps.borrow_mut().push((
+                hub_url.into(),
+                cloud_token.into(),
+                channel.into(),
+                project_id.into(),
+                replace,
+            ));
+            self.map_result.borrow_mut().take().unwrap_or_else(|| {
+                Ok(ChannelMapping {
+                    channel_id: "C09FCTHCQ2U".into(),
+                    channel_name: "violet-internal".into(),
+                    project_id: project_id.into(),
+                })
+            })
+        }
+
+        fn unmap_channel(
+            &self,
+            hub_url: &str,
+            cloud_token: &str,
+            channel_id: &str,
+        ) -> std::result::Result<(), HubClientError> {
+            self.unmaps
+                .borrow_mut()
+                .push((hub_url.into(), cloud_token.into(), channel_id.into()));
+            Ok(())
+        }
+    }
+
+    fn channel_request(channel: &str) -> ChannelRequest {
+        ChannelRequest {
+            channel: Some(channel.to_string()),
+            replace: false,
+            remove: None,
+        }
+    }
+
+    #[test]
+    fn channel_flag_maps_the_channel_to_this_project_with_the_cloud_login_cas_a897() {
+        let hub = FakeChannelHub::default();
+        let line = register_channel_mapping(
+            &channel_request("#violet-internal"),
+            violet_hub_url(),
+            Some("cloud-session-token"),
+            Some("github.com/richards-llc/violet_ps"),
+            &hub,
+        )
+        .unwrap()
+        .expect("a mapping was requested");
+        let maps = hub.maps.borrow();
+        assert_eq!(maps.len(), 1);
+        let (url, token, channel, project, replace) = &maps[0];
+        assert_eq!(url, violet_hub_url());
+        assert_eq!(token, "cloud-session-token");
+        assert_eq!(channel, "violet-internal", "a leading # is stripped");
+        assert_eq!(project, "github.com/richards-llc/violet_ps");
+        assert!(!replace);
+        assert!(line.contains("#violet-internal (C09FCTHCQ2U)"), "{line}");
+        assert!(line.contains("github.com/richards-llc/violet_ps"), "{line}");
+        assert!(!line.contains("cloud-session-token"), "{line}");
+    }
+
+    #[test]
+    fn channel_mapping_failures_name_the_fix_cas_a897() {
+        let cases = [
+            (
+                HubClientError::NotAMember,
+                "invite @Violet to #violet-internal first",
+            ),
+            (HubClientError::ChannelMapped, "--channel-replace"),
+            (HubClientError::Unauthorized, "Cassy Cloud login"),
+        ];
+        for (error, expected) in cases {
+            let hub = FakeChannelHub::default();
+            *hub.map_result.borrow_mut() = Some(Err(error.clone()));
+            let message = register_channel_mapping(
+                &channel_request("violet-internal"),
+                violet_hub_url(),
+                Some("cloud-session-token"),
+                Some("project"),
+                &hub,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(message.contains(expected), "{error:?}: {message}");
+        }
+
+        // Replace is only sent when asked for.
+        let hub = FakeChannelHub::default();
+        let request = ChannelRequest {
+            replace: true,
+            ..channel_request("violet-internal")
+        };
+        register_channel_mapping(&request, violet_hub_url(), Some("t"), Some("p"), &hub).unwrap();
+        assert!(hub.maps.borrow()[0].4);
+
+        // No Cloud login, no project identity, or a malformed channel never
+        // reach the hub.
+        let hub = FakeChannelHub::default();
+        let no_login = register_channel_mapping(
+            &channel_request("x"),
+            violet_hub_url(),
+            None,
+            Some("p"),
+            &hub,
+        );
+        assert!(
+            no_login
+                .unwrap_err()
+                .to_string()
+                .contains("Cassy Cloud login")
+        );
+        let no_project = register_channel_mapping(
+            &channel_request("x"),
+            violet_hub_url(),
+            Some("t"),
+            None,
+            &hub,
+        );
+        assert!(no_project.unwrap_err().to_string().contains("canonical"));
+        let malformed = register_channel_mapping(
+            &channel_request("a/b?c"),
+            violet_hub_url(),
+            Some("t"),
+            Some("p"),
+            &hub,
+        );
+        assert!(malformed.is_err());
+        assert!(hub.maps.borrow().is_empty());
+    }
+
+    #[test]
+    fn channel_remove_unmaps_by_channel_id_only_cas_a897() {
+        let hub = FakeChannelHub::default();
+        let request = ChannelRequest {
+            channel: None,
+            replace: false,
+            remove: Some("C09FCTHCQ2U".into()),
+        };
+        let line = register_channel_mapping(&request, violet_hub_url(), Some("t"), Some("p"), &hub)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hub.unmaps.borrow()[0].2, "C09FCTHCQ2U");
+        assert!(line.contains("unmapped C09FCTHCQ2U"), "{line}");
+
+        let by_name = ChannelRequest {
+            remove: Some("violet-internal".into()),
+            ..request
+        };
+        let error =
+            register_channel_mapping(&by_name, violet_hub_url(), Some("t"), Some("p"), &hub)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("channel id"), "{error}");
+        assert_eq!(hub.unmaps.borrow().len(), 1);
+
+        // Nothing requested: nothing happens.
+        let none = ChannelRequest {
+            channel: None,
+            replace: false,
+            remove: None,
+        };
+        assert!(
+            register_channel_mapping(&none, violet_hub_url(), Some("t"), Some("p"), &hub)
+                .unwrap()
+                .is_none()
         );
     }
 }

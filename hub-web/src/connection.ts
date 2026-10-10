@@ -790,6 +790,15 @@ export class HubConnectionSupervisor {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/operations`, body);
   }
 
+  /**
+   * Grant or revoke a task's write access outside its worktree (cas-ab04,
+   * GH #1169). Needs factory:manage; the hub records the grant with this
+   * device as its source and posts a receipt into the conversation.
+   */
+  async writeGrant(session: string, body: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/write-grants`, body);
+  }
+
   async status(session: string): Promise<Record<string, unknown>> {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/status`);
   }

@@ -50,6 +50,23 @@ describe('conversation evidence', () => {
     expect(history.events.map(event => event.kind === 'send' && event.value.text))
       .toEqual(['Phone message', 'Computer message', 'Terminal message']);
   });
+  it('threads the supervisor answer under a terminal-typed question, once (cas-5c89)', () => {
+    const history = new ConversationHistory();
+    history.hydrateSend({ notification_id: 3, target: 'supervisor', text: 'What changed in Violet today?', state: 'acknowledged', stamped: false, device_id: 'terminal', operator_label: 'Terminal', at: '2026-10-10T13:34:00Z' });
+    const answer = { notification_id: 4, reply_to: 3, message: 'Two fixes landed.', summary: 'Two fixes landed.', device_id: '*', kind: 'answer' as const, at: '2026-10-10T13:34:20Z' };
+    history.hydrateReply(answer);
+    history.hydrateReply(answer);
+    const view = new ConversationView(document, history, 'supervisor');
+    document.body.replaceChildren(view.element);
+    view.update();
+    expect(history.events.map(event => event.kind === 'send' ? `send:${event.value.text}` : `reply:${event.value.message}`))
+      .toEqual(['send:What changed in Violet today?', 'reply:Two fixes landed.']);
+    expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent)).toEqual(['from Terminal']);
+    const send = history.events.find(event => event.kind === 'send')!;
+    if (send.kind !== 'send') throw new Error('Missing send');
+    expect(send.value.state).toBe('replied');
+    expect(view.element.textContent).toContain('Two fixes landed.');
+  });
   it('shows the other device send live before its reply and labels the sender receipt', () => {
     const history = new ConversationHistory();
     history.submit('own', 'supervisor', 'Mine');

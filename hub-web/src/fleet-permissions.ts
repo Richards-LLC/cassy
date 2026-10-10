@@ -25,7 +25,9 @@ export type FleetOperation =
   | "assign-task"
   | "restart-worker"
   | "stop-worker"
-  | "end-session";
+  | "end-session"
+  /** cas-ab04: grant or revoke a task's write access outside its worktree. */
+  | "write-access";
 
 /**
  * Operator decision: Stop, Restart and End session are destructive and need
@@ -41,6 +43,7 @@ const OPERATION_SCOPE: Readonly<Record<FleetOperation, Scope>> = {
   "restart-worker": FACTORY_MANAGE_SCOPE,
   "stop-worker": FACTORY_MANAGE_SCOPE,
   "end-session": FACTORY_MANAGE_SCOPE,
+  "write-access": FACTORY_MANAGE_SCOPE,
 };
 
 export function fleetOperationScope(operation: FleetOperation): Scope {

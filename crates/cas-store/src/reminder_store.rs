@@ -562,6 +562,12 @@ pub fn expire_stale_bounded(
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
     };
 
+    // GH #1165: never wait past the calling thread's own store wait budget.
+    let busy_budget = crate::wait_budget::remaining_wait()
+        .map_or(busy_budget, |left| busy_budget.min(left));
+    if busy_budget.is_zero() && crate::wait_budget::wait_deadline().is_some() {
+        return Ok(ReminderExpiryOutcome::DeferredBusy);
+    }
     conn.busy_timeout(busy_budget)?;
     let expiry_result = expire_stale_with_conn(&conn);
     crate::shared_db::install_busy_handler(&conn)?;

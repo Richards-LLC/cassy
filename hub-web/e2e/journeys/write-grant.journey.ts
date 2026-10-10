@@ -83,7 +83,7 @@ test.describe("write access without factory:manage cas_ab04", () => {
   test.use({ viewport: { width: 1280, height: 844 }, colorScheme: "light" });
   test("HUB-J20 a pairing without factory:manage cannot grant", journeyPart, async ({ page, journey }) => {
     const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate"] }, fleet: { [PELICAN]: fleet() } });
-    await journey.stage("Write access is visible but not allowed", async () => {
+    await journey.stage("A pairing without factory:manage", async () => {
       await journey.open();
       await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
       const grant = page.locator("#status-view").getByRole("button", { name: "Write access…" });

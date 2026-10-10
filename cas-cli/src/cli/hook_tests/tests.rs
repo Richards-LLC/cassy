@@ -260,9 +260,13 @@ fn test_configure_codex_creates_config() {
     let config: toml::Value = toml::from_str(&content).unwrap();
     let entry = config
         .get("mcp_servers")
-        .and_then(|v| v.get("cas"))
+        .and_then(|v| v.get("cs"))
         .and_then(|v| v.as_table())
-        .expect("mcp_servers.cas missing");
+        .expect("mcp_servers.cs missing (cas-8a20: Codex's canonical Cassy key is `cs`)");
+    assert!(
+        config.get("mcp_servers").and_then(|v| v.get("cas")).is_none(),
+        "a fresh config must not also register `cas`: {content}"
+    );
 
     assert_eq!(
         entry.get("command"),
@@ -341,11 +345,18 @@ env = { CAS_LOG = "debug" }
 
     let updated = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
     let config: toml::Value = toml::from_str(&updated).unwrap();
+    // cas-8a20: a Cassy entry under a non-canonical key migrates to `cs` so
+    // it merges with the project and spawn-injected `cs` layers instead of
+    // starting a second `cas serve`.
+    assert!(
+        config.get("mcp_servers").and_then(|v| v.get("context7")).is_none(),
+        "the non-canonical Cassy key must be removed: {updated}"
+    );
     let entry = config
         .get("mcp_servers")
-        .and_then(|v| v.get("context7"))
+        .and_then(|v| v.get("cs"))
         .and_then(|v| v.as_table())
-        .expect("mcp_servers.context7 missing");
+        .expect("mcp_servers.cs missing");
 
     assert_eq!(
         entry.get("command"),
@@ -372,6 +383,109 @@ env = { CAS_LOG = "debug" }
             env
         }))
     );
+}
+
+/// cas-8a20: the user-level writer historically registered
+/// `[mcp_servers.cas]` while projects and factory spawns use `cs`. Codex
+/// loads both keys, so every Codex session ran two `cas serve` processes.
+/// The writer must converge every Cassy entry onto the single `cs` key,
+/// keep operator env additions and leave other servers alone.
+#[test]
+fn codex_user_config_migrates_cas_key_to_canonical_cs_cas_8a20() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join("codex-home");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+model = "gpt-5"
+
+[mcp_servers.cas]
+command = "cas"
+args = ["serve"]
+
+[mcp_servers.cas.env]
+CAS_CODEX_FALLBACK_SESSION = "1"
+CAS_LOG = "debug"
+
+[mcp_servers.violet]
+url = "https://violet.example/mcp"
+"#,
+    )
+    .unwrap();
+
+    assert!(crate::cli::hook::config_gen::configure_codex_user_config(&codex_dir).unwrap());
+
+    let content = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+    let config: toml::Value = toml::from_str(&content).unwrap();
+    let servers = config["mcp_servers"].as_table().unwrap();
+    assert!(!servers.contains_key("cas"), "{content}");
+    assert_eq!(servers["cs"]["command"].as_str(), Some("cas"), "{content}");
+    assert_eq!(servers["cs"]["env"]["CAS_LOG"].as_str(), Some("debug"), "{content}");
+    assert_eq!(
+        servers["cs"]["env"]["CAS_CODEX_FALLBACK_SESSION"].as_str(),
+        Some("1"),
+        "{content}"
+    );
+    assert_eq!(
+        servers["violet"]["url"].as_str(),
+        Some("https://violet.example/mcp"),
+        "{content}"
+    );
+    assert_eq!(config["model"].as_str(), Some("gpt-5"), "{content}");
+
+    assert!(
+        !crate::cli::hook::config_gen::configure_codex_user_config(&codex_dir).unwrap(),
+        "a converged config is a no-op"
+    );
+}
+
+/// cas-8a20: a config that already carries both `cas` and `cs` Cassy
+/// entries collapses to one `cs` entry; the `cs` entry wins.
+#[test]
+fn codex_config_collapses_duplicate_cassy_entries_cas_8a20() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+[mcp_servers.cs]
+command = "cas"
+args = ["serve"]
+env_vars = ["PATH", "HOME"]
+
+[mcp_servers.cs.env]
+CAS_CODEX_FALLBACK_SESSION = "1"
+
+[mcp_servers.cas]
+command = "cas"
+args = ["serve"]
+
+[mcp_servers.neon]
+command = "npx"
+args = ["-y", "neon"]
+"#,
+    )
+    .unwrap();
+
+    assert!(configure_codex_mcp_server(temp.path()).unwrap());
+
+    let content = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+    let config: toml::Value = toml::from_str(&content).unwrap();
+    let servers = config["mcp_servers"].as_table().unwrap();
+    let cassy: Vec<_> = servers
+        .iter()
+        .filter(|(_, v)| v.get("command").and_then(|c| c.as_str()) == Some("cas"))
+        .map(|(k, _)| k.as_str())
+        .collect();
+    assert_eq!(cassy, vec!["cs"], "{content}");
+    assert_eq!(
+        servers["cs"]["env_vars"].as_array().map(Vec::len),
+        Some(2),
+        "the surviving `cs` entry keeps its own settings: {content}"
+    );
+    assert_eq!(servers["neon"]["command"].as_str(), Some("npx"), "{content}");
 }
 
 #[test]

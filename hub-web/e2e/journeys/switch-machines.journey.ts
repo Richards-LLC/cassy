@@ -1,8 +1,9 @@
-import { phoneLayout, phoneSwitch } from "./responsive-goals";
+import { phoneLayout, phoneSwitch, showConversationList } from "./responsive-goals";
 import type { Page } from "@playwright/test";
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
+import { journeyStamp } from "./clock";
 
 /**
  * cas-9772: wait for `ready` bounded by protocol events, not wall time. It
@@ -236,3 +237,103 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     expect(await page.locator("body").ariaSnapshot()).not.toContain("Switch session");
   });
 });
+
+
+// cas-4646: the operator's fleet on the day of the report. One machine runs
+// two projects; the other runs two sessions of one project, which the list
+// groups ("gabber-studio · 2 conversations on prowl") with the most recent first.
+const SOUNDWAVE: Machine = {
+  id: "soundwave",
+  label: "soundwave · Linux",
+  sessions: [
+    { name: "true-panda-85", supervisor: "true-panda-85", project_dir: "/projects/violet_ps", workers: ["quick-ant-1"], liveness: "live" },
+    { name: "keen-fox-5", supervisor: "keen-fox-5", project_dir: "/projects/accounting", workers: ["slow-elk-2"], liveness: "live" },
+  ],
+};
+const PROWL: Machine = {
+  id: "prowl",
+  label: "prowl · Linux",
+  sessions: [
+    { name: "jolly-wolf-99", supervisor: "jolly-wolf-99", project_dir: "/projects/gabber-studio", workers: ["able-yak-3"], liveness: "live", last_activity_at: journeyStamp(-3_600_000) },
+    { name: "calm-raven-72", supervisor: "calm-raven-72", project_dir: "/projects/gabber-studio", workers: ["deft-owl-4"], liveness: "live", last_activity_at: journeyStamp(-3_700_000) },
+  ],
+};
+// A session that starts and ends on soundwave while the operator taps.
+const PASSING = { name: "brisk-elk-6", supervisor: "brisk-elk-6", project_dir: "/projects/scratch", workers: ["tame-gnu-7"], liveness: "live" as const };
+
+for (const width of [1280, 390]) {
+  test.describe(`HUB-J8 at ${width}`, () => {
+    test.use(width === 390 ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1280, height: 800 } });
+    test(`HUB-J8 every tap opens its conversation while the list re-renders under the finger at ${width} (cas-4646)`, journeyPart, async ({ page, journey }) => {
+      // Each part streams into its own copy of the fleet.
+      const soundwave = structuredClone(SOUNDWAVE);
+      const prowl = structuredClone(PROWL);
+      const tapped = [...soundwave.sessions, ...prowl.sessions];
+      const hub = await journey.hub({ machines: [soundwave, prowl], paired: ["soundwave", "prowl"] });
+      await journey.open();
+      const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+      await expect(list.locator(".conversation-row")).toHaveCount(4);
+      const touch = width === 390 ? await page.context().newCDPSession(page) : undefined;
+      const press = async (x: number, y: number) => {
+        if (touch) await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+        else { await page.mouse.move(x, y); await page.mouse.down(); }
+      };
+      const release = async () => {
+        if (touch) await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        else await page.mouse.up();
+      };
+      let stamp = -3_600_000;
+      let last = "";
+      await journey.stage("Fifty taps across two machines, each pressed while the list re-renders under the finger", async () => {
+        for (let tap = 0; tap < 50; tap++) {
+          // soundwave, prowl, soundwave, prowl: 0, 2, 1, 3, …
+          const target = tapped[[0, 2, 1, 3][tap % 4]!]!;
+          const owner = soundwave.sessions.includes(target) ? soundwave : prowl;
+          const key = `${owner.id}:${target.name}`;
+          last = key;
+          if (width === 390) await showConversationList(page);
+          const row = list.locator(`.conversation-row[data-thread-key="${key}"]`);
+          await row.scrollIntoViewIfNeeded();
+          const box = (await row.boundingBox())!;
+          const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+          await row.evaluate((node) => { (node as HTMLElement & { pressed?: boolean }).pressed = true; });
+          await press(point.x, point.y);
+          // While the finger is down, both kinds of live update land: the
+          // prowl pair trades places (the other one just did something), and
+          // a session starts or ends on soundwave, which rebuilds the list.
+          const [, other] = [...prowl.sessions].sort((a, b) => Date.parse(b.last_activity_at!) - Date.parse(a.last_activity_at!));
+          stamp += 61_000;
+          other!.last_activity_at = journeyStamp(stamp);
+          await hub.announceCatalog(prowl.id);
+          if (soundwave.sessions.some((session) => session.name === PASSING.name)) {
+            soundwave.sessions = soundwave.sessions.filter((session) => session.name !== PASSING.name);
+            await hub.announceCatalog(soundwave.id, { removed: [PASSING.name] });
+          } else {
+            soundwave.sessions = [...soundwave.sessions, PASSING];
+            await hub.announceCatalog(soundwave.id, { added: [PASSING.name] });
+          }
+          await expect.poll(() => page.evaluate(({ x, y }) => (document.elementFromPoint(x, y)?.closest(".conversation-row") as HTMLElement & { pressed?: boolean } | null)?.pressed !== true, point),
+            { message: `tap ${tap}: the row under the finger was replaced or moved` }).toBe(true);
+          await release();
+          // Highlighted within one frame of the release…
+          const highlighted = await page.evaluate(() => new Promise<string | undefined>((resolve) => requestAnimationFrame(() =>
+            resolve(document.querySelector<HTMLElement>('.conversation-row[aria-current="true"]')?.dataset.threadKey))));
+          expect(highlighted, `tap ${tap} on ${key}: highlighted`).toBe(key);
+          // …and that conversation is open within about 100 ms.
+          const opened = await page.evaluate((name) => new Promise<number>((resolve) => {
+            const start = performance.now();
+            const check = () => {
+              if (document.querySelector(".conversation-host .codename")?.textContent?.trim() === name) resolve(performance.now() - start);
+              else if (performance.now() - start > 2_000) resolve(Infinity);
+              else requestAnimationFrame(check);
+            };
+            check();
+          }), target.supervisor);
+          expect(opened, `tap ${tap}: ${target.supervisor} opened`).toBeLessThanOrEqual(150);
+        }
+      });
+      // The last tap won: the list and the open conversation agree.
+      await expect(list.locator('.conversation-row[aria-current="true"]')).toHaveAttribute("data-thread-key", last);
+    });
+  });
+}

@@ -265,7 +265,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** two paired machines, a conversation open on one of them
 - **Goal:** I work on the other machine, and my draft on the first is still there when I return
-- **Touches:** `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/machine-accent.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/composer-markup.ts`, `hub-web/src/worker-visibility.ts`
+- **Touches:** `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/machine-accent.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/composer-markup.ts`, `hub-web/src/worker-visibility.ts`
 - **Suite:** `hub-web/e2e/journeys/switch-machines.journey.ts`
 - **Gaps:** none
 
@@ -280,6 +280,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 7. Know each conversation and machine by name — the conversation header leads with the project, then "Atlas · Linux · patient-pelican-9", its avatar the machine's own initial; every list row's name and every palette "Jump to" row lead with the project, the codename first in the line beneath
 8. A supervisor with no workers yet is listed everywhere — a live supervisor that has not spawned workers is in the conversation list and the palette's Jump rows, which count the same; a stale or supervisor-less session is hidden from both
 9. Hear the open conversation as the page heading — the goal state's level-1 heading is the open conversation's project, and the tab title names it with its codename
+10. Every tap opens the conversation it pressed, while the list is changing — fifty taps across two machines (two projects on one, a group of two sessions on the other), each pressed while the group re-sorts and a session starts or ends; every tap highlights its row within a frame and opens its conversation within about 100 ms, at 1280 px with a mouse and at 390 px by touch, and the last tap wins (cas-4646)
 
 #### Expected experience
 

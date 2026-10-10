@@ -36,9 +36,65 @@ const RECONCILE_PERIOD: Duration = Duration::from_secs(60);
 /// After a deferred or failed scheduled reconcile, the next one waits this long.
 const RECONCILE_RETRY: Duration = Duration::from_secs(5);
 
-/// Next due time of the scheduled reconcile, per process and `.cas` directory.
-fn reconcile_schedule() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Instant>> {
-    static SCHEDULE: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+/// The scheduled reconcile's state for one `.cas` directory in this process.
+struct ReconcileSchedule {
+    /// When the next open runs a pass.
+    due: Instant,
+    /// The last pass's failure. Until the next pass, every open re-reports it
+    /// (cas-afe1) without repeating the pass.
+    failure: Option<ReconcileFailure>,
+}
+
+/// A reconcile failure that can be reported again; `StoreError` is not `Clone`.
+enum ReconcileFailure {
+    Degraded {
+        entity_type: String,
+        entity_id: String,
+        operation: String,
+        reason: String,
+    },
+    Other(String),
+}
+
+impl ReconcileFailure {
+    fn capture(error: &StoreError) -> Self {
+        match error {
+            StoreError::SyncDegradedAfterCommit {
+                entity_type,
+                entity_id,
+                operation,
+                reason,
+            } => Self::Degraded {
+                entity_type: entity_type.clone(),
+                entity_id: entity_id.clone(),
+                operation: operation.clone(),
+                reason: reason.clone(),
+            },
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    fn replay(&self) -> StoreError {
+        match self {
+            Self::Degraded {
+                entity_type,
+                entity_id,
+                operation,
+                reason,
+            } => StoreError::SyncDegradedAfterCommit {
+                entity_type: entity_type.clone(),
+                entity_id: entity_id.clone(),
+                operation: operation.clone(),
+                reason: reason.clone(),
+            },
+            Self::Other(message) => StoreError::Other(message.clone()),
+        }
+    }
+}
+
+/// Scheduled reconcile state, per process and `.cas` directory.
+fn reconcile_schedule() -> std::sync::MutexGuard<'static, HashMap<PathBuf, ReconcileSchedule>> {
+    static SCHEDULE: OnceLock<Mutex<HashMap<PathBuf, ReconcileSchedule>>> = OnceLock::new();
     SCHEDULE
         .get_or_init(Default::default)
         .lock()
@@ -227,27 +283,30 @@ impl SyncingTaskStore {
     /// The task-store open path's reconcile: once per process and `.cas`
     /// directory, then again only when the schedule is due
     /// ([`RECONCILE_PERIOD`] after a clean pass, [`RECONCILE_RETRY`] after a
-    /// deferred or failed one). Opens are read paths, so a failure is logged
-    /// and the intents stay durable for the next pass; explicit `init`
-    /// still reports it.
-    pub(crate) fn reconcile_if_due(&self) {
+    /// deferred or failed one). Between passes an open does no reconcile
+    /// work; it re-reports the last pass's failure, if any (cas-afe1).
+    pub(crate) fn reconcile_if_due(&self) -> Result<()> {
         let cas_dir = self.queue.cas_dir().to_path_buf();
         let now = Instant::now();
         {
             let mut schedule = reconcile_schedule();
-            if schedule.get(&cas_dir).is_some_and(|due| now < *due) {
-                return;
+            if let Some(entry) = schedule.get(&cas_dir)
+                && now < entry.due
+            {
+                return entry.failure.as_ref().map_or(Ok(()), |f| Err(f.replay()));
             }
             // Claim this pass so concurrent opens do not repeat it.
-            schedule.insert(cas_dir.clone(), now + RECONCILE_RETRY);
+            schedule.insert(
+                cas_dir.clone(),
+                ReconcileSchedule {
+                    due: now + RECONCILE_RETRY,
+                    failure: None,
+                },
+            );
         }
-        match self.reconcile_pending_task_sync() {
-            Ok(outcome) => record_reconcile(cas_dir, outcome),
-            Err(error) => {
-                record_reconcile(cas_dir, TaskSyncReconcileOutcome::Deferred);
-                tracing::warn!(%error, "task sync reconcile failed; pending intents retained for retry");
-            }
-        }
+        let result = self.reconcile_pending_task_sync();
+        record_reconcile(cas_dir, &result);
+        result.map(|_| ())
     }
 
     fn persisted_for_queue(&self, task: &Task) -> Result<Task> {
@@ -385,12 +444,22 @@ impl SyncingTaskStore {
     }
 }
 
-fn record_reconcile(cas_dir: PathBuf, outcome: TaskSyncReconcileOutcome) {
-    let delay = match outcome {
-        TaskSyncReconcileOutcome::Clean => RECONCILE_PERIOD,
-        TaskSyncReconcileOutcome::Deferred => RECONCILE_RETRY,
+fn record_reconcile(cas_dir: PathBuf, result: &Result<TaskSyncReconcileOutcome>) {
+    let (delay, failure) = match result {
+        Ok(TaskSyncReconcileOutcome::Clean) => (RECONCILE_PERIOD, None),
+        Ok(TaskSyncReconcileOutcome::Deferred) => (RECONCILE_RETRY, None),
+        Err(error) => {
+            tracing::warn!(%error, "task sync reconcile failed; pending intents retained for retry");
+            (RECONCILE_RETRY, Some(ReconcileFailure::capture(error)))
+        }
     };
-    reconcile_schedule().insert(cas_dir, Instant::now() + delay);
+    reconcile_schedule().insert(
+        cas_dir,
+        ReconcileSchedule {
+            due: Instant::now() + delay,
+            failure,
+        },
+    );
 }
 
 fn dependency_entity_id(dep: &Dependency) -> String {
@@ -419,17 +488,9 @@ impl TaskStore for SyncingTaskStore {
     fn init(&self) -> Result<()> {
         self.inner.init()?;
         self.queue.init().map_err(queue_error_before_local_commit)?;
-        let cas_dir = self.queue.cas_dir().to_path_buf();
-        match self.reconcile_pending_task_sync() {
-            Ok(outcome) => {
-                record_reconcile(cas_dir, outcome);
-                Ok(())
-            }
-            Err(error) => {
-                record_reconcile(cas_dir, TaskSyncReconcileOutcome::Deferred);
-                Err(error)
-            }
-        }
+        let result = self.reconcile_pending_task_sync();
+        record_reconcile(self.queue.cas_dir().to_path_buf(), &result);
+        result.map(|_| ())
     }
 
     fn generate_id(&self) -> Result<String> {
@@ -1257,20 +1318,26 @@ mod tests {
         // pass defers without waiting and schedules a retry.
         let held = store.queue.lock_task_sync_mutations(&[&task.id]).unwrap();
         let started = std::time::Instant::now();
-        reopen_test_store(&cas_dir, false).reconcile_if_due();
+        reopen_test_store(&cas_dir, false)
+            .reconcile_if_due()
+            .unwrap();
         assert!(started.elapsed() < Duration::from_millis(100));
         drop(held);
         assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
 
         // Not yet due: further opens do no reconcile work at all.
-        reopen_test_store(&cas_dir, false).reconcile_if_due();
+        reopen_test_store(&cas_dir, false)
+            .reconcile_if_due()
+            .unwrap();
         assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
-        let retry_due = *reconcile_schedule().get(&cas_dir).unwrap();
+        let retry_due = reconcile_schedule().get(&cas_dir).unwrap().due;
         assert!(retry_due <= Instant::now() + RECONCILE_RETRY);
 
         // Once the retry is due, the deferred intent is fulfilled.
-        reconcile_schedule().insert(cas_dir.clone(), Instant::now());
-        reopen_test_store(&cas_dir, false).reconcile_if_due();
+        reconcile_schedule().get_mut(&cas_dir).unwrap().due = Instant::now();
+        reopen_test_store(&cas_dir, false)
+            .reconcile_if_due()
+            .unwrap();
         assert!(store.queue.pending_task_sync_intents().unwrap().is_empty());
         let pending = store.queue.pending(10, 5).unwrap();
         assert_eq!(pending.len(), 1);
@@ -1280,7 +1347,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|payload| payload.contains("committed, sync pending"))
         );
-        let clean_due = *reconcile_schedule().get(&cas_dir).unwrap();
+        let clean_due = reconcile_schedule().get(&cas_dir).unwrap().due;
         assert!(clean_due > Instant::now() + RECONCILE_RETRY);
     }
 

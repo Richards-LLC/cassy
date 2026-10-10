@@ -3803,6 +3803,13 @@ fn factory_write_decision(
     }
 }
 
+/// cas-3147: refusal for an agent shell command that would change the
+/// operator write policy through the operator-only CLI.
+fn operator_policy_command_denial(command: &str) -> Option<String> {
+    let _ = command;
+    None
+}
+
 /// cas-3147: files a Bash command edits in place without naming them as a
 /// write destination: `sed -i` / `perl -i` operands and `mv` sources (a
 /// rename changes the source's directory entry).
@@ -4475,6 +4482,7 @@ mod workspace_contract_tests {
                 modes: modes.iter().copied().collect(),
                 task_id: task.map(str::to_string),
             }],
+            protected: Vec::new(),
         }
     }
 
@@ -4584,6 +4592,87 @@ mod workspace_contract_tests {
             factory_write_decision(&write, &None, None, true, Some(worktree.as_path()), &grant, &tasks(&[])),
             FactoryWriteDecision::Denied(_)
         ), "a supervisor with no granted task is refused too");
+    }
+
+    /// cas-3147: no agent (worker or supervisor) may write the operator
+    /// policy through any tool, even when a write root or its own sanctioned
+    /// checkout contains it.
+    #[cfg(unix)]
+    #[test]
+    fn cas_3147_agents_cannot_write_the_operator_policy() {
+        use super::super::write_roots::{WriteMode, WritePolicy, WriteRoot};
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let main = root.join("main");
+        let operator_dir = main.join(".cas/operator");
+        std::fs::create_dir_all(&operator_dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let policy_file = operator_dir.join("write-policy.toml");
+        std::fs::write(&policy_file, "").unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        // The widest case: a root over the whole project, and a supervisor
+        // whose sanctioned checkout is the main repository itself.
+        let policy = WritePolicy {
+            roots: vec![WriteRoot {
+                path: main.clone(),
+                modes: [WriteMode::Create, WriteMode::Edit, WriteMode::Delete].into_iter().collect(),
+                task_id: None,
+            }],
+            protected: vec![operator_dir.clone()],
+        };
+        let no_tasks = std::collections::HashSet::new();
+        let file = policy_file.display().to_string();
+        for (case, input) in [
+            ("Write", tool_input("Write", serde_json::json!({"file_path": file, "content": "[[roots]]"}), &main)),
+            ("Edit", tool_input("Edit", serde_json::json!({"file_path": file, "old_string": "", "new_string": "x"}), &main)),
+            ("apply_patch", tool_input("apply_patch", serde_json::json!({"command": format!("*** Begin Patch\n*** Update File: {file}\n@@\n+x\n*** End Patch")}), &main)),
+            ("tee", bash_input(&format!("echo x | tee {file}"), &main)),
+            ("sed -i", bash_input(&format!("sed -i s/a/b/ {file}"), &main)),
+            ("rm", bash_input(&format!("rm -f {file}"), &main)),
+            ("mv in", bash_input(&format!("mv /tmp/forged.toml {file}"), &main)),
+            ("relative", bash_input("cp forged.toml .cas/operator/write-policy.toml", &main)),
+        ] {
+            for supervisor in [false, true] {
+                let decision = factory_write_decision(&input, &None, None, supervisor, Some(main.as_path()), &policy, &no_tasks);
+                let FactoryWriteDecision::Denied(violation) = decision else {
+                    panic!("{case} (supervisor={supervisor}) must be refused: {decision:?}");
+                };
+                assert!(violation.matched_rule.contains("operator"), "{case}: {violation:?}");
+            }
+        }
+    }
+
+    /// cas-3147: an agent shell cannot run the operator-only commands,
+    /// however the command is wrapped.
+    #[test]
+    fn cas_3147_agent_shell_cannot_run_operator_policy_commands() {
+        for command in [
+            "cas config set factory.write_roots ~/soundwave-config",
+            "/home/u/.local/bin/cas config set factory.write_roots ''",
+            "env -u CLAUDECODE -u CAS_AGENT_ROLE cas config set factory.write_roots /x",
+            "cas config grant-write --task cas-1 --path /x --reason r",
+            "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
+            "script -qc 'cas config set factory.write_roots /x' /dev/null",
+            "setsid cas config set factory.write_roots /x",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("operator"), "{denial}");
+        }
+        for allowed in [
+            "cas config get factory.write_roots",
+            "cas config set factory.prompt_retention_days 7",
+            "git commit -m 'document cas config set factory.write_roots'",
+            "rg 'grant-write' cas-cli/src",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
     }
 
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside

@@ -45,11 +45,14 @@ pub(crate) struct WriteRoot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WritePolicy {
     pub roots: Vec<WriteRoot>,
+    /// Directories no agent may write, whatever the roots say: the operator
+    /// policy itself (`.cas/operator/`).
+    pub protected: Vec<PathBuf>,
 }
 
 impl WritePolicy {
     pub(crate) fn is_empty(&self) -> bool {
-        self.roots.is_empty()
+        self.roots.is_empty() && self.protected.is_empty()
     }
 
     /// The root under which an agent working on `task_ids` may perform `mode`

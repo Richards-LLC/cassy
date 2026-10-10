@@ -478,6 +478,16 @@ fn branch_exists(repo_root: &Path, reference: &str) -> bool {
 }
 
 fn remove_worktree_forced(repo_root: &Path, worktree_path: &Path) -> std::io::Result<()> {
+    remove_worktree_dir_forced(repo_root, worktree_path)?;
+    // cas-8256: a removed worktree's code-index copy goes with it.
+    crate::daemon::canonical_code_index::purge_removed_worktree_code_index(
+        repo_root,
+        worktree_path,
+    );
+    Ok(())
+}
+
+fn remove_worktree_dir_forced(repo_root: &Path, worktree_path: &Path) -> std::io::Result<()> {
     // Symlink guard: `remove_dir_all` follows symlinks on some platforms,
     // so a worktree path that was replaced by a symlink (race, accidental
     // `ln -s`) could delete the target instead. Refuse to touch symlinks

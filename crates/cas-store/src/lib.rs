@@ -39,6 +39,7 @@ pub mod shared_db;
 pub mod wait_budget;
 
 mod agent_store;
+mod code_index_purge;
 mod code_store;
 mod code_vector_store;
 mod commit_link_store;
@@ -110,6 +111,10 @@ pub use event_store::{
 };
 
 // Code store for indexed source code
+pub use code_index_purge::{
+    BatchedWrites, CODE_WRITE_DEFAULT_BATCH, CODE_WRITE_MAX_BATCH, CodeIndexPurgeStats,
+    PurgeSymbol, RepositoryScope, ScanReceiptScope, SqliteCodeIndexPurge, WriteBatching,
+};
 pub use code_store::CodeStore;
 pub use code_vector_store::{
     CODE_VECTOR_SCHEMA, CODE_VECTOR_SCHEMA_STATEMENTS, CodeIndexState, CodeVectorCoverage,

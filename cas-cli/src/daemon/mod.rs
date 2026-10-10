@@ -15,6 +15,7 @@
 pub mod queue;
 pub mod watcher;
 
+pub(crate) mod canonical_code_index;
 mod decay;
 // cas-499c: `cas index code` (cli::index_cmd) and the doctor lag check need the repository
 // derivation and the on-demand indexer, not just the daemon's re-exports.

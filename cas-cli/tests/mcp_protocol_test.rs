@@ -275,6 +275,19 @@ impl McpTestClient {
         Self::from_child(child, true, server_log_dir)
     }
 
+    fn spawn_command_capturing_stderr(mut cmd: Command) -> Self {
+        cmd.arg("serve");
+        let server_log_dir = server_log_dir(&cmd);
+        let child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn cas serve");
+
+        Self::from_child(child, true, server_log_dir)
+    }
+
     /// Wire a spawned child up to the draining reader threads. A piped
     /// stderr is always drained into the bounded tail; `capture_stderr`
     /// additionally keeps all of it for [`Self::stop_and_read_stderr`].
@@ -1598,4 +1611,68 @@ fn test_serve_logs_actual_tool_list_on_startup() {
         "startup banner should list registered tool names (memory, task, ...); \
          got: {collected}"
     );
+}
+
+/// cas-8256: a factory worker's `cas serve` never runs the code indexer
+/// against the shared store; the canonical checkout's serve still does.
+/// Every worker used to index its whole worktree on boot (58 copies, 364k
+/// symbols in the cassy store).
+#[test]
+fn factory_worker_serve_never_starts_the_code_indexer_cas_8256() {
+    let sandbox = CasSandbox::new();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(sandbox.path())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "--quiet"]);
+    std::fs::create_dir_all(sandbox.path().join("src")).unwrap();
+    std::fs::write(
+        sandbox.path().join("src/lib.rs"),
+        "pub fn sandbox_symbol() {}\n",
+    )
+    .unwrap();
+
+    let mut worker = sandbox.command();
+    worker.env("CAS_AGENT_ROLE", "worker");
+    let mut client = McpTestClient::spawn_command_capturing_stderr(worker);
+    client.initialize();
+    let stderr = client.stop_and_read_stderr();
+    assert!(
+        stderr.contains("Code indexing off in this process: factory worker"),
+        "worker serve did not report its reader role: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Code watcher started"),
+        "worker serve started the code indexer: {stderr}"
+    );
+    let files: i64 = rusqlite::Connection::open(sandbox.path().join(".cas/cas.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'code_files'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if files > 0 {
+        let indexed: i64 = rusqlite::Connection::open(sandbox.path().join(".cas/cas.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM code_files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(indexed, 0, "worker serve indexed source files");
+    }
+
+    // Control: the canonical checkout's serve does start the indexer, so the
+    // absence above is the role gate, not a broken watcher.
+    let mut canonical = McpTestClient::spawn_command_capturing_stderr(sandbox.command());
+    canonical.initialize();
+    let stderr = canonical.stop_and_read_stderr();
+    assert!(
+        stderr.contains("Code watcher started"),
+        "canonical serve did not start the code indexer: {stderr}"
+    );
+    assert!(!stderr.contains("Code indexing off in this process"), "{stderr}");
 }

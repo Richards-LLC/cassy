@@ -245,3 +245,74 @@ async fn input_forwarding_exchange_and_draw_touch_no_store() {
         wait_budget::last_store_access_violation()
     );
 }
+
+#[test]
+fn a_task_sync_mutation_under_a_foreign_sqlite_write_lock_stays_in_budget() {
+    // Only SQLite is held: the mutation takes its task-sync lease and stripe,
+    // then reaches the SyncQueue's BEGIN IMMEDIATE, which must stop at the
+    // thread's deadline rather than wait out the 5 s handler and retries.
+    let (_dir, cas_dir) = logged_in_project();
+    let mut task = seed(&cas_dir);
+    let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+    let write_lock = hold_sqlite_write_lock(&cas_dir);
+    task.title = "renamed while locked".into();
+    let started = Instant::now();
+    let result = {
+        let _budget = wait_budget::bound_waits_for(super::store_worker::PASS_STORE_WAIT_BUDGET);
+        store.update(&task)
+    };
+    let waited = started.elapsed();
+    write_lock.release();
+    assert!(result.is_err(), "the write lock outlived the budget");
+    assert!(
+        waited < PASS_LATENCY_LIMIT,
+        "the budgeted mutation waited {waited:?}"
+    );
+    // Nothing is wedged: the same mutation lands once the lock is gone.
+    store.update(&task).unwrap();
+    assert_eq!(store.get(&task.id).unwrap().title, "renamed while locked");
+}
+
+/// Guard (GH #1165): production code must not restore SQLite's built-in busy
+/// timeout with `busy_timeout(SQLITE_BUSY_TIMEOUT)`. That replaces the
+/// budget-aware handler and lets a budgeted thread wait the full 5 s again.
+/// Use `cas_store::shared_db::install_busy_handler` instead.
+#[test]
+fn no_production_code_installs_sqlites_builtin_busy_timeout() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let mut roots = vec![root.join("cas-cli/src")];
+    for entry in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
+        roots.push(entry.path().join("src"));
+    }
+    let mut offenders = Vec::new();
+    let mut stack = roots;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".rs") || name.contains("test") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Production code ends at the first test module.
+            let production = text.split("#[cfg(test)]").next().unwrap_or("");
+            for (index, line) in production.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                if code.contains("busy_timeout(") && code.contains("SQLITE_BUSY_TIMEOUT") {
+                    offenders.push(format!("{}:{}", path.display(), index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "restore the budget-aware handler with install_busy_handler instead: {offenders:?}"
+    );
+}

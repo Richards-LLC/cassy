@@ -612,7 +612,8 @@ impl CasCore {
                 message: Cow::from(format!("Failed to open database: {e}")),
                 data: None,
             })?;
-            conn.busy_timeout(cas_store::SQLITE_BUSY_TIMEOUT)
+            // GH #1165: the pool's budget-aware busy handler.
+            cas_store::shared_db::install_busy_handler(&conn)
                 .map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!("Failed to set busy timeout: {e}")),

@@ -186,6 +186,39 @@ pub fn last_store_access_violation() -> Option<&'static str> {
     LAST_VIOLATION.with(Cell::get)
 }
 
+/// Lock an in-process mutex, honouring this thread's wait budget.
+///
+/// Without a budget this is a plain blocking `lock` (a poisoned mutex is
+/// recovered). With one, it polls `try_lock` until the deadline and then
+/// returns `None`, so a UI thread never waits on another thread that holds
+/// the mutex across its own store wait.
+pub fn lock_mutex_within_budget<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    what: &'static str,
+) -> Option<std::sync::MutexGuard<'a, T>> {
+    note_store_access(what);
+    if wait_deadline().is_none() {
+        return Some(
+            mutex
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+    }
+    let mut pause = Duration::from_micros(200);
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                return Some(poisoned.into_inner());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let sleep = clamp_wait(pause)?;
+        std::thread::sleep(sleep);
+        pause = (pause * 2).min(Duration::from_millis(5));
+    }
+}
+
 /// Take an exclusive `flock` on `file`, honouring this thread's wait budget.
 ///
 /// Without a budget this is a plain blocking `lock_exclusive`. With one, it
@@ -300,6 +333,30 @@ mod tests {
         }
         assert_eq!(store_access_violations(), before);
         assert!(store_access_forbidden(), "the forbid scope resumes");
+    }
+
+    #[test]
+    fn mutex_lock_gives_up_at_the_deadline() {
+        let mutex = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let held = std::sync::Arc::clone(&mutex);
+        let (locked_tx, locked) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked.recv().unwrap();
+        let started = Instant::now();
+        {
+            let _budget = bound_waits_for(Duration::from_millis(30));
+            assert!(lock_mutex_within_budget(&mutex, "test mutex").is_none());
+        }
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let _budget = bound_waits_for(Duration::from_millis(30));
+        assert!(lock_mutex_within_budget(&mutex, "test mutex").is_some());
     }
 
     #[test]

@@ -96,6 +96,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   rejected credential, install a missing executable, or wait for the
   automatic reconnect (or restart) after a dropped connection.
 
+### Fixed — Cassy Cloud conversation
+
+- A supervisor's answers to questions typed in its terminal now appear in
+  the Commander and Cassy Cloud conversation, each under the question it
+  answers. Before, answers were mirrored only after a message from a paired
+  device, so a conversation driven from the terminal showed the questions and
+  never the answers. Answers to earlier terminal questions are filled in from
+  the recent transcript, once each, and relayed machine prompts are never
+  treated as questions.
+
 ### Fixed — visual QA
 
 - `--strict` no longer passes on a page that shows only a loading spinner

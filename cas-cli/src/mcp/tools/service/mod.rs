@@ -1125,6 +1125,9 @@ impl CasService {
                 }
                 Err(e) => {
                     crate::telemetry::track_mcp_tool("mcp_proxy", "execute", false);
+                    // cas-53ce: a failed call may have dropped an upstream;
+                    // publish the live health for cache readers (preflight).
+                    crate::mcp::write_proxy_health_cache(&self.inner.cas_root, proxy).await;
                     Err(McpError {
                         code: ErrorCode::INTERNAL_ERROR,
                         message: Cow::Owned(format!(

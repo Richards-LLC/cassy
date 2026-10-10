@@ -758,12 +758,37 @@ pub struct MachinePaths {
     pub user_proxy: PathBuf,
     /// `<CLAUDE_CONFIG_DIR|$HOME>/.claude.json`.
     pub claude_json: Option<PathBuf>,
+    /// Other Claude account profiles on this machine (`$HOME/.claude.json`,
+    /// `$HOME/.claude*/.claude.json`), excluding `claude_json`. GH #1164: a
+    /// profile this command never looked at kept a stale `violet` entry.
+    pub claude_profiles: Vec<PathBuf>,
     /// `<CODEX_HOME|$HOME/.codex>/config.toml`.
     pub codex_config: Option<PathBuf>,
     /// The only file allowed to contain the two plaintext onboarding values.
     pub credentials_file: PathBuf,
     /// The login-shell profile that must source the credentials file.
     pub login_profile: Option<PathBuf>,
+}
+
+/// Every Claude profile `.claude.json` under `home` other than `selected`:
+/// `home/.claude.json` and `home/.claude*/.claude.json`, sorted. Only regular
+/// files are returned.
+pub fn discover_claude_profiles(home: &Path, selected: Option<&Path>) -> Vec<PathBuf> {
+    let mut found = vec![home.join(".claude.json")];
+    if let Ok(entries) = std::fs::read_dir(home) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".claude")
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            {
+                found.push(entry.path().join(".claude.json"));
+            }
+        }
+    }
+    found.retain(|path| ifs::is_regular_file(path) && Some(path.as_path()) != selected);
+    found.sort();
+    found.dedup();
+    found
 }
 
 impl MachinePaths {
@@ -807,9 +832,16 @@ impl MachinePaths {
             &home_for_credentials,
             env.get("SHELL").as_deref(),
         ))?);
+        let claude_json = claude_dir.map(|d| d.join(".claude.json"));
+        let claude_profiles = env
+            .get("HOME")
+            .map(PathBuf::from)
+            .map(|home| discover_claude_profiles(&home, claude_json.as_deref()))
+            .unwrap_or_default();
         Ok(Self {
             user_proxy,
-            claude_json: claude_dir.map(|d| d.join(".claude.json")),
+            claude_json,
+            claude_profiles,
             codex_config: codex_dir.map(|d| d.join("config.toml")),
             credentials_file,
             login_profile,
@@ -3033,6 +3065,7 @@ mod tests {
         MachinePaths {
             user_proxy: dir.join("config").join("code-mode-mcp").join("config.toml"),
             claude_json: Some(dir.join("home").join(".claude.json")),
+            claude_profiles: Vec::new(),
             codex_config: Some(dir.join("home").join(".codex").join("config.toml")),
             credentials_file: dir
                 .join("home")
@@ -4821,5 +4854,225 @@ auth = "env:{token}"
         assert!(row.message.contains("the bearer is bad"), "{row:?}");
         assert!(row.message.contains("`cas violet` cannot post"), "{row:?}");
         assert!(!row.message.contains(FAKE_TOKEN));
+    }
+
+    // -----------------------------------------------------------------------
+    // GH #1164: same-URL project override loop; claude-code entry verification
+    // -----------------------------------------------------------------------
+
+    fn same_url_override_project(dir: &Path) -> PathBuf {
+        write_project_proxy(
+            dir,
+            &format!(
+                "allowlist = [\n\
+                 \x20 \"violet.violet_read\",\n\
+                 \x20 \"violet.violet_post\",\n\
+                 ]\n\
+                 \n\
+                 [servers.violet]\n\
+                 transport = \"http\"\n\
+                 url = \"{}\"\n\
+                 auth = \"env:VIOLET_SLACK_TOKEN_CASSY_PROXY\"\n",
+                violet_hub_url()
+            ),
+        )
+    }
+
+    fn no_harness_args() -> VioletArgs {
+        VioletArgs {
+            no_harness: true,
+            ..test_args()
+        }
+    }
+
+    /// GH #1164 part 1: a committed project block naming another machine's
+    /// token for the *same* hub URL left integrate stale forever, advising
+    /// `cas login`, which never mints that token. It is dropped, and the
+    /// machine registration's own token verifies the hub.
+    #[test]
+    fn a_same_url_project_override_naming_another_token_is_dropped_gh_1164() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = no_harness_args();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let project = same_url_override_project(dir.path());
+
+        let probe = RecordingProbe::default();
+        let report = run(&args, Some(&project), &paths, &env, &probe).unwrap();
+
+        let entry = report.project_proxy.clone().expect("project file reported");
+        assert_eq!(entry.state, WriteState::Written, "{report:?}");
+        assert!(entry.note.contains("dropped [servers.violet]"), "{entry:?}");
+        assert!(entry.note.contains("same hub URL"), "{entry:?}");
+        let parsed = ProxyConfig::load_from(&project).unwrap();
+        assert!(!parsed.servers.contains_key(VIOLET_SERVER), "{parsed:?}");
+
+        let probed = probe.0.borrow();
+        assert_eq!(probed.len(), 1, "the machine registration must be verified");
+        match &probed[0] {
+            ServerConfig::Http { auth, .. } => {
+                assert_eq!(auth.as_deref(), Some(format!("env:{TEST_TOKEN_ENV}").as_str()))
+            }
+            other => panic!("unexpected probe server {other:?}"),
+        }
+        assert!(report.is_green(), "{report:?}");
+        assert_eq!(report.remedy, None, "{report:?}");
+    }
+
+    /// A distinct-URL override is a deliberate staging target and is kept. When
+    /// its token is missing, the advice names the override, not `cas login`
+    /// (which can never mint a token a project file invented).
+    #[test]
+    fn a_missing_override_token_names_the_override_not_cas_login_gh_1164() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = no_harness_args();
+        const STAGING: &str = "https://staging.example.test/mcp/slack";
+        let project = write_project_proxy(
+            dir.path(),
+            &format!(
+                "allowlist = [\n  \"violet.violet_read\",\n  \"violet.violet_post\",\n]\n\n\
+                 [servers.violet]\ntransport = \"http\"\nurl = \"{STAGING}\"\n\
+                 auth = \"env:STAGING_ONLY_TOKEN\"\n"
+            ),
+        );
+        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let remedy = report.remedy.clone().expect("a missing token needs a remedy");
+        assert!(remedy.contains("STAGING_ONLY_TOKEN"), "{remedy}");
+        assert!(remedy.contains(&project.display().to_string()), "{remedy}");
+        assert!(!remedy.contains("cas login"), "{remedy}");
+    }
+
+    /// A rejected hub client bearer is not repaired by signing in again: the
+    /// remedy names the variable, the credentials file and the re-mint path.
+    #[test]
+    fn a_rejected_bearer_remedy_names_the_variable_and_re_mint_not_cas_login_gh_1164() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let report = run(
+            &no_harness_args(),
+            None,
+            &paths,
+            &env,
+            &FakeProbe(ProbeOutcome::Unauthorized),
+        )
+        .unwrap();
+        let remedy = report.remedy.clone().expect("401 needs a remedy");
+        assert!(remedy.contains(TEST_TOKEN_ENV), "{remedy}");
+        assert!(
+            remedy.contains(&paths.credentials_file.display().to_string()),
+            "{remedy}"
+        );
+        assert!(remedy.contains("re-run `cas integrate violet`"), "{remedy}");
+        assert!(!remedy.contains("cas login"), "{remedy}");
+        assert!(!CREDENTIALS_HINT.contains("cas login"), "{CREDENTIALS_HINT}");
+    }
+
+    /// GH #1164 part 2: "already current" is a structural claim. Each
+    /// claude-code entry now carries the authenticated tools/list verdict, so
+    /// a rejected bearer is never reported as merely current.
+    #[test]
+    fn claude_code_entries_carry_the_authenticated_tools_list_verdict_gh_1164() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = test_args();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+
+        let verified = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let claude = verified
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .unwrap();
+        assert_eq!(claude.state, WriteState::AlreadyCurrent);
+        let note = claude.note.clone().unwrap_or_default();
+        assert!(note.contains("authenticated tools/list: 2 tool(s)"), "{claude:?}");
+
+        let rejected = run(&args, None, &paths, &env, &FakeProbe(ProbeOutcome::Unauthorized)).unwrap();
+        let claude = rejected
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .unwrap();
+        let note = claude.note.clone().unwrap_or_default();
+        assert!(note.contains("rejected"), "{claude:?}");
+        assert!(note.contains("401"), "{claude:?}");
+        assert!(note.contains(TEST_TOKEN_ENV), "{claude:?}");
+    }
+
+    /// Other Claude account profiles on the machine that already register the
+    /// hub are reconciled too: a literal bearer or MECHA_* references (which
+    /// now expand to empty) are rewritten with env references. A profile that
+    /// never registered the hub is left byte-for-byte alone.
+    #[test]
+    fn sibling_claude_profiles_with_stale_violet_entries_are_rewritten_gh_1164() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let mecha = home.join(".claude-alt").join(".claude.json");
+        let literal = home.join(".claude-work").join(".claude.json");
+        let untouched = home.join(".claude-empty").join(".claude.json");
+        for (path, body) in [
+            (
+                &mecha,
+                format!(
+                    r#"{{"numStartups": 3, "mcpServers": {{"violet": {{"type": "http", "url": "{}", "headers": {{"Authorization": "Bearer ${{MECHA_SLACK_TOKEN_CASSY_PROXY}}", "{VIOLET_BYPASS_HEADER}": "${{MECHA_VERCEL_BYPASS}}"}}}}}}}}"#,
+                    violet_hub_url()
+                ),
+            ),
+            (
+                &literal,
+                format!(
+                    r#"{{"mcpServers": {{"violet": {{"type": "http", "url": "{}", "headers": {{"Authorization": "Bearer xoxb-revoked-literal", "{VIOLET_BYPASS_HEADER}": "${{MECHA_VERCEL_BYPASS}}"}}}}}}}}"#,
+                    violet_hub_url()
+                ),
+            ),
+            (&untouched, r#"{"mcpServers": {"other": {"type": "http", "url": "https://x"}}}"#.to_string()),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let untouched_before = std::fs::read_to_string(&untouched).unwrap();
+
+        let mut paths = paths_in(dir.path());
+        paths.claude_profiles = discover_claude_profiles(&home, paths.claude_json.as_deref());
+        assert_eq!(paths.claude_profiles, vec![mecha.clone(), untouched.clone(), literal.clone()]);
+        let env = ready_env();
+        let report = run(&test_args(), None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+
+        for (path, reason) in [(&mecha, "MECHA_"), (&literal, "literal bearer")] {
+            let entry = report
+                .harnesses
+                .iter()
+                .find(|h| h.path.as_deref() == Some(path.as_path()))
+                .unwrap_or_else(|| panic!("{} not reported: {:?}", path.display(), report.harnesses));
+            assert_eq!(entry.state, WriteState::Written, "{entry:?}");
+            assert!(entry.note.as_deref().unwrap_or_default().contains(reason), "{entry:?}");
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let headers = &written["mcpServers"][VIOLET_SERVER]["headers"];
+            assert_eq!(headers["Authorization"], format!("Bearer ${{{TEST_TOKEN_ENV}}}"));
+            assert_eq!(
+                headers[VIOLET_BYPASS_HEADER],
+                format!("${{{VIOLET_DEFAULT_BYPASS_ENV}}}")
+            );
+            assert!(!std::fs::read_to_string(path).unwrap().contains("xoxb-revoked-literal"));
+        }
+        // Unrelated keys survive the rewrite.
+        let mecha_doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mecha).unwrap()).unwrap();
+        assert_eq!(mecha_doc["numStartups"], 3);
+        assert!(
+            !report
+                .harnesses
+                .iter()
+                .any(|h| h.path.as_deref() == Some(untouched.as_path())),
+            "{:?}",
+            report.harnesses
+        );
+        assert_eq!(std::fs::read_to_string(&untouched).unwrap(), untouched_before);
     }
 }

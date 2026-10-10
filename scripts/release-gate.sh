@@ -434,10 +434,12 @@ run_check() {
     row_selected "$name" || return 0
     log="$row_log_dir/$name.log"
     started="$(date -u +%FT%TZ)"
-    # Assembly/recovery already proved the native suite and the queue's archive
-    # runner in a plain clone. Consume that proof even on the first full gate;
+    # Assembly/recovery already proved the CI script tiers, the native suite
+    # and the queue's archive runner in a plain clone of the same code input
+    # (the proof refuses a PASS unless all three passed on its tree). Consume
+    # that proof even on the first full gate (cas-398c: ci-script-tests too);
     # --only remains a fresh diagnostic and cannot consume authorization.
-    if [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(nextest|archive-mode)$ \
+    if [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         local assembly_pass=''
         if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root" 2>&1)"; then
@@ -453,9 +455,9 @@ run_check() {
             return 0
         fi
         printf '  %s\n' "$assembly_pass"
-    elif [[ -z "$only_rows" && "$no_reuse" == true && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+    elif [[ -z "$only_rows" && "$no_reuse" == true && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ ]]; then
         printf '  MISS assembly key=implementation reason=full_gate_required\n'
-    elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+    elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ ]]; then
         printf '  MISS assembly key=implementation reason=helper_missing\n'
     fi
     key="$(row_cache_key "$name" || true)"

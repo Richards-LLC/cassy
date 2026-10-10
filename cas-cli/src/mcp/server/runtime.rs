@@ -277,6 +277,8 @@ async fn run_server_impl() -> anyhow::Result<()> {
             cloud_sync_enabled: cloud_config.auto_sync,
             cloud_sync_interval_secs: cloud_config.interval_secs.max(1),
             index_code: code_config.enabled && code_role.is_writer(),
+            // cas-ba66: the code-vector queue belongs to the canonical writer.
+            drain_code_vectors: code_role.is_writer(),
             code_watch_paths,
             code_extensions: code_config.extensions.clone(),
             code_exclude_patterns: code_config.exclude_patterns.clone(),

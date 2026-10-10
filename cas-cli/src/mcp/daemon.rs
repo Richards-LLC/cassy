@@ -1185,9 +1185,11 @@ impl EmbeddedDaemon {
     /// permanent `400` read as a cheerful "0 embedded" for weeks.
     async fn run_embedding_drain_cycle(&self) -> Result<(), CasError> {
         let cas_root = self.config.cas_root.clone();
+        // cas-ba66: only the canonical code-index writer drains code vectors.
+        let code = crate::cloud::CodeVectorDrain::for_writer(self.config.drain_code_vectors);
 
         let report = tokio::task::spawn_blocking(move || {
-            crate::cloud::drain_all_pending(&cas_root, crate::cloud::DRAIN_BATCH)
+            crate::cloud::drain_all_pending(&cas_root, crate::cloud::DRAIN_BATCH, code)
         })
         .await
         .map_err(|e| CasError::Other(format!("Task join error: {e}")))??;

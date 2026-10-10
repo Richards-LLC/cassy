@@ -153,6 +153,11 @@ pub struct EmbeddedDaemonConfig {
     pub embed_drain: bool,
     /// Embedding drain interval (seconds).
     pub embed_drain_interval_secs: u64,
+    /// Include code-symbol vectors in the embedding drain. Only the
+    /// canonical code-index writer does (cas-ba66): worker and linked
+    /// worktree daemons read the shared code index and must not drain its
+    /// vector queue against the shared store.
+    pub drain_code_vectors: bool,
     /// Enable injected-relevance sampling.
     pub relevance_sampling_enabled: bool,
     /// Minimum interval between relevance sampling passes (seconds).
@@ -179,6 +184,7 @@ impl Default for EmbeddedDaemonConfig {
             archive_retention_days: 0,
             // Code indexing defaults
             index_code: false, // Disabled by default (opt-in)
+            drain_code_vectors: false, // Canonical writer only (opt-in)
             code_watch_paths: vec![],
             code_extensions: vec![],
             code_exclude_patterns: vec![],

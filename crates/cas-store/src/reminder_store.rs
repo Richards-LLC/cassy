@@ -1530,16 +1530,22 @@ mod tests {
             ReminderExpiryOutcome::Expired(_)
         ));
 
-        let restored_timeout_ms: i64 = store
+        // The pooled connection's normal busy handler is back (GH #1165: a
+        // budget-aware handler, so `PRAGMA busy_timeout` reads 0): a write
+        // waits out a short foreign lock instead of failing at once.
+        let blocker = Connection::open(temp.path().join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            blocker.execute_batch("ROLLBACK").unwrap();
+        });
+        store
             .conn
             .lock()
             .unwrap()
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
             .unwrap();
-        assert_eq!(
-            restored_timeout_ms,
-            crate::SQLITE_BUSY_TIMEOUT.as_millis() as i64
-        );
+        release.join().unwrap();
     }
 
     #[test]

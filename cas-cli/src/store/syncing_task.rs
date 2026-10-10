@@ -1149,6 +1149,71 @@ mod tests {
         assert_eq!(writer_queue.pending(10, 5).unwrap().len(), 1);
     }
 
+    /// Leave one committed task whose sync intent is still pending, the state
+    /// a degraded post-commit enqueue leaves behind.
+    fn leave_degraded_update_intent(temp: &TempDir, store: &SyncingTaskStore, id: &str) -> Task {
+        let mut task = Task::new(id.to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        store.queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), "");
+        task.title = "committed, sync pending".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        remove_task_enqueue_failure(temp.path());
+        assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
+        task
+    }
+
+    /// GH #1165: every task-store open reconciled under a blocking exclusive
+    /// flock on task-sync-intents.lock, so a read (the factory daemon's main
+    /// loop, an MCP `task show`) queued behind any process holding it, for up
+    /// to 42.8 s in the field. While another process holds the lock (here
+    /// for up to 30 s), open + reconcile + get + list must finish within
+    /// 100 ms, and the pending intent must stay for a later reconcile.
+    #[test]
+    fn reads_never_wait_for_a_held_task_sync_lock_gh_1165() {
+        let (temp, store) = create_test_store();
+        let task = leave_degraded_update_intent(&temp, &store, "task-held-lock-read");
+        let holder = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(temp.path().join("task-sync-intents.lock"))
+            .unwrap();
+        holder.lock_exclusive().unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let cas_dir = temp.path().to_path_buf();
+        let task_id = task.id.clone();
+        let reader = std::thread::spawn(move || {
+            let reopened = reopen_test_store(&cas_dir, false);
+            let started = std::time::Instant::now();
+            let init = reopened.init();
+            let got = reopened.get(&task_id).map(|task| task.title);
+            let listed = reopened.list(None).map(|tasks| tasks.len());
+            done_tx
+                .send((started.elapsed(), init.is_ok(), got, listed))
+                .unwrap();
+        });
+        let outcome = done_rx.recv_timeout(Duration::from_secs(30));
+        FileExt::unlock(&holder).unwrap();
+        reader.join().unwrap();
+        let (elapsed, init_ok, got, listed) =
+            outcome.expect("a read must not wait for the held task-sync lock");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "open/reconcile/get/list took {elapsed:?} while the lock was held"
+        );
+        assert!(init_ok, "a deferred reconcile is not an open failure");
+        assert_eq!(got.unwrap(), "committed, sync pending");
+        assert_eq!(listed.unwrap(), 1);
+        assert_eq!(
+            store.queue.pending_task_sync_intents().unwrap().len(),
+            1,
+            "the deferred intent stays durable for a later reconcile"
+        );
+    }
+
     #[test]
     fn unbound_advanced_intent_is_retained_without_queue_output() {
         let (_temp, store) = create_test_store();

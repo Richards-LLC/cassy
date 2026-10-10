@@ -15893,6 +15893,63 @@ mod gh_1153_idle_pty_delivery_tests {
     }
 
     #[tokio::test]
+    async fn gh_1163_outbound_reply_after_delivery_retires_the_watchdog() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
+        // Activity is worker-level evidence even when addressed to a different peer,
+        // and remains evidence after the transport drains it.
+        let reply = queue.enqueue_with_session(WORKER, "reviewer", "Interim findings", "provision-test").unwrap();
+        queue.mark_processed(reply).unwrap();
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert!(!daemon.normal_delivery_probes.contains_key(&row));
+        assert_ne!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
+            cas_store::WakeAttempt::Fired, "recipient activity must not trigger a nudge");
+        assert!(queue.message_delivery_report(row).unwrap().unwrap().acked_at.is_none(),
+            "activity is watchdog evidence, not an explicit message acknowledgement");
+    }
+
+    fn record_note(cas_dir: &Path, author: &str, at: chrono::DateTime<chrono::Utc>) {
+        let mut event = cas_types::Event::new(cas_types::EventType::TaskNoteAdded,
+            cas_types::EventEntityType::Task, "cas-1153", "Interim findings").with_session(author);
+        event.created_at = at;
+        crate::store::open_event_store(cas_dir).unwrap().record(&event).unwrap();
+    }
+
+    #[tokio::test]
+    async fn gh_1163_recipient_note_after_delivery_retires_the_watchdog() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
+        record_note(daemon.app.cas_dir(), "gh1153-worker-id", chrono::Utc::now());
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert!(!daemon.normal_delivery_probes.contains_key(&row));
+        assert_ne!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
+            cas_store::WakeAttempt::Fired);
+        assert!(queue.message_delivery_report(row).unwrap().unwrap().acked_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn gh_1163_prior_foreign_and_unattributed_activity_does_not_clear_stall() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
+        queue.enqueue_with_session(WORKER, "reviewer", "Old reply", "provision-test").unwrap();
+        let floor = chrono::Utc::now();
+        daemon.normal_delivery_probes.get_mut(&row).unwrap().delivered_at_utc = floor;
+        record_note(daemon.app.cas_dir(), "gh1153-worker-id", floor - chrono::Duration::seconds(1));
+        record_note(daemon.app.cas_dir(), "other-worker-id", floor + chrono::Duration::seconds(1));
+        queue.enqueue_with_session(WORKER, "reviewer", "Foreign session", "other-factory").unwrap();
+        queue.enqueue_with_session("other-worker", "reviewer", "Other reply", "provision-test").unwrap();
+        let task_store = crate::store::open_task_store(daemon.app.cas_dir()).unwrap();
+        let mut task = cas_types::Task::new("cas-1153".into(), "Assigned task".into());
+        task.assignee = Some(WORKER.into());
+        task.notes = "A supervisor note without worker attribution".into();
+        task_store.add(&task).unwrap();
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert!(daemon.normal_delivery_probes.contains_key(&row));
+        assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
+            cas_store::WakeAttempt::Fired, "only this recipient's activity after delivery clears a probe");
+    }
+
+    #[tokio::test]
     async fn idle_pty_recipient_without_a_turn_is_nudged_then_reported_not_delivered() {
         let Fixture {
             _tmp,

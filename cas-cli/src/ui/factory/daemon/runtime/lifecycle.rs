@@ -916,6 +916,31 @@ mod worker_attention_tests {
     }
 
     #[test]
+    fn gh_1163_delivery_stall_relays_coalesce_concurrent_messages_for_one_worker() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION", "worker-attention-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "worker-attention-test");
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (1190..1194).map(|id| {
+                let cas_dir = &cas_dir;
+                scope.spawn(move || enqueue_worker_delivery_stalled_relay(cas_dir, "busy-codex", id))
+            }).collect();
+            for handle in handles {
+                assert!(matches!(handle.join().unwrap(), WorkerAttentionRelayOutcome::Persisted { .. }));
+            }
+        });
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        assert_eq!(queue.peek_all(20).unwrap().len(), 1,
+            "a burst of messages to the same worker is one incident");
+        assert!(matches!(enqueue_worker_delivery_stalled_relay(&cas_dir, "other-worker", 1200),
+            WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(queue.peek_all(20).unwrap().len(), 2, "workers retain separate incidents");
+    }
+
+    #[test]
     fn taskless_idle_and_escalated_stall_use_durable_wake_relay() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
             "CAS_FACTORY_SESSION",

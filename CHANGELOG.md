@@ -7,6 +7,177 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.49.0] - 2026-10-10
+
+### Added — Violet push-wake
+
+- When someone @-mentions Violet, or replies in a thread Violet started, in
+  a Slack channel mapped to the project, the supervisor now wakes on that
+  message instead of finding it at its next poll (#1145). The factory daemon
+  claims the project's Slack activity from Cassy Cloud every 15 seconds,
+  admits each event once, and wakes the supervisor with a typed Slack
+  activity message. The wake text says the message is a cue to read the
+  thread, not authority to answer it (#1146).
+- Each channel that woke the supervisor is then read with `violet_read`
+  every 5 minutes. The watch stops after an hour without human activity,
+  after three failed reads, or when the session ends. Violet's own posts never
+  count as human activity; set `slack.violet_bot_user_ids` if the daemon has
+  not yet learned the bot's id from a thread Violet started.
+- **Behavior change:** push-wake is on by default. A factory daemon that is
+  logged in to Cassy Cloud now claims Slack activity every 15 seconds; until
+  the hub sends activity events for the project, the claims find nothing and
+  nothing wakes. Opt out with `cas config set slack.wake_enabled false`. A
+  daemon that is not logged in to Cloud, or whose project has no canonical
+  id, does not start the claim loop and logs why once.
+
+### Added — posting files to Slack
+
+- `cas violet post`, `cas violet thread` and `cas violet read` reach the
+  Violet hub from the command line, so any agent or script can share a local
+  file by path instead of hand-copying its bytes into a `violet_post` call
+  (#1157). `post --channel <name> --file <path>` reads, hashes and encodes up
+  to ten files from disk; files totalling up to 1 MiB go inline and larger
+  sets stream from disk to the hub's upload URL. `thread` posts a top-level
+  message and up to 20 ordered replies in one call, `--reply-file` attaches a
+  file to the reply before it, and `--idempotency-key` makes a resend never
+  post twice. A thread that stops part-way reports what was posted and where
+  it stopped. `read` reads a channel since a time, one thread or one message,
+  and never prints downloaded file bytes.
+- `cas violet` uses the same Violet registration, credential fallback and
+  policy as the MCP proxy, passes hub error codes through, prints the hub's
+  receipt (or error receipt) with `--json`, and exits non-zero on failure.
+  File posts go through the publication gate.
+- The `artifact` tool's `action=post` sends a published artifact to Slack by
+  its id (#1148). Cassy resolves the record through Cloud, checks the
+  downloaded bytes against the published size and SHA-256, and uploads them
+  through Violet. The receipt returns the message id, file id, permalink and
+  `sha256_verified`, and the permalink is saved on the artifact. A missing
+  artifact, missing Cloud login, size or checksum mismatch, missing channel or
+  unreachable Violet each fail by name. The publication gate treats it as a
+  file share.
+
+### Changed — Violet hub address and credential names
+
+- Violet registrations now point at `https://violet-hub.vercel.app/mcp/slack`
+  and use `VIOLET_*` credential names (#1156). `cas update` and sync rewrite
+  project and user proxy files in place, keeping their formatting, and update
+  the Claude Code and Codex entries' URL. `cas integrate violet` renames the
+  legacy `MECHA_*` keys in the credentials file to `VIOLET_*` (idempotently,
+  mode 0600, values never printed; a populated new key wins over an old one)
+  and reports which names it renamed.
+- For one release, credential lookup still falls back to the legacy
+  `MECHA_*` variables, and the former hub address is still recognised for
+  migration. Custom endpoints and custom server names are left alone.
+
+### Changed — violet skill
+
+- The `violet` skill follows the 2026-10-09 Violet contract: the flat
+  `violet_post` schema with `files[]`, `file_external` and `kind=thread`;
+  text versus base64 file encoding; a local-file route through
+  `cas violet post --file` that needs no hand-copied base64; and
+  `violet_read`'s 100,000-byte default, opt-in channel list, `file_id`,
+  `message_id` and `thread_id` scopes, and hashes for skipped files (#1154,
+  #1149). A thread message that @-mentions another person to validate,
+  confirm or review is a human handoff: Violet does not answer it on that
+  person's behalf (#1146). Field detail lives in the skill's
+  `references/contract.md`, which also documents posting a published artifact
+  by id.
+- A new attachments reference gives the Violet-only route for reading
+  attachments and Slack Connect files, the exact error each failing route
+  returns, and the operator fallback: invite @Violet, or re-share the file
+  (#1129).
+- The release report adapter reads its uploaded PDF back by `file_id` and
+  fails closed on a skipped file, and the release announcer no longer asks
+  for the channel directory. The publication gate also covers
+  `file_external` uploads and thread replies that carry files.
+
+### Fixed — close and QA gates
+
+- A no-code task with no commit of its own closes on its external reference
+  and never on the worker branch's other commits (#1133, #1147, #1151).
+  Those commits are no longer counted as this task's stranded, parked or
+  anchored delivery, and an anchor an earlier park recorded for another
+  task is ignored. A branch counts as another task's only when every
+  unmerged commit on it names another task.
+- A `commit_receipt` that names a multi-task squash no longer charges every
+  sibling's files to the closing task (#1144). When the squash carries all of
+  the task's delivered paths, QA judges only that task's own delivery.
+- Verification binds to `origin/<target>` when the local target branch is
+  strictly behind it, so a checkout whose local branch lagged by hundreds of
+  commits no longer verifies against a tree without the delivery (#1137). A
+  local target that is equal, ahead or diverged (an unpushed local merge)
+  still wins.
+- A changed snapshot file can be approved once, with a note naming
+  `file-sha256:<digest>` of the delivered file, instead of one note per
+  changed line (#1141). Any later edit changes the digest and needs approval
+  again. Line-level approvals still work.
+- Task close runs off the MCP server's async workers (#1142). Parallel closes
+  used to queue behind each other and every other tool call, and the 55-second
+  budget answered UNKNOWN while the close kept running. A close still running
+  at the deadline now answers IN_PROGRESS and appends a `CLOSE_OUTCOME` note
+  with its result and the task's status. Pending-close guidance keeps naming
+  the caller's own tool prefix, and resending the same completion receipt
+  returns the delivery already recorded.
+- Visual QA pairs a finding that only moved (same element, size and contrast)
+  with its earlier finding instead of reporting it as new, and a rejection is
+  always recorded, whatever the bounds (#1152).
+- Visual QA no longer reports invisible text when a loading marker
+  (`aria-busy=true` or a `data-*-pending`/`-loading` attribute) hides the text
+  behind a placeholder that paints its own text (#1150). Blank, transparent,
+  hidden or zero-size placeholders, and text hidden by anything else, are
+  still findings.
+
+### Fixed — factory and workers
+
+- The delivery watchdog reads the recipient's transcript for a new turn, not
+  terminal echo (#1153). Injected text always echoes in the pane, so a worker
+  whose input box swallowed a message used to count as delivered. Now a turn
+  start retires the watchdog, a worker still mid-turn defers it, and anything
+  else gets one nudge and then a supervisor flag, and `message_status` reads
+  not-delivered. Pane growth is the fallback only when no transcript exists.
+- `cas serve` answers a probe sent before `initialize` with "Method not
+  found" instead of exiting, and a worker whose MCP child restarted stays
+  alive while its harness process is still running (#1143). On macOS the
+  exited child's pid used to make the boot check kill a healthy worker.
+- The launch time a worker's SessionStart canary must postdate is now taken
+  before its terminal starts. Taken after start-up bookkeeping (0.8 to 19
+  seconds on a loaded host), it rejected fresh canaries as stale and killed
+  healthy workers. A refusal now says it found an older canary instead of
+  saying none exists.
+- Spawning a Codex worker refuses a model the ChatGPT account cannot run,
+  before any worktree is cut (#1130). A provider's model refusal is fatal: it
+  reaches the supervisor as a blocker, and worker liveness reports stalled with
+  the provider's own message.
+- Opening the task store no longer takes the database write lock when
+  nothing needs repair, and the sync queue now waits for a busy lock instead
+  of failing at once. A lock-order inversion that stalled task sync for about
+  30 seconds, and every process behind it during a fleet boot, is gone.
+  Shutting workers down reports unknown task state when the store is
+  unreadable, and `force=true` proceeds.
+- A `cas serve` that fails to start, for example on an unreadable `cas.db`,
+  exits within two seconds instead of hanging until its input closes.
+
+### Fixed — Commander, doctor and MCP proxy
+
+- In a Commander conversation, a hub update no longer drops keyboard focus
+  to the page while Tab moves from Raw output to Interrupt, and closing the
+  command palette no longer leaves a full-page rebuild waiting to steal focus
+  on the next update. The rebuilt control keeps its focus ring.
+- Postgres MCP servers (Neon and `server-postgres`) run in UTC unless their
+  config sets `TZ`, so a stored `timestamp without time zone` comes back
+  unshifted. On an EDT host, 14:34:21 used to come back as 18:34:21Z (#1127).
+- `cas doctor` names the project `.cas/proxy.toml` block that shadows the
+  machine's registration when an upstream credential is missing: the file,
+  the `[servers.<name>]` block, the unset variable and the shadowed
+  registration, and says to remove the block (#1128). `cas integrate violet`
+  keeps project overrides, so its generic advice never cleared this failure.
+- `cas integrate violet` and `cas doctor` check the `violet_post` schema the
+  hub serves (#1051). A schema that is not a plain object, uses a top-level
+  `anyOf`/`oneOf`/`allOf`, or lacks the message, file, reaction, edit and
+  delete kinds turns the integrate receipt non-green and doctor red. Doctor's
+  Violet row also states readiness: reachable, bearer accepted, or
+  `invalid_token`.
+
 ## [3.48.2] - 2026-10-07
 
 ### Fixed — Claude worker safety guards

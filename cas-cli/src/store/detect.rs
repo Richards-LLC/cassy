@@ -854,6 +854,34 @@ mod tests {
         assert!(cas_dir.join("config.toml").exists());
     }
 
+    /// GH #1170: a `cas serve` from 3.49.0 run in a `.cas` holding only a
+    /// `proxy.toml` left an empty (schema v0) `cas.db` behind. Its existence
+    /// made init report "already initialized" and return the store untouched,
+    /// so even `cas init --force` exited 0 with serve still refusing v0.
+    #[test]
+    fn an_empty_cas_db_is_not_an_initialized_store_gh_1170() {
+        let temp = TempDir::new().unwrap();
+        let cas = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        std::fs::write(cas.join("proxy.toml"), "").unwrap();
+        std::fs::write(cas.join("cas.db"), b"").unwrap();
+        assert!(!cas_store_present(&cas), "an empty cas.db holds no store");
+
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        assert!(cas_store_present(&cas_dir), "init must create the store over it");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('entries', 'tasks', 'rules')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 3, "the base tables exist");
+        let status = crate::migration::check_migrations(&cas_dir).unwrap();
+        assert!(!status.has_pending(), "init leaves the store at the current schema");
+    }
+
     #[test]
     fn init_cas_dir_creates_the_store_in_a_config_only_cas_and_keeps_its_config() {
         // cas-563f: a .cas holding only an intentional config.toml (no

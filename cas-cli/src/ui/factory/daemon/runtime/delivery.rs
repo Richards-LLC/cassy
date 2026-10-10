@@ -1533,7 +1533,7 @@ mod tests {
     fn terminal_assignment_is_suppressed_at_the_final_transport_boundary() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let task_id = "cas-2b0b";
         let mut task = cas_types::Task::new(task_id.to_string(), "closed before delivery".into());
         task.status = cas_types::TaskStatus::Closed;
@@ -1554,7 +1554,7 @@ mod tests {
     fn started_assignment_is_suppressed_for_the_current_worker_at_transport() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let task_id = "cas-7c1d";
         let mut task = cas_types::Task::new(task_id.to_string(), "already delivered".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;

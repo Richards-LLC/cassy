@@ -245,6 +245,20 @@ pub(crate) enum TaskSyncFulfillResult {
 }
 
 impl SyncQueue {
+    /// The queue connection, honouring the thread's store wait budget: the
+    /// cached daemon task store shares this connection with background
+    /// threads that may hold it across a busy wait (GH #1165).
+    fn lock_queue_conn(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, CasError> {
+        cas_store::wait_budget::lock_mutex_within_budget(&self.conn, "sync queue connection")
+            .ok_or_else(|| {
+                CasError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "sync queue connection held by another thread; this thread's store wait \
+                     budget is spent",
+                ))
+            })
+    }
+
     fn task_sync_lock_path(&self) -> PathBuf {
         self.cas_dir.join(TASK_SYNC_INTENT_LOCK)
     }
@@ -263,7 +277,12 @@ impl SyncQueue {
         &self,
         entity_ids: &[S],
     ) -> Result<TaskSyncMutationGuard, CasError> {
-        self.lock_task_sync_mutations_within(entity_ids, None)
+        // GH #1165 (cas-04db): a thread under a store wait budget (the factory
+        // daemon loop) fails fast at its deadline; others wait as before.
+        self.lock_task_sync_mutations_within(
+            entity_ids,
+            cas_store::wait_budget::remaining_wait(),
+        )
     }
 
     /// [`Self::lock_task_sync_mutations`] with a wait budget: `None` waits as
@@ -333,7 +352,7 @@ impl SyncQueue {
         fallback_previous_project_id: Option<&str>,
         global_scope: bool,
     ) -> Result<TaskSyncIntent, CasError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_queue_conn()?;
         let tx = begin_write(&conn)?;
         let mutation_id = uuid::Uuid::new_v4().to_string();
         let previous_revision = tx
@@ -400,7 +419,7 @@ impl SyncQueue {
     }
 
     pub(crate) fn cancel_task_sync_intent(&self, intent_id: i64) -> Result<(), CasError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_queue_conn()?;
         let tx = begin_write(&conn)?;
         tx.execute(
             "DELETE FROM task_mutation_receipts WHERE receipt_id IN
@@ -416,7 +435,7 @@ impl SyncQueue {
     }
 
     pub(crate) fn pending_task_sync_intents(&self) -> Result<Vec<TaskSyncIntent>, CasError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_queue_conn()?;
         let mut statement = conn.prepare(
             r#"
             SELECT i.id, i.mutation_id, i.entity_id, i.operation, i.previous_updated_at,
@@ -465,7 +484,7 @@ impl SyncQueue {
         H: FnOnce(),
     {
         const ATTEMPTS: usize = 3;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_queue_conn()?;
         let mut after_validation = Some(after_validation);
         let mut attempt = 0;
         let (tx, canonical, _reconcile_lease) = loop {
@@ -733,9 +752,13 @@ fn begin_write_bounded(
     conn: &rusqlite::Connection,
 ) -> Result<Option<cas_store::shared_db::ImmediateTx<'_>>, CasError> {
     refuse_write_wait_under_reconcile_lease()?;
-    conn.busy_timeout(RECONCILE_BUSY_BOUND)?;
+    conn.busy_timeout(
+        cas_store::wait_budget::remaining_wait()
+            .map_or(RECONCILE_BUSY_BOUND, |left| left.min(RECONCILE_BUSY_BOUND)),
+    )?;
     let began = cas_store::shared_db::ImmediateTx::new(conn);
-    let restored = conn.busy_timeout(cas_store::SQLITE_BUSY_TIMEOUT);
+    // GH #1165: restore the budget-aware handler, not SQLite's built-in one.
+    let restored = cas_store::shared_db::install_busy_handler(conn);
     match began {
         Ok(tx) => {
             restored?;

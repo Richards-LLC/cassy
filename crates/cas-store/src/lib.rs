@@ -36,6 +36,7 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod shared_db;
+pub mod wait_budget;
 
 mod agent_store;
 mod code_store;

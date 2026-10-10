@@ -103,6 +103,44 @@ pub(crate) struct LoopProgress {
     phase: AtomicU8,
     loop_tid: AtomicI64,
     spawn: Mutex<SpawnSnapshot>,
+    /// When the running pass began, and the pass durations since the last
+    /// status snapshot (GH #1165).
+    pass_started: Mutex<Option<std::time::Instant>>,
+    window: Mutex<Vec<u64>>,
+}
+
+/// Most pass durations one snapshot window keeps; older ones are dropped
+/// from the percentile but still counted.
+const PASS_WINDOW_CAP: usize = 8192;
+/// The pass latency #1165 sets as the loop's bound.
+const SLOW_PASS_MS: u64 = 100;
+
+/// Summary of one window of pass durations.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PassWindow {
+    pub passes: u64,
+    pub max_ms: Option<u64>,
+    pub p99_ms: Option<u64>,
+    pub over_100ms: u64,
+}
+
+impl PassWindow {
+    fn from_durations(mut durations: Vec<u64>, passes: u64) -> Self {
+        if durations.is_empty() {
+            return Self {
+                passes,
+                ..Self::default()
+            };
+        }
+        durations.sort_unstable();
+        let rank = ((durations.len() * 99).div_ceil(100)).max(1) - 1;
+        Self {
+            passes,
+            max_ms: durations.last().copied(),
+            p99_ms: Some(durations[rank]),
+            over_100ms: durations.iter().filter(|ms| **ms >= SLOW_PASS_MS).count() as u64,
+        }
+    }
 }
 
 impl LoopProgress {
@@ -113,7 +151,27 @@ impl LoopProgress {
             phase: AtomicU8::new(LoopPhase::Start as u8),
             loop_tid: AtomicI64::new(current_tid()),
             spawn: Mutex::new(SpawnSnapshot::default()),
+            pass_started: Mutex::new(None),
+            window: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Mark the top of a pass, so [`Self::complete_pass`] can time it.
+    pub(crate) fn begin_pass(&self) {
+        if let Ok(mut started) = self.pass_started.lock() {
+            *started = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Take the pass durations recorded since the last call.
+    pub(crate) fn take_pass_window(&self) -> PassWindow {
+        let durations = self
+            .window
+            .lock()
+            .map(|mut window| std::mem::take(&mut *window))
+            .unwrap_or_default();
+        let passes = durations.len() as u64;
+        PassWindow::from_durations(durations, passes)
     }
 
     pub(crate) fn enter(&self, phase: LoopPhase) {
@@ -123,6 +181,18 @@ impl LoopProgress {
     /// Mark a pass complete. The loop's future may move between runtime
     /// threads, so the thread id is refreshed here too.
     pub(crate) fn complete_pass(&self) {
+        let elapsed = self
+            .pass_started
+            .lock()
+            .ok()
+            .and_then(|mut started| started.take())
+            .map(|started| started.elapsed().as_millis() as u64);
+        if let Some(ms) = elapsed
+            && let Ok(mut window) = self.window.lock()
+            && window.len() < PASS_WINDOW_CAP
+        {
+            window.push(ms);
+        }
         self.last_pass_ms
             .store(Utc::now().timestamp_millis(), Ordering::Relaxed);
         self.passes.fetch_add(1, Ordering::Relaxed);
@@ -173,6 +243,10 @@ impl LoopProgress {
             loop_thread_wait: None,
             helpers_killed: Vec::new(),
             last_reset,
+            max_pass_ms: None,
+            p99_pass_ms: None,
+            window_passes: 0,
+            passes_over_100ms: 0,
         }
     }
 }
@@ -299,6 +373,11 @@ pub(crate) fn spawn_watchdog(
                     }
                 }
                 status.helpers_killed = helpers_killed.clone();
+                let window = progress.take_pass_window();
+                status.max_pass_ms = window.max_ms;
+                status.p99_pass_ms = window.p99_ms;
+                status.window_passes = window.passes;
+                status.passes_over_100ms = window.over_100ms;
                 if let Err(error) = write_status(&cas_dir, &status) {
                     tracing::debug!(%error, "cas-73b5: could not write the daemon loop status");
                 }
@@ -320,6 +399,28 @@ pub(crate) fn spawn_watchdog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pass_window_reports_max_p99_and_slow_passes_then_resets() {
+        let progress = LoopProgress::new();
+        assert_eq!(progress.take_pass_window(), PassWindow::default());
+        progress.begin_pass();
+        progress.complete_pass();
+        // A pass without begin_pass (the first, before the loop marks it) is
+        // counted in `passes` but not timed.
+        progress.complete_pass();
+        let window = progress.take_pass_window();
+        assert_eq!(window.passes, 1);
+        assert!(window.max_ms.unwrap() < SLOW_PASS_MS);
+        assert_eq!(window.over_100ms, 0);
+        assert_eq!(progress.take_pass_window(), PassWindow::default());
+
+        let durations: Vec<u64> = (1..=200).collect();
+        let summary = PassWindow::from_durations(durations, 200);
+        assert_eq!(summary.max_ms, Some(200));
+        assert_eq!(summary.p99_ms, Some(198));
+        assert_eq!(summary.over_100ms, 101);
+    }
 
     #[test]
     fn etime_parses_every_ps_shape() {

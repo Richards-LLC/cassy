@@ -39,6 +39,7 @@ mod init;
 mod panels_and_modes;
 pub(crate) mod render_and_ops;
 mod sidecar_and_selection;
+pub(crate) mod task_dialog_load;
 
 pub(crate) use branch_visibility::BranchAheadBehind;
 pub(crate) use branch_visibility::truncate_branch_middle;
@@ -969,6 +970,9 @@ pub struct FactoryApp {
     pub show_task_dialog: bool,
     /// Selected task ID for task dialog
     pub task_dialog_id: Option<String>,
+    /// Off-thread read of the dialog's task (GH #1165): the renderer never
+    /// touches the store.
+    pub task_dialog_load: task_dialog_load::TaskDialogLoad,
     /// Scroll offset for task dialog
     pub task_dialog_scroll: u16,
     /// Max scroll offset for task dialog (computed during render)
@@ -7220,7 +7224,7 @@ mod spawn_isolation_tests {
                     .success()
             );
         }
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for (id, branch) in [
             ("cas-task-epic", "epic/task"),
             ("cas-focus-epic", "epic/focus"),

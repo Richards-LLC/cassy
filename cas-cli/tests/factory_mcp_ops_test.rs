@@ -833,6 +833,10 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
             loop_thread_wait: Some("pipe_read".to_string()),
             helpers_killed: Vec::new(),
             last_reset: None,
+            max_pass_ms: None,
+            p99_pass_ms: None,
+            window_passes: 0,
+            passes_over_100ms: 0,
         },
     )
     .unwrap();

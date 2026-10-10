@@ -480,7 +480,7 @@ fn ensure_worker_preassignment(
             "cas-28a4: pre-assignment reported no write but the binding is already correct"
         );
     }
-    let store = crate::store::open_task_store(cas_dir)
+    let store = crate::store::open_task_store_cached(cas_dir)
         .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))?;
     store
         .get(task_id)
@@ -560,7 +560,7 @@ fn append_workspace_contract_brief(
         task_artifacts.display()
     ));
 
-    let Some(task) = crate::store::open_task_store(cas_dir)
+    let Some(task) = crate::store::open_task_store_cached(cas_dir)
         .ok()
         .and_then(|store| store.get(task_id).ok())
     else {
@@ -657,7 +657,7 @@ fn preassign_failure_reason(
     task_id: &str,
     worker_name: &str,
 ) -> Option<String> {
-    let store = match crate::store::open_task_store(cas_dir) {
+    let store = match crate::store::open_task_store_cached(cas_dir) {
         Ok(store) => store,
         Err(e) => {
             return Some(format!(
@@ -3511,6 +3511,7 @@ impl FactoryDaemon {
         recipient: &str,
     ) {
         Self::record_surfacing_receipt(
+            None,
             queue,
             prompt_id,
             recipient,
@@ -3527,6 +3528,7 @@ impl FactoryDaemon {
         recipient: &str,
     ) {
         Self::record_surfacing_receipt(
+            None,
             queue,
             prompt_id,
             recipient,
@@ -3534,7 +3536,43 @@ impl FactoryDaemon {
         );
     }
 
+    /// [`Self::record_transport_receipt`] for the delivery path: a busy store
+    /// defers the receipt to the store worker instead of dropping it (GH #1165).
+    fn record_transport_receipt_durable(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            Some(self.app.cas_dir()),
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::TransportClaimed,
+        );
+    }
+
+    /// [`Self::record_observed_wake_receipt`], deferred when the store is busy.
+    fn record_observed_wake_receipt_durable(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            Some(self.app.cas_dir()),
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
+    }
+
+    /// With `cas_dir`, a failed write is deferred to the store worker so a
+    /// busy store never drops the receipt (GH #1165).
     fn record_surfacing_receipt(
+        cas_dir: Option<&std::path::Path>,
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
         recipient: &str,
@@ -3545,6 +3583,23 @@ impl FactoryDaemon {
             recipient,
             source,
         ) {
+            if let Some(cas_dir) = cas_dir {
+                let cas_dir = cas_dir.to_path_buf();
+                let deferred_recipient = recipient.to_string();
+                let deferred = super::store_worker::defer(
+                    "record surfacing receipt",
+                    &error.to_string(),
+                    move || {
+                        crate::store::open_prompt_queue_store(&cas_dir)
+                            .map_err(|error| error.to_string())?
+                            .record_recipient_surfaced(prompt_id, &deferred_recipient, source)
+                            .map_err(|error| error.to_string())
+                    },
+                );
+                if deferred != super::store_worker::Persisted::Dropped {
+                    return;
+                }
+            }
             tracing::debug!(
                 target: "cas::coordination",
                 message_id = prompt_id,
@@ -3703,7 +3758,13 @@ impl FactoryDaemon {
         row_id: i64,
         recipient: &str,
     ) -> anyhow::Result<()> {
-        Self::record_observed_wake_receipt(queue, row_id, recipient);
+        Self::record_surfacing_receipt(
+            None,
+            queue,
+            row_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
         queue.mark_transport_delivered(row_id)?;
         Ok(())
     }
@@ -4951,7 +5012,7 @@ impl FactoryDaemon {
             observation.state
                 == crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
         });
-        let task_blocked = crate::store::open_task_store(cas_dir)
+        let task_blocked = crate::store::open_task_store_cached(cas_dir)
             .ok()
             .and_then(|store| store.list(Some(cas_types::TaskStatus::Blocked)).ok())
             .is_some_and(|tasks| {
@@ -5545,10 +5606,13 @@ impl FactoryDaemon {
                 let target = target.clone();
                 match self.deliver_context_reset(&target).await {
                     super::delivery::ContextResetDelivery::Injected => {
-                        if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                        if super::store_worker::mark_transport_delivered(
+                            self.app.cas_dir(),
+                            queued.id,
+                        ) == super::store_worker::Persisted::Dropped
+                        {
                             tracing::warn!(
                                 prompt_id = queued.id,
-                                error = %e,
                                 "cas-dffe: failed to stamp a delivered context-reset command"
                             );
                         }
@@ -5983,11 +6047,14 @@ impl FactoryDaemon {
                     // harness took our inbox copy AND the pane then produced
                     // output. Record the strong observed-wake receipt so the
                     // consumed row does not reappear in inbox_poll.
-                    Self::record_observed_wake_receipt(&*queue, queued.id, &queued.target);
-                    if let Err(error) = queue.mark_transport_delivered(queued.id) {
+                    self.record_observed_wake_receipt_durable(&*queue, queued.id, &queued.target);
+                    if super::store_worker::mark_transport_delivered(
+                        self.app.cas_dir(),
+                        queued.id,
+                    ) == super::store_worker::Persisted::Dropped
+                    {
                         tracing::error!(
                             prompt_id = queued.id,
-                            %error,
                             "cas-ceae: failed to consume a row the harness already drained"
                         );
                     } else {
@@ -6458,6 +6525,7 @@ impl FactoryDaemon {
 
             tracing::info!("Injecting prompt to '{}': {}", target, preview);
 
+            let injection_cas_dir = self.app.cas_dir().to_path_buf();
             let record_injection = |store: &SqliteEventStore,
                                     prompt_id: i64,
                                     queue_source: &str,
@@ -6495,7 +6563,17 @@ impl FactoryDaemon {
                     summary,
                 )
                 .with_metadata(meta);
-                let _ = store.record(&ev);
+                // GH #1165: a busy store defers the audit row, never drops it.
+                if let Err(error) = store.record(&ev) {
+                    let cas_dir = injection_cas_dir.clone();
+                    super::store_worker::defer("record injection", &error.to_string(), move || {
+                        crate::store::open_event_store(&cas_dir)
+                            .map_err(|error| error.to_string())?
+                            .record(&ev)
+                            .map(drop)
+                            .map_err(|error| error.to_string())
+                    });
+                }
             };
 
             let mut success = false;
@@ -6608,7 +6686,7 @@ impl FactoryDaemon {
                             // that already received it. Without this write, one
                             // broadcast is re-served to every worker on every
                             // `inbox_poll`, forever.
-                            Self::record_transport_receipt(&*queue, queued.id, name);
+                            self.record_transport_receipt_durable(&*queue, queued.id, name);
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
                                 record_injection(
@@ -6667,6 +6745,8 @@ impl FactoryDaemon {
                 } else {
                     Some(fail_notes.join("; "))
                 };
+                // GH #1165: the broadcast already reached its panes; a busy
+                // store defers the outcome stamp rather than losing it.
                 if let Err(e) = queue.mark_broadcast_outcome(
                     queued.id,
                     attempted,
@@ -6674,11 +6754,32 @@ impl FactoryDaemon {
                     failed,
                     detail.as_deref(),
                 ) {
-                    tracing::error!(
-                        "Failed to stamp broadcast outcome for prompt {}: {}",
-                        queued.id,
-                        e
-                    );
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    let prompt_id = queued.id;
+                    let deferred_detail = detail.clone();
+                    if super::store_worker::defer(
+                        "mark broadcast outcome",
+                        &e.to_string(),
+                        move || {
+                            crate::store::open_prompt_queue_store(&cas_dir)
+                                .map_err(|error| error.to_string())?
+                                .mark_broadcast_outcome(
+                                    prompt_id,
+                                    attempted,
+                                    succeeded,
+                                    failed,
+                                    deferred_detail.as_deref(),
+                                )
+                                .map_err(|error| error.to_string())
+                        },
+                    ) == super::store_worker::Persisted::Dropped
+                    {
+                        tracing::error!(
+                            "Failed to stamp broadcast outcome for prompt {}: {}",
+                            queued.id,
+                            e
+                        );
+                    }
                 }
                 if succeeded == 0 {
                     let _ = queue.record_retry(
@@ -7355,13 +7456,16 @@ impl FactoryDaemon {
                 // plus the re-nudge cadence still cover the deferred path. The
                 // recipient's unread view was never the right place to hide a
                 // delivery failure.
-                Self::record_transport_receipt(&*queue, queued.id, &queued.target);
+                self.record_transport_receipt_durable(&*queue, queued.id, &queued.target);
                 // cas-2c5f: authoritative transport handoff only.
-                if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                // GH #1165: the bytes are already in the pane, so a busy store
+                // defers this stamp to the store worker instead of losing it.
+                if super::store_worker::mark_transport_delivered(self.app.cas_dir(), queued.id)
+                    == super::store_worker::Persisted::Dropped
+                {
                     tracing::error!(
-                        "Failed to mark prompt {} as transport-delivered: {}",
-                        queued.id,
-                        e
+                        "Failed to mark prompt {} as transport-delivered",
+                        queued.id
                     );
                 }
             }
@@ -9304,7 +9408,7 @@ fn fire_reminder(
         // parses exactly what is written here.
         let event_context = triggering_event.map(|event| event.description.clone());
         let task_status = reminder.task_id.as_deref().and_then(|task_id| {
-            crate::store::open_task_store(cas_dir)
+            crate::store::open_task_store_cached(cas_dir)
                 .ok()
                 .and_then(|store| store.get(task_id).ok())
                 .map(|task| task.status.to_string())
@@ -9932,7 +10036,7 @@ mod tests {
         use cas_store::{EnqueueIdempotentResult, PromptQueueStore, TaskStore};
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for (id, status) in [
             ("cas-a894", TaskStatus::AwaitingMerge),
             ("cas-b894", TaskStatus::InProgress),
@@ -10092,7 +10196,7 @@ mod tests {
         .unwrap();
         let mut task = cas_types::Task::new("cas-cite2".into(), "Fix uploads".into());
         task.description = "See https://github.com/acme/widgets/issues/77.".into();
-        crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+        crate::store::open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
 
         deliver_worker_task_brief(
             &cas_dir,
@@ -13258,7 +13362,7 @@ mod tests {
         let task_id = "cas-preassigned";
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(task_id.to_string(), "preassigned task".to_string());
         task.assignee = Some(worker.to_string());
         store.add(&task).unwrap();
@@ -13639,7 +13743,7 @@ mod tests {
     fn preassign_that_did_not_stick_is_reported_with_a_reason() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
 
         let mut mine = Task::new("cas-2702".to_string(), "assigned to me".to_string());
         mine.assignee = Some("cosmic-crow-41".to_string());
@@ -13681,7 +13785,7 @@ mod tests {
     fn registration_preassignment_binds_a_free_task() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&Task::new(
                 "cas-aee6".to_string(),
@@ -13706,7 +13810,7 @@ mod tests {
     fn registration_preassignment_is_idempotent() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-2702".to_string(), "spawn queue".to_string());
         task.assignee = Some("cosmic-crow-41".to_string());
         store.add(&task).unwrap();
@@ -13727,7 +13831,7 @@ mod tests {
         let mut holder = cas_types::Agent::new("holder-agent-id".into(), "happy-owl-73".into());
         holder.role = cas_types::AgentRole::Worker;
         agents.register(&holder).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-e74c".to_string(), "merge guard".to_string());
         task.assignee = Some("happy-owl-73".to_string());
         store.add(&task).unwrap();
@@ -13754,7 +13858,7 @@ mod tests {
     fn registration_preassignment_refuses_terminal_task_without_briefing_worker() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-closed".to_string(), "already done".to_string());
         task.status = TaskStatus::Closed;
         task.assignee = Some("cosmic-crow-41".to_string());
@@ -13780,7 +13884,7 @@ mod tests {
     fn registration_preassignment_resets_stale_holder_and_preserves_audit_history() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-stale".to_string(), "orphaned delivery".to_string());
         task.status = TaskStatus::InProgress;
         task.assignee = Some("dead-session-worker".to_string());
@@ -13947,7 +14051,7 @@ mod tests {
     fn registration_preassignment_brief_includes_demo_statement() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-demo-brief".to_string(), "demo brief".to_string());
         task.demo_statement = "As a reader, I open the page and see the result.".to_string();
         store.add(&task).unwrap();
@@ -14036,7 +14140,7 @@ mod tests {
             .register(&worker)
             .unwrap();
 
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut stale = Task::new("cas-stale-path".into(), "stale artifact path".into());
         stale.description = "Write the receipt to /mnt/datacube/staging/proof.json".into();
         task_store.add(&stale).unwrap();
@@ -15460,7 +15564,7 @@ mod wake_recipient_regressions_gh1101 {
         use cas_store::{EnqueueIdempotentResult, PromptQueueStore};
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-gh1101".into(), "reassigned QA".into());
         task.assignee = Some("old-worker".into());
         tasks.add(&task).unwrap();

@@ -11,13 +11,47 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
-use crate::{Result, SQLITE_BUSY_TIMEOUT, StoreError};
+#[cfg(test)]
+use crate::SQLITE_BUSY_TIMEOUT;
+use crate::{Result, StoreError};
 
 /// Acquire a shared SQLite connection, converting a poisoned mutex into a
 /// recoverable store error instead of panicking the caller.
+///
+/// Under a thread wait budget ([`crate::wait_budget`]) the in-process mutex is
+/// polled only until the deadline: another thread of this process holding the
+/// connection across its own busy wait must not stall a UI thread (GH #1165).
 pub(crate) fn lock_connection(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>> {
-    conn.lock()
-        .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()))
+    lock_connection_mutex(conn)
+}
+
+/// [`lock_connection`] for a bare mutex (the pooled write path).
+pub(crate) fn lock_connection_mutex(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
+    crate::wait_budget::note_store_access("sqlite connection");
+    if crate::wait_budget::wait_deadline().is_none() {
+        return conn
+            .lock()
+            .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()));
+    }
+    let mut pause = Duration::from_micros(200);
+    loop {
+        match conn.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(StoreError::Other(
+                    "shared SQLite connection lock poisoned".to_string(),
+                ));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let Some(sleep) = crate::wait_budget::clamp_wait(pause) else {
+            return Err(crate::wait_budget::budget_exhausted_store_error(
+                "shared SQLite connection held by another thread",
+            ));
+        };
+        std::thread::sleep(sleep);
+        pause = (pause * 2).min(Duration::from_millis(5));
+    }
 }
 
 /// Process-global pool of shared SQLite connections, keyed by canonical DB path.
@@ -314,6 +348,7 @@ fn assert_not_protected(db_path: &Path) {
 /// PRAGMAs (WAL, busy_timeout, etc.) are configured exactly once per connection.
 pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>> {
     assert_not_protected(db_path);
+    crate::wait_budget::note_store_access("shared_connection");
 
     let canonical = canonical_db_path(db_path);
 
@@ -376,7 +411,7 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
 /// Open a database and apply the PRAGMAs every shared connection carries.
 fn open_configured(db_path: &Path) -> crate::Result<Connection> {
     let conn = Connection::open(db_path)?;
-    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    install_busy_handler(&conn)?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;\
          PRAGMA synchronous=NORMAL;\
@@ -388,6 +423,16 @@ fn open_configured(db_path: &Path) -> crate::Result<Connection> {
     // orders of magnitude larger than its live frames (cas-759f).
     conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
     Ok(conn)
+}
+
+/// Install the pooled connections' busy handler: SQLite's [`SQLITE_BUSY_TIMEOUT`]
+/// schedule, cut short by this thread's wait budget ([`crate::wait_budget`]).
+///
+/// Code that temporarily narrows a pooled connection with `busy_timeout` must
+/// restore with this, not `busy_timeout(SQLITE_BUSY_TIMEOUT)`, which would
+/// replace the budget-aware handler with SQLite's built-in one.
+pub fn install_busy_handler(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_handler(Some(crate::wait_budget::busy_handler))
 }
 
 /// RAII guard for an IMMEDIATE transaction.
@@ -500,18 +545,30 @@ pub fn begin_immediate_with_retry_bounded<'a>(
                 let jitter_range = base_ms / 2;
                 let jitter = cheap_random_u64() % (jitter_range * 2 + 1);
                 let delay_ms = base_ms - jitter_range + jitter;
+                // A thread with a wait budget (the factory UI loop) gives up
+                // instead of sleeping past it (GH #1165).
+                let Some(sleep) = crate::wait_budget::clamp_wait(Duration::from_millis(delay_ms))
+                else {
+                    break;
+                };
                 tracing::warn!(
                     base_ms,
                     delay_ms,
                     attempts,
                     "write lock held by another connection, retrying after backoff with jitter"
                 );
-                std::thread::sleep(Duration::from_millis(delay_ms));
+                std::thread::sleep(sleep);
             }
             Err(error) => return Err(StoreError::Database(error)),
         }
     }
 
+    if crate::wait_budget::wait_budget_exhausted() {
+        // Keep the busy shape so callers that defer on busy do so here.
+        return Err(crate::wait_budget::budget_exhausted_store_error(
+            "BEGIN IMMEDIATE",
+        ));
+    }
     // The bare "database is locked" is what made the original report
     // un-triageable: it does not say whether anything waited. State it.
     Err(StoreError::Other(format!(
@@ -610,9 +667,11 @@ impl std::ops::Deref for PooledImmediateTx<'_> {
 /// Here each attempt takes the mutex, waits at most [`POOLED_ATTEMPT_BUSY`] in
 /// the busy handler, and on SQLITE_BUSY drops the mutex before sleeping, so an
 /// in-process lock holder that needs the connection gets it within one
-/// attempt. The overall wait budget is unchanged. The connection's busy
-/// timeout is restored to [`SQLITE_BUSY_TIMEOUT`] before the mutex is
-/// released, which is the value every pooled connection is opened with.
+/// attempt. The overall wait budget is unchanged. The connection's
+/// budget-aware busy handler ([`install_busy_handler`]) is restored before the
+/// mutex is released, which is what every pooled connection is opened with. A
+/// thread under a store wait budget ([`crate::wait_budget`]) also stops at its
+/// deadline (GH #1165).
 ///
 /// As with the unpooled form, nothing runs inside the transaction until it is
 /// open, so the caller's body executes exactly once.
@@ -632,12 +691,22 @@ pub fn begin_immediate_pooled_bounded(
 
     let last_busy = loop {
         attempts += 1;
-        let conn = shared
-            .lock()
-            .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()))?;
+        let conn = lock_connection_mutex(shared)?;
+        // GH #1165: a thread under a store wait budget never waits past it.
+        let attempt_busy = match crate::wait_budget::remaining_wait() {
+            Some(left) if left.is_zero() => {
+                drop(conn);
+                return Err(crate::wait_budget::budget_exhausted_store_error(
+                    "BEGIN IMMEDIATE",
+                ));
+            }
+            Some(left) => attempt_busy.min(left),
+            None => attempt_busy,
+        };
         conn.busy_timeout(attempt_busy)?;
         let begun = conn.execute_batch("BEGIN IMMEDIATE");
-        let restored = conn.busy_timeout(SQLITE_BUSY_TIMEOUT);
+        // Restore the pool's budget-aware handler, not SQLite's built-in one.
+        let restored = install_busy_handler(&conn);
         match begun {
             Ok(()) => {
                 let tx = PooledImmediateTx {
@@ -652,7 +721,7 @@ pub fn begin_immediate_pooled_bounded(
                 // Release the process mutex before sleeping: this is the point
                 // of the pooled form.
                 drop(conn);
-                if started.elapsed() >= budget {
+                if started.elapsed() >= budget || crate::wait_budget::wait_budget_exhausted() {
                     break error;
                 }
                 let base_ms = POOLED_BACKOFF_MS
@@ -671,7 +740,12 @@ pub fn begin_immediate_pooled_bounded(
                          connection released"
                     );
                 }
-                std::thread::sleep(Duration::from_millis(delay_ms));
+                let Some(sleep) =
+                    crate::wait_budget::clamp_wait(Duration::from_millis(delay_ms))
+                else {
+                    break error;
+                };
+                std::thread::sleep(sleep);
             }
             Err(error) => {
                 restored?;
@@ -679,6 +753,13 @@ pub fn begin_immediate_pooled_bounded(
             }
         }
     };
+
+    if crate::wait_budget::wait_budget_exhausted() {
+        // Keep the busy shape so callers that defer on busy do so here.
+        return Err(crate::wait_budget::budget_exhausted_store_error(
+            "BEGIN IMMEDIATE",
+        ));
+    }
 
     Err(StoreError::Other(format!(
         "database busy for {:.1}s across {attempts} attempt(s); another connection held the \
@@ -827,12 +908,18 @@ where
                 let jitter_range = base_ms / 2;
                 let jitter = cheap_random_u64() % (jitter_range * 2 + 1);
                 let delay_ms = base_ms - jitter_range + jitter;
+                // A thread with a wait budget returns the busy error once the
+                // budget is spent instead of sleeping (GH #1165).
+                let Some(sleep) = crate::wait_budget::clamp_wait(Duration::from_millis(delay_ms))
+                else {
+                    return f();
+                };
                 tracing::warn!(
                     base_ms,
                     delay_ms,
                     "SQLite busy, retrying after backoff with jitter"
                 );
-                std::thread::sleep(Duration::from_millis(delay_ms));
+                std::thread::sleep(sleep);
             }
             Err(e) => return Err(e),
         }
@@ -2376,7 +2463,10 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 3, "seed + holder + pooled");
-        assert_eq!(busy_timeout_ms(&shared.lock().unwrap()), 5_000);
+        // The pool's budget-aware busy handler is back (GH #1165); SQLite
+        // reports a custom handler as busy_timeout 0, never the short
+        // per-attempt timeout.
+        assert_eq!(busy_timeout_ms(&shared.lock().unwrap()), 0);
     }
 
     /// While a pooled writer waits, other callers keep getting the mutex
@@ -2465,6 +2555,34 @@ mod tests {
         assert!(slowest < Duration::from_secs(10), "slowest writer waited {slowest:?}");
     }
 
+    /// GH #1165: a thread with a store wait budget gives up at its deadline
+    /// on the pooled path too, with a busy-shaped error.
+    #[test]
+    fn pooled_writer_honours_the_thread_wait_budget() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+        let shared = Mutex::new(conn);
+        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_000));
+        ready.recv().unwrap();
+
+        let started = Instant::now();
+        let error = {
+            let _budget = crate::wait_budget::bound_waits_for(Duration::from_millis(40));
+            match begin_immediate_pooled(&shared) {
+                Ok(_) => panic!("the foreign lock outlives the budget"),
+                Err(error) => error,
+            }
+        };
+        let waited = started.elapsed();
+        holder.join().unwrap();
+        assert!(waited < Duration::from_millis(500), "waited {waited:?}");
+        assert!(
+            matches!(&error, StoreError::Database(e) if is_busy_error(e)),
+            "{error}"
+        );
+        assert!(shared.try_lock().unwrap().is_autocommit());
+    }
+
     #[test]
     fn cas_3f65e_pooled_budget_exhaustion_fails_with_the_wait_stated() {
         let temp = TempDir::new().unwrap();
@@ -2492,7 +2610,11 @@ mod tests {
         assert!(waited < Duration::from_millis(800), "waited {waited:?}");
         let conn = shared.try_lock().expect("the mutex is released on failure");
         assert!(conn.is_autocommit(), "no transaction is left open");
-        assert_eq!(busy_timeout_ms(&conn), 5_000, "the busy timeout is restored");
+        assert_eq!(
+            busy_timeout_ms(&conn),
+            0,
+            "the budget-aware busy handler is restored (GH #1165)"
+        );
     }
 
     #[test]

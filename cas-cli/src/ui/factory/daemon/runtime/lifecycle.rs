@@ -139,7 +139,7 @@ fn merged_close_blocked_status_key(
         } => tasks,
         _ => return None,
     };
-    let store = crate::store::open_task_store(cas_dir).ok()?;
+    let store = crate::store::open_task_store_cached(cas_dir).ok()?;
     let mut generations = tasks
         .iter()
         .map(|task| {
@@ -371,7 +371,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     ).is_err() {
         return WorkerAttentionRelayOutcome::Pending;
     }
-    let Ok(task_store) = crate::store::open_task_store(cas_dir) else {
+    let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
     let Ok(mut task) = task_store.get(task_id) else {
@@ -475,6 +475,177 @@ fn enqueue_delivery_pr_merged_wake(
     Ok(())
 }
 
+/// Drain the durable lifecycle outbox once (cas-ecff). Runs on the daemon's
+/// store worker (GH #1165).
+fn drain_lifecycle_outbox_once(cas_dir: &std::path::Path) {
+    let Ok(sq) = crate::store::open_supervisor_queue_store(cas_dir) else {
+        return;
+    };
+    let Ok(pq) = crate::store::open_prompt_queue_store(cas_dir) else {
+        return;
+    };
+    match crate::mcp::tools::core::task::lifecycle::supervisor_push::drain_lifecycle_outbox(
+        sq.as_ref(),
+        pq.as_ref(),
+        50,
+    ) {
+        Ok(report) if report.recovered > 0 || report.failed > 0 => {
+            tracing::info!(
+                recovered = report.recovered,
+                failed = report.failed,
+                attempted = report.attempted,
+                "lifecycle outbox drain"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "lifecycle outbox drain failed");
+        }
+        _ => {}
+    }
+}
+
+/// Parked deliveries targeting `main`, for the CI watcher. Runs on the
+/// blocking pool with the GitHub calls (GH #1165).
+fn awaiting_merge_deliveries(
+    cas_dir: &std::path::Path,
+) -> Vec<super::ci_watch::AwaitingMergeDelivery> {
+    crate::store::open_task_store_cached(cas_dir)
+        .ok()
+        .and_then(|store| store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|task| {
+            let worker = task.assignee?;
+            let work_target = task.deliverables.work_target.as_ref()?;
+            if work_target.target_branch != "main" {
+                return None;
+            }
+            let branch = task
+                .deliverables
+                .parked_branch
+                .or(task.branch)
+                .unwrap_or_else(|| format!("factory/{worker}"));
+            Some(super::ci_watch::AwaitingMergeDelivery {
+                task_id: task.id,
+                worker,
+                branch,
+                branch_tip: task.deliverables.factory_branch_anchor,
+                pr_number: task.deliverables.delivery_pr_number,
+            })
+        })
+        .collect()
+}
+
+/// Persist one completed CI-watch poll: PR observations, merge timeouts,
+/// merge-queue ejections, PR-lane failures and red-run wakes. Runs on the
+/// daemon's store worker, never on the UI loop (GH #1165).
+fn persist_ci_watch_results(
+    cas_dir: &std::path::Path,
+    session_name: &str,
+    delivery_pr_observations: Vec<super::ci_watch::DeliveryPrObservation>,
+    ejections: Vec<super::ci_watch::MergeQueueEjection>,
+    pr_lane_failures: Vec<super::ci_watch::PrLaneFailure>,
+    failures: Vec<super::ci_watch::CiFailure>,
+) {
+    for observation in delivery_pr_observations {
+        match apply_delivery_pr_observation(cas_dir, &observation) {
+            Ok(()) => tracing::info!(
+                task_id = %observation.task_id,
+                pr_number = observation.pr_number,
+                merge_commit = ?observation.merge_commit,
+                "recorded delivery PR observation"
+            ),
+            Err(error) => tracing::warn!(
+                task_id = %observation.task_id,
+                pr_number = observation.pr_number,
+                %error,
+                "could not persist delivery PR observation"
+            ),
+        }
+    }
+    relay_delivery_pr_merge_timeouts(cas_dir);
+    for ejection in ejections {
+        match enqueue_merge_queue_ejection_relay(
+            cas_dir,
+            &ejection.task_id,
+            &ejection.worker,
+            ejection.pr_number,
+            ejection.failed_run_id,
+            &ejection.occurrence,
+        ) {
+            WorkerAttentionRelayOutcome::Persisted { notification_id } => {
+                tracing::warn!(
+                    task_id = %ejection.task_id,
+                    pr_number = ejection.pr_number,
+                    failed_run_id = ?ejection.failed_run_id,
+                    notification_id,
+                    "queued durable merge-queue ejection relay for supervisor and worker"
+                )
+            }
+            WorkerAttentionRelayOutcome::Pending => tracing::warn!(
+                task_id = %ejection.task_id,
+                pr_number = ejection.pr_number,
+                "merge-queue ejection relay remains pending"
+            ),
+            WorkerAttentionRelayOutcome::NotApplicable => {}
+        }
+    }
+    for failure in pr_lane_failures {
+        match enqueue_pr_lane_failure_relay(cas_dir, &failure) {
+            WorkerAttentionRelayOutcome::Persisted { notification_id } => {
+                tracing::warn!(
+                    task_id = %failure.task_id,
+                    worker = %failure.worker,
+                    pr_number = failure.pr_number,
+                    head_sha = %failure.head_sha,
+                    run_id = failure.run_id,
+                    notification_id,
+                    "queued durable PR-lane failure relay for supervisor"
+                )
+            }
+            WorkerAttentionRelayOutcome::Pending => tracing::warn!(
+                task_id = %failure.task_id,
+                pr_number = failure.pr_number,
+                head_sha = %failure.head_sha,
+                "PR-lane failure relay remains pending"
+            ),
+            WorkerAttentionRelayOutcome::NotApplicable => {}
+        }
+    }
+    if failures.is_empty() {
+        return;
+    }
+    let queue = match crate::store::open_prompt_queue_store(cas_dir) {
+        Ok(queue) => queue,
+        Err(error) => {
+            tracing::warn!(%error, "could not open prompt queue for CI red-run relays");
+            return;
+        }
+    };
+    for failure in failures {
+        match super::ci_watch::emit_failure(queue.as_ref(), session_name, &failure) {
+            Ok(true) => {
+                super::delivery::wake_daemon_after_enqueue(cas_dir);
+                tracing::warn!(
+                    branch = %failure.branch,
+                    head_sha = %failure.head_sha,
+                    run_url = %failure.run_url,
+                    failing_job = %failure.failing_job,
+                    "queued CI red-run lifecycle wake for supervisor"
+                )
+            }
+            Ok(false) => tracing::debug!(
+                branch = %failure.branch,
+                head_sha = %failure.head_sha,
+                "suppressed duplicate CI red-run relay"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "failed to queue CI red-run relay")
+            }
+        }
+    }
+}
+
 /// Persist the PR identity as soon as it is discovered, then persist the merge
 /// receipt only after the worker wake is durable. A failed prompt write leaves
 /// the merge unrecorded so the next GitHub poll retries the complete handoff.
@@ -482,7 +653,7 @@ fn apply_delivery_pr_observation(
     cas_dir: &std::path::Path,
     observation: &super::ci_watch::DeliveryPrObservation,
 ) -> Result<(), String> {
-    let store = crate::store::open_task_store(cas_dir)
+    let store = crate::store::open_task_store_cached(cas_dir)
         .map_err(|error| format!("could not open task store: {error}"))?;
     let mut task = store
         .get(&observation.task_id)
@@ -530,7 +701,7 @@ fn apply_delivery_pr_observation(
 /// supervisor exactly which PR/receipt needs recovery. Its stable key makes
 /// this a single escalation for the merge episode.
 fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
-    let Ok(store) = crate::store::open_task_store(cas_dir) else {
+    let Ok(store) = crate::store::open_task_store_cached(cas_dir) else {
         return;
     };
     let Ok(tasks) = store.list(None) else {
@@ -1373,7 +1544,7 @@ mod worker_attention_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "merge-queue-ejection-test");
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = cas_types::Task::new("cas-fc35".to_string(), "parked delivery".to_string());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some("fast-jaguar-59".to_string());
@@ -1476,7 +1647,7 @@ mod worker_attention_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "delivery-pr-merged-test");
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = cas_types::Task::new("cas-7ea6".to_string(), "delivery".to_string());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some("calm-octopus-51".to_string());
@@ -1878,9 +2049,29 @@ impl FactoryDaemon {
             std::sync::Arc::clone(&self.shutdown),
         );
         let mut last_reset_check = std::time::Instant::now();
+        // GH #1165: store writes whose result the loop does not need on the
+        // spot run on one ordered background thread, and the task-sync repair
+        // the cached task store skips on open runs on its own schedule.
+        let store_worker = super::store_worker::global();
+        let _task_sync_reconcile = super::store_worker::spawn_task_sync_reconcile(
+            self.app.cas_dir().to_path_buf(),
+            Arc::clone(&self.shutdown),
+        );
 
         while !self.shutdown.load(Ordering::Relaxed) {
+            // GH #1165: every store wait left on this thread (SQLite busy
+            // handler and retries, the connection mutex, the task-sync flock)
+            // shares one per-pass budget and fails fast past it. The loop
+            // retries on a later pass and panels keep their last snapshot.
+            // `run` is driven by `Runtime::block_on`, so this thread-local
+            // scope stays on this thread across the awaits below.
+            loop_progress.begin_pass();
+            let pass_store_budget = cas_store::wait_budget::bound_waits_for(
+                super::store_worker::PASS_STORE_WAIT_BUDGET,
+            );
             loop_progress.enter(super::loop_watchdog::LoopPhase::ClientInput);
+            // Input forwarding and PTY exchange must not touch the store.
+            let store_free_input = cas_store::wait_budget::forbid_store_access();
             // Error timeout must run in daemon mode too (not only local event loop path).
             let had_error = self.app.error_message.is_some();
             self.app.check_error_timeout();
@@ -1906,6 +2097,7 @@ impl FactoryDaemon {
             let ws_activity = self.process_ws_client_input().await;
             let bytes_processed = self.exchange_terminal(&loop_progress).await;
             let had_output = bytes_processed > 0;
+            drop(store_free_input);
 
             let summary_metadata = format!(
                 "session={} role=supervisor task={}",
@@ -1944,28 +2136,11 @@ impl FactoryDaemon {
                 // cas-ecff: auto-drain pending lifecycle outbox (durable
                 // task_lifecycle rows with prompt_delivered_at unset) so
                 // partial failures recover without re-running task mutations.
-                if let Ok(sq) = crate::store::open_supervisor_queue_store(self.app.cas_dir()) {
-                    if let Ok(pq) = crate::store::open_prompt_queue_store(self.app.cas_dir()) {
-                        match crate::mcp::tools::core::task::lifecycle::supervisor_push::drain_lifecycle_outbox(
-                            sq.as_ref(),
-                            pq.as_ref(),
-                            50,
-                        ) {
-                            Ok(report) if report.recovered > 0 || report.failed > 0 => {
-                                tracing::info!(
-                                    recovered = report.recovered,
-                                    failed = report.failed,
-                                    attempted = report.attempted,
-                                    "lifecycle outbox drain"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "lifecycle outbox drain failed");
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                // GH #1165: on the store worker, at most one drain at a time.
+                let cas_dir = self.app.cas_dir().to_path_buf();
+                store_worker.submit_unique("lifecycle outbox drain", move || {
+                    drain_lifecycle_outbox_once(&cas_dir)
+                });
                 last_prompt_poll = std::time::Instant::now();
                 prompt_notified = false;
             }
@@ -2013,33 +2188,9 @@ impl FactoryDaemon {
                     && last_ci_watch.elapsed() >= super::ci_watch::CI_WATCH_INTERVAL
                 {
                     let project = self.app.project_path().to_path_buf();
-                    let deliveries = crate::store::open_task_store(self.app.cas_dir())
-                        .ok()
-                        .and_then(|store| {
-                            store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok()
-                        })
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|task| {
-                            let worker = task.assignee?;
-                            let work_target = task.deliverables.work_target.as_ref()?;
-                            if work_target.target_branch != "main" {
-                                return None;
-                            }
-                            let branch = task
-                                .deliverables
-                                .parked_branch
-                                .or(task.branch)
-                                .unwrap_or_else(|| format!("factory/{worker}"));
-                            Some(super::ci_watch::AwaitingMergeDelivery {
-                                task_id: task.id,
-                                worker,
-                                branch,
-                                branch_tip: task.deliverables.factory_branch_anchor,
-                                pr_number: task.deliverables.delivery_pr_number,
-                            })
-                        })
-                        .collect::<Vec<_>>();
+                    // GH #1165: the AwaitingMerge read runs with the GitHub
+                    // calls on the blocking pool, not on this loop.
+                    let watch_cas_dir = self.app.cas_dir().to_path_buf();
                     let previously_queued = last_merge_queue_membership.clone();
                     let previously_armed = last_auto_merge_membership.clone();
                     let mut watched_branches =
@@ -2063,6 +2214,7 @@ impl FactoryDaemon {
                         }
                     }
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
                         let failures =
                             super::ci_watch::collect_failures(&transport, &watched_branches)?;
@@ -2089,114 +2241,22 @@ impl FactoryDaemon {
                             ci_watch_unavailable_reported = false;
                             last_merge_queue_membership = queue_poll.queued_prs;
                             last_auto_merge_membership = queue_poll.auto_merge_prs;
-                            for observation in delivery_pr_observations {
-                                match apply_delivery_pr_observation(
-                                    self.app.cas_dir(),
-                                    &observation,
-                                ) {
-                                    Ok(()) => tracing::info!(
-                                        task_id = %observation.task_id,
-                                        pr_number = observation.pr_number,
-                                        merge_commit = ?observation.merge_commit,
-                                        "recorded delivery PR observation"
-                                    ),
-                                    Err(error) => tracing::warn!(
-                                        task_id = %observation.task_id,
-                                        pr_number = observation.pr_number,
-                                        %error,
-                                        "could not persist delivery PR observation"
-                                    ),
-                                }
-                            }
-                            relay_delivery_pr_merge_timeouts(self.app.cas_dir());
-                            for ejection in queue_poll.ejections {
-                                match enqueue_merge_queue_ejection_relay(
-                                    self.app.cas_dir(),
-                                    &ejection.task_id,
-                                    &ejection.worker,
-                                    ejection.pr_number,
-                                    ejection.failed_run_id,
-                                    &ejection.occurrence,
-                                ) {
-                                    WorkerAttentionRelayOutcome::Persisted { notification_id } => {
-                                        tracing::warn!(
-                                            task_id = %ejection.task_id,
-                                            pr_number = ejection.pr_number,
-                                            failed_run_id = ?ejection.failed_run_id,
-                                            notification_id,
-                                            "queued durable merge-queue ejection relay for supervisor and worker"
-                                        )
-                                    }
-                                    WorkerAttentionRelayOutcome::Pending => tracing::warn!(
-                                        task_id = %ejection.task_id,
-                                        pr_number = ejection.pr_number,
-                                        "merge-queue ejection relay remains pending"
-                                    ),
-                                    WorkerAttentionRelayOutcome::NotApplicable => {}
-                                }
-                            }
-                            for failure in queue_poll.pr_lane_failures {
-                                match enqueue_pr_lane_failure_relay(
-                                    self.app.cas_dir(),
-                                    &failure,
-                                ) {
-                                    WorkerAttentionRelayOutcome::Persisted { notification_id } => {
-                                        tracing::warn!(
-                                            task_id = %failure.task_id,
-                                            worker = %failure.worker,
-                                            pr_number = failure.pr_number,
-                                            head_sha = %failure.head_sha,
-                                            run_id = failure.run_id,
-                                            notification_id,
-                                            "queued durable PR-lane failure relay for supervisor"
-                                        )
-                                    }
-                                    WorkerAttentionRelayOutcome::Pending => tracing::warn!(
-                                        task_id = %failure.task_id,
-                                        pr_number = failure.pr_number,
-                                        head_sha = %failure.head_sha,
-                                        "PR-lane failure relay remains pending"
-                                    ),
-                                    WorkerAttentionRelayOutcome::NotApplicable => {}
-                                }
-                            }
-                            if !failures.is_empty() {
-                                match crate::store::open_prompt_queue_store(self.app.cas_dir()) {
-                                    Ok(queue) => {
-                                        for failure in failures {
-                                            match super::ci_watch::emit_failure(
-                                                queue.as_ref(),
-                                                &self.session_name,
-                                                &failure,
-                                            ) {
-                                                Ok(true) => {
-                                                    super::delivery::wake_daemon_after_enqueue(
-                                                        self.app.cas_dir(),
-                                                    );
-                                                    tracing::warn!(
-                                                        branch = %failure.branch,
-                                                        head_sha = %failure.head_sha,
-                                                        run_url = %failure.run_url,
-                                                        failing_job = %failure.failing_job,
-                                                        "queued CI red-run lifecycle wake for supervisor"
-                                                    )
-                                                }
-                                                Ok(false) => tracing::debug!(
-                                                    branch = %failure.branch,
-                                                    head_sha = %failure.head_sha,
-                                                    "suppressed duplicate CI red-run relay"
-                                                ),
-                                                Err(error) => {
-                                                    tracing::warn!(%error, "failed to queue CI red-run relay")
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(%error, "could not open prompt queue for CI red-run relays")
-                                    }
-                                }
-                            }
+                            // GH #1165: persisting the results is store work;
+                            // it runs on the store worker, in order.
+                            let cas_dir = self.app.cas_dir().to_path_buf();
+                            let session_name = self.session_name.clone();
+                            let ejections = queue_poll.ejections;
+                            let lane_failures = queue_poll.pr_lane_failures;
+                            store_worker.submit("ci watch results", move || {
+                                persist_ci_watch_results(
+                                    &cas_dir,
+                                    &session_name,
+                                    delivery_pr_observations,
+                                    ejections,
+                                    lane_failures,
+                                    failures,
+                                )
+                            });
                         }
                         Ok(Err(error)) => {
                             if !ci_watch_unavailable_reported {
@@ -2317,8 +2377,15 @@ impl FactoryDaemon {
                     // revalidated it against current task/worker state. Send
                     // the actionable cases through the durable supervisor
                     // wake lane before ordinary prompt injection.
-                    for event in &delivery_events {
-                        enqueue_worker_attention_relay(self.app.cas_dir(), event);
+                    // GH #1165: on the store worker, in event order.
+                    if !delivery_events.is_empty() {
+                        let cas_dir = self.app.cas_dir().to_path_buf();
+                        let events = delivery_events.clone();
+                        store_worker.submit("worker attention relays", move || {
+                            for event in &events {
+                                enqueue_worker_attention_relay(&cas_dir, event);
+                            }
+                        });
                     }
 
                     // Handle epic state transitions
@@ -2480,7 +2547,7 @@ impl FactoryDaemon {
                         // Task mutations and director snapshots share one durable
                         // assignment row; a late tick cannot duplicate the wake.
                         if let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text) {
-                            if let Ok(task) = crate::store::open_task_store(self.app.cas_dir())
+                            if let Ok(task) = crate::store::open_task_store_cached(self.app.cas_dir())
                                 .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
                             {
                                 match crate::task_assignment::enqueue(self.app.cas_dir(), &task) {
@@ -2772,7 +2839,10 @@ impl FactoryDaemon {
                 || needs_compact_redraw
                 || resize_applied
                 || spawning
-                || error_cleared_by_timeout;
+                || error_cleared_by_timeout
+                || self.app.task_dialog_load.is_loading();
+            // GH #1165: drawing must not touch the store.
+            let store_free_draw = cas_store::wait_budget::forbid_store_access();
             if dirty && !resize_pending {
                 // Render full TUI for full-mode clients (and relay clients)
                 let has_full_clients = self
@@ -2844,8 +2914,10 @@ impl FactoryDaemon {
                     (name.clone(), started)
                 }),
             );
+            drop(store_free_draw);
             loop_progress.complete_pass();
             loop_progress.enter(super::loop_watchdog::LoopPhase::Idle);
+            drop(pass_store_budget);
 
             // Adaptive sleep: ~120fps when active, ~60fps idle with clients,
             // ~2fps headless (no clients, no GUI) to minimize CPU usage.
@@ -2875,6 +2947,14 @@ impl FactoryDaemon {
             } else {
                 tokio::time::sleep(sleep_dur).await;
             }
+        }
+
+        // Let queued store writes land before cleanup tears the session down.
+        if !store_worker.wait_idle(Duration::from_secs(5)) {
+            tracing::warn!(
+                pending = store_worker.pending(),
+                "factory store worker still busy at shutdown"
+            );
         }
 
         // Stop recording if it was enabled

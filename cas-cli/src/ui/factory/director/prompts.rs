@@ -937,7 +937,7 @@ fn classify_merge_alert_observations(
 fn staged_integration_batch(repo_root: &Path, task_id: &str) -> bool {
     // Freshness checks must not initialize a Cassy database in another target repo.
     if !repo_root.join(".cas/cas.db").is_file() { return false; }
-    crate::store::open_task_store(&repo_root.join(".cas"))
+    crate::store::open_task_store_cached(&repo_root.join(".cas"))
         .and_then(|store| Ok(store.get(task_id)?))
         .is_ok_and(|task| task.status == TaskStatus::AwaitingMerge && task.deliverables.integration_batch.is_some())
 }
@@ -2769,7 +2769,7 @@ mod tests {
                 }
                 agents.register(&agent).unwrap();
             }
-            let tasks = crate::store::open_task_store(&dir).unwrap();
+            let tasks = crate::store::open_task_store_cached(&dir).unwrap();
             let mut task = Task::new("cas-gh1124".into(), "Delivered work".into());
             task.assignee = Some("swift-fox".into());
             task.status = TaskStatus::InProgress;
@@ -7114,7 +7114,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cas_root = dir.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
-        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_root).unwrap();
         let mut task = cas_types::Task::new("cas-b401".into(), "Batch delivery".into());
         task.status = TaskStatus::AwaitingMerge;
         let mut value = serde_json::to_value(task).unwrap();

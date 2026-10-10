@@ -11,7 +11,7 @@ use cas_types::{
 };
 
 use crate::error::StoreError;
-use crate::{Result, SQLITE_BUSY_TIMEOUT};
+use crate::Result;
 
 pub const DELIVERY_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS worker_completion_receipts (
@@ -143,7 +143,7 @@ pub fn record_observed_delivery_merge(
 
 fn open(root: &Path) -> Result<Connection> {
     let conn = Connection::open(root.join("cas.db"))?;
-    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    crate::shared_db::install_busy_handler(&conn)?;
     conn.execute_batch(DELIVERY_SCHEMA)?;
     Ok(conn)
 }

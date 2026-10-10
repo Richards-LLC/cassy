@@ -2535,7 +2535,7 @@ impl SqlitePromptQueueStore {
             cas_dir.join("cas.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT)?;
+        crate::shared_db::install_busy_handler(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })

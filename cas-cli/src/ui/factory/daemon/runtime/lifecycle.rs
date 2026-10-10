@@ -2052,7 +2052,7 @@ impl FactoryDaemon {
         // GH #1165: store writes whose result the loop does not need on the
         // spot run on one ordered background thread, and the task-sync repair
         // the cached task store skips on open runs on its own schedule.
-        let store_worker = super::store_worker::StoreWorker::start();
+        let store_worker = super::store_worker::global();
         let _task_sync_reconcile = super::store_worker::spawn_task_sync_reconcile(
             self.app.cas_dir().to_path_buf(),
             Arc::clone(&self.shutdown),
@@ -2949,7 +2949,12 @@ impl FactoryDaemon {
         }
 
         // Let queued store writes land before cleanup tears the session down.
-        store_worker.drain(Duration::from_secs(5));
+        if !store_worker.wait_idle(Duration::from_secs(5)) {
+            tracing::warn!(
+                pending = store_worker.pending(),
+                "factory store worker still busy at shutdown"
+            );
+        }
 
         // Stop recording if it was enabled
         if self.app.record_enabled() {

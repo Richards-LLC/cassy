@@ -129,6 +129,16 @@ impl StoreWorker {
         self.pending.load(Ordering::Acquire)
     }
 
+    /// Wait up to `timeout` for queued jobs to finish, still accepting new
+    /// ones. Returns true when the queue emptied.
+    pub(crate) fn wait_idle(&self, timeout: Duration) -> bool {
+        let started = Instant::now();
+        while self.pending() > 0 && started.elapsed() < timeout {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.pending() == 0
+    }
+
     /// Stop accepting jobs and wait up to `timeout` for queued ones to finish.
     /// Used at shutdown, after the loop has stopped.
     pub(crate) fn drain(mut self, timeout: Duration) {
@@ -148,6 +158,107 @@ impl StoreWorker {
             );
         }
     }
+}
+
+/// The daemon's store worker. One per process: the factory daemon runs one
+/// loop per process, and its methods reach the worker without a struct field.
+pub(crate) fn global() -> &'static StoreWorker {
+    static WORKER: std::sync::OnceLock<StoreWorker> = std::sync::OnceLock::new();
+    WORKER.get_or_init(StoreWorker::start)
+}
+
+/// How often a deferred write retries on the store worker before giving up.
+const DEFERRED_WRITE_ATTEMPTS: u32 = 6;
+
+/// What [`persist_or_defer`] did with a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Persisted {
+    /// The write landed on the caller's thread.
+    Now,
+    /// The write hit the caller's wait budget (or failed) and was queued on
+    /// the store worker, which retries it without a budget.
+    Deferred,
+    /// The write failed and the store worker could not take it.
+    Dropped,
+}
+
+/// Run a store write that must not be lost. It is tried once on the caller's
+/// thread, under any wait budget in force there. If it fails (a budget-spent
+/// busy error, or any other error), the same write is queued on the store
+/// worker and retried there without a budget. A write that follows an
+/// irreversible action, such as a PTY injection, is therefore recorded later
+/// rather than dropped (GH #1165).
+///
+/// `write` must be idempotent: it may run again after a partial failure.
+pub(crate) fn persist_or_defer<E: std::fmt::Display>(
+    label: &'static str,
+    write: impl Fn() -> Result<(), E> + Send + 'static,
+) -> Persisted {
+    persist_or_defer_on(global(), label, write)
+}
+
+pub(crate) fn persist_or_defer_on<E: std::fmt::Display>(
+    worker: &StoreWorker,
+    label: &'static str,
+    write: impl Fn() -> Result<(), E> + Send + 'static,
+) -> Persisted {
+    match write() {
+        Ok(()) => Persisted::Now,
+        Err(error) => defer_on(worker, label, &error.to_string(), write),
+    }
+}
+
+/// Queue a write that already failed on the caller's thread, so the store
+/// worker retries it without a budget. See [`persist_or_defer`].
+pub(crate) fn defer<E: std::fmt::Display>(
+    label: &'static str,
+    first_error: &str,
+    write: impl Fn() -> Result<(), E> + Send + 'static,
+) -> Persisted {
+    defer_on(global(), label, first_error, write)
+}
+
+fn defer_on<E: std::fmt::Display>(
+    worker: &StoreWorker,
+    label: &'static str,
+    first_error: &str,
+    write: impl Fn() -> Result<(), E> + Send + 'static,
+) -> Persisted {
+    tracing::debug!(label, error = %first_error, "store write deferred to the store worker");
+    let queued = worker.submit(label, move || {
+        let mut pause = Duration::from_millis(100);
+        for attempt in 1..=DEFERRED_WRITE_ATTEMPTS {
+            match write() {
+                Ok(()) => return,
+                Err(error) if attempt == DEFERRED_WRITE_ATTEMPTS => {
+                    tracing::error!(label, attempt, %error, "deferred store write failed");
+                }
+                Err(error) => {
+                    tracing::warn!(label, attempt, %error, "deferred store write failed; retrying");
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(Duration::from_secs(5));
+                }
+            }
+        }
+    });
+    if queued {
+        Persisted::Deferred
+    } else {
+        tracing::error!(label, error = %first_error, "store write failed and could not be deferred");
+        Persisted::Dropped
+    }
+}
+
+/// Stamp transport delivery for a row the daemon already handed to its
+/// recipient. Deferred, never dropped, when the store is busy (GH #1165).
+pub(crate) fn mark_transport_delivered(cas_dir: &std::path::Path, prompt_id: i64) -> Persisted {
+    let cas_dir = cas_dir.to_path_buf();
+    persist_or_defer("mark transport delivered", move || {
+        crate::store::open_prompt_queue_store(&cas_dir)
+            .map_err(|error| error.to_string())?
+            .mark_transport_delivered(prompt_id)
+            .map_err(|error| error.to_string())
+    })
 }
 
 /// Run the pending task-sync repair every [`TASK_SYNC_RECONCILE_INTERVAL`]
@@ -193,6 +304,74 @@ mod tests {
         }
         worker.drain(Duration::from_secs(5));
         assert_eq!(*seen.lock().unwrap(), vec![0, 1, 2, 3, 4]);
+    }
+
+    /// Condition for GH #1165: a write past the budget is never dropped. A
+    /// real prompt-queue delivery ack and a `supervisor_injected` event row
+    /// hit a held SQLite write lock under a spent budget, are deferred, and
+    /// land once the lock is released.
+    #[test]
+    fn writes_past_the_budget_are_deferred_and_land_after_the_lock_clears() {
+        use cas_store::{EventStore, PromptQueueStore};
+        let dir = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row = queue.enqueue("supervisor", "worker-a", "hello").unwrap();
+        let events = crate::store::open_event_store(&cas_dir).unwrap();
+        let before_events = events.list_recent(100).unwrap().len();
+
+        assert_eq!(
+            queue.message_status(row).unwrap(),
+            Some(cas_store::MessageStatus::Pending)
+        );
+        let blocker = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let worker = StoreWorker::start();
+        let started = Instant::now();
+        let (ack, event) = {
+            let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
+            let ack_dir = cas_dir.clone();
+            let ack = persist_or_defer_on(&worker, "delivery ack", move || {
+                crate::store::open_prompt_queue_store(&ack_dir)
+                    .map_err(|error| error.to_string())?
+                    .mark_transport_delivered(row)
+                    .map_err(|error| error.to_string())
+            });
+            let event_dir = cas_dir.clone();
+            let event = persist_or_defer_on(&worker, "record injection", move || {
+                let event = cas_types::Event::new(
+                    cas_types::EventType::SupervisorInjected,
+                    cas_types::EventEntityType::Agent,
+                    "worker-a",
+                    "Injected queued prompt".to_string(),
+                );
+                crate::store::open_event_store(&event_dir)
+                    .map_err(|error| error.to_string())?
+                    .record(&event)
+                    .map_err(|error| error.to_string())
+            });
+            (ack, event)
+        };
+        assert_eq!(ack, Persisted::Deferred);
+        assert_eq!(event, Persisted::Deferred);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the caller returned at once: {:?}",
+            started.elapsed()
+        );
+        // Still pending while the foreign writer holds the lock.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(worker.pending() > 0);
+
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert!(worker.wait_idle(Duration::from_secs(30)));
+        assert_eq!(
+            queue.message_status(row).unwrap(),
+            Some(cas_store::MessageStatus::Delivered),
+            "the deferred ack landed"
+        );
+        assert_eq!(events.list_recent(100).unwrap().len(), before_events + 1);
+        worker.drain(Duration::from_secs(5));
     }
 
     #[test]

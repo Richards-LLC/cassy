@@ -89,20 +89,15 @@ fn seed(cas_dir: &Path) -> cas_types::Task {
 
 /// The store-touching work of one loop pass that #1165 traced: the prompt
 /// queue, the spawn queue, spawn verification, the two-second refresh,
-/// reminders, a worker task mutation and a draw with the task dialog open.
-async fn store_phases(
-    daemon: &mut FactoryDaemon,
-    terminal: &mut Terminal<BufferBackend>,
-    task: &cas_types::Task,
-) {
+/// reminders and a draw with the task dialog open. Loop-thread task
+/// mutations still take the intents flock until cas-78ac4 bounds it by the
+/// thread's wait budget; the control test below pins that behaviour.
+async fn store_phases(daemon: &mut FactoryDaemon, terminal: &mut Terminal<BufferBackend>) {
     let _ = daemon.process_prompt_queue().await;
     let _ = daemon.enqueue_spawn_requests();
     daemon.reconcile_spawn_verifications().await;
     let _ = daemon.app.refresh_data();
     daemon.process_reminders(&[]);
-    if let Ok(store) = crate::store::open_task_store_cached(daemon.app.cas_dir()) {
-        let _ = store.update(task);
-    }
     let _forbid = wait_budget::forbid_store_access();
     terminal.draw(|frame| daemon.app.render(frame)).unwrap();
 }
@@ -123,7 +118,7 @@ async fn loop_pass_stays_fast_while_the_intents_flock_and_sqlite_write_lock_are_
     .unwrap();
 
     // Uncontended warm-up: the daemon has opened its stores before any pass.
-    store_phases(&mut daemon, &mut terminal, &task).await;
+    store_phases(&mut daemon, &mut terminal).await;
 
     let flock = hold_intents_flock(&cas_dir);
     let write_lock = hold_sqlite_write_lock(&cas_dir);
@@ -132,7 +127,7 @@ async fn loop_pass_stays_fast_while_the_intents_flock_and_sqlite_write_lock_are_
         let started = Instant::now();
         {
             let _budget = wait_budget::bound_waits_for(super::store_worker::PASS_STORE_WAIT_BUDGET);
-            store_phases(&mut daemon, &mut terminal, &task).await;
+            store_phases(&mut daemon, &mut terminal).await;
         }
         slowest = slowest.max(started.elapsed());
     }

@@ -3484,11 +3484,13 @@ impl FactoryDaemon {
     /// helper also repairs historical success paths without weakening another
     /// channel's receipt. The reservation itself must succeed before sending.
     fn record_transport_receipt(
+        &self,
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
         recipient: &str,
     ) {
         Self::record_surfacing_receipt(
+            Some(self.app.cas_dir()),
             queue,
             prompt_id,
             recipient,
@@ -3500,11 +3502,13 @@ impl FactoryDaemon {
     /// turn containing this row. Unlike the transport handoff receipt, this
     /// must retire the row from the unread view (cas-1a54/cas-5255).
     fn record_observed_wake_receipt(
+        &self,
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
         recipient: &str,
     ) {
         Self::record_surfacing_receipt(
+            Some(self.app.cas_dir()),
             queue,
             prompt_id,
             recipient,
@@ -3512,7 +3516,10 @@ impl FactoryDaemon {
         );
     }
 
+    /// With `cas_dir`, a failed write is deferred to the store worker so a
+    /// busy store never drops the receipt (GH #1165).
     fn record_surfacing_receipt(
+        cas_dir: Option<&std::path::Path>,
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
         recipient: &str,
@@ -3523,6 +3530,23 @@ impl FactoryDaemon {
             recipient,
             source,
         ) {
+            if let Some(cas_dir) = cas_dir {
+                let cas_dir = cas_dir.to_path_buf();
+                let deferred_recipient = recipient.to_string();
+                let deferred = super::store_worker::defer(
+                    "record surfacing receipt",
+                    &error.to_string(),
+                    move || {
+                        crate::store::open_prompt_queue_store(&cas_dir)
+                            .map_err(|error| error.to_string())?
+                            .record_recipient_surfaced(prompt_id, &deferred_recipient, source)
+                            .map_err(|error| error.to_string())
+                    },
+                );
+                if deferred != super::store_worker::Persisted::Dropped {
+                    return;
+                }
+            }
             tracing::debug!(
                 target: "cas::coordination",
                 message_id = prompt_id,
@@ -3681,7 +3705,13 @@ impl FactoryDaemon {
         row_id: i64,
         recipient: &str,
     ) -> anyhow::Result<()> {
-        Self::record_observed_wake_receipt(queue, row_id, recipient);
+        Self::record_surfacing_receipt(
+            None,
+            queue,
+            row_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
         queue.mark_transport_delivered(row_id)?;
         Ok(())
     }
@@ -5523,10 +5553,13 @@ impl FactoryDaemon {
                 let target = target.clone();
                 match self.deliver_context_reset(&target).await {
                     super::delivery::ContextResetDelivery::Injected => {
-                        if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                        if super::store_worker::mark_transport_delivered(
+                            self.app.cas_dir(),
+                            queued.id,
+                        ) == super::store_worker::Persisted::Dropped
+                        {
                             tracing::warn!(
                                 prompt_id = queued.id,
-                                error = %e,
                                 "cas-dffe: failed to stamp a delivered context-reset command"
                             );
                         }
@@ -5958,11 +5991,14 @@ impl FactoryDaemon {
                     // harness took our inbox copy AND the pane then produced
                     // output. Record the strong observed-wake receipt so the
                     // consumed row does not reappear in inbox_poll.
-                    Self::record_observed_wake_receipt(&*queue, queued.id, &queued.target);
-                    if let Err(error) = queue.mark_transport_delivered(queued.id) {
+                    self.record_observed_wake_receipt(&*queue, queued.id, &queued.target);
+                    if super::store_worker::mark_transport_delivered(
+                        self.app.cas_dir(),
+                        queued.id,
+                    ) == super::store_worker::Persisted::Dropped
+                    {
                         tracing::error!(
                             prompt_id = queued.id,
-                            %error,
                             "cas-ceae: failed to consume a row the harness already drained"
                         );
                     } else {
@@ -6432,6 +6468,7 @@ impl FactoryDaemon {
 
             tracing::info!("Injecting prompt to '{}': {}", target, preview);
 
+            let injection_cas_dir = self.app.cas_dir().to_path_buf();
             let record_injection = |store: &SqliteEventStore,
                                     prompt_id: i64,
                                     queue_source: &str,
@@ -6469,7 +6506,16 @@ impl FactoryDaemon {
                     summary,
                 )
                 .with_metadata(meta);
-                let _ = store.record(&ev);
+                // GH #1165: a busy store defers the audit row, never drops it.
+                if let Err(error) = store.record(&ev) {
+                    let cas_dir = injection_cas_dir.clone();
+                    super::store_worker::defer("record injection", &error.to_string(), move || {
+                        crate::store::open_event_store(&cas_dir)
+                            .map_err(|error| error.to_string())?
+                            .record(&ev)
+                            .map_err(|error| error.to_string())
+                    });
+                }
             };
 
             let mut success = false;
@@ -6582,7 +6628,7 @@ impl FactoryDaemon {
                             // that already received it. Without this write, one
                             // broadcast is re-served to every worker on every
                             // `inbox_poll`, forever.
-                            Self::record_transport_receipt(&*queue, queued.id, name);
+                            self.record_transport_receipt(&*queue, queued.id, name);
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
                                 record_injection(
@@ -6641,6 +6687,8 @@ impl FactoryDaemon {
                 } else {
                     Some(fail_notes.join("; "))
                 };
+                // GH #1165: the broadcast already reached its panes; a busy
+                // store defers the outcome stamp rather than losing it.
                 if let Err(e) = queue.mark_broadcast_outcome(
                     queued.id,
                     attempted,
@@ -6648,11 +6696,32 @@ impl FactoryDaemon {
                     failed,
                     detail.as_deref(),
                 ) {
-                    tracing::error!(
-                        "Failed to stamp broadcast outcome for prompt {}: {}",
-                        queued.id,
-                        e
-                    );
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    let prompt_id = queued.id;
+                    let deferred_detail = detail.clone();
+                    if super::store_worker::defer(
+                        "mark broadcast outcome",
+                        &e.to_string(),
+                        move || {
+                            crate::store::open_prompt_queue_store(&cas_dir)
+                                .map_err(|error| error.to_string())?
+                                .mark_broadcast_outcome(
+                                    prompt_id,
+                                    attempted,
+                                    succeeded,
+                                    failed,
+                                    deferred_detail.as_deref(),
+                                )
+                                .map_err(|error| error.to_string())
+                        },
+                    ) == super::store_worker::Persisted::Dropped
+                    {
+                        tracing::error!(
+                            "Failed to stamp broadcast outcome for prompt {}: {}",
+                            queued.id,
+                            e
+                        );
+                    }
                 }
                 if succeeded == 0 {
                     let _ = queue.record_retry(
@@ -7325,13 +7394,16 @@ impl FactoryDaemon {
                 // plus the re-nudge cadence still cover the deferred path. The
                 // recipient's unread view was never the right place to hide a
                 // delivery failure.
-                Self::record_transport_receipt(&*queue, queued.id, &queued.target);
+                self.record_transport_receipt(&*queue, queued.id, &queued.target);
                 // cas-2c5f: authoritative transport handoff only.
-                if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                // GH #1165: the bytes are already in the pane, so a busy store
+                // defers this stamp to the store worker instead of losing it.
+                if super::store_worker::mark_transport_delivered(self.app.cas_dir(), queued.id)
+                    == super::store_worker::Persisted::Dropped
+                {
                     tracing::error!(
-                        "Failed to mark prompt {} as transport-delivered: {}",
-                        queued.id,
-                        e
+                        "Failed to mark prompt {} as transport-delivered",
+                        queued.id
                     );
                 }
             }

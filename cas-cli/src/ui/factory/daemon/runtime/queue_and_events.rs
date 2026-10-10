@@ -15849,6 +15849,37 @@ mod gh_1153_idle_pty_delivery_tests {
     }
 
     #[tokio::test]
+    async fn gh_1163_executing_long_turn_waits_without_a_nudge_or_relay() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture { _tmp, mut daemon, queue, rollout, row } = deliver_to_idle_worker().await;
+        let delivery = daemon.normal_delivery_probes[&row].delivered_at_utc;
+        let mut body = std::fs::read_to_string(&rollout).unwrap();
+        body.push_str(&turn_event("task_started", delivery - chrono::Duration::seconds(1)));
+        // The turn start falls outside the bounded transcript tail during a long turn.
+        body.push_str(&format!("{}\n", serde_json::json!({"padding": "x".repeat(300_000)})));
+        body.push_str(&format!("{}\n", serde_json::json!({
+            "timestamp": rfc3339(chrono::Utc::now()),
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "phase": "analysis",
+                "content": [{"type": "output_text", "text": "Working on the task"}]}
+        })));
+        std::fs::write(&rollout, body).unwrap();
+        assert_eq!(crate::ui::factory::director::idle_worker_liveness(daemon.app.cas_dir(), WORKER)
+            .unwrap().state, crate::mcp::tools::service::worker_liveness::Liveness::Executing);
+
+        // Also cover a probe whose retry was sent before the worker became busy.
+        daemon.normal_delivery_probes.get_mut(&row).unwrap().nudge_sent_at = Some(Instant::now());
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        let report = queue.message_delivery_report(row).unwrap().unwrap();
+        assert_ne!(report.wake_attempt, cas_store::WakeAttempt::Failed,
+            "executing workers must never be reported as stalled");
+        assert!(daemon.normal_delivery_probes.contains_key(&row),
+            "wait for the busy turn boundary");
+        assert!(queue.peek_all(20).unwrap().iter().all(|queued|
+            !queued.prompt.contains("worker_delivery_stalled")));
+    }
+
+    #[tokio::test]
     async fn idle_pty_recipient_without_a_turn_is_nudged_then_reported_not_delivered() {
         let Fixture {
             _tmp,

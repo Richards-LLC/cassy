@@ -407,3 +407,93 @@ fn purge_on_a_store_without_code_tables_is_a_noop_cas_8256() {
     assert!(retired.is_empty());
     assert!(store.repository_file_counts().unwrap().is_empty());
 }
+
+/// The migration-built schema (unlike `CODE_SCHEMA`) declares foreign keys,
+/// including `code_symbols.parent_id REFERENCES code_symbols(id) ON DELETE
+/// SET NULL` with no index on `parent_id`. With enforcement on, every deleted
+/// symbol scans the whole symbol table. The purge suspends enforcement for its
+/// own transactions only: no referential action fires (the canonical child's
+/// `parent_id` is left as written) and the connection's setting is restored.
+#[test]
+fn purge_runs_without_foreign_key_scans_and_restores_enforcement_cas_8256() {
+    let root = tempfile::tempdir().unwrap();
+    Connection::open(root.path().join("cas.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE code_files (
+                 id TEXT PRIMARY KEY, path TEXT NOT NULL, repository TEXT NOT NULL,
+                 language TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+                 line_count INTEGER NOT NULL DEFAULT 0, commit_hash TEXT,
+                 content_hash TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL,
+                 scope TEXT NOT NULL DEFAULT 'project', UNIQUE(repository, path));
+             CREATE TABLE code_symbols (
+                 id TEXT PRIMARY KEY, qualified_name TEXT NOT NULL, name TEXT NOT NULL,
+                 kind TEXT NOT NULL, language TEXT NOT NULL, file_path TEXT NOT NULL,
+                 file_id TEXT NOT NULL, line_start INTEGER NOT NULL, line_end INTEGER NOT NULL,
+                 source TEXT NOT NULL, documentation TEXT, signature TEXT, parent_id TEXT,
+                 repository TEXT NOT NULL, commit_hash TEXT, created TEXT NOT NULL,
+                 updated TEXT NOT NULL, content_hash TEXT NOT NULL,
+                 scope TEXT NOT NULL DEFAULT 'project',
+                 FOREIGN KEY (file_id) REFERENCES code_files(id) ON DELETE CASCADE,
+                 FOREIGN KEY (parent_id) REFERENCES code_symbols(id) ON DELETE SET NULL);
+             CREATE TABLE code_relationships (
+                 id TEXT PRIMARY KEY, source_id TEXT NOT NULL, target_id TEXT NOT NULL,
+                 relation_type TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1.0,
+                 created TEXT NOT NULL,
+                 FOREIGN KEY (source_id) REFERENCES code_symbols(id) ON DELETE CASCADE,
+                 FOREIGN KEY (target_id) REFERENCES code_symbols(id) ON DELETE CASCADE,
+                 UNIQUE(source_id, target_id, relation_type));",
+        )
+        .unwrap();
+    seed_repository(root.path(), CANONICAL, 1, 3);
+    seed_repository(root.path(), WORKER, 2, 4);
+    // A canonical symbol naming a worker symbol as its parent: with
+    // enforcement on, deleting the parent would rewrite this row.
+    let probe = Connection::open(root.path().join("cas.db")).unwrap();
+    probe
+        .execute(
+            "UPDATE code_symbols SET parent_id = ?1 WHERE id = ?2",
+            [format!("sym-{WORKER}-1"), format!("sym-{CANONICAL}-1")],
+        )
+        .unwrap();
+
+    let store = SqliteCodeIndexPurge::open_existing(root.path())
+        .unwrap()
+        .unwrap();
+    let shared = crate::shared_db::shared_connection(&root.path().join("cas.db")).unwrap();
+    let enforced = |conn: &std::sync::Arc<std::sync::Mutex<Connection>>| -> i64 {
+        conn.lock()
+            .unwrap()
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(
+        enforced(&shared),
+        1,
+        "shared connections enforce foreign keys"
+    );
+
+    let keep = vec![CANONICAL.to_string()];
+    let (stats, _) = purge(
+        &store,
+        RepositoryScope::AllExcept(&keep),
+        WriteBatching::new(2, Duration::ZERO),
+    );
+    assert_eq!(stats.symbols_deleted, 8);
+    assert_eq!(stats.files_deleted, 2);
+    assert_eq!(counts_for(root.path(), WORKER), (0, 0, 0, 0, 0));
+    assert_eq!(counts_for(root.path(), CANONICAL), (1, 3, 3, 2, 3));
+    let parent: Option<String> = probe
+        .query_row(
+            "SELECT parent_id FROM code_symbols WHERE id = ?1",
+            [format!("sym-{CANONICAL}-1")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        parent.as_deref(),
+        Some(format!("sym-{WORKER}-1").as_str()),
+        "a referential action ran inside the purge"
+    );
+    assert_eq!(enforced(&shared), 1, "enforcement was not restored");
+}

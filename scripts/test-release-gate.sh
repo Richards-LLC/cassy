@@ -2027,5 +2027,27 @@ else
     bad "serial memory fallback failed: $(cat "$tmp/serial-proof.log")"
 fi
 
+# cas-398c: the factory daemon proves release-binary-isa and macos-check in
+# the background; the cut's full gate reuses both and names any miss.
+repo="$(new_fixture row-proof)"
+export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-proof-logs"
+run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove-rows "$repo" >"$tmp/row-proof.log" 2>&1
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/row-proof-gate.log" 2>&1
+if grep -qF 'row-proofs release-binary-isa=PASS macos-check=PASS' "$tmp/row-proof.log" \
+    && [[ "$(awk -F '\t' '$1 ~ /^(release-binary-isa|macos-check)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+    && grep -qF 'PASS row-proof row=release-binary-isa' "$CAS_RELEASE_GATE_LOG_DIR/release-binary-isa.log" \
+    && grep -qF 'PASS row-proof row=macos-check' "$CAS_RELEASE_GATE_LOG_DIR/macos-check.log"; then
+    ok 'background row proofs let the full gate reuse release-binary-isa and macos-check'
+else
+    bad "row proofs were not reused: $(cat "$tmp/row-proof.log" "$tmp/row-proof-gate.log")"
+fi
+CAS_FUTURE_TEST_INPUT=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/row-proof-miss.log" 2>&1
+if [[ "$(awk -F '\t' '$1 ~ /^(release-binary-isa|macos-check)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 0 ]] \
+    && grep -qF 'environment_key=CAS_FUTURE_TEST_INPUT' "$tmp/row-proof-miss.log"; then
+    ok 'a test-relevant variable refuses row-proof reuse and names the variable'
+else
+    bad "row proof reused across a changed test input: $(cat "$tmp/row-proof-miss.log")"
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

@@ -205,6 +205,78 @@ class ReceiptTests(unittest.TestCase):
             self.assertNotIn(name, policy["included"])
         self.assertNotIn("ghp_fixture", json.dumps(policy))
 
+    def row_proof(self, env, action, *args, toolchain="fixture-row-tools", passed=True):
+        """Run a row-proof action with real inputs and a faked gate row."""
+        check_output = proof.subprocess.check_output
+
+        def probe(command, **kwargs):
+            if command[0] == "git":
+                return check_output(command, **kwargs)
+            return b"fixture tool version\n"
+
+        with mock.patch.dict(proof.os.environ, env, clear=True), \
+                mock.patch.object(proof.subprocess, "check_output", side_effect=probe), \
+                mock.patch.object(proof, "row_toolchain", return_value=toolchain), \
+                mock.patch.object(proof, "run_gate_row", return_value=passed) as rows:
+            return action(*args), rows
+
+    def test_cas_398c_row_proofs_survive_prep_and_refuse_changed_inputs(self):
+        base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        daemon = dict(base, **self.DAEMON_ONLY)
+        results, rows = self.row_proof(daemon, proof.prove_rows, self.root)
+        self.assertEqual(results, {row: "PASS" for row in proof.ROW_PROOF_ROWS})
+        self.assertEqual(rows.call_count, 2)
+        # A second background run on the same input proves nothing again.
+        _, rows = self.row_proof(daemon, proof.prove_rows, self.root)
+        rows.assert_not_called()
+
+        cut = self.harness_environment(dict(base, **self.SHELL_ONLY))
+
+        def check(env, row="release-binary-isa", **kwargs):
+            stream = io.StringIO()
+            with contextlib.redirect_stderr(stream):
+                (expected, _), _ = self.row_proof(env, proof.row_inputs, self.root, row, **kwargs)
+                found, _ = self.row_proof(env, proof.row_matching, self.root, expected, True, **kwargs)
+            return found, stream.getvalue()
+
+        for row in proof.ROW_PROOF_ROWS:
+            found, _ = check(cut, row)
+            self.assertIsNotNone(found, row)
+            self.assertEqual(found[0]["inputs"]["target"], proof.ROW_TARGETS[row])
+            self.assertIn("RUSTFLAGS", found[0]["environment_policy"]["included"])
+            self.assertIn("GITHUB_TOKEN", found[0]["environment_policy"]["excluded"])
+
+        # Prep: member versions, lock versions and the ledger are masked.
+        for name in ("member-one", "member-two"):
+            manifest = self.root / name / "Cargo.toml"
+            manifest.write_text(manifest.read_text().replace('version = "1.0.0" #', 'version = "1.0.1" #'))
+        (self.root / "cas-cli/src/builtins/reference-history.json").write_text('{"prep": []}\n')
+        self.commit()
+        self.assertIsNotNone(check(cut)[0], "prep keeps the row proof")
+
+        found, miss = check(dict(cut, CAS_FUTURE_TEST_INPUT="1"))
+        self.assertIsNone(found)
+        self.assertIn("key=environment reason=different environment_key=CAS_FUTURE_TEST_INPUT", miss)
+        found, miss = check(cut, toolchain="other-zigbuild")
+        self.assertIsNone(found)
+        self.assertIn("key=row_toolchain reason=different", miss)
+        (self.root / "src/lib.rs").write_text("// code change\n")
+        self.commit()
+        found, miss = check(cut)
+        self.assertIsNone(found)
+        self.assertIn("key=code_input reason=different", miss)
+
+    def test_cas_398c_failed_row_proof_is_never_reused(self):
+        env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        results, _ = self.row_proof(env, proof.prove_rows, self.root, ("macos-check",), passed=False)
+        self.assertEqual(results, {"macos-check": "FAIL"})
+        (expected, _), _ = self.row_proof(env, proof.row_inputs, self.root, "macos-check")
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            found, _ = self.row_proof(env, proof.row_matching, self.root, expected, True)
+        self.assertIsNone(found)
+        self.assertIn("key=status reason=not_PASS", stream.getvalue())
+
     def test_build_test_and_unknown_variables_still_invalidate_fingerprint(self):
         base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
         expected, _ = self.inputs_for_environment(base)

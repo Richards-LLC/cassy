@@ -348,6 +348,7 @@ mod tests {
                 crate::store::open_event_store(&event_dir)
                     .map_err(|error| error.to_string())?
                     .record(&event)
+                    .map(drop)
                     .map_err(|error| error.to_string())
             });
             (ack, event)

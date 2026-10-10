@@ -3484,6 +3484,39 @@ impl FactoryDaemon {
     /// helper also repairs historical success paths without weakening another
     /// channel's receipt. The reservation itself must succeed before sending.
     fn record_transport_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            None,
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::TransportClaimed,
+        );
+    }
+
+    /// Record a strong receipt after the daemon observed the recipient take a
+    /// turn containing this row. Unlike the transport handoff receipt, this
+    /// must retire the row from the unread view (cas-1a54/cas-5255).
+    fn record_observed_wake_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            None,
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
+    }
+
+    /// [`Self::record_transport_receipt`] for the delivery path: a busy store
+    /// defers the receipt to the store worker instead of dropping it (GH #1165).
+    fn record_transport_receipt_durable(
         &self,
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
@@ -3498,10 +3531,8 @@ impl FactoryDaemon {
         );
     }
 
-    /// Record a strong receipt after the daemon observed the recipient take a
-    /// turn containing this row. Unlike the transport handoff receipt, this
-    /// must retire the row from the unread view (cas-1a54/cas-5255).
-    fn record_observed_wake_receipt(
+    /// [`Self::record_observed_wake_receipt`], deferred when the store is busy.
+    fn record_observed_wake_receipt_durable(
         &self,
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
@@ -5991,7 +6022,7 @@ impl FactoryDaemon {
                     // harness took our inbox copy AND the pane then produced
                     // output. Record the strong observed-wake receipt so the
                     // consumed row does not reappear in inbox_poll.
-                    self.record_observed_wake_receipt(&*queue, queued.id, &queued.target);
+                    self.record_observed_wake_receipt_durable(&*queue, queued.id, &queued.target);
                     if super::store_worker::mark_transport_delivered(
                         self.app.cas_dir(),
                         queued.id,
@@ -6513,6 +6544,7 @@ impl FactoryDaemon {
                         crate::store::open_event_store(&cas_dir)
                             .map_err(|error| error.to_string())?
                             .record(&ev)
+                            .map(drop)
                             .map_err(|error| error.to_string())
                     });
                 }
@@ -6628,7 +6660,7 @@ impl FactoryDaemon {
                             // that already received it. Without this write, one
                             // broadcast is re-served to every worker on every
                             // `inbox_poll`, forever.
-                            self.record_transport_receipt(&*queue, queued.id, name);
+                            self.record_transport_receipt_durable(&*queue, queued.id, name);
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
                                 record_injection(
@@ -7394,7 +7426,7 @@ impl FactoryDaemon {
                 // plus the re-nudge cadence still cover the deferred path. The
                 // recipient's unread view was never the right place to hide a
                 // delivery failure.
-                self.record_transport_receipt(&*queue, queued.id, &queued.target);
+                self.record_transport_receipt_durable(&*queue, queued.id, &queued.target);
                 // cas-2c5f: authoritative transport handoff only.
                 // GH #1165: the bytes are already in the pane, so a busy store
                 // defers this stamp to the store worker instead of losing it.

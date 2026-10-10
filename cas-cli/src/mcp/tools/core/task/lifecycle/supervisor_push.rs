@@ -618,7 +618,7 @@ fn session_metadata_supervisor_name(session: &str) -> Option<String> {
     if session.contains('/') || session.contains('\\') || session.contains("..") {
         return None;
     }
-    let text = std::fs::read_to_string(crate::ui::factory::session::metadata_path(session)).ok()?;
+    let text = std::fs::read_to_string(crate::ui::factory::metadata_path(session)).ok()?;
     let metadata: serde_json::Value = serde_json::from_str(&text).ok()?;
     metadata
         .get("supervisor")?

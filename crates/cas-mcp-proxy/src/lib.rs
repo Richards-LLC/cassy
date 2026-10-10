@@ -2888,7 +2888,7 @@ for line in sys.stdin:
         }
     }
 
-    async fn call_fake(engine: &ProxyEngine, tool: &str) -> Result<ExecuteResult> {
+    async fn call_fake(engine: &ProxyEngine, tool: &str) -> Result<String> {
         engine
             .execute(
                 &registered_worker_caller(),
@@ -2896,6 +2896,7 @@ for line in sys.stdin:
                 None,
             )
             .await
+            .map(|result| result.text)
     }
 
     async fn fake_health(engine: &ProxyEngine) -> UpstreamHealth {

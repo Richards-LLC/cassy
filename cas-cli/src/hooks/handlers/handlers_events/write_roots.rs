@@ -60,13 +60,46 @@ impl WritePolicy {
         mode: WriteMode,
         task_ids: &HashSet<String>,
     ) -> Option<&WriteRoot> {
-        let _ = (resolved, mode, task_ids);
-        None
+        self.in_effect(task_ids).find(|root| {
+            root.modes.contains(&mode)
+                // A root that cannot be resolved (missing, dangling symlink)
+                // admits nothing. Containment is judged on resolved paths, so
+                // `..` and symlinks inside the root cannot escape it.
+                && root
+                    .path
+                    .canonicalize()
+                    .is_ok_and(|canonical| resolved.starts_with(canonical))
+        })
+    }
+
+    /// Roots that apply to an agent working on `task_ids`: every project root
+    /// and the grants bound to those tasks.
+    fn in_effect<'a>(
+        &'a self,
+        task_ids: &'a HashSet<String>,
+    ) -> impl Iterator<Item = &'a WriteRoot> + 'a {
+        self.roots.iter().filter(move |root| {
+            root.task_id
+                .as_ref()
+                .is_none_or(|task| task_ids.contains(task))
+        })
     }
 
     /// Human-readable list for denial messages: `path (create, edit)`.
     pub(crate) fn describe(&self, task_ids: &HashSet<String>) -> Vec<String> {
-        let _ = task_ids;
-        Vec::new()
+        self.in_effect(task_ids)
+            .map(|root| {
+                let modes = root
+                    .modes
+                    .iter()
+                    .map(|mode| mode.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match &root.task_id {
+                    Some(task) => format!("{} ({modes}; grant for {task})", root.path.display()),
+                    None => format!("{} ({modes})", root.path.display()),
+                }
+            })
+            .collect()
     }
 }

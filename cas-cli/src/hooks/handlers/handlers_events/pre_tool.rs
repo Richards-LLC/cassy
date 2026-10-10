@@ -3684,17 +3684,213 @@ fn factory_write_decision(
     policy: &super::write_roots::WritePolicy,
     task_ids: &std::collections::HashSet<String>,
 ) -> FactoryWriteDecision {
-    let _ = (policy, task_ids);
-    match factory_write_violation(
-        input,
-        configured_artifacts_root,
-        configured_scratch_root,
-        is_supervisor,
-        registered_worktree_root,
-    ) {
-        Some(violation) => FactoryWriteDecision::Denied(violation),
-        None => FactoryWriteDecision::Allowed,
+    use super::write_roots::WriteMode;
+    let Some(tool) = input.tool_name.as_deref() else {
+        return FactoryWriteDecision::Allowed;
+    };
+    let Some(tool_input) = input.tool_input.as_ref() else {
+        return FactoryWriteDecision::Allowed;
+    };
+    let mut uses = Vec::new();
+    let mut admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
+        policy.matching(&resolved, mode, task_ids).map(|root| {
+            uses.push(WriteRootUse {
+                path: resolved.clone(),
+                mode,
+                root: root.path.clone(),
+                task_id: root.task_id.clone(),
+            });
+        })
+    };
+    // cas-cf4f: Bash deletions are judged as deletions, before creation.
+    if tool == "Bash"
+        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
+    {
+        for (raw_path, _recursive) in bash_delete_targets(command) {
+            let Some(violation) = factory_delete_violation(
+                input,
+                configured_artifacts_root,
+                configured_scratch_root,
+                is_supervisor,
+                registered_worktree_root,
+                &raw_path,
+            ) else {
+                continue;
+            };
+            // Only an ordinary out-of-root delete can be admitted; protected
+            // roots and live runtime files stay refused whatever the policy.
+            let admitted = violation.matched_rule == "deletion outside sanctioned roots"
+                && admit(violation.resolved_path.clone(), WriteMode::Delete, &mut uses).is_some();
+            if !admitted {
+                return FactoryWriteDecision::Denied(violation);
+            }
+        }
     }
+    let targets: Vec<(String, Option<WriteMode>)> = match tool {
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("path"))
+            .and_then(|value| value.as_str())
+            .map(|path| vec![(path.to_string(), None)])
+            .unwrap_or_default(),
+        "Bash" => {
+            let Some(command) = tool_input.get("command").and_then(|value| value.as_str()) else {
+                return FactoryWriteDecision::Allowed;
+            };
+            // cas-3147 (GH #1169 item 4): in-place edits and rename sources
+            // are judged like any other write, not left to chance.
+            bash_write_targets(command)
+                .into_iter()
+                .map(|path| (path, None))
+                .chain(
+                    bash_in_place_edit_targets(command)
+                        .into_iter()
+                        .map(|path| (path, Some(WriteMode::Edit))),
+                )
+                .collect()
+        }
+        // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
+        // text in `tool_input.command`.
+        "apply_patch" => {
+            let Some(patch) = tool_input.get("command").and_then(|value| value.as_str()) else {
+                return FactoryWriteDecision::Allowed;
+            };
+            apply_patch_write_targets_with_modes(patch)
+                .into_iter()
+                .map(|(path, mode)| (path, Some(mode)))
+                .collect()
+        }
+        _ => return FactoryWriteDecision::Allowed,
+    };
+    for (raw_path, mode) in targets {
+        // A variable that survived the finite expansion above may resolve to
+        // an absolute path only when Bash runs it. Treating the literal
+        // `$NAME` as relative to the worktree would create an escape hatch.
+        if raw_path.contains('$') {
+            return FactoryWriteDecision::Denied(FactoryWriteViolation {
+                evaluated_path: raw_path.clone(),
+                resolved_path: std::path::PathBuf::from(&raw_path),
+                matched_rule: "unresolved shell variable",
+            });
+        }
+        let Some(resolved) = unsanctioned_factory_path_with_worktree(
+            input,
+            configured_artifacts_root,
+            configured_scratch_root,
+            is_supervisor,
+            &raw_path,
+            registered_worktree_root,
+        ) else {
+            continue;
+        };
+        let mode = mode.unwrap_or(if std::fs::symlink_metadata(&resolved).is_ok() {
+            WriteMode::Edit
+        } else {
+            WriteMode::Create
+        });
+        if admit(resolved.clone(), mode, &mut uses).is_none() {
+            return FactoryWriteDecision::Denied(FactoryWriteViolation {
+                evaluated_path: raw_path,
+                resolved_path: resolved,
+                matched_rule: "none",
+            });
+        }
+    }
+    if uses.is_empty() {
+        FactoryWriteDecision::Allowed
+    } else {
+        FactoryWriteDecision::AllowedByRoot(uses)
+    }
+}
+
+/// cas-3147: files a Bash command edits in place without naming them as a
+/// write destination: `sed -i` / `perl -i` operands and `mv` sources (a
+/// rename changes the source's directory entry).
+fn bash_in_place_edit_targets(command: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for words in shell_statement_words(command) {
+        let Some(index) = executable_word_index(&words) else {
+            continue;
+        };
+        let name = shell_word_basename(&words[index]);
+        let args = &words[index + 1..];
+        match name {
+            "sed" | "perl" => {
+                let in_place = args.iter().any(|arg| {
+                    arg == "--in-place"
+                        || arg.starts_with("--in-place=")
+                        || (arg.starts_with('-')
+                            && !arg.starts_with("--")
+                            && arg[1..].contains('i'))
+                });
+                if !in_place {
+                    continue;
+                }
+                // The program is `-e`/`-f` values or, without them, the
+                // first operand; every other operand is a file.
+                let mut operands = Vec::new();
+                let mut explicit_program = false;
+                let mut iter = args.iter();
+                while let Some(arg) = iter.next() {
+                    if matches!(arg.as_str(), "-e" | "-f" | "--expression" | "--file") {
+                        explicit_program = true;
+                        iter.next();
+                    } else if arg.starts_with("--expression=") || arg.starts_with("--file=") {
+                        explicit_program = true;
+                    } else if name == "perl"
+                        && arg.starts_with('-')
+                        && !arg.starts_with("--")
+                        && arg.ends_with('e')
+                    {
+                        // `perl -pie 'code' file`: the bundle ends in -e.
+                        explicit_program = true;
+                        iter.next();
+                    } else if !arg.starts_with('-') {
+                        operands.push(arg.clone());
+                    }
+                }
+                if !explicit_program && !operands.is_empty() {
+                    operands.remove(0);
+                }
+                targets.extend(operands);
+            }
+            "mv" => {
+                let mut operands: Vec<String> = args
+                    .iter()
+                    .filter(|arg| !arg.starts_with('-'))
+                    .cloned()
+                    .collect();
+                operands.pop();
+                targets.extend(operands);
+            }
+            _ => {}
+        }
+    }
+    targets
+}
+
+/// cas-3147: [`apply_patch_write_targets`] with the change each header makes.
+fn apply_patch_write_targets_with_modes(
+    patch: &str,
+) -> Vec<(String, super::write_roots::WriteMode)> {
+    use super::write_roots::WriteMode;
+    const HEADERS: [(&str, WriteMode); 4] = [
+        ("*** Add File: ", WriteMode::Create),
+        ("*** Update File: ", WriteMode::Edit),
+        ("*** Delete File: ", WriteMode::Delete),
+        ("*** Move to: ", WriteMode::Create),
+    ];
+    patch
+        .lines()
+        .filter_map(|line| {
+            HEADERS.iter().find_map(|(header, mode)| {
+                line.strip_prefix(header)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(|path| (path.to_string(), *mode))
+            })
+        })
+        .collect()
 }
 
 /// cas-3147: the denial message, naming the operator's write roots in effect.
@@ -3707,13 +3903,20 @@ fn factory_workspace_contract_denial_with_roots(
     policy: &super::write_roots::WritePolicy,
     task_ids: &std::collections::HashSet<String>,
 ) -> String {
-    let _ = (policy, task_ids);
-    factory_workspace_contract_denial(
+    let denial = factory_workspace_contract_denial(
         input,
         violation,
         configured_artifacts_root,
         configured_scratch_root,
         worktree_root,
+    );
+    let roots = policy.describe(task_ids);
+    if roots.is_empty() {
+        return denial;
+    }
+    format!(
+        "{denial} Operator write roots in effect: {}. Only the operator can add roots or grants.",
+        roots.join("; ")
     )
 }
 
@@ -3731,71 +3934,18 @@ fn factory_write_violation(
     is_supervisor: bool,
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<FactoryWriteViolation> {
-    let tool = input.tool_name.as_deref()?;
-    let tool_input = input.tool_input.as_ref()?;
-    // cas-cf4f: Bash deletions are judged as deletions, before creation.
-    if tool == "Bash"
-        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
-        && let Some(violation) = bash_delete_targets(command).into_iter().find_map(|(raw_path, _recursive)| {
-            factory_delete_violation(
-                input,
-                configured_artifacts_root,
-                configured_scratch_root,
-                is_supervisor,
-                registered_worktree_root,
-                &raw_path,
-            )
-        })
-    {
-        return Some(violation);
+    match factory_write_decision(
+        input,
+        configured_artifacts_root,
+        configured_scratch_root,
+        is_supervisor,
+        registered_worktree_root,
+        &super::write_roots::WritePolicy::default(),
+        &std::collections::HashSet::new(),
+    ) {
+        FactoryWriteDecision::Denied(violation) => Some(violation),
+        FactoryWriteDecision::Allowed | FactoryWriteDecision::AllowedByRoot(_) => None,
     }
-    let raw_paths = match tool {
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
-            .get("file_path")
-            .or_else(|| tool_input.get("path"))
-            .and_then(|value| value.as_str())
-            .map(|path| vec![path.to_string()])
-            .unwrap_or_default(),
-        "Bash" => {
-            let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            bash_write_targets(command)
-        }
-        // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
-        // text in `tool_input.command`.
-        "apply_patch" => {
-            let patch = tool_input.get("command").and_then(|value| value.as_str())?;
-            apply_patch_write_targets(patch)
-        }
-        _ => return None,
-    };
-
-    raw_paths.into_iter().find_map(|raw_path| {
-        // A variable that survived the finite expansion above may resolve to
-        // an absolute path only when Bash runs it. Treating the literal
-        // `$NAME` as relative to the worktree would create an escape hatch.
-        // Known `$HOME` and command-local assignment/loop variables have
-        // already been expanded; the remainder is deliberately fail-closed.
-        if raw_path.contains('$') {
-            return Some(FactoryWriteViolation {
-                evaluated_path: raw_path.clone(),
-                resolved_path: std::path::PathBuf::from(&raw_path),
-                matched_rule: "unresolved shell variable",
-            });
-        }
-        unsanctioned_factory_path_with_worktree(
-            input,
-            configured_artifacts_root,
-            configured_scratch_root,
-            is_supervisor,
-            &raw_path,
-            registered_worktree_root,
-        )
-        .map(|resolved_path| FactoryWriteViolation {
-            evaluated_path: raw_path,
-            resolved_path,
-            matched_rule: "none",
-        })
-    })
 }
 
 /// cas-49c0: every file a Codex `apply_patch` call adds, updates, deletes or

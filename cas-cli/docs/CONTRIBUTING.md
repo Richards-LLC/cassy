@@ -50,6 +50,15 @@ personal rows with that exact structured rejection, keeps local entities and
 team queue rows, and makes no cloud calls. `--json` reports the purged count,
 scope and reason. This cleanup does not backfill or delete remote cloud data.
 
+`duplicate_of_other_project` means the same row already lives under another
+Cloud project identity. The rejection names that owning project. If both
+identities represent the same project, ask the Cloud owner to register and fold
+the alias first, then run `cas cloud project --adopt-aliases`,
+`cas cloud queue --retry --retry-reason duplicate_of_other_project`, and
+`cas cloud sync`. Otherwise, retire the local duplicate. Retrying alone cannot
+repair remote ownership; alias adoption rewrites local task provenance and
+does not move Cloud rows.
+
 ## Canonical install path
 
 Cassy must be installed to **one** location: `~/.local/bin/cas`. Any other

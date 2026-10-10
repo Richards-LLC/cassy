@@ -3073,3 +3073,22 @@ impl FactoryDaemon {
         Ok(())
     }
 }
+
+impl FactoryDaemon {
+    /// One loop pass's share of the two-second director refresh (cas-ee9ab).
+    /// Returns true when panel data changed.
+    pub(super) async fn director_refresh_pass(
+        &mut self,
+        refresh: &mut super::director_refresh::DirectorRefresh,
+        due: bool,
+        _store_worker: &super::store_worker::StoreWorker,
+        _loop_progress: &super::loop_watchdog::LoopProgress,
+    ) -> bool {
+        if !due {
+            return false;
+        }
+        std::thread::sleep(refresh.read_delay);
+        let _ = self.app.refresh_data();
+        true
+    }
+}

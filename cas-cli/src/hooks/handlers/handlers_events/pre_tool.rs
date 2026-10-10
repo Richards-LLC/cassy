@@ -4983,6 +4983,7 @@ mod workspace_contract_tests {
                     modes: [OperatorWriteMode::Create].into_iter().collect(),
                     reason: "INGEST request files".into(),
                     granted_at: "2026-10-10T18:00:00Z".into(),
+                    granted_by: None,
                 }],
             },
         )

@@ -156,6 +156,7 @@ pub(crate) fn execute_grant_write(args: &ConfigGrantWriteArgs, cli: &Cli, cas_ro
         modes,
         reason: args.reason.trim().to_string(),
         granted_at: granted_at.clone(),
+        granted_by: Some("operator-cli".to_string()),
     });
     save_operator_policy(cas_root, &policy)?;
     let note = format!(

@@ -12773,7 +12773,7 @@ mod tests {
         let remaining: Vec<i64> = {
             let conn = store.conn.lock().unwrap();
             let mut stmt = conn.prepare("SELECT id FROM prompt_queue ORDER BY id").unwrap();
-            stmt.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
+            stmt.query_map([], |row| row.get(0)).unwrap().map(|id| id.unwrap()).collect()
         };
         assert_eq!(remaining, vec![outbox_present]);
     }

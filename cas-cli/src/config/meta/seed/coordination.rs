@@ -125,6 +125,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.event_telemetry_retention_days",
+        section: "factory",
+        name: "Telemetry Event Retention (days)",
+        description: "Days high-volume telemetry events (supervisor_injected, supervisor_notified, agent_heartbeat, worker_file_edited, worker_subagent_spawned, worker_subagent_completed) stay in the events table. The canonical daemon deletes older rows every 15 minutes in transactions of at most 1,000 rows, whether or not the project is idle. Lifecycle events such as tasks, commits and verification are never pruned by this window. 0 disables the sweep.",
+        value_type: ConfigType::Int,
+        default: "14",
+        constraint: Constraint::Range(0, 3650),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "events", "telemetry", "retention", "prune", "database", "size"],
+        use_cases: &[
+            "Bound cas.db growth from supervisor injection telemetry",
+            "Set 0 to keep every telemetry event",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.worker_build_jobs",
         section: "factory",
         name: "Worker Cargo Build Jobs",

@@ -102,7 +102,10 @@ pub use trace_archive::{
 pub use agent_store::{AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};
 
 // Event store for activity tracking (sidecar)
-pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_with_conn};
+pub use event_store::{
+    EVENT_PRUNE_MAX_BATCH, EVENT_SCHEMA, EventPruneReport, EventStore, SqliteEventStore,
+    TELEMETRY_EVENT_TYPES, prune_telemetry_events, record_event_with_conn,
+};
 
 // Code store for indexed source code
 pub use code_store::CodeStore;

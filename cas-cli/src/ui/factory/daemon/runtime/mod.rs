@@ -6,6 +6,7 @@ pub(crate) mod delivery;
 #[cfg(test)]
 mod delivery_matrix_tests;
 mod gui_client;
+mod injection_events;
 mod lifecycle;
 pub(crate) mod loop_watchdog;
 pub(super) mod merge_sweep;

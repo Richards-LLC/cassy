@@ -599,6 +599,16 @@ pub struct FactoryConfig {
     #[serde(default = "default_prompt_retention_days")]
     pub prompt_retention_days: u32,
 
+    /// Days high-volume telemetry events (`supervisor_injected`,
+    /// `supervisor_notified`, `agent_heartbeat`, `worker_file_edited`,
+    /// `worker_subagent_*`) stay in the events table before the canonical
+    /// daemon deletes them in bounded batches (cas-e193). Lifecycle events
+    /// (tasks, commits, verification) are never touched by this window:
+    /// provenance and task-ownership readers scan them unbounded. 0 disables
+    /// the sweep.
+    #[serde(default = "default_event_telemetry_retention_days")]
+    pub event_telemetry_retention_days: u32,
+
     /// Seconds a worker may hold an in-progress task with a fresh heartbeat
     /// but zero observable activity (no file edits, commits, or subagent
     /// events) before the director flags it `WorkerStalled` and notifies
@@ -842,6 +852,10 @@ pub(crate) fn default_prompt_retention_days() -> u32 {
     7
 }
 
+pub(crate) fn default_event_telemetry_retention_days() -> u32 {
+    14
+}
+
 fn default_message_max_chars() -> usize {
     1200
 }
@@ -910,6 +924,7 @@ impl Default for FactoryConfig {
             max_concurrent_builders: default_max_concurrent_builders(),
             spawn_min_free_gib: default_spawn_min_free_gib(),
             prompt_retention_days: default_prompt_retention_days(),
+            event_telemetry_retention_days: default_event_telemetry_retention_days(),
             stall_threshold_secs: default_stall_threshold_secs(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),

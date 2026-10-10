@@ -5485,6 +5485,8 @@ impl FactoryDaemon {
 
         // Best-effort event recording (for external tooling acks, activity feed, playback).
         let event_store = SqliteEventStore::open(self.app.cas_dir()).ok();
+        // cas-e193: injection-event dedupe is scoped to the store it writes.
+        let injection_scope = self.app.cas_dir().to_path_buf();
 
         // cas-f02b (GH #101): one supervisor wake per drain pass — see the
         // wake-slot comment at the decision site.
@@ -6437,6 +6439,17 @@ impl FactoryDaemon {
                                     actual_target: &str,
                                     status: &str,
                                     error: Option<String>| {
+                // cas-e193: an identical retry of an outcome already recorded
+                // adds nothing for the ack waiters or the feed.
+                if !super::injection_events::should_record_injection(
+                    &injection_scope,
+                    prompt_id,
+                    actual_target,
+                    status,
+                    error.as_deref(),
+                ) {
+                    return;
+                }
                 let mut meta = serde_json::json!({
                     "prompt_id": prompt_id,
                     "queue_source": queue_source,

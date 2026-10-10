@@ -372,3 +372,149 @@ async fn no_code_task_with_possible_own_lane_commits_still_requires_merge() {
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}");
     }
 }
+
+/// GH #1167: put an unnamed commit under the worker lane's foreign tip, the
+/// way a lane carries a sync or an untagged commit from an earlier task. Under
+/// cas-2387 that commit might be this task's work, so the worker's own close
+/// keeps the delivery gates; the supervisor's review paths decide it.
+fn bury_unnamed_lane_commit(f: &mut Fixture) {
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    git(&worker_path, &["reset", "-q", "--hard", "HEAD~1"]);
+    std::fs::write(worker_path.join("shared.txt"), "shared fixture\n").unwrap();
+    git(&worker_path, &["add", "shared.txt"]);
+    git(&worker_path, &["commit", "-q", "-m", "sync shared fixtures"]);
+    std::fs::write(worker_path.join("other.rs"), "pub fn other() {}\n").unwrap();
+    git(&worker_path, &["add", "other.rs"]);
+    git(&worker_path, &["commit", "-q", "-m", OTHER]);
+    f.foreign_tip = git(&worker_path, &["rev-parse", "HEAD"]);
+    git(&worker_path, &["push", "-q", "-f", "origin", LANE]);
+}
+
+fn no_code_spike(id: &str, target: &str) -> Task {
+    let mut spike = assigned(id, TaskType::Spike, target);
+    spike.execution_note = Some("no-code".into());
+    spike.external_ref = Some("art-c203".into());
+    spike
+}
+
+/// GH #1167 (1): a no-code spike whose target branch exists only on origin
+/// (the main checkout tracks it remotely) closes on its proof. The lane's
+/// commits all belong to another task; an unreadable local target must not
+/// make them look like this task's.
+#[tokio::test]
+async fn no_code_spike_closes_when_its_target_exists_only_on_origin_gh1167() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "staging");
+    git(f.dir.path(), &["branch", "-D", "staging"]);
+    let id = "cas-c203";
+    f.put(&no_code_spike(id, "staging"));
+    claim(&f, id);
+    let response = call(
+        &f.worker,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Report delivered as an artifact",
+            "execution_note": "no-code", "external_ref": "art-c203",
+        }),
+    )
+    .await;
+    assert_closed_without_lane(&f, id, &response);
+}
+
+/// GH #1167 (2): the supervisor's evidence_only close of an artifact-only
+/// no-code spike succeeds even when the worker lane holds an unnamed commit.
+/// The supervisor reviewed the artifact; the lane is not measured.
+#[tokio::test]
+async fn evidence_only_closes_an_artifact_only_no_code_spike_gh1167() {
+    let mut env = TestEnvGuard::temp_home();
+    let mut f = fixture(&mut env, "main");
+    bury_unnamed_lane_commit(&mut f);
+    let id = "cas-c204";
+    f.put(&no_code_spike(id, "main"));
+    claim(&f, id);
+    let proof = f.artifact(id);
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Spike report retained as an artifact",
+            "evidence_only": true, "evidence_only_artifact_path": proof,
+            "evidence_only_reference": format!("branch:{LANE}"),
+        }),
+    )
+    .await;
+    assert_closed_without_lane(&f, id, &response);
+    let evidence = f.task(id).deliverables.evidence_only.expect("evidence recorded");
+    assert!(evidence.paths.is_empty(), "{:?}", evidence.paths);
+}
+
+/// GH #1167 (3): after the supervisor clears the code target
+/// (proof_scope_fix target_repo=""), the no-code spike closes on its proof
+/// with no branch resolution and no merge-tree preflight, even though the
+/// lane holds an unnamed commit and an earlier park anchored the lane tip.
+#[tokio::test]
+async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167() {
+    let mut env = TestEnvGuard::temp_home();
+    let mut f = fixture(&mut env, "main");
+    bury_unnamed_lane_commit(&mut f);
+    let id = "cas-c205";
+    let mut spike = no_code_spike(id, "main");
+    spike.status = TaskStatus::AwaitingMerge;
+    spike.deliverables.parked_branch = Some(LANE.into());
+    spike.deliverables.factory_branch_anchor = Some(
+        git(f.dir.path(), &["rev-parse", &format!("{}~1", f.foreign_tip)]),
+    );
+    f.put(&spike);
+    claim(&f, id);
+    let cleared = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "update", "id": id, "proof_scope_fix": true, "target_repo": "",
+            "reason": "report-only spike: no code target",
+        }),
+    )
+    .await;
+    assert!(f.task(id).deliverables.work_target.is_none(), "{cleared}");
+    let response = call(
+        &f.worker,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Report delivered",
+            "execution_note": "no-code", "external_ref": "art-c203",
+        }),
+    )
+    .await;
+    assert!(!response.contains("merge-tree"), "{response}");
+    let task = f.task(id);
+    assert_eq!(task.status, TaskStatus::Closed, "{response}");
+    assert!(
+        !response.contains("MERGE REQUIRED") && !response.contains("DELIVERY BRANCH UNRESOLVED"),
+        "{response}"
+    );
+}
+
+/// GH #1167 (4): the same lane still gates a code task and a worker's own
+/// no-code close: an unnamed lane commit may be this task's work (cas-2387).
+#[tokio::test]
+async fn unnamed_lane_commit_still_gates_code_and_worker_no_code_closes_gh1167() {
+    for (id, no_code) in [("cas-c206", false), ("cas-c207", true)] {
+        let mut env = TestEnvGuard::temp_home();
+        let mut f = fixture(&mut env, "main");
+        bury_unnamed_lane_commit(&mut f);
+        let task = if no_code {
+            no_code_spike(id, "main")
+        } else {
+            assigned(id, TaskType::Task, "main")
+        };
+        f.put(&task);
+        claim(&f, id);
+        let mut request = serde_json::json!({"action": "close", "id": id, "reason": "Done"});
+        if no_code {
+            request["execution_note"] = "no-code".into();
+            request["external_ref"] = "art-c203".into();
+        }
+        let response = call(&f.worker, request).await;
+        assert!(
+            response.contains("MERGE REQUIRED") || response.contains("DELIVERY BRANCH UNRESOLVED"),
+            "{id}: {response}"
+        );
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{id}");
+    }
+}

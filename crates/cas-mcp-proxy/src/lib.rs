@@ -2979,7 +2979,7 @@ for line in sys.stdin:
         if name == "drop":
             os._exit(0)
         if name == "hang":
-            time.sleep(3600)
+            time.sleep(30)
         send({"jsonrpc": "2.0", "id": ident, "result": {
             "content": [{"type": "text", "text": "ok"}], "isError": False}})
     elif ident is not None:

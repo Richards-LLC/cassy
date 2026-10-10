@@ -101,7 +101,8 @@ role + accessible name when supplied, or matching text + shared bounds within
 0.5 CSS pixels. A CSS class rename alone does not add a finding; a new rule,
 text or geometry still does. Historical reports lacking identity evidence
 require matching selectors. A finding only the tip has is one the delivery introduced,
-and `qa_record` refuses the pair.
+and `qa_record` refuses the pair. Either report shape works: a top-level
+`findings` list, or per-render `renders[].issues` with the page in `input`.
 
 This captures desktop 1280 and phone 390, each in light and dark. Then score
 the `cas-ui-craft` critique rubric for what the delivery changed, not for the

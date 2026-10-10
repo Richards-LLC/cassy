@@ -2786,6 +2786,145 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
     );
 }
 
+// Replay the deployed Cloud envelope: two old project identities own the
+// duplicates, while an unrelated accepted row must still leave the queue.
+async fn duplicate_project_rejection_scenario(team: bool) {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let counts = serde_json::json!({"tasks": {"inserted": 1, "updated": 0, "skipped": 2}});
+    let mut response = if team {
+        serde_json::json!({"synced": counts})
+    } else {
+        counts
+    };
+    response["rows"] = serde_json::json!([
+        {"entity_type": "tasks", "id": "cas-new", "outcome": "inserted"},
+        {"entity_type": "tasks", "id": "cas-old-a", "outcome": "rejected",
+         "reason": "duplicate_of_other_project", "existing_canonical_id": "accounting"},
+        {"entity_type": "tasks", "id": "cas-old-b", "outcome": "rejected",
+         "reason": "duplicate_of_other_project", "existing_canonical_id": "petra-stella-accounting"}
+    ]);
+    Mock::given(method("POST"))
+        .and(path(if team {
+            "/api/teams/accounting-team/sync/push"
+        } else {
+            "/api/sync/push"
+        }))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"richards-llc-accounting\"\n",
+    )
+    .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["cas-new", "cas-old-a", "cas-old-b"] {
+        let mut task = Task::new(id.into(), "Accounting work".into());
+        task.origin_project = Some("richards-llc-accounting".into());
+        tasks.add(&task).unwrap();
+        let payload = serde_json::to_string(&task).unwrap();
+        if team {
+            queue
+                .enqueue_for_team(
+                    EntityType::Task,
+                    id,
+                    SyncOperation::Upsert,
+                    Some(&payload),
+                    "accounting-team",
+                )
+                .unwrap();
+        } else {
+            queue
+                .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some(&payload))
+                .unwrap();
+        }
+    }
+    let config = CloudSyncerConfig::default();
+    let max_retries = config.max_retries;
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        config,
+        "richards-llc-accounting".into(),
+        temp.path(),
+    );
+    let result = if team {
+        syncer.push_team("accounting-team").unwrap()
+    } else {
+        syncer.push_scoped(PushScope::TasksOnly).unwrap()
+    };
+    assert_eq!(result.pushed_tasks, 1, "{:?}", result.errors);
+    let remaining = queue.list_all(10).unwrap();
+    assert_eq!(remaining.len(), 2, "only the duplicates stay parked");
+    for (id, owner) in [
+        ("cas-old-a", "accounting"),
+        ("cas-old-b", "petra-stella-accounting"),
+    ] {
+        assert!(result.concise_errors().iter().any(|error| {
+            error.contains(id) && error.contains(&format!("existing_project={owner}"))
+        }));
+        let row = remaining.iter().find(|row| row.entity_id == id).unwrap();
+        assert_eq!(row.retry_count, max_retries);
+        assert_eq!(
+            row.last_reason.as_deref(),
+            Some("duplicate_of_other_project")
+        );
+        let visible = row
+            .last_error
+            .as_deref()
+            .unwrap()
+            .split("; server response:")
+            .next()
+            .unwrap();
+        assert!(
+            visible.contains(&format!("existing_project={owner}")),
+            "{visible}"
+        );
+        assert!(
+            visible.contains("cas cloud project --adopt-aliases"),
+            "{visible}"
+        );
+        assert!(visible.contains("retire the local duplicate"), "{visible}");
+        assert!(!visible.contains("unrecognized"), "{visible}");
+    }
+}
+
+#[tokio::test]
+async fn duplicate_project_rejection_names_owner_and_remedy_personal() {
+    duplicate_project_rejection_scenario(false).await;
+}
+
+#[tokio::test]
+async fn duplicate_project_rejection_names_owner_and_remedy_team() {
+    duplicate_project_rejection_scenario(true).await;
+}
+
+#[test]
+fn duplicate_project_rejection_without_owner_keeps_legacy_response_compatible() {
+    let row: PushRowResult = serde_json::from_value(serde_json::json!({
+        "id": "cas-old", "outcome": "rejected", "reason": "duplicate_of_other_project"
+    }))
+    .unwrap();
+    assert_eq!(row.rejection_context(), "duplicate_of_other_project");
+    assert!(!row.rejection_is_retryable());
+    assert!(push_reason_hint(row.reason.as_deref().unwrap()).contains("cloud owner"));
+}
+
 /// A cloud build that answers with aggregate counts only must behave exactly as
 /// it did before per-row results existed.
 #[tokio::test]
@@ -2856,6 +2995,7 @@ fn every_push_reason_has_its_own_remediation() {
     for reason in [
         "project_mismatch",
         "project_identity_conflict",
+        "duplicate_of_other_project",
         "scope_mismatch",
         "revision_conflict",
         "version_gate",
@@ -2872,13 +3012,13 @@ fn every_push_reason_has_its_own_remediation() {
 
 #[test]
 fn batch_identity_error_recovers_its_structured_reason() {
-    let error = crate::error::CasError::Other(
-        r#"Push failed with status 409: {"error":"project_identity_conflict"}"#.to_string(),
-    );
-    assert_eq!(
-        push_reason_from_error(&error).as_deref(),
-        Some("project_identity_conflict")
-    );
+    for reason in ["project_identity_conflict", "duplicate_of_other_project"] {
+        let error = crate::error::CasError::Other(format!(
+            "Push failed with status 409: {}",
+            serde_json::json!({"error": reason})
+        ));
+        assert_eq!(push_reason_from_error(&error).as_deref(), Some(reason));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3216,6 +3356,7 @@ fn a_stale_base_is_retryable_rather_than_parked() {
         id: "cas-stale".to_string(),
         outcome: PushRowOutcome::Rejected,
         reason: Some("revision_conflict".to_string()),
+        existing_canonical_id: None,
     };
     assert!(conflict.rejection_is_retryable());
     // An unknown reason still parks — losing a diagnostic row is worse.
@@ -3223,6 +3364,7 @@ fn a_stale_base_is_retryable_rather_than_parked() {
         id: "cas-unknown".to_string(),
         outcome: PushRowOutcome::Rejected,
         reason: Some("something_new".to_string()),
+        existing_canonical_id: None,
     };
     assert!(!unknown.rejection_is_retryable());
 }

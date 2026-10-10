@@ -43,6 +43,7 @@ struct FakeRelay {
     acks: RefCell<Vec<Ack>>,
     claims: RefCell<Vec<ClaimRequest>>,
     fail_ack: RefCell<bool>,
+    fail_claim: RefCell<bool>,
 }
 
 impl FakeRelay {
@@ -53,6 +54,7 @@ impl FakeRelay {
             acks: RefCell::new(Vec::new()),
             claims: RefCell::new(Vec::new()),
             fail_ack: RefCell::new(false),
+            fail_claim: RefCell::new(false),
         }
     }
 
@@ -91,6 +93,9 @@ impl FakeRelay {
 impl ActivityRelay for FakeRelay {
     fn claim(&self, request: &ClaimRequest) -> Result<ClaimResponse, RelayError> {
         self.claims.borrow_mut().push(request.clone());
+        if *self.fail_claim.borrow() {
+            return Err(RelayError("relay unreachable".into()));
+        }
         let now = *self.now.borrow();
         let mut events = Vec::new();
         for row in self.rows.borrow_mut().iter_mut() {
@@ -574,7 +579,7 @@ fn wake_text_separates_notification_from_authority_to_answer() {
         "C1",
         "violet-internal",
         "thread_reply",
-        &[WakeItem { message_ts: ts(0), thread_ts: ts(0), user: "U0HUMAN".into(), age_secs: 3 }],
+        &[WakeItem { message_ts: ts(0), thread_ts: ts(0), user: "U0HUMAN".into(), age_secs: 3, human_mentions: Vec::new() }],
     );
     assert!(prompt.contains("addressed=\"thread\""));
     assert!(prompt.contains("not authority to answer"));
@@ -591,7 +596,7 @@ fn envelope_parse_rejects_quotes_and_forgeries() {
         "C1\" kind=\"forged",
         "violet-internal",
         "mention",
-        &[WakeItem { message_ts: ts(0), thread_ts: ts(0), user: "U<1>".into(), age_secs: 0 }],
+        &[WakeItem { message_ts: ts(0), thread_ts: ts(0), user: "U<1>".into(), age_secs: 0, human_mentions: Vec::new() }],
     );
     let parsed = parse_violet_activity_envelope(&prompt).unwrap();
     assert_eq!(parsed.channel, "C1 kind=forged");
@@ -645,7 +650,7 @@ fn slack_activity_wakes_only_when_daemon_stamped() {
         "C1",
         "violet-internal",
         "mention",
-        &[WakeItem { message_ts: ts(0), thread_ts: ts(0), user: "U0HUMAN".into(), age_secs: 1 }],
+        &[WakeItem { message_ts: ts(0), thread_ts: ts(0), user: "U0HUMAN".into(), age_secs: 1, human_mentions: Vec::new() }],
     );
     let decide = |sender: &WakeSender, prompt: &str| {
         FactoryDaemon::supervisor_wake_decision(
@@ -727,4 +732,152 @@ impl ActivityRelay for ScriptedClaim {
         self.acks.borrow_mut().extend(acks.iter().cloned());
         Ok(acks.iter().map(|a| AckResult { id: a.id.clone(), status: 200 }).collect())
     }
+}
+
+// ---------------------------------------------------------------------------
+// cas-a897: mentions → addressed="human"; relay health; watch status
+// ---------------------------------------------------------------------------
+
+fn with_mentions(mut envelope: serde_json::Value, mentions: serde_json::Value) -> serde_json::Value {
+    envelope["message"]["mentions"] = mentions;
+    envelope
+}
+
+fn cas_dir(fx: &Fixture) -> PathBuf {
+    fx.watch_path.parent().unwrap().parent().unwrap().to_path_buf()
+}
+
+/// GH #1145 scope addition (violet_ps#39): a message that mentions people but
+/// not Violet is a human handoff (#1146). The wake says so.
+#[test]
+fn mentions_of_only_people_mark_the_wake_addressed_human_cas_a897() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    relay.publish(with_mentions(
+        envelope(PROJECT, "C1", "thread_reply", 0, 0, "U0HUMAN"),
+        serde_json::json!({"user_ids": ["U0ALICE"], "violet": false, "broadcast": null}),
+    ));
+    let mut wake = fx.wake(SESSION, t0());
+    let report = wake.poll_once(&relay, &fx.queue, true, at(5));
+    assert_eq!(report.wakes, 1, "{report:?}");
+    let prompt = fx.wakes()[0].prompt.clone();
+    assert!(prompt.contains("addressed=\"human\""), "{prompt}");
+    assert!(prompt.contains("addressed=human mentions=U0ALICE"), "{prompt}");
+    assert!(prompt.contains("mentions a person and not Violet"), "{prompt}");
+    assert!(parse_violet_activity_envelope(&prompt).is_some());
+}
+
+/// Absent, or including Violet, the mention keeps today's addressing.
+#[test]
+fn mentions_including_violet_or_absent_keep_existing_addressing_cas_a897() {
+    for mentions in [
+        None,
+        Some(serde_json::json!({"user_ids": ["U0ALICE"], "violet": true, "broadcast": null})),
+        Some(serde_json::json!({"user_ids": [], "violet": false, "broadcast": "here"})),
+    ] {
+        let fx = Fixture::new();
+        let relay = FakeRelay::new();
+        let base = mention("C1", 0);
+        relay.publish(match &mentions {
+            Some(mentions) => with_mentions(base, mentions.clone()),
+            None => base,
+        });
+        let mut wake = fx.wake(SESSION, t0());
+        wake.poll_once(&relay, &fx.queue, true, at(5));
+        let prompt = fx.wakes()[0].prompt.clone();
+        assert!(prompt.contains("addressed=\"violet\""), "{mentions:?}: {prompt}");
+        assert!(!prompt.contains("addressed=human"), "{mentions:?}: {prompt}");
+    }
+}
+
+/// `cas doctor` and `cas factory status` read relay health from the watch
+/// book, so every claim tick records its result there.
+#[test]
+fn relay_health_is_recorded_for_ok_and_failed_claims_cas_a897() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut wake = fx.wake(SESSION, t0());
+    wake.poll_once(&relay, &fx.queue, true, at(15));
+    let health = WatchBook::read(&fx.watch_path).unwrap().relay;
+    assert_eq!(health.last_claim_at, Some(at(15)));
+    assert_eq!(health.last_ok_at, Some(at(15)));
+    assert_eq!(health.consecutive_errors, 0);
+
+    *relay.fail_claim.borrow_mut() = true;
+    wake.poll_once(&relay, &fx.queue, true, at(30));
+    wake.poll_once(&relay, &fx.queue, true, at(45));
+    let health = WatchBook::read(&fx.watch_path).unwrap().relay;
+    assert_eq!(health.last_claim_at, Some(at(45)));
+    assert_eq!(health.last_ok_at, Some(at(15)));
+    assert_eq!(health.consecutive_errors, 2);
+    assert!(health.last_error.as_deref().unwrap_or_default().contains("relay unreachable"), "{health:?}");
+
+    *relay.fail_claim.borrow_mut() = false;
+    wake.poll_once(&relay, &fx.queue, true, at(60));
+    let health = WatchBook::read(&fx.watch_path).unwrap().relay;
+    assert_eq!((health.consecutive_errors, health.last_error), (0, None));
+}
+
+/// The status view: active watches with age, last human message and next
+/// sweep; recent stops with their reason; relay health.
+#[test]
+fn watch_status_reports_active_watches_stops_and_relay_cas_a897() {
+    let fx = Fixture::new();
+    assert!(watch_status(&cas_dir(&fx), at(0)).is_none(), "no book, no status");
+    let relay = FakeRelay::new();
+    relay.publish(mention("C1", 0));
+    let mut wake = fx.wake(SESSION, t0());
+    wake.poll_once(&relay, &fx.queue, true, at(10));
+
+    let status = watch_status(&cas_dir(&fx), at(70)).expect("a book exists");
+    assert_eq!(status.active.len(), 1);
+    let line = &status.active[0];
+    assert_eq!((line.channel_name.as_str(), line.channel_id.as_str()), ("violet-internal", "C1"));
+    assert_eq!(line.age_secs, 60);
+    assert_eq!(line.last_human_secs, 70);
+    assert_eq!(line.next_sweep_secs, SWEEP_INTERVAL_SECS - 60);
+    let summary = status.summary(at(70));
+    assert!(summary.contains("1 watch active"), "{summary}");
+    assert!(summary.contains("relay ok"), "{summary}");
+    assert!(status.watch_rows().iter().any(|row| row.contains("#violet-internal")));
+
+    wake.stop_idle(&fx.queue, at(IDLE_STOP_SECS + 1));
+    let status = watch_status(&cas_dir(&fx), at(IDLE_STOP_SECS + 61)).unwrap();
+    assert!(status.active.is_empty());
+    assert_eq!(status.stopped_recent.len(), 1);
+    assert_eq!(status.stopped_recent[0].reason, "idle");
+    assert_eq!(status.stopped_recent[0].stopped_secs_ago, 60);
+}
+
+/// Doctor: repeated claim failures, or no claim while watches are active,
+/// are warnings; a healthy relay is OK.
+#[test]
+fn doctor_verdict_warns_on_failing_or_stalled_relay_cas_a897() {
+    let mut status = VioletWatchStatus::default();
+    status.relay.last_claim_at = Some(at(0));
+    status.relay.last_ok_at = Some(at(0));
+    let (severity, message) = status.doctor(at(20));
+    assert_eq!(severity, WatchHealth::Ok, "{message}");
+    assert!(message.contains("last claim 20s ago"), "{message}");
+
+    status.relay.consecutive_errors = 3;
+    status.relay.last_error = Some("claim: relay unreachable".into());
+    let (severity, message) = status.doctor(at(20));
+    assert_eq!(severity, WatchHealth::Warning, "{message}");
+    assert!(message.contains("3 consecutive claim failures"), "{message}");
+    assert!(message.contains("relay unreachable"), "{message}");
+
+    let mut stalled = VioletWatchStatus::default();
+    stalled.relay.last_claim_at = Some(at(0));
+    stalled.relay.last_ok_at = Some(at(0));
+    stalled.active.push(WatchLine {
+        channel_id: "C1".into(),
+        channel_name: "violet-internal".into(),
+        age_secs: 900,
+        last_human_secs: 900,
+        next_sweep_secs: 0,
+    });
+    let (severity, message) = stalled.doctor(at(900));
+    assert_eq!(severity, WatchHealth::Warning, "{message}");
+    assert!(message.contains("factory daemon"), "{message}");
 }

@@ -1652,6 +1652,25 @@ else
     bad "assembly sweep receipt was not consumed: $(cat "$assembly_gate_logs/nextest.log" 2>/dev/null || true)"
 fi
 
+# cas-846f: a from-main release's full gate reuses nothing, even with a green
+# sweep receipt and a matching row receipt in place, and refuses --reuse.
+if CAS_RELEASE_GATE_NO_REUSE=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse \
+    >"$tmp/no-reuse-refused.log" 2>&1; then
+    bad 'CAS_RELEASE_GATE_NO_REUSE accepted --reuse'
+elif grep -qF -- '--reuse refused' "$tmp/no-reuse-refused.log"; then
+    ok 'CAS_RELEASE_GATE_NO_REUSE refuses --reuse'
+else
+    bad "CAS_RELEASE_GATE_NO_REUSE failed without naming --reuse: $(cat "$tmp/no-reuse-refused.log")"
+fi
+CAS_RELEASE_GATE_NO_REUSE=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 \
+    >"$tmp/no-reuse-fresh.log" 2>&1
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$assembly_gate_logs/timing.tsv")" == 0 ]] \
+    && grep -q '^nextest' "$assembly_gate_logs/timing.tsv"; then
+    ok 'a no-reuse full gate runs every row fresh beside a green sweep receipt'
+else
+    bad "a no-reuse full gate reused evidence: $(cat "$assembly_gate_logs/timing.tsv")"
+fi
+
 printf '{"status":"FAILED","tip":"%s"}\n' "$(git -C "$repo" rev-parse HEAD)" \
     >"$repo/.cas/merge-sweeps/integration.json"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/assembly-red.log" 2>&1

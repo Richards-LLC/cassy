@@ -120,9 +120,13 @@ cut_preflight_check_tag() {
 cut_preflight_check_scratch() {
     local scratch="${CAS_RELEASE_GATE_HOME_DIR:-}" configured
     local probe archive required available previous scratch_parent checkout_device scratch_device
+    local env_file_hint="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
     if [[ -z "$scratch" ]]; then
         configured="$(cut_preflight_env_value CAS_RELEASE_GATE_HOME_DIR 2>/dev/null || true)"
-        scratch="${configured:-$(release_portable_default_scratch_base)}"
+        # cas-be3a: unset means a base on the checkout's filesystem when the
+        # platform default is across a boundary (release-train.sh exports the
+        # same value to the gate).
+        scratch="${configured:-$(release_portable_checkout_scratch_base "$worktree")}"
     fi
     probe="$scratch/.release-train-write.$$"
     mkdir -p "$scratch" 2>/dev/null || {
@@ -138,8 +142,14 @@ cut_preflight_check_scratch() {
     checkout_device="${CAS_RELEASE_TRAIN_CHECKOUT_DEVICE:-$(release_portable_stat_device "$worktree" || true)}"
     scratch_device="${CAS_RELEASE_TRAIN_SCRATCH_DEVICE:-$(release_portable_stat_device "$scratch_parent" || true)}"
     if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
+        local fix
+        if fix="$(release_portable_sibling_scratch_base "$worktree")"; then
+            fix="set CAS_RELEASE_GATE_HOME_DIR=$fix (in the environment or $env_file_hint)"
+        else
+            fix="set CAS_RELEASE_GATE_HOME_DIR to a directory on the checkout's filesystem with no .cas ancestor"
+        fi
         cut_preflight_block scratch-space \
-            "filesystem boundary: checkout device=${checkout_device:-unknown} scratch-parent device=${scratch_device:-unknown}"
+            "filesystem boundary: checkout device=${checkout_device:-unknown} scratch-parent device=${scratch_device:-unknown} (scratch base $scratch); $fix"
         return $?
     fi
     archive="${CAS_RELEASE_TRAIN_LAST_ARCHIVE_SIZE:-}"
@@ -261,6 +271,26 @@ cut_preflight_check_publish_toolchain() {
     fi
 }
 
+# cas-be3a: the report stage runs after publication and announce, so a missing
+# renderer browser used to stop the train once nothing could be undone. Launch
+# the renderer's browser here, before any publish step.
+cut_preflight_check_report_renderer() {
+    [[ "${CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN:-}" == 1 ]] && return 0
+    [[ "${CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_REPORT_RENDERER:-}" == 1 ]] && return 0
+    local probe="${CAS_RELEASE_REPORT_RENDERER_PROBE:-$script_dir/check-release-report-renderer.sh}"
+    local log="$run_dir/preflight-report-renderer.log" pinned
+    mkdir -p "$run_dir"
+    if "$probe" >"$log" 2>&1; then
+        return 0
+    fi
+    cat "$log" >&2
+    # Pin the install to the Playwright release the renderer will use, so the
+    # browser build matches.
+    pinned="$(sed -n 's/^playwright-version=//p' "$log" | head -n1)"
+    cut_preflight_block report-renderer \
+        "the release report PDF renderer cannot launch its browser (log $log); install it with \`npm exec --yes --package=playwright${pinned:+@$pinned} -- playwright install chromium-headless-shell\`, then rerun with --cut --resume"
+}
+
 cut_preflight_check_changelog() {
     local changelog="$worktree/CHANGELOG.md" date_stamp
     date_stamp="$(release_train_date_stamp)"
@@ -334,6 +364,11 @@ cut_preflight_check_draft() {
 }
 
 cut_preflight_check_integration() {
+    if [[ -r "$run_dir/assemble.integration.json" ]] &&
+        [[ "$(jq -r '.mode // empty' "$run_dir/assemble.integration.json")" == from-main ]]; then
+        printf 'preflight: release epics already merged to main; assemble revalidates main; full gate required\n'
+        return 0
+    fi
     local common receipt origin_main receipt_base
     common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
         | sed 's#/\.git$##')"
@@ -419,6 +454,7 @@ cut_stage_preflight() {
     cut_preflight_check_zig || return 1
     cut_preflight_check_toolchain || return 1
     cut_preflight_check_publish_toolchain || return 1
+    cut_preflight_check_report_renderer || return 1
     cut_preflight_check_changelog || return 1
     cut_preflight_check_changelog_lint || return 1
     cut_preflight_check_draft || return 1

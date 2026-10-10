@@ -646,8 +646,9 @@ impl CloudSyncer {
             }
 
             let reason = row.reason.as_deref().unwrap_or("unspecified");
+            let context = row.rejection_context();
             let diagnostic = format!(
-                "cloud rejected team {entity_key} {}: reason={reason} ({}); server response: {raw_response}",
+                "cloud rejected team {entity_key} {}: reason={context} ({}); server response: {raw_response}",
                 item.entity_id,
                 crate::cloud::syncer::push_reason_hint(reason)
             );
@@ -661,7 +662,7 @@ impl CloudSyncer {
                     .queue
                     .park_failed(item.id, &diagnostic, self.config.max_retries);
             }
-            rejected.push(format!("{} ({reason})", item.entity_id));
+            rejected.push(format!("{} ({context})", item.entity_id));
         }
 
         if !rejected.is_empty() {

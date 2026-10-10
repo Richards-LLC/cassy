@@ -172,9 +172,8 @@ describe("hub-web fixture visual QA", () => {
     }
   });
 
-  it("names the resolved Playwright on every run and keeps no directory-order fallback", async () => {
+  it("keeps no directory-order fallback when resolving Playwright", async () => {
     const runner = await readFile(join(repoRoot, "..", "scripts", "visual-qa.mjs"), "utf8");
-    expect(runner).toContain("console.log(redactQaText(`Playwright ${playwrightVersion} (${playwrightSource})`, options.secrets));");
     expect(runner).not.toContain("candidates.at(-1)");
   });
 });

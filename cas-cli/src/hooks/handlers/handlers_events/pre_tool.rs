@@ -1413,6 +1413,14 @@ fn worker_command_rust_build_at_depth(command: &str, cwd: &Path, depth: usize) -
             return Some(found);
         }
         if depth < 2 {
+            // `env -S 'cargo …'` runs its split string as the command (cas-cfd6).
+            if let Some(payload) = env_split_string_payload(&words) {
+                if let Some(found) = worker_command_rust_build_at_depth(&payload, cwd, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+        if depth < 2 {
             // `sh -c '<script>'`, `bash -lc "<script>"`
             for (index, word) in words.iter().enumerate() {
                 let shell = matches!(shell_word_basename(word), "sh" | "bash" | "zsh" | "dash");
@@ -2497,6 +2505,55 @@ fn shell_word_basename(word: &str) -> &str {
 
 /// Find the executable word after the small set of shell wrappers commonly
 /// used by worker commands. This is deliberately not a shell evaluator.
+/// `env` options whose value is the following word (cas-cfd6).
+const ENV_VALUE_OPTIONS: &[&str] = &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"];
+
+/// `sudo` options whose value is the following word (cas-cfd6).
+const SUDO_VALUE_OPTIONS: &[&str] = &[
+    "-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir", "-h", "--host",
+    "-p", "--prompt", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U",
+    "--other-user", "-R", "--chroot",
+];
+
+/// The command string an `env -S STRING` / `--split-string[=]STRING` runs,
+/// for statements whose executable position is `env` (cas-cfd6).
+fn env_split_string_payload(words: &[String]) -> Option<String> {
+    // Only an `env` in command position: after leading assignments and the
+    // wrappers the build guard already unwraps, never a quoted argument.
+    let start = words.iter().position(|word| {
+        !(word
+            .split_once('=')
+            .is_some_and(|(name, _)| is_shell_variable_name(name))
+            || matches!(
+                shell_word_basename(word),
+                "sudo" | "command" | "nohup" | "setsid" | "time" | "exec" | "nice" | "timeout"
+            )
+            || word.starts_with('-')
+            || word.parse::<f64>().is_ok())
+    })?;
+    if shell_word_basename(&words[start]) != "env" {
+        return None;
+    }
+    let mut index = start + 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if let Some(value) = word.strip_prefix("--split-string=") {
+            return Some(value.to_string());
+        }
+        if word == "-S" || word == "--split-string" {
+            return words.get(index + 1).cloned();
+        }
+        if let Some(value) = word.strip_prefix("-S").filter(|value| !value.is_empty()) {
+            return Some(value.to_string());
+        }
+        if word == "--" || !(word.starts_with('-') || word.contains('=')) {
+            return None;
+        }
+        index += if ENV_VALUE_OPTIONS.contains(&word) { 2 } else { 1 };
+    }
+    None
+}
+
 pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
@@ -2504,20 +2561,41 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
         match shell_word_basename(word) {
             "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
             "env" => {
+                // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
+                // value; skipping only the flag made `env -u X cargo …` name
+                // `X` as the executable and miss the worker Rust build guard.
+                // An `-S` payload is itself inspected by the build guard.
                 index += 1;
-                while index < words.len()
-                    && (words[index].starts_with('-')
-                        || words[index]
+                while index < words.len() {
+                    let word = words[index].as_str();
+                    if word == "--" {
+                        index += 1;
+                        break;
+                    } else if ENV_VALUE_OPTIONS.contains(&word) {
+                        index += 2;
+                    } else if word.starts_with('-')
+                        || word
                             .split_once('=')
-                            .is_some_and(|(name, _)| is_shell_variable_name(name)))
-                {
-                    index += 1;
+                            .is_some_and(|(name, _)| is_shell_variable_name(name))
+                    {
+                        index += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
             "sudo" => {
                 index += 1;
                 while index < words.len() && words[index].starts_with('-') {
-                    index += 1;
+                    if words[index] == "--" {
+                        index += 1;
+                        break;
+                    }
+                    index += if SUDO_VALUE_OPTIONS.contains(&words[index].as_str()) {
+                        2
+                    } else {
+                        1
+                    };
                 }
             }
             "command" => index += 1,
@@ -3592,6 +3670,7 @@ fn factory_delete_violation(
         .map(std::path::Path::to_path_buf)
         .or_else(|| std::env::var_os("CAS_CLONE_PATH").filter(|v| !v.is_empty()).map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    let own_worktree_root = worktree_root.clone();
     let is_root_or_ancestor_of = |protected: Option<std::path::PathBuf>| {
         protected
             .and_then(|protected| canonical(&protected))
@@ -3618,6 +3697,13 @@ fn factory_delete_violation(
     {
         return None;
     }
+    // cas-39f3: a worker's own gitdir index.lock, when a killed git left it
+    // empty and nothing holds it open.
+    match own_gitdir_index_lock(&resolved, &own_worktree_root) {
+        OwnGitdirLock::Stale => return None,
+        OwnGitdirLock::Live(rule) => return Some(violation(resolved, rule)),
+        OwnGitdirLock::NotOwnLock => {}
+    }
     // cas-aa4e: a ~/.cas runtime file is deletable only when it is stale.
     match cas_runtime_leftover(&resolved, home.as_deref()) {
         RuntimeLeftover::Stale => return None,
@@ -3634,6 +3720,97 @@ fn factory_delete_violation(
         return None;
     }
     Some(violation(resolved, "deletion outside sanctioned roots"))
+}
+
+/// cas-39f3: classification of a deletion target against the caller's own
+/// linked-worktree gitdir (`<repo>/.git/worktrees/<name>/`).
+enum OwnGitdirLock {
+    /// Not `index.lock` in the caller's own gitdir: other rules decide.
+    NotOwnLock,
+    /// Zero bytes and not open in any process: a killed git's leftover.
+    Stale,
+    /// The caller's own lock, but possibly in use; the refusal rule.
+    Live(&'static str),
+}
+
+fn own_gitdir_index_lock(resolved: &Path, worktree_root: &Path) -> OwnGitdirLock {
+    if resolved.file_name().is_none_or(|name| name != "index.lock") {
+        return OwnGitdirLock::NotOwnLock;
+    }
+    // A linked worktree's `.git` is a file naming its private gitdir.
+    let Ok(dot_git) = std::fs::read_to_string(worktree_root.join(".git")) else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    let Some(gitdir) = dot_git
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))
+        .map(|gitdir| std::path::PathBuf::from(gitdir.trim()))
+    else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        worktree_root.join(gitdir)
+    };
+    let Ok(gitdir) = gitdir.canonicalize() else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    if gitdir
+        .parent()
+        .and_then(Path::file_name)
+        .is_none_or(|name| name != "worktrees")
+        || resolved != gitdir.join("index.lock")
+    {
+        return OwnGitdirLock::NotOwnLock;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(resolved) else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    if !metadata.file_type().is_file() {
+        return OwnGitdirLock::Live("deletion of a git index.lock: not a regular file");
+    }
+    if metadata.len() != 0 {
+        return OwnGitdirLock::Live("deletion of a git index.lock: the lock has content");
+    }
+    if git_lock_open_by_a_process(resolved, &metadata) {
+        return OwnGitdirLock::Live("deletion of a git index.lock: the lock is held open by a process");
+    }
+    OwnGitdirLock::Stale
+}
+
+/// Whether any process holds `lock` open. git keeps its lockfile open from
+/// creation until commit or rollback, so an open descriptor means a live
+/// writer. Linux scans `/proc/*/fd`; elsewhere a lock modified in the last
+/// minute is treated as held.
+fn git_lock_open_by_a_process(lock: &Path, metadata: &std::fs::Metadata) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = metadata;
+        let Ok(processes) = std::fs::read_dir("/proc") else {
+            return true;
+        };
+        for process in processes.flatten() {
+            let Ok(fds) = std::fs::read_dir(process.path().join("fd")) else {
+                continue;
+            };
+            for fd in fds.flatten() {
+                if std::fs::read_link(fd.path()).is_ok_and(|target| target == lock) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = lock;
+        metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_none_or(|age| age < std::time::Duration::from_secs(60))
+    }
 }
 
 /// cas-aa4e: the static refusal rule for a live runtime file's reason.
@@ -4226,6 +4403,89 @@ mod workspace_contract_tests {
                 );
             }
         }
+    }
+
+    /// cas-39f3: a worker may delete a zero-byte, unheld `index.lock` in its
+    /// own worktree's gitdir (`<repo>/.git/worktrees/<self>/`), the leftover
+    /// of a git process killed mid-write. A lock with content, a lock a
+    /// process still holds open, another worktree's lock, the main
+    /// repository's lock and any other file in the gitdir stay refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_may_remove_only_its_own_stale_gitdir_index_lock_cas_39f3() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let root_path = root.path().canonicalize().expect("canonical fixture root");
+        let home = root_path.join("home");
+        let main = root_path.join("main");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join("README"), "x").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        let worktree = main.join(".cas/worktrees/brisk-otter-7");
+        let other = main.join(".cas/worktrees/other-worker-8");
+        git(&main, &["worktree", "add", "-q", "-b", "factory/brisk-otter-7", worktree.to_str().unwrap()]);
+        git(&main, &["worktree", "add", "-q", "-b", "factory/other-worker-8", other.to_str().unwrap()]);
+        let own_gitdir = main.join(".git/worktrees/brisk-otter-7");
+        let other_gitdir = main.join(".git/worktrees/other-worker-8");
+        let own_lock = own_gitdir.join("index.lock");
+        let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        let stale = |path: &Path, body: &[u8]| {
+            std::fs::write(path, body).unwrap();
+            std::fs::File::options().write(true).open(path).unwrap().set_modified(aged).unwrap();
+        };
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let decide = |command: &str| {
+            factory_write_violation(&bash_input(command, &worktree), &None, None, false, Some(worktree.as_path()))
+        };
+        let rm = |path: &Path| format!("rm -f {}", path.display());
+
+        stale(&own_lock, b"");
+        assert_eq!(decide(&rm(&own_lock)), None, "own zero-byte unheld index.lock");
+        assert_eq!(
+            decide("rm -f ../../../.git/worktrees/brisk-otter-7/index.lock"),
+            None,
+            "the same lock by relative path"
+        );
+
+        let refused = |case: &str, command: String| {
+            let violation = decide(&command).unwrap_or_else(|| panic!("{case} must be refused: {command}"));
+            assert!(violation.matched_rule.starts_with("deletion"), "{case}: {violation:?}");
+            violation
+        };
+        stale(&own_lock, b"DIRC partial");
+        refused("own lock with content", rm(&own_lock));
+        stale(&own_lock, b"");
+        let holder = std::fs::File::open(&own_lock).unwrap();
+        let held = refused("own lock held open by a process", rm(&own_lock));
+        assert!(held.matched_rule.contains("held"), "{held:?}");
+        drop(holder);
+        assert_eq!(decide(&rm(&own_lock)), None, "released again");
+
+        let other_lock = other_gitdir.join("index.lock");
+        stale(&other_lock, b"");
+        refused("another worker's gitdir lock", rm(&other_lock));
+        let main_lock = main.join(".git/index.lock");
+        stale(&main_lock, b"");
+        refused("the main repository's index.lock", rm(&main_lock));
+        refused("another file in the own gitdir", rm(&own_gitdir.join("HEAD")));
+        refused("the whole own gitdir", format!("rm -rf {}", own_gitdir.display()));
     }
 
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside

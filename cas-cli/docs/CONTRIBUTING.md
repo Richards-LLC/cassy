@@ -50,6 +50,15 @@ personal rows with that exact structured rejection, keeps local entities and
 team queue rows, and makes no cloud calls. `--json` reports the purged count,
 scope and reason. This cleanup does not backfill or delete remote cloud data.
 
+`duplicate_of_other_project` means the same row already lives under another
+Cloud project identity. The rejection names that owning project. If both
+identities represent the same project, ask the Cloud owner to register and fold
+the alias first, then run `cas cloud project --adopt-aliases`,
+`cas cloud queue --retry --retry-reason duplicate_of_other_project`, and
+`cas cloud sync`. Otherwise, retire the local duplicate. Retrying alone cannot
+repair remote ownership; alias adoption rewrites local task provenance and
+does not move Cloud rows.
+
 ## Canonical install path
 
 Cassy must be installed to **one** location: `~/.local/bin/cas`. Any other
@@ -1178,8 +1187,12 @@ task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and
 `reason="reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>"`. Each named commit
-must strictly descend from the delivery anchor, be reachable on the authoritative
-target, and touch a dropped path. Together they must cover every dropped path.
+must differ from the delivery anchor, be reachable on the authoritative target,
+and change a dropped path in its first-parent diff. Together they must cover
+every dropped path's final target state: a path counts only when its state at
+the named commit matches the target, including deletion and file mode. The
+superseding commits may predate the anchor, as when migration renames or a
+deliberate revert landed before the delivery was re-anchored (GH #1160).
 Cassy records the full resolved commit IDs, anchor, measured target, paths and
 review. A narrative without commit receipts cannot waive the content gate.
 

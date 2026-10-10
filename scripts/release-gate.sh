@@ -163,6 +163,17 @@ version="$1"
 only_rows="${3:-}"
 reuse_rows=false
 [[ "${2:-}" == --reuse ]] && reuse_rows=true
+# cas-846f: a release assembled from main had no merge sweep, so its full gate
+# must prove every row fresh. The train sets this; nothing here may reuse a row
+# receipt, a sweep receipt or an assembly proof.
+no_reuse=false
+if [[ "${CAS_RELEASE_GATE_NO_REUSE:-}" == 1 ]]; then
+    if "$reuse_rows"; then
+        printf 'error: --reuse refused: this release requires a full gate with every row run fresh (CAS_RELEASE_GATE_NO_REUSE=1)\n' >&2
+        exit 2
+    fi
+    no_reuse=true
+fi
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -260,6 +271,7 @@ rm -f "$row_log_dir/compile-timing.tsv" "$row_log_dir/memory-admission.json"
 rm -f "$row_log_dir/compile-memory.jsonl" "$row_log_dir/link-rss.jsonl"
 printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
 cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
+[[ "$no_reuse" == false ]] || cache_dir=''
 # The train owns durable row evidence; unchanged inputs reuse it automatically.
 [[ -z "$cache_dir" || -n "$only_rows" ]] || reuse_rows=true
 cache_head="$(git rev-parse HEAD)"
@@ -423,7 +435,7 @@ run_check() {
     # Assembly/recovery already proved the native suite and the queue's archive
     # runner in a plain clone. Consume that proof even on the first full gate;
     # --only remains a fresh diagnostic and cannot consume authorization.
-    if [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ \
+    if [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(nextest|archive-mode)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         local assembly_pass=''
         if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root" 2>&1)"; then
@@ -439,6 +451,8 @@ run_check() {
             return 0
         fi
         printf '  %s\n' "$assembly_pass"
+    elif [[ -z "$only_rows" && "$no_reuse" == true && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+        printf '  MISS assembly key=implementation reason=full_gate_required\n'
     elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ ]]; then
         printf '  MISS assembly key=implementation reason=helper_missing\n'
     fi

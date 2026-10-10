@@ -34,7 +34,7 @@ pub(crate) fn run_event_telemetry_retention(
             ..Default::default()
         });
     }
-    let store = open_event_store(cas_root).map_err(|error| error.to_string())?;
+    let store = crate::store::open_event_store(cas_root).map_err(|error| error.to_string())?;
     cas_store::prune_telemetry_events(
         store.as_ref(),
         i64::from(days),

@@ -78,7 +78,7 @@ turns off its pass.
 
 ```toml
 [factory]
-prompt_transcript_retention_days = 14 # clear prompts.messages_json on older prompts
+prompt_transcript_retention_days = 7  # clear prompts.messages_json on older prompts
 prompt_retention_days = 7             # delete terminal prompt_queue rows
 supervisor_queue_retention_days = 14  # delete finished supervisor_queue rows
 ```

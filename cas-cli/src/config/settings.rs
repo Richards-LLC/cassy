@@ -874,7 +874,7 @@ pub(crate) fn default_event_telemetry_retention_days() -> u32 {
 }
 
 pub(crate) fn default_prompt_transcript_retention_days() -> u32 {
-    14
+    7
 }
 
 pub(crate) fn default_supervisor_queue_retention_days() -> u32 {

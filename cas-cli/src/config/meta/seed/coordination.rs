@@ -147,7 +147,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         name: "Prompt Transcript Retention (days)",
         description: "Days a captured prompt keeps its session transcript (prompts.messages_json). The canonical daemon clears older transcripts every 15 minutes in transactions of at most 1,000 rows, whether or not the project is idle. The prompt row, its text and its provenance keys (id, session, agent, task, content hash) are kept, so blame and attribution still resolve; no reader consumes the transcript. 0 disables the trim.",
         value_type: ConfigType::Int,
-        default: "14",
+        default: "7",
         constraint: Constraint::Range(0, 3650),
         advanced: true,
         requires_feature: None,

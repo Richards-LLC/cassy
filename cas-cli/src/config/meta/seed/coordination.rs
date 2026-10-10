@@ -111,7 +111,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.prompt_retention_days",
         section: "factory",
         name: "Prompt Queue Retention (days)",
-        description: "Days a terminal prompt-queue row (delivered, acknowledged, suppressed or abandoned) is kept before the maintenance sweep deletes it with its delivery receipts. Pending rows and rows that carry a relay episode key are never deleted by retention. gc_cleanup force=true uses the same window. 0 disables the sweep.",
+        description: "Days a terminal prompt-queue row (delivered, acknowledged, suppressed or abandoned) is kept before it is deleted with its delivery receipts, by the maintenance sweep and by the canonical daemon every 15 minutes in transactions of at most 1,000 rows. Pending rows and rows that carry a relay episode key are never deleted by retention, except a supervisor-queue outbox key whose notification is already delivered or gone. gc_cleanup force=true uses the same window. 0 disables the sweep.",
         value_type: ConfigType::Int,
         default: "7",
         constraint: Constraint::Range(0, 3650),
@@ -138,6 +138,40 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         use_cases: &[
             "Bound cas.db growth from supervisor injection telemetry",
             "Set 0 to keep every telemetry event",
+        ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.prompt_transcript_retention_days",
+        section: "factory",
+        name: "Prompt Transcript Retention (days)",
+        description: "Days a captured prompt keeps its session transcript (prompts.messages_json). The canonical daemon clears older transcripts every 15 minutes in transactions of at most 1,000 rows, whether or not the project is idle. The prompt row, its text and its provenance keys (id, session, agent, task, content hash) are kept, so blame and attribution still resolve; no reader consumes the transcript. 0 disables the trim.",
+        value_type: ConfigType::Int,
+        default: "7",
+        constraint: Constraint::Range(0, 3650),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "prompt", "transcript", "retention", "messages", "database", "size"],
+        use_cases: &[
+            "Bound cas.db growth from per-session prompt transcripts",
+            "Set 0 to keep every transcript",
+        ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.supervisor_queue_retention_days",
+        section: "factory",
+        name: "Supervisor Queue Retention (days)",
+        description: "Days a finished supervisor-queue notification is kept: an outbox notification whose prompt was delivered, or a pulled notification that was processed. The canonical daemon deletes older finished rows every 15 minutes in transactions of at most 1,000 rows. Pending and undelivered notifications are never deleted, nor are keys that can recur for the same subject (worker-attention:, integration:). 0 disables the sweep.",
+        value_type: ConfigType::Int,
+        default: "14",
+        constraint: Constraint::Range(0, 3650),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "supervisor", "queue", "notification", "retention", "database", "size"],
+        use_cases: &[
+            "Bound cas.db growth from delivered lifecycle notifications",
+            "Set 0 to keep every supervisor notification",
         ],
     });
 

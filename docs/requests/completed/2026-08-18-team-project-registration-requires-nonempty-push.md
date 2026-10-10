@@ -76,7 +76,7 @@ CLI repo — no credentials on the build machine, and the server lives in
 
 The exact request the client sends for registration:
 
-```
+```http
 POST /api/teams/{teamId}/sync/push
 Authorization: Bearer <token>
 Content-Type: application/json

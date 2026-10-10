@@ -314,6 +314,11 @@ pub(super) fn mirror_supervisor_replies(
                 .is_none()
                 .then_some(turn.prompt.as_deref())
                 .flatten()
+                // cas-8737: harness envelopes are never operator questions,
+                // and skipping them keeps the per-poll lookups to real ones.
+                .filter(|prompt| {
+                    !crate::hooks::handlers::handlers_middle::is_harness_prompt(prompt)
+                })
                 .and_then(|prompt| {
                     queue
                         .terminal_operator_turn_near(
@@ -932,5 +937,30 @@ mod tests {
         assert_eq!(replies.len(), 1, "{replies:?}");
         assert_eq!(replies[0].message, "Yes, every check passed.");
         assert_eq!(replies[0].reply_to, Some(terminal));
+    }
+
+    /// cas-8737 and cas-5c89: a harness-started turn never threads under a
+    /// terminal row, even one with identical text, and is not backfilled.
+    #[test]
+    fn harness_prompts_never_become_operator_questions_cas_5c89() {
+        let envelope = "[cas #77 agent-authored 0s first] worker update";
+        let now = Utc::now();
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "turn-h",
+            envelope,
+            "Noted.",
+            now + chrono::Duration::seconds(1),
+        ));
+        queue
+            .record_terminal_operator_turn("factory-1", envelope)
+            .unwrap();
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(
+            replies[0].kind,
+            crate::ui::factory::OperatorTurnKind::Status
+        );
+        assert_eq!(replies[0].reply_to, None);
     }
 }

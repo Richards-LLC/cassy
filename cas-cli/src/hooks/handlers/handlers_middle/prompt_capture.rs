@@ -55,6 +55,13 @@ fn is_operator_terminal_prompt(input: &HookInput, prompt: &str) -> bool {
     ) {
         return false;
     }
+    !is_harness_prompt(prompt)
+}
+
+/// cas-8737: a prompt carrying a harness envelope (relayed messages, wakes,
+/// reminders, lifecycle relays) on any line. Shared with the Commander reply
+/// mirror (cas-5c89), so the two agree on what an operator question is.
+pub(crate) fn is_harness_prompt(prompt: &str) -> bool {
     const MACHINE_PREFIXES: &[&str] = &[
         "Another Claude session sent a message:",
         "CAS wake:",
@@ -67,7 +74,7 @@ fn is_operator_terminal_prompt(input: &HookInput, prompt: &str) -> bool {
         "<teammate-message",
         "<system-reminder",
     ];
-    !prompt.lines().any(|line| {
+    prompt.lines().any(|line| {
         let line = line.trim_start();
         MACHINE_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
     })

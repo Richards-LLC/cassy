@@ -2967,6 +2967,19 @@ impl FactoryDaemon {
                 &probe.prompt,
                 pane_output_grew,
             );
+            // GH #1163: a long turn can push its start out of the bounded tail.
+            // Share worker_status's execution evidence (including tool activity)
+            // rather than interpreting a missing start as an idle recipient.
+            let evidence = if evidence != NormalDeliveryTurnEvidence::TurnStarted
+                && crate::ui::factory::director::idle_worker_liveness(
+                    self.app.cas_dir(), &probe.pane,
+                ).is_some_and(|observation| observation.state
+                    == crate::mcp::tools::service::worker_liveness::Liveness::Executing)
+            {
+                NormalDeliveryTurnEvidence::RecipientBusy
+            } else {
+                evidence
+            };
             let action = normal_delivery_probe_action(evidence, probe.nudge_sent_at);
             tracing::debug!(
                 target: "cas::coordination",

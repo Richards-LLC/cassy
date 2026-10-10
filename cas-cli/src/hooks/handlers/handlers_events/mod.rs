@@ -6,6 +6,7 @@ mod neon_sql_guard;
 mod notifications;
 mod pre_tool;
 mod slack_transport;
+mod write_roots;
 mod publication_gate;
 pub(crate) mod project_overview;
 

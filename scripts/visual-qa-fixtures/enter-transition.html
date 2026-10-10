@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light">
+    <meta name="visual-qa:requires-javascript" content="Fixture exercises a framework enter transition after load.">
+    <style>
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      main { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; }
+      .field-message { color: #8a1c1c; }
+      /* Vue/Quasar <Transition name="fade">: the element is inserted at
+         opacity 0, the transition starts a frame later, runs 600 ms, then the
+         classes are removed (GH #1158). */
+      .fade-enter-from { opacity: 0; }
+      .fade-enter-active { transition: opacity 600ms ease; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Sign in</h1>
+      <p>Use the email address on your account.</p>
+      <div id="field"></div>
+    </main>
+    <script>
+      // GH #1158 measured the insert at 212-407 ms after load. Tests sweep
+      // ?delay= across that band so the race is exercised deterministically.
+      const delay = Number(new URLSearchParams(location.search).get('delay') ?? 300);
+      addEventListener('load', () => setTimeout(() => {
+        const message = document.createElement('div');
+        message.className = 'field-message fade-enter-from fade-enter-active';
+        message.textContent = 'Enter a valid email address.';
+        document.querySelector('#field').append(message);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          message.classList.remove('fade-enter-from');
+          message.addEventListener('transitionend', () => message.classList.remove('fade-enter-active'), { once: true });
+        }));
+      }, delay));
+    </script>
+  </body>
+</html>

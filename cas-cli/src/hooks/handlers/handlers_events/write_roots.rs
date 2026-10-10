@@ -74,10 +74,10 @@ impl WritePolicy {
 
     /// Roots that apply to an agent working on `task_ids`: every project root
     /// and the grants bound to those tasks.
-    fn in_effect<'a>(
+    fn in_effect<'a, 'b>(
         &'a self,
-        task_ids: &'a HashSet<String>,
-    ) -> impl Iterator<Item = &'a WriteRoot> + 'a {
+        task_ids: &'b HashSet<String>,
+    ) -> impl Iterator<Item = &'a WriteRoot> + use<'a, 'b> {
         self.roots.iter().filter(move |root| {
             root.task_id
                 .as_ref()

@@ -3692,7 +3692,7 @@ fn factory_write_decision(
         return FactoryWriteDecision::Allowed;
     };
     let mut uses = Vec::new();
-    let mut admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
+    let admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
         policy.matching(&resolved, mode, task_ids).map(|root| {
             uses.push(WriteRootUse {
                 path: resolved.clone(),

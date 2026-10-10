@@ -774,6 +774,44 @@ def task_pool_from(cas_dir: Path, size: int) -> list[str]:
     return [row[0] for row in rows] or ["cas-0000"]
 
 
+def prewarm(args, env, run_dir: Path) -> dict:
+    """Run one `cas serve` alone before the measured load.
+
+    A build's first canonical serve may do one-off boot work on the copied
+    database, such as purging duplicate code-index copies. Measured once and
+    kept out of the load window, that work is reported, not mixed into the
+    SLO latencies.
+    """
+    if args.prewarm_secs <= 0:
+        return {"secs": 0}
+    started = now()
+    client = McpClient(args.cas_bin, env["project"], child_env(args, env, {
+        "CAS_AGENT_NAME": "load-prewarm",
+        "CAS_AGENT_ROLE": "worker",
+        "CAS_SESSION_ID": str(uuid.uuid4()),
+    }), run_dir / "prewarm.stderr")
+    try:
+        client.initialize(CALL_TIMEOUT_SECS)
+        boot = now() - started
+        time.sleep(max(0.0, args.prewarm_secs - boot))
+    finally:
+        client.close()
+    return {"secs": args.prewarm_secs, "initialize_secs": round(boot, 2),
+            "elapsed_secs": round(now() - started, 1)}
+
+
+def code_index_rows(cas_dir: Path) -> dict:
+    """Code-index footprint of the scratch copy (boot purges change it)."""
+    try:
+        conn = sqlite3.connect(f"file:{cas_dir / 'cas.db'}?mode=ro", uri=True, timeout=30)
+        files, repos = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT repository) FROM code_files").fetchone()
+        conn.close()
+        return {"code_files": files, "repositories": repos}
+    except sqlite3.Error as error:
+        return {"error": str(error)}
+
+
 def start_daemon(args, env, log_path: Path) -> subprocess.Popen:
     daemon_env = child_env(args, env, {"CAS_AGENT_ROLE": "supervisor"})
     log = open(log_path, "ab")
@@ -954,6 +992,9 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
     args.run_dir = str(run_dir)
 
     env = prepare_run(args, run_dir)
+    index_at_copy = code_index_rows(env["cas_dir"])
+    prewarm_report = prewarm(args, env, run_dir)
+    index_at_load = code_index_rows(env["cas_dir"])
     pool = task_pool_from(env["cas_dir"], 200)
     peers = [agent_name(i) for i in range(args.agents)]
     print(f"[load] run dir {run_dir}; {len(pool)} tasks in the show pool", flush=True)
@@ -1001,6 +1042,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
 
     calls = summarize_calls(results)
     daemon = summarize_daemon(daemon_sampler, daemon_alive)
+    index_at_end = code_index_rows(env["cas_dir"])
     waits = [e["wait_secs"] for e in lock_sampler.episodes]
     receipt = {
         "schema": "cas-load-harness/v1",
@@ -1015,6 +1057,9 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "think_mean_secs": args.think_mean,
         "seed": args.seed,
         "excluded_workload": sorted(args.exclude),
+        "prewarm": prewarm_report,
+        "code_index": {"at_copy": index_at_copy, "at_load_start": index_at_load,
+                       "at_end": index_at_end},
         "background_writers": {
             "writers": args.bg_writers,
             "hold_ms": args.bg_hold_ms,
@@ -1121,6 +1166,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--daemon", action=argparse.BooleanOptionalAction, default=True,
                         help="run a headless `cas factory daemon --workers 0`")
     parser.add_argument("--daemon-warmup", type=float, default=10.0)
+    parser.add_argument("--prewarm-secs", type=float, default=0.0,
+                        help="run one cas serve alone this long before the load, so one-off "
+                             "boot work on the copied DB stays out of the measured window")
     parser.add_argument("--cloud-endpoint", default="http://127.0.0.1:9",
                         help="cloud endpoint for children; default is a closed local port")
     parser.add_argument("--lock-interval", type=float, default=0.2)

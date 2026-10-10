@@ -2826,11 +2826,13 @@ async fn duplicate_project_rejection_scenario(team: bool) {
     )
     .unwrap();
     crate::store::open_store_local(temp.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["cas-new", "cas-old-a", "cas-old-b"] {
         let mut task = Task::new(id.into(), "Accounting work".into());
         task.origin_project = Some("richards-llc-accounting".into());
+        tasks.add(&task).unwrap();
         let payload = serde_json::to_string(&task).unwrap();
         if team {
             queue
@@ -3010,13 +3012,13 @@ fn every_push_reason_has_its_own_remediation() {
 
 #[test]
 fn batch_identity_error_recovers_its_structured_reason() {
-    let error = crate::error::CasError::Other(
-        r#"Push failed with status 409: {"error":"project_identity_conflict"}"#.to_string(),
-    );
-    assert_eq!(
-        push_reason_from_error(&error).as_deref(),
-        Some("project_identity_conflict")
-    );
+    for reason in ["project_identity_conflict", "duplicate_of_other_project"] {
+        let error = crate::error::CasError::Other(format!(
+            "Push failed with status 409: {}",
+            serde_json::json!({"error": reason})
+        ));
+        assert_eq!(push_reason_from_error(&error).as_deref(), Some(reason));
+    }
 }
 
 // ---------------------------------------------------------------------------

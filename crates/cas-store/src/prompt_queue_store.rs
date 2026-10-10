@@ -2232,6 +2232,21 @@ pub trait PromptQueueStore: Send + Sync {
     /// daemon may initialize its mirror cursor after the first reply ended.
     fn first_verified_operator_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>>;
 
+    /// cas-5c89: the first sign of an operator in this session: a verified
+    /// paired-device Commander send or a terminal operator turn.
+    fn first_operator_activity_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>>;
+
+    /// cas-5c89: the terminal operator turn in this session whose text is
+    /// `prompt` (trimmed), recorded within `window_secs` of `at`; the nearest
+    /// one when several match.
+    fn terminal_operator_turn_near(
+        &self,
+        factory_session: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+        window_secs: i64,
+    ) -> Result<Option<i64>>;
+
     /// Atomically mirror a completed supervisor turn unless that turn already
     /// sent an explicit operator reply. The turn key also makes daemon replay
     /// and concurrent polls harmless.
@@ -5451,6 +5466,63 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .map(|at| at.with_timezone(&Utc))
             .map_err(|error| StoreError::Parse(error.to_string())))
             .transpose()
+    }
+
+    fn first_operator_activity_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let at: Option<String> = conn.query_row(
+            "SELECT MIN(created_at) FROM prompt_queue
+              WHERE factory_session = ?
+                AND ((source LIKE 'commander:%' AND origin_kind = 'paired_device'
+                      AND operator_verified = 1)
+                     OR (source = 'terminal' AND target = 'terminal-history'))",
+            params![factory_session],
+            |row| row.get(0),
+        )?;
+        at.map(|at| DateTime::parse_from_rfc3339(&at)
+            .map(|at| at.with_timezone(&Utc))
+            .map_err(|error| StoreError::Parse(error.to_string())))
+            .transpose()
+    }
+
+    fn terminal_operator_turn_near(
+        &self,
+        factory_session: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+        window_secs: i64,
+    ) -> Result<Option<i64>> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Ok(None);
+        }
+        let window = chrono::Duration::seconds(window_secs.max(0));
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut statement = conn.prepare_cached(
+            "SELECT id, created_at FROM prompt_queue
+              WHERE factory_session = ?1 AND source = 'terminal'
+                AND target = 'terminal-history' AND prompt = ?2
+                AND created_at >= ?3 AND created_at <= ?4",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    factory_session,
+                    prompt,
+                    (at - window).to_rfc3339(),
+                    (at + window).to_rfc3339()
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, created)| {
+                let created = DateTime::parse_from_rfc3339(&created).ok()?.with_timezone(&Utc);
+                Some((id, (created - at).num_milliseconds().abs()))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(id, _)| id))
     }
 
     fn mirror_supervisor_turn(

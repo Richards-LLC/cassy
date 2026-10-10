@@ -658,8 +658,15 @@ harness/session names in `scripts/assembly-proof.py`'s `IDENTITY` set from both
 the test environment and the fingerprint: factory/agent/session identity,
 `CAS_ROOT`, `CAS_CLONE_PATH`, `AI_AGENT`, `CLAUDECODE`,
 `CLAUDE_CODE_CHILD_SESSION`, `CAS_FACTORY_MODE`, `CAS_FACTORY_SUPERVISOR_CLI`
-and `CAS_FACTORY_WORKER_CLI`. A factory shell and a scrubbed release shell can
-therefore share the same proof without passing harness context to test children.
+and `CAS_FACTORY_WORKER_CLI`. It also removes the `HARNESS_NOISE` names
+(terminal, login-session, ssh-agent, interactive-editor, agent-harness and
+factory worker-spawn settings), every `CLAUDE_*` and `CODEX_*` variable, and
+credentials (`*_TOKEN`, `*_API_KEY`, `*_SECRET`, `*_PASSWORD`), each with a
+recorded reason (cas-398c). A factory shell, the factory daemon's background
+proof and a scrubbed release shell can therefore share one proof, so `--cut`
+reuses the daemon's proof of the same code input. Each receipt's
+`environment_policy` lists the included names and every excluded name with its
+reason; a miss names the differing included variable.
 There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
 `CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
 `CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.

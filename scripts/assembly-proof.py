@@ -68,6 +68,85 @@ VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR
             # test variables are still included by their own names.
             "CAS_RELEASE_ENV_FILE"}
 
+# cas-398c: the proof key is the whole scrubbed environment, so a proof made by
+# the factory daemon in the background satisfies a cut run from a supervisor
+# shell only when nothing test-relevant differs. Every name below is excluded
+# from the key AND scrubbed from the environment the proof's test rows run in,
+# so it cannot change a test outcome. Anything not listed stays a key input,
+# including unknown future names; a miss then names the differing variable.
+HARNESS_NOISE = {
+    # Terminal and login-session plumbing of whoever launched the proof.
+    "TERM": "terminal type of the launching shell",
+    "COLORTERM": "terminal colour capability of the launching shell",
+    "TERM_PROGRAM": "terminal emulator of the launching shell",
+    "TERM_PROGRAM_VERSION": "terminal emulator of the launching shell",
+    "TERM_SESSION_ID": "terminal session of the launching shell",
+    "TMUX": "multiplexer socket of the launching shell",
+    "TMUX_PANE": "multiplexer pane of the launching shell",
+    "STY": "screen session of the launching shell",
+    "WINDOW": "screen window of the launching shell",
+    "WINDOWID": "X window of the launching shell",
+    "DISPLAY": "graphical session of the launching shell",
+    "WAYLAND_DISPLAY": "graphical session of the launching shell",
+    "DBUS_SESSION_BUS_ADDRESS": "desktop bus of the login session",
+    "XDG_SESSION_ID": "login session id",
+    "XDG_SESSION_TYPE": "login session type",
+    "XDG_SESSION_CLASS": "login session class",
+    "XDG_VTNR": "login virtual terminal",
+    "SSH_AUTH_SOCK": "ssh agent of the launching shell; proof rows use no remote",
+    "SSH_AGENT_PID": "ssh agent of the launching shell; proof rows use no remote",
+    "SSH_CLIENT": "remote login address",
+    "SSH_CONNECTION": "remote login address",
+    "SSH_TTY": "remote login terminal",
+    # Interactive editors: a proof row never opens one.
+    "EDITOR": "interactive editor; proof rows never open one",
+    "VISUAL": "interactive editor; proof rows never open one",
+    "GIT_EDITOR": "interactive editor; proof rows never open one",
+    # Agent harness settings exported to the harness's own child shells.
+    "COREPACK_ENABLE_AUTO_PIN": "Claude Code child-shell default; rows see corepack's default",
+    "DISABLE_AUTOUPDATER": "Claude Code harness setting",
+    "DISABLE_COST_WARNINGS": "Claude Code harness setting",
+    "IS_DEMO": "Claude Code harness setting",
+    "NoDefaultCurrentDirectoryInExePath": "Claude Code harness setting (Windows lookup)",
+    # Factory worker spawn settings: they configure the agent, not the build.
+    "CAS_FACTORY_WORKER_MODEL": "factory worker spawn setting (agent model)",
+    "CAS_FACTORY_WORKER_EFFORT": "factory worker spawn setting (agent effort)",
+    "CAS_FACTORY_WORKER_ACCOUNT_DIR": "factory worker spawn setting (agent account)",
+    "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE": "factory worker spawn setting (agent config)",
+    "CAS_FACTORY_NICE_WORKER": "factory worker CPU priority; changes scheduling, not results",
+}
+EXCLUDED_PREFIXES = (
+    ("CLAUDE_", "Claude Code harness session plumbing"),
+    ("CODEX_", "Codex harness session plumbing"),
+)
+CREDENTIAL_SUFFIXES = ("_TOKEN", "_API_KEY", "_SECRET", "_PASSWORD")
+
+
+def exclusion_reason(name):
+    """Why `name` is scrubbed from proof rows and excluded from the key."""
+    if name in IDENTITY:
+        return "harness/session identity"
+    if name in HARNESS_NOISE:
+        return HARNESS_NOISE[name]
+    for prefix, reason in EXCLUDED_PREFIXES:
+        if name.startswith(prefix):
+            return reason
+    if name.endswith(CREDENTIAL_SUFFIXES):
+        return "credential; scrubbed so no proof row can reach a live service"
+    return None
+
+
+def key_only_exclusion(name):
+    """Why `name` stays in the row environment but is not a key input."""
+    if name in VOLATILE:
+        return "output location, shell bookkeeping or build parallelism; not the tested candidate"
+    if name.startswith("CAS_RELEASE_GATE_") or name.startswith("CAS_RELEASE_TRAIN_"):
+        return "release gate/train orchestration control"
+    if name == "ZIG":
+        return "replaced by ZIG_SHA256 of the resolved binary"
+    return None
+
+
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
@@ -192,7 +271,7 @@ def with_cargo_bin(env):
 
 
 def test_environment(root):
-    env = {key: value for key, value in os.environ.items() if key not in IDENTITY}
+    env = {key: value for key, value in os.environ.items() if exclusion_reason(key) is None}
     with_cargo_bin(env)
     env.setdefault("CAS_INIT_TIMEOUT_SECS", "900")
     if "ZIG" in env:
@@ -238,8 +317,7 @@ def environment_material(root, env):
     """
     material = {}
     for key, value in env.items():
-        if (key in VOLATILE or key.startswith("CAS_RELEASE_GATE_")
-                or key.startswith("CAS_RELEASE_TRAIN_") or key == "ZIG"):
+        if key_only_exclusion(key) or exclusion_reason(key):
             continue
         material[key] = value
     zig = env.get("ZIG")
@@ -250,6 +328,17 @@ def environment_material(root, env):
         path = root / name
         material["local:" + name] = digest(path.read_bytes()) if path.is_file() else "absent"
     return material
+
+
+def environment_policy(root):
+    """Names only: which variables key this proof and why the rest do not."""
+    env = test_environment(root)
+    excluded = {}
+    for name in os.environ:
+        reason = exclusion_reason(name) or key_only_exclusion(name)
+        if reason:
+            excluded[name] = reason
+    return {"included": sorted(environment_material(root, env)), "excluded": dict(sorted(excluded.items()))}
 
 
 def receipt_path(root, expected):
@@ -634,7 +723,8 @@ def prove_owned(root):
         record = {"inputs": expected, "status": "RUNNING", "head": head,
                   "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {}, "scratch": scratch_report,
                   "environment_keys": {key: digest(value.encode())
-                                       for key, value in environment_material(root, env).items()}}
+                                       for key, value in environment_material(root, env).items()},
+                  "environment_policy": environment_policy(root)}
         write(path, record)
         log_dir = path.parent / (path.stem + "-logs")
         log_dir.mkdir(exist_ok=True)

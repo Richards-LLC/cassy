@@ -263,7 +263,12 @@ impl SyncQueue {
         &self,
         entity_ids: &[S],
     ) -> Result<TaskSyncMutationGuard, CasError> {
-        self.lock_task_sync_mutations_within(entity_ids, None)
+        // GH #1165 (cas-04db): a thread under a store wait budget (the factory
+        // daemon loop) fails fast at its deadline; others wait as before.
+        self.lock_task_sync_mutations_within(
+            entity_ids,
+            cas_store::wait_budget::remaining_wait(),
+        )
     }
 
     /// [`Self::lock_task_sync_mutations`] with a wait budget: `None` waits as

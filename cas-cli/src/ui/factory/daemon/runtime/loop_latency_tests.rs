@@ -1,5 +1,7 @@
 //! GH #1165: the factory daemon loop keeps forwarding input and drawing while
 //! another holder keeps `task-sync-intents.lock` and the SQLite write lock.
+//! The flock holder takes the lock exclusively, as a pre-#1165 `cas serve`
+//! still does; that blocks the shared lease every task mutation now takes.
 //!
 //! The holders here are other threads with their own file descriptions and
 //! SQLite connections. `flock` locks belong to the open file description and
@@ -89,12 +91,12 @@ fn seed(cas_dir: &Path) -> cas_types::Task {
 
 /// The store-touching work of one loop pass that #1165 traced: the prompt
 /// queue, the spawn queue, spawn verification, the two-second refresh,
-/// reminders and a draw with the task dialog open. Loop-thread task
-/// mutations still take the intents flock until cas-78ac4 bounds it by the
-/// thread's wait budget; the control test below pins that behaviour.
+/// reminders, a worker task mutation (spawn/shutdown/assignment paths write
+/// tasks on the loop thread) and a draw with the task dialog open.
 async fn store_phases(
     daemon: &mut FactoryDaemon,
     terminal: &mut Terminal<BufferBackend>,
+    task: &cas_types::Task,
 ) -> Vec<(&'static str, Duration)> {
     let mut phases = Vec::new();
     let mut mark = Instant::now();
@@ -112,6 +114,10 @@ async fn store_phases(
     lap("refresh", &mut phases);
     daemon.process_reminders(&[]);
     lap("reminders", &mut phases);
+    if let Ok(store) = crate::store::open_task_store_cached(daemon.app.cas_dir()) {
+        let _ = store.update(task);
+    }
+    lap("task mutation", &mut phases);
     {
         let _forbid = wait_budget::forbid_store_access();
         terminal.draw(|frame| daemon.app.render(frame)).unwrap();
@@ -136,11 +142,11 @@ async fn loop_pass_stays_fast_while_the_intents_flock_and_sqlite_write_lock_are_
     .unwrap();
 
     // Uncontended warm-up: the daemon has opened its stores before any pass.
-    store_phases(&mut daemon, &mut terminal).await;
+    store_phases(&mut daemon, &mut terminal, &task).await;
     let mut uncontended = Duration::ZERO;
     for _ in 0..3 {
         let started = Instant::now();
-        store_phases(&mut daemon, &mut terminal).await;
+        store_phases(&mut daemon, &mut terminal, &task).await;
         uncontended = uncontended.max(started.elapsed());
     }
 
@@ -152,7 +158,7 @@ async fn loop_pass_stays_fast_while_the_intents_flock_and_sqlite_write_lock_are_
         let started = Instant::now();
         let phases = {
             let _budget = wait_budget::bound_waits_for(super::store_worker::PASS_STORE_WAIT_BUDGET);
-            store_phases(&mut daemon, &mut terminal).await
+            store_phases(&mut daemon, &mut terminal, &task).await
         };
         if started.elapsed() > slowest {
             slowest = started.elapsed();

@@ -12,10 +12,18 @@ const fixture = fileURLToPath(new URL('./visual-qa-fixtures/enter-transition.htm
 const matrix = { strict: true, schemes: ['light'], viewports: [{ name: 'phone', width: 390, height: 800 }] };
 const artifacts = () => mkdtemp(join(process.env.VISUAL_QA_ARTIFACTS_ROOT || tmpdir(), 'enter-transition-'));
 
-test('a post-load enter transition passes --strict on 20 of 20 runs across the 150-450 ms insert band', async () => {
+// Where the race lands depends on how long load-to-measure takes on the host:
+// 25-45 ms after load on a fast local fixture, 212-407 ms on the staging app
+// GH #1158 measured. Ten runs sweep 0-90 ms and ten sweep the measured band.
+const DELAYS = [
+  ...Array.from({ length: 10 }, (_, index) => index * 10),
+  ...Array.from({ length: 10 }, (_, index) => 212 + Math.round((index * 195) / 9)),
+];
+
+test('a post-load enter transition passes --strict on 20 of 20 runs', async () => {
+  assert.equal(DELAYS.length, 20);
   const failures = [];
-  for (let run = 0; run < 20; run += 1) {
-    const delay = 150 + Math.round((run * 300) / 19);
+  for (const delay of DELAYS) {
     const url = `${pathToFileURL(fixture).href}?delay=${delay}`;
     const result = await runVisualQa({ ...matrix, urls: [url], artifactDir: await artifacts() });
     if (result.status !== 'PASS') {

@@ -205,6 +205,14 @@ impl Config {
                 factory.event_telemetry_retention_days.to_string(),
             ),
             (
+                "factory.prompt_transcript_retention_days".to_string(),
+                factory.prompt_transcript_retention_days.to_string(),
+            ),
+            (
+                "factory.supervisor_queue_retention_days".to_string(),
+                factory.supervisor_queue_retention_days.to_string(),
+            ),
+            (
                 "factory.worker_build_jobs".to_string(),
                 factory.cargo_build_jobs.clone(),
             ),

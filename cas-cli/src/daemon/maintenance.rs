@@ -67,8 +67,45 @@ pub(crate) struct PromptTableRetentionReport {
 pub(crate) fn run_prompt_table_retention(
     cas_root: &std::path::Path,
 ) -> Result<PromptTableRetentionReport, String> {
-    let _ = cas_root;
-    Ok(PromptTableRetentionReport::default())
+    let factory = crate::config::Config::load(cas_root)
+        .map(|cas_config| cas_config.factory())
+        .unwrap_or_default();
+    let window = |days: u32| i64::from(days) * 24 * 60 * 60;
+    let run = |days: u32, step: &dyn Fn(i64, usize) -> cas_store::Result<usize>| {
+        if days == 0 {
+            return Ok(Default::default());
+        }
+        cas_store::retention::run_retention_batches(
+            cas_store::retention::RETENTION_MAX_BATCH,
+            PROMPT_RETENTION_MAX_BATCHES,
+            EVENT_RETENTION_BATCH_PAUSE,
+            |batch| step(window(days), batch),
+        )
+        .map_err(|error| error.to_string())
+    };
+    let mut report = PromptTableRetentionReport::default();
+    if factory.prompt_transcript_retention_days > 0 {
+        let prompts =
+            crate::store::open_prompt_store(cas_root).map_err(|error| error.to_string())?;
+        report.transcripts = run(factory.prompt_transcript_retention_days, &|secs, batch| {
+            prompts.trim_transcripts_batch(secs, batch)
+        })?;
+    }
+    if factory.prompt_retention_days > 0 {
+        let queue =
+            crate::store::open_prompt_queue_store(cas_root).map_err(|error| error.to_string())?;
+        report.prompt_queue = run(factory.prompt_retention_days, &|secs, batch| {
+            queue.prune_terminal_batch(secs, batch)
+        })?;
+    }
+    if factory.supervisor_queue_retention_days > 0 {
+        let supervisor = crate::store::open_supervisor_queue_store(cas_root)
+            .map_err(|error| error.to_string())?;
+        report.supervisor_queue = run(factory.supervisor_queue_retention_days, &|secs, batch| {
+            supervisor.prune_finished_batch(secs, batch)
+        })?;
+    }
+    Ok(report)
 }
 
 /// A stale heartbeat is not enough to kill a factory worker.  Codex has no

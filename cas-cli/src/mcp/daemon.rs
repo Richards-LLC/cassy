@@ -1340,6 +1340,45 @@ impl EmbeddedDaemon {
                 tracing::warn!(error = %error, "Telemetry event retention task join error");
             }
         }
+        self.run_prompt_table_retention_cycle().await;
+    }
+
+    /// One bounded pass over the prompt, prompt-queue and supervisor-queue
+    /// tables (cas-f207), on the same canonical-daemon tick as telemetry
+    /// retention: <=1,000-row IMMEDIATE batches with a lock-free pause between.
+    async fn run_prompt_table_retention_cycle(&self) {
+        let cas_root = self.config.cas_root.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::daemon::run_prompt_table_retention(&cas_root)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(report)) => {
+                let tables = [
+                    ("prompts.messages_json", report.transcripts),
+                    ("prompt_queue", report.prompt_queue),
+                    ("supervisor_queue", report.supervisor_queue),
+                ];
+                for (table, pass) in tables {
+                    if pass.affected > 0 {
+                        tracing::info!(
+                            table,
+                            affected = pass.affected,
+                            batches = pass.batches,
+                            backlog_remaining = !pass.complete,
+                            "prompt table retention pass"
+                        );
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                let mut status = self.status.write().await;
+                status.last_error = Some(format!("Prompt table retention failed: {error}"));
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Prompt table retention task join error");
+            }
+        }
     }
 
     /// Run full maintenance cycle

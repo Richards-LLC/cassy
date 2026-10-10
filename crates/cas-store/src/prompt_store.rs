@@ -338,8 +338,26 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn trim_transcripts_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
-        let _ = (older_than_secs, batch);
-        Ok(0)
+        if older_than_secs <= 0 {
+            return Err(crate::error::StoreError::Other(
+                "trim_transcripts_batch requires a positive window".to_string(),
+            ));
+        }
+        let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
+        let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+        // Pooled write lock, released between batches by the caller (cas-3f65e).
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            // idx_prompts_timestamp bounds the scan to aged rows.
+            Ok(tx.execute(
+                "UPDATE prompts SET messages_json = NULL
+                 WHERE rowid IN (
+                     SELECT rowid FROM prompts
+                     WHERE timestamp < ?1 AND messages_json IS NOT NULL
+                     LIMIT ?2
+                 )",
+                params![cutoff, batch as i64],
+            )?)
+        })
     }
 
     fn prune(&self, days: i64) -> Result<usize> {

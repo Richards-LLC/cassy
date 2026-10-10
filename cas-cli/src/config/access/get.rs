@@ -122,6 +122,8 @@ impl Config {
             "factory.event_telemetry_retention_days" => {
                 Some(factory.event_telemetry_retention_days.to_string())
             }
+            "factory.prompt_transcript_retention_days" => Some(factory.prompt_transcript_retention_days.to_string()),
+            "factory.supervisor_queue_retention_days" => Some(factory.supervisor_queue_retention_days.to_string()),
             "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
                 Some(factory.cargo_build_jobs.clone())
             }

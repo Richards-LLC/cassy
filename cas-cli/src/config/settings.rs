@@ -593,9 +593,11 @@ pub struct FactoryConfig {
     pub spawn_min_free_gib: u32,
 
     /// Days a terminal prompt-queue row (delivered, acked, suppressed or
-    /// abandoned) is kept before the maintenance sweep deletes it (cas-9d8a).
-    /// Pending rows and rows carrying a relay episode key are never deleted
-    /// by retention. 0 disables the sweep.
+    /// abandoned) is kept before the maintenance sweep and the canonical
+    /// daemon's retention tick delete it in bounded batches (cas-9d8a,
+    /// cas-f207). Pending rows and rows carrying a relay episode key are never
+    /// deleted by retention, except a supervisor-queue outbox key whose
+    /// notification is already delivered or gone. 0 disables the sweep.
     #[serde(default = "default_prompt_retention_days")]
     pub prompt_retention_days: u32,
 

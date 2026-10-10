@@ -41,8 +41,30 @@ pub fn run_retention_batches<F>(
 where
     F: FnMut(usize) -> Result<usize>,
 {
-    let _ = (batch_size, max_batches, pause, &mut step);
-    Ok(RetentionReport::default())
+    let mut report = RetentionReport {
+        complete: true,
+        ..Default::default()
+    };
+    let batch = batch_size.clamp(1, RETENTION_MAX_BATCH);
+    loop {
+        if report.batches >= max_batches {
+            report.complete = false;
+            return Ok(report);
+        }
+        let affected = step(batch)?;
+        if affected == 0 {
+            return Ok(report);
+        }
+        report.affected += affected;
+        report.batches += 1;
+        report.largest_batch = report.largest_batch.max(affected);
+        if affected < batch {
+            return Ok(report);
+        }
+        if !pause.is_zero() {
+            std::thread::sleep(pause);
+        }
+    }
 }
 
 #[cfg(test)]

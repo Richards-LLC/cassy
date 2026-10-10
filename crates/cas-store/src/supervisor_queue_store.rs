@@ -542,8 +542,36 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
     }
 
     fn prune_finished_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
-        let _ = (older_than_secs, batch);
-        Ok(0)
+        if older_than_secs <= 0 {
+            return Err(crate::error::StoreError::Other(
+                "prune_finished_batch requires a positive window".to_string(),
+            ));
+        }
+        let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
+        let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            // Outbox rows are finished once their prompt is delivered (the
+            // outbox re-relays only prompt_delivered_at IS NULL); pull rows once
+            // processed. Keys that recur for one subject stay, or
+            // notify_idempotent would insert the same event again.
+            Ok(tx.execute(
+                "DELETE FROM supervisor_queue
+                 WHERE id IN (
+                     SELECT id FROM supervisor_queue
+                     WHERE created_at < ?1
+                       AND (
+                           (transition_key IS NULL AND processed_at IS NOT NULL)
+                           OR (transition_key IS NOT NULL
+                               AND prompt_delivered_at IS NOT NULL
+                               AND transition_key NOT LIKE 'worker-attention:%'
+                               AND transition_key NOT LIKE 'integration:%')
+                       )
+                     ORDER BY id
+                     LIMIT ?2
+                 )",
+                params![cutoff, batch as i64],
+            )?)
+        })
     }
 
     fn close(&self) -> Result<()> {

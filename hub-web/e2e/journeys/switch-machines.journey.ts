@@ -309,7 +309,7 @@ for (const width of [1280, 390]) {
       };
       let stamp = -3_600_000;
       let last = "";
-      await journey.stage("Fifty taps across two machines, each pressed while the list re-renders under the finger", async () => {
+      await journey.stage("Every tap opens the conversation it pressed, while the list is changing", async () => {
         for (let tap = 0; tap < 50; tap++) {
           // soundwave, prowl, soundwave, prowl: 0, 2, 1, 3, …
           const target = tapped[[0, 2, 1, 3][tap % 4]!]!;

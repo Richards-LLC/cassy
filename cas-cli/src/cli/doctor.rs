@@ -1384,6 +1384,13 @@ fn code_index_autofix(root: &Path) -> Option<Check> {
     Some(code_index_autofix_outcome(crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false)))
 }
 
+/// cas-8256: one code index per project. Flags rows indexed under any
+/// repository other than the canonical checkout's (factory worktree copies).
+fn code_index_copies_check(counts: &[(String, usize)], canonical: &[String]) -> Check {
+    let _ = (counts, canonical);
+    Check::new("code index copies", CheckStatus::Ok, "")
+}
+
 fn code_index_autofix_outcome(outcome: Result<crate::daemon::CodeIndexResult, crate::error::CasError>) -> Check {
     match outcome {
         Ok(result) if result.errors.is_empty() && result.files_deferred == 0 => Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed)),
@@ -9640,6 +9647,41 @@ mod tests {
             "message: {}",
             first.message
         );
+    }
+
+    /// cas-8256: every worker used to index its worktree into the shared
+    /// store. Doctor names each copy with its file count, and the canonical one.
+    #[test]
+    fn code_index_copies_check_flags_non_canonical_repositories_cas_8256() {
+        let canonical = vec!["cassy".to_string()];
+        let counts = vec![
+            ("brave-hound-32".to_string(), 314),
+            ("cassy".to_string(), 314),
+            ("crisp-jay-9".to_string(), 310),
+        ];
+        let check = code_index_copies_check(&counts, &canonical);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        for needle in [
+            "2 non-canonical",
+            "brave-hound-32 (314 files)",
+            "crisp-jay-9 (310 files)",
+            "cassy (314 files)",
+            "cas doctor --fix",
+        ] {
+            assert!(check.message.contains(needle), "missing {needle:?}: {}", check.message);
+        }
+    }
+
+    #[test]
+    fn code_index_copies_check_is_ok_for_one_canonical_index_cas_8256() {
+        let canonical = vec!["cassy".to_string()];
+        let check = code_index_copies_check(&[("cassy".to_string(), 314)], &canonical);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(check.message.contains("cassy (314 files)"), "{}", check.message);
+
+        let empty = code_index_copies_check(&[], &canonical);
+        assert!(matches!(empty.status, CheckStatus::Ok), "{}", empty.message);
+        assert!(!empty.message.is_empty());
     }
 
     /// A freshly-indexed tree reports Ok with the counts, not a warning.

@@ -38,6 +38,7 @@ pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub mod shared_db;
 
 mod agent_store;
+mod code_index_purge;
 mod code_store;
 mod code_vector_store;
 mod commit_link_store;
@@ -105,6 +106,10 @@ pub use agent_store::{AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentSt
 pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_with_conn};
 
 // Code store for indexed source code
+pub use code_index_purge::{
+    BatchedWrites, CODE_WRITE_DEFAULT_BATCH, CODE_WRITE_MAX_BATCH, CodeIndexPurgeStats,
+    PurgeSymbol, RepositoryScope, ScanReceiptScope, SqliteCodeIndexPurge, WriteBatching,
+};
 pub use code_store::CodeStore;
 pub use code_vector_store::{
     CODE_VECTOR_SCHEMA, CODE_VECTOR_SCHEMA_STATEMENTS, CodeIndexState, CodeVectorCoverage,

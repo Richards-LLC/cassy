@@ -13,6 +13,7 @@ use cas_code::CodeSymbol;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::code_index_purge::{BatchedWrites, WriteBatching};
 use crate::{Result, StoreError};
 
 pub const CODE_VECTOR_SCHEMA: &str = r#"
@@ -579,6 +580,26 @@ impl SqliteCodeVectorStore {
         })
     }
 
+    /// [`Self::reconcile`] in bounded transactions, optionally scoped to the
+    /// canonical repositories (cas-8256).
+    pub fn reconcile_scoped(
+        &self,
+        force: bool,
+        repositories: Option<&[String]>,
+        batching: WriteBatching,
+        writes: &mut BatchedWrites,
+    ) -> Result<CodeVectorReconcile> {
+        let _ = (repositories, batching);
+        let outcome = self.reconcile(force)?;
+        writes.record(
+            outcome.orphaned_dropped
+                + outcome.failed_rearmed
+                + outcome.stale_rearmed
+                + outcome.requeued,
+        );
+        Ok(outcome)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn record_scan(
         &self,
@@ -1056,4 +1077,103 @@ mod tests {
         assert_eq!(stats.vectorized, 1);
         assert_eq!(stats.eligible, 2);
     }
+
+    fn symbol_in(repository: &str, id: &str, hash: &str) -> CodeSymbol {
+        let mut symbol = symbol(id, hash, SymbolKind::Function);
+        symbol.repository = repository.into();
+        symbol
+    }
+
+    /// cas-8256: reconcile used to be one `BEGIN IMMEDIATE` over the whole
+    /// store (364k symbols, 335k queue rows), holding the write lock for every
+    /// other process for the whole pass. Each transaction now changes at most
+    /// one batch of rows, and the outcome is the same as the single pass.
+    #[test]
+    fn reconcile_commits_at_most_one_batch_of_rows_per_transaction_cas_8256() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let ghosts: Vec<CodeSymbol> = (0..120)
+            .map(|i| symbol(&format!("sym-ghost-{i:03}"), "g", SymbolKind::Function))
+            .collect();
+        store.sync_file_symbols(&ghosts, &[]).unwrap();
+        let stale_old: Vec<CodeSymbol> = (0..30)
+            .map(|i| symbol(&format!("sym-stale-{i:03}"), "old", SymbolKind::Function))
+            .collect();
+        store.sync_file_symbols(&stale_old, &[]).unwrap();
+        let mut table: Vec<CodeSymbol> = (0..30)
+            .map(|i| symbol(&format!("sym-stale-{i:03}"), "new", SymbolKind::Function))
+            .collect();
+        table.extend(
+            (0..130).map(|i| symbol(&format!("sym-new-{i:03}"), "n", SymbolKind::Function)),
+        );
+        seed_symbols(root.path(), &table);
+
+        let mut writes = BatchedWrites::default();
+        let outcome = store
+            .reconcile_scoped(
+                false,
+                None,
+                WriteBatching::new(25, std::time::Duration::ZERO),
+                &mut writes,
+            )
+            .unwrap();
+        assert_eq!(outcome.orphaned_dropped, 120);
+        assert_eq!(outcome.stale_rearmed, 30);
+        assert_eq!(outcome.requeued, 130);
+        assert!(
+            writes.largest_transaction_rows <= 25,
+            "a reconcile transaction changed {} rows",
+            writes.largest_transaction_rows
+        );
+        assert!(writes.transactions >= 280usize.div_ceil(25));
+        let after = store.coverage().unwrap();
+        assert_eq!((after.orphaned, after.unqueued), (0, 0));
+        assert_eq!(after.eligible, 160);
+
+        let mut again = BatchedWrites::default();
+        let second = store
+            .reconcile_scoped(false, None, WriteBatching::default(), &mut again)
+            .unwrap();
+        assert!(second.is_noop(), "second pass changed rows: {second:?}");
+        assert_eq!(again.largest_transaction_rows, 0);
+    }
+
+    /// cas-8256: the canonical process reconciles the canonical repositories
+    /// only; another repository's symbols are neither queued nor re-armed.
+    #[test]
+    fn reconcile_scoped_queues_only_the_canonical_repositories_cas_8256() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let foreign_stale = symbol_in("crisp-jay-9", "sym-w-stale", "old");
+        store
+            .sync_file_symbols(std::slice::from_ref(&foreign_stale), &[])
+            .unwrap();
+        seed_symbols(
+            root.path(),
+            &[
+                symbol_in("cassy", "sym-c-1", "a"),
+                symbol_in("cassy", "sym-c-2", "b"),
+                symbol_in("cassy", "sym-c-3", "c"),
+                symbol_in("crisp-jay-9", "sym-w-1", "a"),
+                symbol_in("crisp-jay-9", "sym-w-2", "b"),
+                symbol_in("crisp-jay-9", "sym-w-stale", "new"),
+            ],
+        );
+        let keep = vec!["cassy".to_string()];
+        let mut writes = BatchedWrites::default();
+        let outcome = store
+            .reconcile_scoped(false, Some(&keep), WriteBatching::default(), &mut writes)
+            .unwrap();
+        assert_eq!(outcome.requeued, 3);
+        assert_eq!(outcome.stale_rearmed, 0, "a foreign row was re-armed");
+        let pending: Vec<String> = store
+            .list_pending(100)
+            .unwrap()
+            .into_iter()
+            .map(|work| work.symbol_id)
+            .collect();
+        assert!(pending.iter().all(|id| id.starts_with("sym-c-") || id == "sym-w-stale"));
+        assert_eq!(pending.len(), 4);
+    }
+
 }

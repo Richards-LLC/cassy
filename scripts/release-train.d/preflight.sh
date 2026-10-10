@@ -334,6 +334,11 @@ cut_preflight_check_draft() {
 }
 
 cut_preflight_check_integration() {
+    if [[ -r "$run_dir/assemble.integration.json" ]] &&
+        [[ "$(jq -r '.mode // empty' "$run_dir/assemble.integration.json")" == from-main ]]; then
+        printf 'preflight: release epics already merged to main; assemble revalidates main; full gate required\n'
+        return 0
+    fi
     local common receipt origin_main receipt_base
     common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
         | sed 's#/\.git$##')"

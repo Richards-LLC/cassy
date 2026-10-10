@@ -24,6 +24,10 @@ class IntegrationAssembly(unittest.TestCase):
         self.addCleanup(os.environ.update, inherited)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        old_artifacts = os.environ.get("CAS_RELEASE_ARTIFACTS_ROOT")
+        self.addCleanup(lambda: os.environ.pop("CAS_RELEASE_ARTIFACTS_ROOT", None)
+                        if old_artifacts is None else os.environ.__setitem__("CAS_RELEASE_ARTIFACTS_ROOT", old_artifacts))
+        os.environ["CAS_RELEASE_ARTIFACTS_ROOT"] = str(Path(self.temp.name) / "artifacts")
         self.root = Path(self.temp.name) / "project"
         self.root.mkdir()
         self.git("init", "-b", "main")
@@ -237,6 +241,8 @@ set -eu
 test \"$1\" = factory
 test \"$2\" = integration-recover
 test \"$3\" = --base-only
+test \"$4\" = --release-epics
+test \"$5\" = one
 """ + lock_probe + """printf '%s\\n' \"${CAS_FACTORY_SESSION:-missing}\" > .cas/recovery-session
 printf '%s\\n' \"${CAS_AGENT_ID:-missing}|${CAS_SESSION_ID:-missing}|${CAS_AGENT_NAME:-missing}|${CAS_AGENT_ROLE:-missing}\" > .cas/recovery-identity
 base=$(git rev-parse refs/remotes/origin/main)
@@ -264,6 +270,73 @@ PY
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(text, result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
+
+    def test_renamed_checkout_adopts_legacy_branch(self):
+        renamed = self.root.with_name("renamed-checkout")
+        self.root.rename(renamed)
+        self.root = renamed
+        self.receipt_path = renamed / ".cas/merge-sweeps/integration.json"
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("config", "--local", "cas.integrationBranch"), "integration/project")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+
+    def test_from_main_assembles_without_sweep_and_records_reason(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.tip)
+        self.receipt_path.unlink()
+        result = subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble", "--from-main"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+        self.assertFalse(self.receipt_path.exists(), "main mode must not forge a passing sweep")
+        run = Path(os.environ["CAS_RELEASE_ARTIFACTS_ROOT"]) / "v0.0.0-project"
+        receipt = json.loads((run / "assemble.integration.json").read_text())
+        self.assertEqual(receipt["mode"], "from-main")
+        self.assertEqual(receipt["tip"], self.tip)
+        self.assertIn("already merged", receipt["reason"])
+        self.assertTrue(receipt["full_gate_required"])
+
+    def test_from_main_pipeline_still_requires_full_gate(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.tip)
+        self.receipt_path.unlink()
+        result = subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble", "--from-main"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--pipeline"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GATE_NOT_GREEN", result.stdout + result.stderr)
+
+    def test_from_main_resume_invalidates_old_gate_when_main_moves(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.tip)
+        run = Path(os.environ["CAS_RELEASE_ARTIFACTS_ROOT"]) / "v0.0.0-project"
+        result = subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble", "--from-main"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (run / "stage.assemble.done").write_text(self.tip)
+        (run / "stage.gate.done").write_text(self.tip)
+        (run / "gate.full.sha").write_text(self.tip)
+        (self.root / "CHANGELOG.md").write_text("release prose\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "release prose")
+        self.advance_integration()
+        self.git("update-ref", "refs/remotes/origin/main", self.tip)
+        result = self.resume_action("--resume-check", run)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((run / "gate.full.sha").exists())
+        result = self.resume_action("assemble", run)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
+        self.assertEqual((self.root / "CHANGELOG.md").read_text(), "release prose\n")
+
+    def test_self_heal_refuses_legacy_epics_without_ids(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.tip)
+        self.receipt["epics"][0].pop("id")
+        self.save()
+        result = self.assemble()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lacks release epic IDs", result.stderr)
+        self.assertFalse((self.root / ".cas/healed").exists())
 
     def test_clean_tip_is_consumed_via_train_action(self):
         result = self.assemble()

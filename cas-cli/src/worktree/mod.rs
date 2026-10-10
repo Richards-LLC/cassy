@@ -29,6 +29,7 @@
 pub mod discovery;
 pub mod external_symlinks;
 pub mod git;
+pub(crate) mod integration_branch;
 mod manager;
 pub mod salvage;
 pub mod sweep;

@@ -59,7 +59,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--cut [--resume]|--assemble|--prep|--announce|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--receipts|--host-update|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--cut [--resume]|--assemble [--from-main]|--prep|--announce|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--receipts|--host-update|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -1127,9 +1127,16 @@ case "$action" in
         exit $?
         ;;
     --assemble)
+        assemble_action=assemble
+        if [[ "${4:-}" == --from-main && "$#" -eq 4 ]]; then
+            assemble_action=--from-main
+        elif [[ "$#" -ne 3 ]]; then
+            usage >&2
+            exit 2
+        fi
         CAS_RELEASE_RECEIPTS_RUN_DIR="${CAS_RELEASE_RECEIPTS_RUN_DIR:-$run_dir}" \
         CAS_RELEASE_TRAIN_RUN_DIR="${CAS_RELEASE_TRAIN_RUN_DIR:-$run_dir}" \
-            python3 "$script_dir/release-integrate.py" "$worktree"
+            python3 "$script_dir/release-integrate.py" "$worktree" "$assemble_action"
         if [[ -f "$worktree/Cargo.toml" ]]; then
             python3 "$script_dir/assembly-proof.py" prove "$worktree"
         fi

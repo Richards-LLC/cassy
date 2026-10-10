@@ -42,6 +42,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   connection. `loop.json` adds `phase_latency`: for each loop phase, how often
   it ran, its slowest run and how many runs took 100 ms or more, with the
   refresh split into its steps.
+- `scripts/many-agent-load.py` reproduces the many-agent stall on a scratch
+  copy of a project database and checks the latency targets; see
+  `cas-cli/docs/MANY_AGENT_LOAD_HARNESS.md`.
 
 ### Changed — bounded storage
 

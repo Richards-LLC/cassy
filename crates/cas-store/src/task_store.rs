@@ -1149,8 +1149,7 @@ impl TaskStore for SqliteTaskStore {
         formatted_note: &str,
         receipt_id: &str,
     ) -> Result<DateTime<Utc>> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
             let now = Utc::now();
             let rows = tx.execute(
                 "UPDATE tasks

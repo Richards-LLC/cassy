@@ -465,6 +465,11 @@ const WRITE_TXN_BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800];
 /// Nothing is retried once the transaction is open: the caller's body runs
 /// exactly once, so a body that consumes a single-use token cannot consume it
 /// twice.
+///
+/// This form is for a connection the caller owns outright. A pooled
+/// [`shared_connection`] must use [`begin_immediate_pooled`] instead: calling
+/// this through a held `MutexGuard` keeps the process-wide mutex locked across
+/// every wait (cas-3f65e).
 pub fn begin_immediate_with_retry(conn: &Connection) -> crate::Result<ImmediateTx<'_>> {
     begin_immediate_with_retry_bounded(conn, WRITE_TXN_BACKOFF_MS)
 }
@@ -538,6 +543,157 @@ where
     F: FnOnce(&ImmediateTx<'_>) -> crate::Result<T>,
 {
     let tx = begin_immediate_with_retry_bounded(conn, backoff_ms)?;
+    let value = body(&tx)?;
+    tx.commit()?;
+    Ok(value)
+}
+
+/// Longest one pooled attempt waits inside SQLite's busy handler while it holds
+/// the process-wide connection mutex.
+const POOLED_ATTEMPT_BUSY: Duration = Duration::from_millis(100);
+
+/// Total wait a pooled writer spends on a foreign write lock before it fails.
+/// Matches the unpooled schedule's worst case (six 5s busy waits plus ~1.5s of
+/// backoff), so moving a caller onto the pooled path does not make it give up
+/// sooner.
+const POOLED_WRITE_BUDGET: Duration = Duration::from_millis(31_500);
+
+/// Sleep between pooled attempts, in milliseconds; the last entry repeats.
+/// Short because the attempts themselves already wait in the busy handler, and
+/// a long sleep would lose the lock to writers that poll faster.
+const POOLED_BACKOFF_MS: &[u64] = &[5, 10, 20, 40, 80];
+
+/// An IMMEDIATE transaction on a pooled connection that owns the connection's
+/// mutex guard for the transaction's lifetime.
+///
+/// Built only by [`begin_immediate_pooled`], which takes the guard per attempt
+/// and drops it while it sleeps; see that function for why.
+pub struct PooledImmediateTx<'a> {
+    conn: MutexGuard<'a, Connection>,
+    committed: bool,
+}
+
+impl PooledImmediateTx<'_> {
+    /// Commit the transaction, then release the connection mutex.
+    pub fn commit(mut self) -> rusqlite::Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PooledImmediateTx<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
+impl std::ops::Deref for PooledImmediateTx<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+/// Acquire a `BEGIN IMMEDIATE` write transaction on a pooled connection without
+/// holding the connection mutex while it waits for a foreign writer.
+///
+/// [`begin_immediate_with_retry`] takes a `&Connection`, so a pooled caller
+/// must already hold the process-wide `Mutex<Connection>` and keeps holding it
+/// through every busy wait and backoff sleep, ~31.6s at worst. If another
+/// thread in the same process holds the SQLite write lock on a different
+/// connection and needs this pooled connection to finish, neither can proceed
+/// until the budget runs out: the cas-0e57 task-sync incident.
+///
+/// Here each attempt takes the mutex, waits at most [`POOLED_ATTEMPT_BUSY`] in
+/// the busy handler, and on SQLITE_BUSY drops the mutex before sleeping, so an
+/// in-process lock holder that needs the connection gets it within one
+/// attempt. The overall wait budget is unchanged. The connection's busy
+/// timeout is restored to [`SQLITE_BUSY_TIMEOUT`] before the mutex is
+/// released, which is the value every pooled connection is opened with.
+///
+/// As with the unpooled form, nothing runs inside the transaction until it is
+/// open, so the caller's body executes exactly once.
+pub fn begin_immediate_pooled(shared: &Mutex<Connection>) -> crate::Result<PooledImmediateTx<'_>> {
+    begin_immediate_pooled_bounded(shared, POOLED_ATTEMPT_BUSY, POOLED_WRITE_BUDGET)
+}
+
+/// [`begin_immediate_pooled`] with an explicit per-attempt busy wait and total
+/// budget, so tests can exhaust the budget quickly.
+pub fn begin_immediate_pooled_bounded(
+    shared: &Mutex<Connection>,
+    attempt_busy: Duration,
+    budget: Duration,
+) -> crate::Result<PooledImmediateTx<'_>> {
+    let started = Instant::now();
+    let mut attempts = 0usize;
+
+    let last_busy = loop {
+        attempts += 1;
+        let conn = shared
+            .lock()
+            .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()))?;
+        conn.busy_timeout(attempt_busy)?;
+        let begun = conn.execute_batch("BEGIN IMMEDIATE");
+        let restored = conn.busy_timeout(SQLITE_BUSY_TIMEOUT);
+        match begun {
+            Ok(()) => {
+                let tx = PooledImmediateTx {
+                    conn,
+                    committed: false,
+                };
+                restored?;
+                return Ok(tx);
+            }
+            Err(error) if is_busy_error(&error) => {
+                restored?;
+                // Release the process mutex before sleeping: this is the point
+                // of the pooled form.
+                drop(conn);
+                if started.elapsed() >= budget {
+                    break error;
+                }
+                let base_ms = POOLED_BACKOFF_MS
+                    .get(attempts - 1)
+                    .or(POOLED_BACKOFF_MS.last())
+                    .copied()
+                    .unwrap_or(0);
+                let jitter_range = base_ms / 2;
+                let jitter = cheap_random_u64() % (jitter_range * 2 + 1);
+                let delay_ms = base_ms - jitter_range + jitter;
+                if attempts == 1 || attempts.is_power_of_two() {
+                    tracing::warn!(
+                        attempts,
+                        delay_ms,
+                        "write lock held by another connection, retrying with the pooled \
+                         connection released"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            Err(error) => {
+                restored?;
+                return Err(StoreError::Database(error));
+            }
+        }
+    };
+
+    Err(StoreError::Other(format!(
+        "database busy for {:.1}s across {attempts} attempt(s); another connection held the \
+         write lock for the whole wait (last: {last_busy})",
+        started.elapsed().as_secs_f64(),
+    )))
+}
+
+/// Run `body` inside a write transaction acquired by
+/// [`begin_immediate_pooled`], committing on success.
+pub fn with_immediate_write_txn_pooled<T, F>(shared: &Mutex<Connection>, body: F) -> crate::Result<T>
+where
+    F: FnOnce(&Connection) -> crate::Result<T>,
+{
+    let tx = begin_immediate_pooled(shared)?;
     let value = body(&tx)?;
     tx.commit()?;
     Ok(value)
@@ -2153,5 +2309,221 @@ mod tests {
             !first_sight_of_connection(&live),
             "a connection a caller holds is never closed by a sweep"
         );
+    }
+
+    // ── Pooled write transactions (cas-3f65e) ───────────────────────
+
+    fn busy_timeout_ms(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// The cas-0e57 inversion: an in-process thread holds the SQLite write
+    /// lock on its own connection and needs the pooled connection's mutex to
+    /// finish, while a pooled writer waits for that write lock. Holding the
+    /// mutex through the wait (the unpooled retry used through a guard) left
+    /// both stuck for the full ~31.6s budget, then failed the pooled writer.
+    #[test]
+    fn cas_3f65e_pooled_writer_lets_an_in_process_lock_holder_finish() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+        let shared = Arc::new(Mutex::new(conn));
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let shared = Arc::clone(&shared);
+            let db_path = db_path.clone();
+            std::thread::spawn(move || {
+                let own = Connection::open(&db_path).unwrap();
+                own.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
+                own.execute_batch("BEGIN IMMEDIATE").unwrap();
+                own.execute("INSERT INTO t VALUES (99, 'holder')", []).unwrap();
+                held_tx.send(()).unwrap();
+                // Let the pooled writer start waiting on the write lock.
+                std::thread::sleep(Duration::from_millis(150));
+                let started = Instant::now();
+                let rows: i64 = shared
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+                    .unwrap();
+                let mutex_wait = started.elapsed();
+                own.execute_batch("COMMIT").unwrap();
+                (rows, mutex_wait)
+            })
+        };
+        held_rx.recv().unwrap();
+
+        let started = Instant::now();
+        let tx = begin_immediate_pooled(&shared).expect("the pooled writer must get the lock");
+        tx.execute("INSERT INTO t VALUES (2, 'pooled')", []).unwrap();
+        tx.commit().unwrap();
+        let writer_wait = started.elapsed();
+
+        let (rows_seen, mutex_wait) = holder.join().unwrap();
+        assert_eq!(rows_seen, 1, "the holder read through the pooled connection");
+        assert!(
+            mutex_wait < Duration::from_millis(1_000),
+            "the holder waited {mutex_wait:?} for the pooled mutex"
+        );
+        assert!(
+            writer_wait < Duration::from_secs(3),
+            "the pooled writer waited {writer_wait:?}"
+        );
+        let total: i64 = shared
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 3, "seed + holder + pooled");
+        assert_eq!(busy_timeout_ms(&shared.lock().unwrap()), 5_000);
+    }
+
+    /// While a pooled writer waits, other callers keep getting the mutex
+    /// between its attempts.
+    #[test]
+    fn cas_3f65e_pooled_writer_does_not_hold_the_mutex_across_retry_sleeps() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+        let shared = Arc::new(Mutex::new(conn));
+
+        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_200));
+        ready.recv().unwrap();
+
+        let writer = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let tx = begin_immediate_pooled(&shared)?;
+                tx.execute("INSERT INTO t VALUES (2, 'pooled')", [])?;
+                tx.commit()?;
+                crate::Result::Ok(())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+
+        let mut slowest = Duration::ZERO;
+        for _ in 0..6 {
+            let started = Instant::now();
+            drop(shared.lock().unwrap());
+            slowest = slowest.max(started.elapsed());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        holder.join().unwrap();
+        writer.join().unwrap().expect("the writer commits once the holder does");
+
+        assert!(
+            slowest < Duration::from_millis(500),
+            "the pooled mutex was held for {slowest:?} while the writer waited"
+        );
+    }
+
+    /// Fifteen workers' processes writing at once is the fleet-boot shape.
+    /// Each simulated process has its own pooled connection; polling with the
+    /// mutex released must not starve any of them.
+    #[test]
+    fn cas_3f65e_fifteen_pooled_writers_all_commit() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, _conn) = contended_db(&temp);
+
+        let mut handles = Vec::new();
+        for worker in 0..15 {
+            let path = db_path.clone();
+            handles.push(std::thread::spawn(move || {
+                let conn = Connection::open(&path).unwrap();
+                conn.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
+                let shared = Mutex::new(conn);
+                let mut slowest = Duration::ZERO;
+                for round in 0..5 {
+                    let started = Instant::now();
+                    with_immediate_write_txn_pooled(&shared, |tx| {
+                        let _: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
+                        tx.execute(
+                            "INSERT INTO t (v) VALUES (?1)",
+                            rusqlite::params![format!("w{worker}-r{round}")],
+                        )?;
+                        // A short body, so the lock is genuinely contended.
+                        std::thread::sleep(Duration::from_millis(5));
+                        Ok(())
+                    })
+                    .unwrap_or_else(|e| panic!("worker {worker} round {round} failed: {e}"));
+                    slowest = slowest.max(started.elapsed());
+                }
+                slowest
+            }));
+        }
+        let slowest = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .max()
+            .unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1 + 15 * 5);
+        assert!(slowest < Duration::from_secs(10), "slowest writer waited {slowest:?}");
+    }
+
+    #[test]
+    fn cas_3f65e_pooled_budget_exhaustion_fails_with_the_wait_stated() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+        let shared = Mutex::new(conn);
+
+        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_000));
+        ready.recv().unwrap();
+
+        let started = Instant::now();
+        let error = match begin_immediate_pooled_bounded(
+            &shared,
+            Duration::from_millis(20),
+            Duration::from_millis(200),
+        ) {
+            Ok(_) => panic!("the foreign lock outlives the budget"),
+            Err(error) => error,
+        };
+        let waited = started.elapsed();
+        holder.join().unwrap();
+
+        let message = error.to_string();
+        assert!(message.contains("database busy for"), "{message}");
+        assert!(message.contains("attempt(s)"), "{message}");
+        assert!(waited < Duration::from_millis(800), "waited {waited:?}");
+        let conn = shared.try_lock().expect("the mutex is released on failure");
+        assert!(conn.is_autocommit(), "no transaction is left open");
+        assert_eq!(busy_timeout_ms(&conn), 5_000, "the busy timeout is restored");
+    }
+
+    #[test]
+    fn cas_3f65e_pooled_tx_rolls_back_and_releases_on_drop() {
+        let temp = TempDir::new().unwrap();
+        let (_db_path, conn) = contended_db(&temp);
+        let shared = Mutex::new(conn);
+
+        {
+            let tx = begin_immediate_pooled(&shared).unwrap();
+            tx.execute("INSERT INTO t VALUES (2, 'discarded')", []).unwrap();
+            assert!(shared.try_lock().is_err(), "the tx owns the mutex while open");
+        }
+        let conn = shared.try_lock().expect("dropping the tx releases the mutex");
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1, "an uncommitted pooled tx rolls back");
+
+        drop(conn);
+        let value = with_immediate_write_txn_pooled(&shared, |tx| {
+            tx.execute("INSERT INTO t VALUES (3, 'kept')", [])?;
+            Ok(7)
+        })
+        .unwrap();
+        assert_eq!(value, 7);
+        let total: i64 = shared
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
     }
 }

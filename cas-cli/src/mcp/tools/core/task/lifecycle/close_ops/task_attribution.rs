@@ -51,6 +51,17 @@ pub(super) fn commit_claims_another_task(
             .is_some_and(|message| subject_claims_another_task(&message, identity))
 }
 
+/// GH #1167: whether `commit`'s message names this task. An unreadable commit
+/// names nothing.
+pub(super) fn commit_names_task(repo: &Path, commit: &str, identity: &TaskCommitIdentity) -> bool {
+    identity.matches_known_commit(commit)
+        || is_safe_git_refname(commit)
+            && identity.task_id.as_deref().is_some_and(|id| {
+                git_text(repo, &["log", "-1", "--format=%B", commit, "--"])
+                    .is_some_and(|message| message_references_task(&message, id))
+            })
+}
+
 /// GH #1133, #1151: whether every commit `lane` holds beyond `target` (and
 /// beyond `origin/<target>` when that exists) claims another task. An unnamed
 /// commit may be this task's own work (cas-2387), so it answers `false`.
@@ -65,6 +76,13 @@ pub(super) fn lane_commits_all_claim_other_tasks(
     if !is_safe_git_refname(lane) || !is_safe_git_refname(target) {
         return None;
     }
+    // GH #1167: a checkout may track the target only on origin. Measure
+    // against whichever exists; neither is unknowable (None).
+    let origin_target = format!("origin/{target}");
+    let local_target = git_ref_exists(repo, target);
+    if !local_target && !git_ref_exists(repo, &origin_target) {
+        return None;
+    }
     let limit = (LIMIT + 1).to_string();
     let mut args = vec![
         "log".to_string(),
@@ -73,9 +91,10 @@ pub(super) fn lane_commits_all_claim_other_tasks(
         limit,
         "--format=%H%x1f%B%x1e".to_string(),
         lane.to_string(),
-        format!("^{target}"),
     ];
-    let origin_target = format!("origin/{target}");
+    if local_target {
+        args.push(format!("^{target}"));
+    }
     if git_ref_exists(repo, &origin_target) {
         args.push(format!("^{origin_target}"));
     }

@@ -13542,11 +13542,36 @@ pub(crate) fn resolve_close_delivery_branch(
 /// task, a commit on the lane naming this task, or an unmerged lane commit
 /// that does not claim another task (unnamed work may be this task's, see
 /// cas-2387). Any of those keeps every ordinary delivery gate.
+///
+/// GH #1167: once a no-code task has no work target (a supervisor cleared it
+/// with proof_scope_fix target_repo="", or it never had one), nothing can be
+/// merged on its behalf, so only commits that name this task count as its
+/// own; an unnamed commit or an anchor on the worker lane does not.
 pub(crate) fn no_code_task_without_own_commits(
     repo_path: &std::path::Path,
     task: &Task,
     target: &str,
     receipt: Option<&str>,
+) -> bool {
+    no_code_task_without_own_commits_judged(
+        repo_path,
+        task,
+        target,
+        receipt,
+        task.deliverables.work_target.is_none(),
+    )
+}
+
+/// [`no_code_task_without_own_commits`] with the attribution rule explicit.
+/// `named_only` counts only commits that name this task as its own (a
+/// supervisor-reviewed path: a cleared work target, or evidence_only);
+/// otherwise unnamed lane work may be this task's (cas-2387).
+pub(crate) fn no_code_task_without_own_commits_judged(
+    repo_path: &std::path::Path,
+    task: &Task,
+    target: &str,
+    receipt: Option<&str>,
+    named_only: bool,
 ) -> bool {
     let delivery = &task.deliverables;
     if task.execution_note.as_deref() != Some("no-code")
@@ -13568,7 +13593,13 @@ pub(crate) fn no_code_task_without_own_commits(
         .factory_branch_anchor
         .iter()
         .chain(&delivery.historical_factory_branch_anchors)
-        .any(|anchor| !task_attribution::commit_claims_another_task(repo_path, anchor, &identity))
+        .any(|anchor| {
+            if named_only {
+                task_attribution::commit_names_task(repo_path, anchor, &identity)
+            } else {
+                !task_attribution::commit_claims_another_task(repo_path, anchor, &identity)
+            }
+        })
     {
         return false;
     }
@@ -13590,9 +13621,10 @@ pub(crate) fn no_code_task_without_own_commits(
             if !matches!(
                 task_attribution::branch_task_claims(repo_path, &reference, &identity),
                 Some((None, _))
-            ) || task_attribution::lane_commits_all_claim_other_tasks(
-                repo_path, &reference, target, &identity,
-            ) != Some(true)
+            ) || (!named_only
+                && task_attribution::lane_commits_all_claim_other_tasks(
+                    repo_path, &reference, target, &identity,
+                ) != Some(true))
             {
                 return false;
             }

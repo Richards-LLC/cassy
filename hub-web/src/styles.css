@@ -1675,7 +1675,7 @@ dialog form > *,
 
 /* Cassy Cloud: project-first conversations. */
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
-.cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
+.cloud-brand-mark { display: block; width: var(--space-8); height: var(--space-8); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
 /* The context rail (P10) folds to the 48px context track until it has
  * something the header does not; .context-open gives it its 240px back. */

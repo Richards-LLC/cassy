@@ -664,6 +664,37 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
             .starts_with(b"<svg")
     );
 
+    // cas-8951: every icon and the manifest index.html links is served.
+    for (uri, content_type, magic) in [
+        ("/commander/favicon-16.png", "image/png", &b"\x89PNG"[..]),
+        ("/commander/favicon-32.png", "image/png", &b"\x89PNG"[..]),
+        ("/commander/apple-touch-icon.png", "image/png", &b"\x89PNG"[..]),
+        ("/commander/icon-192.png", "image/png", &b"\x89PNG"[..]),
+        ("/commander/icon-512.png", "image/png", &b"\x89PNG"[..]),
+        ("/commander/icon-maskable-192.png", "image/png", &b"\x89PNG"[..]),
+        ("/commander/icon-maskable-512.png", "image/png", &b"\x89PNG"[..]),
+        (
+            "/commander/manifest.webmanifest",
+            "application/manifest+json",
+            &b"{"[..],
+        ),
+    ] {
+        let asset = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(asset.status(), StatusCode::OK, "{uri}");
+        assert_eq!(asset.headers()["content-type"], content_type, "{uri}");
+        assert!(
+            to_bytes(asset.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .starts_with(magic),
+            "{uri}"
+        );
+    }
+
     let denied = app
         .clone()
         .oneshot(Request::get("/v1/sessions").body(Body::empty()).unwrap())

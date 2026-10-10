@@ -123,13 +123,26 @@ Ghostty's ANSI palette stays in `hub-web/src/terminal/ghostty-adapter.ts`; it is
 
 ## Brand
 
-The Hub's product name is **Cassy Cloud**. `hub-web/src/cloud-brand.ts` owns an
-inline SVG of the canonical three interlocking Cassy ribbons traced from
-`docs/assets/cassy-logo.png`. `public/favicon.svg` is the single geometry source
-for header, pairing and favicon. The monochrome mark inherits
-`--color-action`, with matching light/dark favicon ink. The serif wordmark uses
+The Hub's product name is **Cassy Cloud**. `public/favicon.svg` is the single
+brand asset: the canonical three interlocking Cassy ribbons traced from
+`docs/assets/cassy-logo.png`, white, pale aurora blue (#E6ECFF to #A9C2FF) and
+aurora teal (#B8F5EA to #6FE0D0), on a 512px rounded tile (radius 114) filled
+with the `--look-send` violet gradient (#7656FA to #5B3FE0 to #3E5BEA) under a
+soft white sheen. The tile is the same in light and dark. The white ribbon
+measures 4.7–6.5:1 on the tile; the tile measures 4.0–5.6:1 on the light glass
+field (#EFECFB) and 3.0–4.1:1 on the dark one (#0E0C20). The old mark was a
+flat ink, pale #A9B3FF in dark: high luminance contrast but almost no chroma,
+which is what read as washed out on the violet aurora.
+`hub-web/src/cloud-brand.ts` renders that file as a 32px `<img>` (a data URI,
+so each copy keeps its gradient ids private) beside the serif wordmark in
 `--font-display`, medium weight, `--fs-lg` (21px), with `--space-2` separation.
-No downloaded font or raster is required.
+`hub-web/scripts/render-brand-icons.mjs` paints the PNGs from the same file:
+`favicon-16.png` and `favicon-32.png`, `icon-192.png` and `icon-512.png`
+(rounded tile), `apple-touch-icon.png` (180, full-bleed square; iOS rounds it)
+and `icon-maskable-192.png`/`icon-maskable-512.png` (full-bleed, ribbons at
+scale 0.95 inside the 80% safe circle). `index.html` links them and
+`public/manifest.webmanifest`; the hub embeds every one (`server.rs`). Rerun
+the script after changing `favicon.svg`. No downloaded font is required.
 
 Place the complete brand at the top of the thread list on phone and desktop;
 the list screen is the only place the phone shows the lockup. The phone

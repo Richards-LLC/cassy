@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { cloudBrand } from "./cloud-brand";
 import { KEYBOARD_VIEWPORT_PROPERTY, applyKeyboardViewport, bindKeyboardViewport, keyboardViewportHeight, type VisualViewportLike } from "./conversation-shell";
 
 class FakeVisualViewport implements VisualViewportLike {
@@ -103,5 +107,24 @@ describe("cold-load list states (journey F14)", () => {
     expect(node(machineFooterMarkup([live, { ...live, id: "c" }], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot connected");
     expect(node(machineFooterMarkup([live, row], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot partial");
     expect(node(machineFooterMarkup([row], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot");
+  });
+});
+
+describe("cloudBrand", () => {
+  // Contract: the sidebar brand mark is the favicon file itself (cas-8951).
+  // Consumer: conversation list, thread header, pairing and paired-machines dialogs render cloudBrand().
+  it("renders the brand mark from the favicon asset without shared gradient ids", () => {
+    const favicon = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/favicon.svg"), "utf8");
+    const host = document.createElement("div");
+    host.innerHTML = cloudBrand() + cloudBrand();
+    const marks = [...host.querySelectorAll<HTMLImageElement>(".cloud-brand > img.cloud-brand-mark")];
+    expect(marks).toHaveLength(2);
+    for (const mark of marks) {
+      expect(mark.alt).toBe("");
+      expect(decodeURIComponent(mark.getAttribute("src")!.replace("data:image/svg+xml,", ""))).toBe(favicon.trim());
+    }
+    // Inline SVG copies would share id="cassy-tile"; a hidden copy then breaks every visible fill.
+    expect(host.querySelector("svg, [id]")).toBeNull();
+    expect(host.textContent).toBe("Cassy CloudCassy Cloud");
   });
 });

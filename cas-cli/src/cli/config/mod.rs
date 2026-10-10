@@ -21,7 +21,9 @@ pub enum ConfigCommands {
     /// Get a config value
     Get(ConfigGetArgs),
 
-    /// Set a config value
+    /// Set a config value. `factory.write_roots` is operator-only and
+    /// guardrail-grade, not security-grade: it is written to
+    /// .cas/operator/write-policy.toml and refused inside agent sessions.
     Set(ConfigSetArgs),
 
     /// List all config options

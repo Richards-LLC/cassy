@@ -1302,20 +1302,25 @@ that contains or lies inside `.cas/operator/` are refused.
 Each root admits only its modes:
 - **create**: a new file, an `apply_patch` add or move, or a `cp`, `tee` or
   `touch` destination;
-- **edit**: an existing file, `sed -i` / `perl -i`, or the source of an `mv`;
+- **edit**: an existing file, or, once a policy file exists, `sed -i` /
+  `perl -i` operands and `mv` sources (without a policy file these keep their
+  previous, unjudged behaviour);
 - **delete**: `rm` or an `apply_patch` delete.
 
 Every write admitted this way is logged as a `workspace_write_root_used`
 event (tool, path, mode, root, task, agent) in the factory session log. A
 refusal lists the roots in effect.
 
-**Operator-only.** Agents run as the operator's Unix user, so Cassy guards the
-policy in layers:
+**Operator-only, guardrail-grade (not security-grade).** The operator and the
+agents share a Unix user. The PreToolUse hook is the actual gate against
+agents; the CLI checks are defence in depth. With no policy file, the default
+contract is unchanged. The layers are:
 - the commands refuse to run when they detect any agent environment variable
   (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_*`, `CAS_CLONE_PATH`,
   `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`, `CODEX_THREAD_ID`);
 - they refuse when an agent or Cassy server (claude, codex, `cas serve`,
-  `cas factory`) is among the process's ancestors;
+  `cas factory`) is among the process's ancestors, or when the process runs
+  inside a factory worker or server cgroup;
 - they refuse without an interactive terminal, and need a typed confirmation;
 - `Config::set` refuses the key, so the config TUI, import and every agent path
   that reaches it cannot set roots;

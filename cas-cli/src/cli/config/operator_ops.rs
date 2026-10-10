@@ -16,7 +16,14 @@ use crate::config::operator_policy::{
 };
 
 /// `cas config grant-write`: a one-off write grant bound to one open task.
+///
+/// Operator-only, guardrail-grade (not security-grade): agents share your Unix
+/// user, so Cassy's tool-call hook is what stops them; this command's own
+/// agent checks are defence in depth.
 #[derive(clap::Parser)]
+#[command(
+    after_help = "Guardrail-grade, not security-grade: the operator and the agents share a Unix user. Cassy's PreToolUse hook refuses agents that run this command or write .cas/operator/; the checks here (no agent environment, no agent ancestor, no factory cgroup, a terminal, a typed confirmation) are defence in depth."
+)]
 pub struct ConfigGrantWriteArgs {
     /// Task the grant is bound to; it ends when the task closes
     #[arg(long)]

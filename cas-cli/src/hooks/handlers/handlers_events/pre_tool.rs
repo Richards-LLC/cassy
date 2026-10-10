@@ -101,6 +101,20 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", reason));
     }
 
+    // cas-3147 (GH #1169): write roots and grants are operator-only. Every
+    // harness tool call is an agent's, so the operator-only CLI is refused
+    // here for every role, before any auto-approval or root early return.
+    if tool_name == "Bash"
+        && let Some(reason) = input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .and_then(operator_policy_command_denial)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================
@@ -528,24 +542,38 @@ fn handle_pre_tool_use_inner(
             // Leave worktree operations and historical reads available.
             artifacts_root = Some(registered_worktree.as_deref().unwrap_or(Path::new(&input.cwd)).display().to_string());
         }
-        if let Some(violation) = factory_write_violation(
+        // cas-3147 (GH #1169): operator write roots and task grants.
+        let is_supervisor = crate::harness_policy::is_supervisor(input);
+        let (write_policy, write_task_ids) =
+            operator_write_policy_for(cas_root, &mut stores, input, is_supervisor);
+        match factory_write_decision(
             input,
             &artifacts_root,
             scratch_root.as_deref(),
-            crate::harness_policy::is_supervisor(input),
+            is_supervisor,
             registered_worktree.as_deref(),
+            &write_policy,
+            &write_task_ids,
         ) {
-            log_factory_workspace_rejection(cas_root, input, &violation);
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &factory_workspace_contract_denial(
-                    input,
-                    &violation,
-                    artifacts_root.as_deref(),
-                    scratch_root.as_deref(),
-                    registered_worktree.as_deref(),
-                ),
-            ));
+            FactoryWriteDecision::Allowed => {}
+            FactoryWriteDecision::AllowedByRoot(uses) => {
+                log_write_root_uses(cas_root, input, &uses);
+            }
+            FactoryWriteDecision::Denied(violation) => {
+                log_factory_workspace_rejection(cas_root, input, &violation);
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "deny",
+                    &factory_workspace_contract_denial_with_roots(
+                        input,
+                        &violation,
+                        artifacts_root.as_deref(),
+                        scratch_root.as_deref(),
+                        registered_worktree.as_deref(),
+                        &write_policy,
+                        &write_task_ids,
+                    ),
+                ));
+            }
         }
     }
 
@@ -3766,6 +3794,34 @@ fn factory_write_decision(
     let Some(tool) = input.tool_name.as_deref() else {
         return FactoryWriteDecision::Allowed;
     };
+    // cas-3147: the operator policy directory is never writable by an agent,
+    // whatever sanctions or roots would otherwise cover it.
+    // A delete also may not remove an ancestor of it (`rm -rf .cas`).
+    let protected_violation = |raw_path: &str, ancestors_too: bool| -> Option<FactoryWriteViolation> {
+        if policy.protected.is_empty() {
+            return None;
+        }
+        let expanded = match raw_path.strip_prefix("~/") {
+            Some(rest) => std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest),
+            None => std::path::PathBuf::from(raw_path),
+        };
+        let path = if expanded.is_absolute() {
+            lexically_normalize_path(expanded)
+        } else {
+            lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(expanded))
+        };
+        let resolved = canonicalize_for_containment(&path).unwrap_or(path);
+        policy
+            .protected
+            .iter()
+            .filter_map(|dir| canonicalize_for_containment(dir))
+            .any(|dir| resolved.starts_with(&dir) || (ancestors_too && dir.starts_with(&resolved)))
+            .then(|| FactoryWriteViolation {
+                evaluated_path: raw_path.to_string(),
+                resolved_path: resolved,
+                matched_rule: "the operator write policy is operator-only",
+            })
+    };
     let Some(tool_input) = input.tool_input.as_ref() else {
         return FactoryWriteDecision::Allowed;
     };
@@ -3785,6 +3841,9 @@ fn factory_write_decision(
         && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
     {
         for (raw_path, _recursive) in bash_delete_targets(command) {
+            if let Some(violation) = protected_violation(&raw_path, true) {
+                return FactoryWriteDecision::Denied(violation);
+            }
             let Some(violation) = factory_delete_violation(
                 input,
                 configured_artifacts_root,
@@ -3841,6 +3900,9 @@ fn factory_write_decision(
         _ => return FactoryWriteDecision::Allowed,
     };
     for (raw_path, mode) in targets {
+        if let Some(violation) = protected_violation(&raw_path, false) {
+            return FactoryWriteDecision::Denied(violation);
+        }
         // A variable that survived the finite expansion above may resolve to
         // an absolute path only when Bash runs it. Treating the literal
         // `$NAME` as relative to the worktree would create an escape hatch.
@@ -3884,7 +3946,66 @@ fn factory_write_decision(
 /// cas-3147: refusal for an agent shell command that would change the
 /// operator write policy through the operator-only CLI.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
-    let _ = command;
+    operator_policy_command_denial_at_depth(command, 0)
+}
+
+fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    for words in shell_statement_words(command) {
+        let Some(mut index) = executable_word_index(&words) else {
+            continue;
+        };
+        loop {
+            let name = shell_word_basename(&words[index]);
+            let args = &words[index + 1..];
+            match name {
+                // Wrappers that run their remaining words as the command.
+                "setsid" | "nohup" | "nice" | "time" | "exec" | "xargs" | "stdbuf" | "ionice" => {
+                    let Some(next) = args.iter().position(|arg| !arg.starts_with('-')) else {
+                        break;
+                    };
+                    let rest = &words[index + 1 + next..];
+                    let Some(offset) = executable_word_index(rest) else {
+                        break;
+                    };
+                    index += 1 + next + offset;
+                }
+                // Wrappers whose option value is itself a shell command.
+                "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
+                    for (position, arg) in args.iter().enumerate() {
+                        let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                        if (flags_c || arg == "--command")
+                            && let Some(payload) = args.get(position + 1)
+                            && let Some(denial) =
+                                operator_policy_command_denial_at_depth(payload, depth + 1)
+                        {
+                            return Some(denial);
+                        }
+                    }
+                    break;
+                }
+                "cas" => {
+                    let config = args.iter().position(|arg| arg == "config");
+                    let refused = config.is_some_and(|at| {
+                        let rest = &args[at + 1..];
+                        rest.first().is_some_and(|sub| sub == "grant-write" || sub == "revoke-write")
+                            || (rest.first().is_some_and(|sub| sub == "set")
+                                && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
+                    });
+                    if refused {
+                        return Some(
+                            "🚫 OPERATOR-ONLY (cas-3147): write roots and per-task write grants can only be changed by the operator from their own terminal, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` or `cas config grant-write …` themselves."
+                                .to_string(),
+                        );
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
     None
 }
 
@@ -3976,6 +4097,98 @@ fn apply_patch_write_targets_with_modes(
             })
         })
         .collect()
+}
+
+/// cas-3147: the operator write policy in effect for this hook call, and the
+/// task IDs whose grants apply. Roots come only from the operator policy
+/// file, never from config.toml. A grant applies while its task is open: to
+/// the worker holding the task's lease, and to the supervisor. An unreadable
+/// policy file fails closed to "no roots", but the policy directory stays
+/// protected.
+fn operator_write_policy_for(
+    cas_root: &Path,
+    stores: &mut ToolHookStores<'_>,
+    input: &HookInput,
+    is_supervisor: bool,
+) -> (super::write_roots::WritePolicy, std::collections::HashSet<String>) {
+    use super::write_roots::{WriteMode, WritePolicy, WriteRoot};
+    use crate::config::operator_policy::{OperatorWriteMode, load_operator_policy};
+    let modes = |modes: &std::collections::BTreeSet<OperatorWriteMode>| {
+        modes
+            .iter()
+            .map(|mode| match mode {
+                OperatorWriteMode::Create => WriteMode::Create,
+                OperatorWriteMode::Edit => WriteMode::Edit,
+                OperatorWriteMode::Delete => WriteMode::Delete,
+            })
+            .collect()
+    };
+    let mut policy = WritePolicy {
+        roots: Vec::new(),
+        protected: vec![cas_root.join("operator")],
+    };
+    let mut task_ids = std::collections::HashSet::new();
+    let operator = match load_operator_policy(cas_root) {
+        Ok(operator) => operator,
+        Err(error) => {
+            tracing::warn!(%error, "operator write policy unreadable; no write roots apply");
+            return (policy, task_ids);
+        }
+    };
+    policy.roots.extend(operator.roots.iter().map(|root| WriteRoot {
+        path: root.path.clone(),
+        modes: modes(&root.modes),
+        task_id: None,
+    }));
+    if operator.grants.is_empty() {
+        return (policy, task_ids);
+    }
+    let leased: std::collections::HashSet<String> = stores
+        .agents()
+        .and_then(|store| store.list_agent_leases(&current_agent_id(input)).ok())
+        .map(|leases| leases.into_iter().map(|lease| lease.task_id).collect())
+        .unwrap_or_default();
+    for grant in &operator.grants {
+        let open = stores
+            .tasks()
+            .and_then(|store| store.get(&grant.task).ok())
+            .is_some_and(|task| task.status != cas_types::TaskStatus::Closed);
+        if !open {
+            continue;
+        }
+        if is_supervisor || leased.contains(&grant.task) {
+            task_ids.insert(grant.task.clone());
+        }
+        policy.roots.push(WriteRoot {
+            path: grant.path.clone(),
+            modes: modes(&grant.modes),
+            task_id: Some(grant.task.clone()),
+        });
+    }
+    (policy, task_ids)
+}
+
+/// cas-3147 (GH #1169 item 3): audit every out-of-tree change a write root or
+/// grant admitted.
+fn log_write_root_uses(cas_root: &Path, input: &HookInput, uses: &[WriteRootUse]) {
+    let tool = input.tool_name.as_deref().unwrap_or("unknown");
+    let agent = current_agent_id(input);
+    for used in uses {
+        let path = used.path.display().to_string();
+        let root = used.root.display().to_string();
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            cas_root,
+            "workspace_write_root_used",
+            &[
+                ("tool", tool),
+                ("path", path.as_str()),
+                ("mode", used.mode.as_str()),
+                ("root", root.as_str()),
+                ("task", used.task_id.as_deref().unwrap_or("")),
+                ("agent", agent.as_str()),
+            ],
+        );
+    }
 }
 
 /// cas-3147: the denial message, naming the operator's write roots in effect.

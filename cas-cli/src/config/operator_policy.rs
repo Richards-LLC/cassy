@@ -70,28 +70,149 @@ pub fn operator_policy_path(cas_root: &Path) -> PathBuf {
 
 /// Load the policy; a missing file is an empty policy.
 pub fn load_operator_policy(cas_root: &Path) -> anyhow::Result<OperatorWritePolicy> {
-    let _ = cas_root;
-    Ok(OperatorWritePolicy::default())
+    let path = operator_policy_path(cas_root);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text)
+            .map_err(|error| anyhow::anyhow!("invalid operator write policy {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(OperatorWritePolicy::default()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Replace the policy file atomically.
 pub fn save_operator_policy(cas_root: &Path, policy: &OperatorWritePolicy) -> anyhow::Result<()> {
-    let _ = (cas_root, policy);
+    let path = operator_policy_path(cas_root);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("operator policy path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let text = format!(
+        "# Operator write policy (cas-3147). Written only by the operator's own\n\
+         # `cas config set factory.write_roots` / `cas config grant-write`.\n\
+         # Agents are refused when they try to write this file.\n{}",
+        toml::to_string_pretty(policy)?
+    );
+    let staging = parent.join(format!(".write-policy.{}.tmp", std::process::id()));
+    std::fs::write(&staging, text)?;
+    std::fs::rename(&staging, &path)?;
     Ok(())
 }
 
 /// Parse `create+edit` style modes; empty means the default `create+edit`.
 pub fn parse_modes(value: &str) -> anyhow::Result<BTreeSet<OperatorWriteMode>> {
-    let _ = value;
-    Ok(BTreeSet::new())
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(BTreeSet::from([OperatorWriteMode::Create, OperatorWriteMode::Edit]));
+    }
+    value
+        .split(['+', ','])
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(|mode| match mode {
+            "create" => Ok(OperatorWriteMode::Create),
+            "edit" => Ok(OperatorWriteMode::Edit),
+            "delete" => Ok(OperatorWriteMode::Delete),
+            other => Err(anyhow::anyhow!("unknown write mode `{other}`; use create, edit or delete")),
+        })
+        .collect()
+}
+
+/// Resolve one operator-supplied root or grant path: `~` expanded, absolute,
+/// existing, canonical, and neither `/`, `$HOME`, nor anything that contains
+/// or lies inside the operator policy directory.
+pub fn resolve_operator_path(raw: &str, cas_root: &Path) -> anyhow::Result<PathBuf> {
+    let raw = raw.trim();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let expanded = if raw == "~" {
+        home.clone().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home.clone().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?.join(rest)
+    } else {
+        PathBuf::from(raw)
+    };
+    if !expanded.is_absolute() {
+        anyhow::bail!("write root `{raw}` must be an absolute path (or start with ~/)");
+    }
+    let canonical = expanded
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("write root `{raw}` does not resolve: {error}"))?;
+    if canonical.parent().is_none() {
+        anyhow::bail!("`/` cannot be a write root");
+    }
+    if home
+        .and_then(|home| home.canonicalize().ok())
+        .is_some_and(|home| home == canonical)
+    {
+        anyhow::bail!("your home directory cannot be a write root; name the folders inside it");
+    }
+    let cas_root = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+    let operator_dir = cas_root.join("operator");
+    if operator_dir.starts_with(&canonical) || canonical.starts_with(&operator_dir) {
+        anyhow::bail!(
+            "write root `{}` would contain the operator policy itself ({})",
+            canonical.display(),
+            operator_dir.display()
+        );
+    }
+    Ok(canonical)
 }
 
 /// Parse `cas config set factory.write_roots` values: comma-separated
 /// `path[:modes]` entries, for example `~/a:create+edit,~/b`. Each path must
 /// exist; it is resolved to a canonical absolute path. `""` clears the roots.
 pub fn parse_write_roots(value: &str, cas_root: &Path) -> anyhow::Result<Vec<OperatorWriteRoot>> {
-    let _ = (value, cas_root);
-    Ok(Vec::new())
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (path, modes) = match entry.rsplit_once(':') {
+                Some((path, modes))
+                    if !modes.is_empty()
+                        && modes.chars().all(|c| c.is_ascii_lowercase() || c == '+') =>
+                {
+                    (path, modes)
+                }
+                _ => (entry, ""),
+            };
+            Ok(OperatorWriteRoot {
+                path: resolve_operator_path(path, cas_root)?,
+                modes: parse_modes(modes)?,
+            })
+        })
+        .collect()
+}
+
+/// Environment variables only an agent session carries (cas-3147).
+const AGENT_ENV_MARKERS: &[&str] = &[
+    "CAS_AGENT_NAME",
+    "CAS_AGENT_ROLE",
+    "CAS_SESSION_ID",
+    "CAS_CLONE_PATH",
+    "CAS_SUPERVISOR_NAME",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CODEX_THREAD_ID",
+];
+const AGENT_ENV_PREFIXES: &[&str] = &["CAS_FACTORY_", "CAS_AGENT_", "CLAUDE_CODE_", "CODEX_SANDBOX"];
+
+fn agent_ancestor(command_line: &str) -> bool {
+    let mut words = command_line.split_whitespace();
+    let Some(program) = words.next() else {
+        return false;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    match name {
+        "claude" | "codex" => true,
+        "cas" => matches!(words.next(), Some("serve" | "factory")),
+        "node" | "bun" | "deno" => command_line.contains("claude-code") || command_line.contains("@openai/codex"),
+        _ => command_line.contains("/codex/") && command_line.contains("codex"),
+    }
 }
 
 /// What the operator-only commands know about the process that runs them.
@@ -109,8 +230,104 @@ pub struct InvocationContext {
 /// looks like an operator at a terminal: no agent environment, no agent
 /// process among its ancestors, and an interactive terminal.
 pub fn operator_context_refusal(context: &InvocationContext) -> Option<String> {
-    let _ = context;
+    if let Some(marker) = context.env_names.iter().find(|name| {
+        AGENT_ENV_MARKERS.contains(&name.as_str())
+            || AGENT_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    }) {
+        return Some(format!(
+            "refused: {marker} is set, so this runs inside an agent session. Write roots and grants are operator-only; run the command yourself from your own terminal."
+        ));
+    }
+    if let Some(ancestor) = context.ancestors.iter().find(|line| agent_ancestor(line)) {
+        let program = ancestor.split_whitespace().next().unwrap_or(ancestor);
+        return Some(format!(
+            "refused: this process descends from an agent or Cassy server ({program}). Write roots and grants are operator-only; run the command yourself from your own terminal."
+        ));
+    }
+    if !(context.stdin_is_terminal && context.stdout_is_terminal) {
+        return Some(
+            "refused: write roots and grants need an interactive terminal so the operator can confirm them."
+                .to_string(),
+        );
+    }
     None
+}
+
+impl InvocationContext {
+    /// Describe the current process for [`operator_context_refusal`].
+    pub fn from_process() -> Self {
+        use std::io::IsTerminal;
+        Self {
+            env_names: std::env::vars_os()
+                .filter(|(_, value)| !value.is_empty())
+                .filter_map(|(name, _)| name.into_string().ok())
+                .collect(),
+            ancestors: process_ancestors(),
+            stdin_is_terminal: std::io::stdin().is_terminal(),
+            stdout_is_terminal: std::io::stdout().is_terminal(),
+        }
+    }
+}
+
+/// Command lines of this process's ancestors, nearest first.
+fn process_ancestors() -> Vec<String> {
+    let mut ancestors = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        let mut pid = std::process::id();
+        for _ in 0..64 {
+            let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+                break;
+            };
+            let Some(parent) = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))
+                .and_then(|value| value.trim().parse::<u32>().ok())
+            else {
+                break;
+            };
+            if parent <= 1 {
+                break;
+            }
+            let command_line = std::fs::read(format!("/proc/{parent}/cmdline"))
+                .map(|bytes| {
+                    String::from_utf8_lossy(&bytes)
+                        .split('\0')
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            ancestors.push(command_line);
+            pid = parent;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut pid = std::process::id();
+        for _ in 0..64 {
+            let Ok(output) = std::process::Command::new("ps")
+                .args(["-o", "ppid=", "-p", &pid.to_string()])
+                .output()
+            else {
+                break;
+            };
+            let Some(parent) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().ok() else {
+                break;
+            };
+            if parent <= 1 {
+                break;
+            }
+            let command_line = std::process::Command::new("ps")
+                .args(["-o", "command=", "-p", &parent.to_string()])
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .unwrap_or_default();
+            ancestors.push(command_line);
+            pid = parent;
+        }
+    }
+    ancestors
 }
 
 #[cfg(test)]

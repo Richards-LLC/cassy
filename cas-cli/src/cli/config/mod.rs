@@ -6,6 +6,7 @@
 mod docs_ops;
 mod edit_ops;
 mod io_ops;
+pub mod operator_ops;
 mod read_ops;
 mod util;
 
@@ -52,6 +53,12 @@ pub enum ConfigCommands {
 
     /// Interactive config editor (simple line-based)
     Edit(ConfigEditArgs),
+
+    /// Operator only: grant one task write access outside its worktree until it closes
+    GrantWrite(operator_ops::ConfigGrantWriteArgs),
+
+    /// Operator only: revoke a task's write grants
+    RevokeWrite(operator_ops::ConfigRevokeWriteArgs),
 }
 
 #[derive(Parser)]
@@ -195,6 +202,13 @@ pub struct ConfigEditArgs {
 /// cas_root is resolved once at CLI entry point and passed here.
 pub fn execute_subcommand(cmd: &ConfigCommands, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     match cmd {
+        // cas-3147: write roots live in the operator policy file, not config.toml.
+        ConfigCommands::Get(args) if args.key == "factory.write_roots" => {
+            operator_ops::execute_get_write_roots(cli, cas_root)
+        }
+        ConfigCommands::Set(args) if args.key == "factory.write_roots" => {
+            operator_ops::execute_set_write_roots(&args.value, cli, cas_root)
+        }
         ConfigCommands::Get(args) => crate::cli::config::read_ops::execute_get(args, cli, cas_root),
         ConfigCommands::Set(args) => crate::cli::config::read_ops::execute_set(args, cli, cas_root),
         ConfigCommands::List(args) => {
@@ -225,5 +239,7 @@ pub fn execute_subcommand(cmd: &ConfigCommands, cli: &Cli, cas_root: &Path) -> a
         ConfigCommands::Edit(args) => {
             crate::cli::config::edit_ops::execute_edit(args, cli, cas_root)
         }
+        ConfigCommands::GrantWrite(args) => operator_ops::execute_grant_write(args, cli, cas_root),
+        ConfigCommands::RevokeWrite(args) => operator_ops::execute_revoke_write(args, cli, cas_root),
     }
 }

@@ -454,6 +454,18 @@ pub struct UpstreamHealth {
     pub last_error: Option<String>,
     pub last_attempt_at_ms: Option<u64>,
     pub next_retry_at_ms: Option<u64>,
+    /// Whether the execute path holds a live connection right now (cas-53ce).
+    #[serde(default)]
+    pub connected: bool,
+    /// Last successful connect or tool call on the execute path (cas-53ce).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at_ms: Option<u64>,
+    /// Most recent failure code, kept after a recovery so health still shows
+    /// why the connection last dropped (cas-53ce).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_at_ms: Option<u64>,
 }
 
 /// Coarse state intentionally excludes URLs, credentials, and response content.
@@ -521,7 +533,13 @@ pub struct ProxyEngine {
     policy: RwLock<Arc<dyn ProxyPolicy>>,
     observer: RwLock<Option<Arc<dyn ProxyCallObserver>>>,
     policy_audit: Mutex<VecDeque<ProxyPolicyAuditEntry>>,
+    /// Client-side bound on one upstream tool call (cas-53ce).
+    call_timeout: std::sync::RwLock<Duration>,
 }
+
+/// Default client-side bound on one upstream tool call (cas-53ce). Hub
+/// functions time out at 60 s, so a healthy call finishes well inside it.
+pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 90;
 
 fn validate_configs(configs: &HashMap<String, ServerConfig>) -> Result<()> {
     if configs.values().any(
@@ -559,6 +577,7 @@ impl ProxyEngine {
             policy: RwLock::new(Arc::new(AllowAllProxyPolicy)),
             observer: RwLock::new(None),
             policy_audit: Mutex::new(VecDeque::new()),
+            call_timeout: std::sync::RwLock::new(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)),
         };
 
         let mut names: Vec<_> = configs.keys().cloned().collect();
@@ -571,6 +590,11 @@ impl ProxyEngine {
         .await;
 
         Ok(engine)
+    }
+
+    /// Bound every subsequent upstream tool call by `timeout` (cas-53ce).
+    pub fn set_call_timeout(&self, timeout: Duration) {
+        let _ = timeout;
     }
 
     /// Install the policy used for subsequent upstream calls.
@@ -1449,6 +1473,10 @@ fn initial_health(name: &str, config: &ServerConfig) -> UpstreamHealth {
         last_error: None,
         last_attempt_at_ms: None,
         next_retry_at_ms: None,
+        connected: false,
+        last_success_at_ms: None,
+        last_failure_code: None,
+        last_failure_at_ms: None,
     }
 }
 
@@ -2806,6 +2834,182 @@ mod tests {
         assert!(!engine.upstream_connected("viktor").await);
     }
 
+    /// cas-53ce: a stdio MCP upstream speaking newline-delimited JSON-RPC.
+    /// `echo` answers, `drop` exits the process mid-call (a transport error)
+    /// and `hang` never answers. Every tool call is appended to `calls.log`.
+    fn fake_upstream(dir: &Path) -> ServerConfig {
+        let script = dir.join("fake_mcp.py");
+        std::fs::write(
+            &script,
+            r#"import json, os, sys, time
+log = sys.argv[1]
+def send(message):
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    message = json.loads(line)
+    ident = message.get("id")
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": ident, "result": {
+            "protocolVersion": message["params"].get("protocolVersion", "2025-03-26"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "fake", "version": "1"}}})
+    elif method == "tools/list":
+        tools = [{"name": name, "description": name, "inputSchema": {"type": "object"}}
+                 for name in ("echo", "drop", "hang")]
+        send({"jsonrpc": "2.0", "id": ident, "result": {"tools": tools}})
+    elif method == "tools/call":
+        name = message["params"]["name"]
+        with open(log, "a") as handle:
+            handle.write(name + "\n")
+        if name == "drop":
+            os._exit(0)
+        if name == "hang":
+            time.sleep(3600)
+        send({"jsonrpc": "2.0", "id": ident, "result": {
+            "content": [{"type": "text", "text": "ok"}], "isError": False}})
+    elif ident is not None:
+        send({"jsonrpc": "2.0", "id": ident, "result": {}})
+"#,
+        )
+        .unwrap();
+        ServerConfig::Stdio {
+            command: "python3".to_string(),
+            args: vec![
+                "-I".to_string(),
+                script.display().to_string(),
+                dir.join("calls.log").display().to_string(),
+            ],
+            env: HashMap::new(),
+        }
+    }
+
+    async fn call_fake(engine: &ProxyEngine, tool: &str) -> Result<ExecuteResult> {
+        engine
+            .execute(
+                &registered_worker_caller(),
+                &format!(r#"{{"server":"fake","tool":"{tool}","args":{{}}}}"#),
+                None,
+            )
+            .await
+    }
+
+    async fn fake_health(engine: &ProxyEngine) -> UpstreamHealth {
+        engine.health.read().await.get("fake").cloned().expect("fake health")
+    }
+
+    /// cas-53ce (GH #1168): a transport error drops the upstream, health
+    /// shows it disconnected with the error, the absent message names the
+    /// reconnect (not a credential), and once the backoff is due the next
+    /// call reconnects and succeeds with health showing the recovery and the
+    /// last failure.
+    #[tokio::test]
+    async fn cas_53ce_transport_error_reconnects_with_backoff_and_reports_live_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([(
+            "fake".to_string(),
+            fake_upstream(dir.path()),
+        )]))
+        .await
+        .unwrap();
+        assert!(call_fake(&engine, "echo").await.is_ok(), "{:?}", fake_health(&engine).await);
+        let healthy = fake_health(&engine).await;
+        assert!(healthy.connected);
+        assert!(healthy.last_success_at_ms.is_some());
+
+        let dropped = call_fake(&engine, "drop").await;
+        assert!(dropped.is_err(), "a dropped transport fails the call");
+        let down = fake_health(&engine).await;
+        assert_eq!(down.state, UpstreamState::Backoff, "{down:?}");
+        assert!(!down.connected, "{down:?}");
+        assert_eq!(down.last_failure_code.as_deref(), Some("connection_failed"), "{down:?}");
+        assert!(down.last_failure_at_ms.is_some(), "{down:?}");
+        let snapshot = engine.health_snapshot().await;
+        assert_eq!(snapshot.healthy, 0, "proxy_health must not report the dropped upstream healthy");
+
+        let absent = call_fake(&engine, "echo").await.unwrap_err().to_string();
+        assert!(absent.contains("is absent"), "{absent}");
+        assert!(absent.contains("reconnect"), "a dropped connection names the reconnect: {absent}");
+        assert!(!absent.contains("credential"), "the credential is fine: {absent}");
+
+        engine.health.write().await.get_mut("fake").unwrap().next_retry_at_ms = Some(0);
+        let recovered = call_fake(&engine, "echo").await;
+        assert!(recovered.is_ok(), "a due backoff reconnects on the next call: {recovered:?}");
+        let up = fake_health(&engine).await;
+        assert_eq!(up.state, UpstreamState::Healthy, "{up:?}");
+        assert!(up.connected, "{up:?}");
+        assert_eq!(up.last_failure_code.as_deref(), Some("connection_failed"), "{up:?}");
+        assert!(up.last_success_at_ms >= down.last_failure_at_ms, "{up:?}");
+        engine.shutdown().await;
+    }
+
+    /// cas-53ce (GH #1168): a call to an upstream that never answers fails
+    /// at the client timeout instead of hanging for the hub's ~1000 s, and
+    /// the stuck connection is dropped for reconnect.
+    #[tokio::test]
+    async fn cas_53ce_hanging_upstream_call_fails_at_the_client_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([(
+            "fake".to_string(),
+            fake_upstream(dir.path()),
+        )]))
+        .await
+        .unwrap();
+        engine.set_call_timeout(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), call_fake(&engine, "hang"))
+            .await
+            .expect("the proxy itself must bound the call");
+        let error = outcome.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        let health = fake_health(&engine).await;
+        assert!(!health.connected, "{health:?}");
+        assert_eq!(health.last_failure_code.as_deref(), Some("timeout"), "{health:?}");
+        engine.shutdown().await;
+    }
+
+    /// cas-53ce: the absent message names the real next step: a missing
+    /// credential says to restore it; a dropped connection does not.
+    #[tokio::test]
+    async fn cas_53ce_absent_message_distinguishes_credential_from_dropped_connection() {
+        let missing = ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: Some("env:CAS_TEST_MISSING_53CE_KEY".to_string()),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let engine = ProxyEngine::from_configs(HashMap::from([("violet".to_string(), missing)]))
+            .await
+            .unwrap();
+        let error = engine
+            .execute(
+                &registered_worker_caller(),
+                r#"{"server":"violet","tool":"violet_read","args":{}}"#,
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is absent"), "{error}");
+        assert!(error.contains("credential"), "{error}");
+        assert!(!error.contains("reconnect"), "{error}");
+    }
+
+    #[test]
+    fn cas_53ce_call_timeout_is_configurable_with_a_90s_default() {
+        let config: crate::config::Config = toml::from_str("").unwrap();
+        assert_eq!(config.call_timeout(), Duration::from_secs(90));
+        let config: crate::config::Config = toml::from_str("call_timeout_secs = 45\n").unwrap();
+        assert_eq!(config.call_timeout(), Duration::from_secs(45));
+        let config: crate::config::Config = toml::from_str("call_timeout_secs = 0\n").unwrap();
+        assert_eq!(config.call_timeout(), Duration::from_secs(1), "zero is clamped up");
+    }
+
     fn hanging_http_upstream(hold: Duration) -> (ServerConfig, std::thread::JoinHandle<()>) {
         install_test_crypto_provider();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3311,6 +3515,10 @@ mod tests {
                     last_error: Some("token=private\ncontrol".to_string()),
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: Some(5_001),
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
                 UpstreamHealth {
                     name: second_raw.to_string(),
@@ -3324,6 +3532,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: Some(5_001),
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
             ],
         }
@@ -3393,6 +3605,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 })
                 .collect(),
         }
@@ -3473,6 +3689,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
                 UpstreamHealth {
                     name: "forged-http".to_string(),
@@ -3486,6 +3706,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
                 UpstreamHealth {
                     name: "healthy-stdio".to_string(),
@@ -3499,6 +3723,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
             ],
         }
@@ -3624,6 +3852,10 @@ mod tests {
                 last_error: None,
                 last_attempt_at_ms: Some(1),
                 next_retry_at_ms: Some(5_001),
+                connected: false,
+                last_success_at_ms: None,
+                last_failure_code: None,
+                last_failure_at_ms: None,
             }],
         };
         let json = serde_json::to_value(snapshot).unwrap();

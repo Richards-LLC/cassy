@@ -1744,6 +1744,15 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult>;
 
+    /// Worker-level activity after a transport delivery, including drained replies.
+    /// This is evidence for the watchdog only; it does not acknowledge any message.
+    fn has_message_from_since(
+        &self,
+        source: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// Find direct messages that are still unread past their priority threshold.
     fn delivery_stalled_candidates(
         &self,
@@ -3691,6 +3700,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             Ok(EnqueueIdempotentResult::AlreadyExists(existing_id))
         })
+    }
+
+    fn has_message_from_since(
+        &self,
+        source: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM prompt_queue
+             WHERE source = ?1 AND created_at > ?2
+               AND (factory_session = ?3 OR factory_session IS NULL))",
+            params![source, since.to_rfc3339(), factory_session],
+            |row| row.get(0),
+        )?)
     }
 
     fn delivery_stalled_candidates(

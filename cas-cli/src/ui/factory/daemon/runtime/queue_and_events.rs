@@ -2937,6 +2937,44 @@ impl FactoryDaemon {
         self.normal_delivery_probes.remove(&row_id);
     }
 
+    /// GH #1163: replies and attributed task notes prove the recipient is
+    /// handling work even when a mid-turn message starts no new harness turn.
+    /// Retire only the health probe: leave per-message read/ack receipts alone.
+    fn recipient_authored_activity_after(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        worker: &str,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        match queue.has_message_from_since(worker, &self.session_name, after) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, worker, "failed to read recipient reply evidence"),
+        }
+        let agent = open_agent_store(self.app.cas_dir())
+            .ok()
+            .and_then(|store| store.list(None).ok())
+            .and_then(|agents| {
+                agents
+                    .into_iter()
+                    .filter(|agent| agent.name == worker)
+                    .max_by_key(|agent| agent.registered_at)
+            });
+        let Some(agent) = agent else {
+            return false;
+        };
+        let note = crate::store::open_event_store(self.app.cas_dir()).and_then(|store| {
+            Ok(store.has_event_since(cas_types::EventType::TaskNoteAdded, &agent.id, after)?)
+        });
+        match note {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, worker, "failed to read recipient note evidence");
+                false
+            }
+        }
+    }
+
     /// Retry a normal message whose PTY write never yielded any pane output,
     /// then surface the residual failure to the supervisor.  The retry uses
     /// `Mux::inject`, never `interrupt_and_inject`: this watchdog is evidence
@@ -2956,6 +2994,10 @@ impl FactoryDaemon {
             .collect();
         let mut actions = Vec::with_capacity(due.len());
         for (row_id, probe) in due {
+            if self.recipient_authored_activity_after(queue, &probe.pane, probe.delivered_at_utc) {
+                self.normal_delivery_probes.remove(&row_id);
+                continue;
+            }
             let pane_output_grew = self
                 .app
                 .mux
@@ -2972,10 +3014,13 @@ impl FactoryDaemon {
             // rather than interpreting a missing start as an idle recipient.
             let evidence = if evidence != NormalDeliveryTurnEvidence::TurnStarted
                 && crate::ui::factory::director::idle_worker_liveness(
-                    self.app.cas_dir(), &probe.pane,
-                ).is_some_and(|observation| observation.state
-                    == crate::mcp::tools::service::worker_liveness::Liveness::Executing)
-            {
+                    self.app.cas_dir(),
+                    &probe.pane,
+                )
+                .is_some_and(|observation| {
+                    observation.state
+                        == crate::mcp::tools::service::worker_liveness::Liveness::Executing
+                }) {
                 NormalDeliveryTurnEvidence::RecipientBusy
             } else {
                 evidence
@@ -3055,9 +3100,11 @@ impl FactoryDaemon {
                     // narrative names the failed wake. Recorded before the
                     // relay so the row is truthful even while the relay retries.
                     let detail = normal_delivery_watchdog_flag_detail(evidence);
-                    if let Err(error) =
-                        queue.record_wake_attempt(row_id, cas_store::WakeAttempt::Failed, Some(&detail))
-                    {
+                    if let Err(error) = queue.record_wake_attempt(
+                        row_id,
+                        cas_store::WakeAttempt::Failed,
+                        Some(&detail),
+                    ) {
                         tracing::warn!(
                             target: "cas::coordination",
                             message_id = row_id,
@@ -3075,6 +3122,7 @@ impl FactoryDaemon {
                         self.app.cas_dir(),
                         &pane,
                         row_id,
+                        chrono::Utc::now(),
                     );
                     if !matches!(
                         relay,
@@ -3090,20 +3138,8 @@ impl FactoryDaemon {
                         continue;
                     }
                     self.normal_delivery_probes.remove(&row_id);
-                    let notice = format!(
-                        "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then started no harness turn across two watchdog windows ({}). A single normal nudge was attempted; a durable worker-attention relay was sent to the supervisor; no urgent escalation was sent. Use `coordination action=interrupt` or recycle the worker if it stays idle.</system-notice>",
-                        normal_delivery_evidence_phrase(evidence)
-                    );
-                    if let Err(error) = queue.enqueue_with_session(
-                        "delivery-watchdog",
-                        self.app.supervisor_name(),
-                        &notice,
-                        &self.session_name,
-                    ) {
-                        tracing::error!(%error, message_id = row_id, "failed to queue normal delivery watchdog flag");
-                    } else {
-                        super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
-                    }
+                    // The durable attention outbox already contains the incident.
+                    // A second per-message system notice would bypass its coalescing.
                     tracing::warn!(
                         target: "cas::coordination",
                         stage = "normal_delivery_watchdog_flagged",
@@ -15729,8 +15765,14 @@ mod gh_1153_idle_pty_delivery_tests {
             },
         });
         let mut body = format!("{meta}\n");
-        body.push_str(&turn_event("task_started", now - chrono::Duration::seconds(60)));
-        body.push_str(&turn_event("task_complete", now - chrono::Duration::seconds(50)));
+        body.push_str(&turn_event(
+            "task_started",
+            now - chrono::Duration::seconds(60),
+        ));
+        body.push_str(&turn_event(
+            "task_complete",
+            now - chrono::Duration::seconds(50),
+        ));
         std::fs::write(&rollout, body).unwrap();
         rollout
     }
@@ -15745,19 +15787,22 @@ mod gh_1153_idle_pty_delivery_tests {
         worker
             .metadata
             .insert("worker_cli".to_string(), "codex".to_string());
-        worker
-            .metadata
-            .insert("clone_path".to_string(), clone.to_str().unwrap().to_string());
+        worker.metadata.insert(
+            "clone_path".to_string(),
+            clone.to_str().unwrap().to_string(),
+        );
         worker.metadata.insert(
             "worker_account_dir".to_string(),
             account.to_str().unwrap().to_string(),
         );
+        worker.factory_session = Some("provision-test".into());
         store.register(&worker).unwrap();
-        let supervisor = Agent::new_with_role(
+        let mut supervisor = Agent::new_with_role(
             "gh1153-supervisor-id".to_string(),
             "test-supervisor".to_string(),
             AgentRole::Supervisor,
         );
+        supervisor.factory_session = Some("provision-test".into());
         store.register(&supervisor).unwrap();
     }
 
@@ -15813,7 +15858,8 @@ mod gh_1153_idle_pty_delivery_tests {
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
         daemon.app.mux.add_pane(idle_echo_pane());
         let banner = Instant::now() + Duration::from_secs(5);
-        while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0 && Instant::now() < banner
+        while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0
+            && Instant::now() < banner
         {
             drain_for(&mut daemon, Duration::from_millis(50)).await;
         }
@@ -15864,80 +15910,201 @@ mod gh_1153_idle_pty_delivery_tests {
     #[tokio::test]
     async fn gh_1163_executing_long_turn_waits_without_a_nudge_or_relay() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let Fixture { _tmp, mut daemon, queue, rollout, row } = deliver_to_idle_worker().await;
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            rollout,
+            row,
+        } = deliver_to_idle_worker().await;
         let delivery = daemon.normal_delivery_probes[&row].delivered_at_utc;
         let mut body = std::fs::read_to_string(&rollout).unwrap();
-        body.push_str(&turn_event("task_started", delivery - chrono::Duration::seconds(1)));
+        body.push_str(&turn_event(
+            "task_started",
+            delivery - chrono::Duration::seconds(1),
+        ));
         // The turn start falls outside the bounded transcript tail during a long turn.
-        body.push_str(&format!("{}\n", serde_json::json!({"padding": "x".repeat(300_000)})));
-        body.push_str(&format!("{}\n", serde_json::json!({
-            "timestamp": rfc3339(chrono::Utc::now()),
-            "type": "response_item",
-            "payload": {"type": "message", "role": "assistant", "phase": "analysis",
-                "content": [{"type": "output_text", "text": "Working on the task"}]}
-        })));
+        body.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"padding": "x".repeat(300_000)})
+        ));
+        body.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": rfc3339(chrono::Utc::now()),
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "phase": "analysis",
+                    "content": [{"type": "output_text", "text": "Working on the task"}]}
+            })
+        ));
         std::fs::write(&rollout, body).unwrap();
-        assert_eq!(crate::ui::factory::director::idle_worker_liveness(daemon.app.cas_dir(), WORKER)
-            .unwrap().state, crate::mcp::tools::service::worker_liveness::Liveness::Executing);
+        assert_eq!(
+            crate::ui::factory::director::idle_worker_liveness(daemon.app.cas_dir(), WORKER)
+                .unwrap()
+                .state,
+            crate::mcp::tools::service::worker_liveness::Liveness::Executing
+        );
 
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert_ne!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "executing workers must not be nudged"
+        );
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .next_check_at = Some(Instant::now());
         // Also cover a probe whose retry was sent before the worker became busy.
-        daemon.normal_delivery_probes.get_mut(&row).unwrap().nudge_sent_at = Some(Instant::now());
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .nudge_sent_at = Some(Instant::now());
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
         let report = queue.message_delivery_report(row).unwrap().unwrap();
-        assert_ne!(report.wake_attempt, cas_store::WakeAttempt::Failed,
-            "executing workers must never be reported as stalled");
-        assert!(daemon.normal_delivery_probes.contains_key(&row),
-            "wait for the busy turn boundary");
-        assert!(queue.peek_all(20).unwrap().iter().all(|queued|
-            !queued.prompt.contains("worker_delivery_stalled")));
+        assert_ne!(
+            report.wake_attempt,
+            cas_store::WakeAttempt::Failed,
+            "executing workers must never be reported as stalled"
+        );
+        assert!(
+            daemon.normal_delivery_probes.contains_key(&row),
+            "wait for the busy turn boundary"
+        );
+        assert!(
+            queue
+                .peek_all(20)
+                .unwrap()
+                .iter()
+                .all(|queued| !queued.prompt.contains("worker_delivery_stalled"))
+        );
     }
 
     #[tokio::test]
     async fn gh_1163_outbound_reply_after_delivery_retires_the_watchdog() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            row,
+            ..
+        } = deliver_to_idle_worker().await;
         // Activity is worker-level evidence even when addressed to a different peer,
         // and remains evidence after the transport drains it.
-        let reply = queue.enqueue_with_session(WORKER, "reviewer", "Interim findings", "provision-test").unwrap();
+        let reply = queue
+            .enqueue_with_session(WORKER, "reviewer", "Interim findings", "provision-test")
+            .unwrap();
         queue.mark_processed(reply).unwrap();
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
         assert!(!daemon.normal_delivery_probes.contains_key(&row));
-        assert_ne!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
-            cas_store::WakeAttempt::Fired, "recipient activity must not trigger a nudge");
-        assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().confirmation_source, cas_store::ConfirmationSource::Unconfirmed,
-            "activity is watchdog evidence, not an explicit message acknowledgement");
+        assert_ne!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "recipient activity must not trigger a nudge"
+        );
+        assert_eq!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .confirmation_source,
+            cas_store::ConfirmationSource::Unconfirmed,
+            "activity is watchdog evidence, not an explicit message acknowledgement"
+        );
     }
 
     fn record_note(cas_dir: &Path, author: &str, at: chrono::DateTime<chrono::Utc>) {
-        let mut event = cas_types::Event::new(cas_types::EventType::TaskNoteAdded,
-            cas_types::EventEntityType::Task, "cas-1153", "Interim findings").with_session(author);
+        let mut event = cas_types::Event::new(
+            cas_types::EventType::TaskNoteAdded,
+            cas_types::EventEntityType::Task,
+            "cas-1153",
+            "Interim findings",
+        )
+        .with_session(author);
         event.created_at = at;
-        crate::store::open_event_store(cas_dir).unwrap().record(&event).unwrap();
+        crate::store::open_event_store(cas_dir)
+            .unwrap()
+            .record(&event)
+            .unwrap();
     }
 
     #[tokio::test]
     async fn gh_1163_recipient_note_after_delivery_retires_the_watchdog() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            row,
+            ..
+        } = deliver_to_idle_worker().await;
         record_note(daemon.app.cas_dir(), "gh1153-worker-id", chrono::Utc::now());
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
         assert!(!daemon.normal_delivery_probes.contains_key(&row));
-        assert_ne!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
-            cas_store::WakeAttempt::Fired);
-        assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
+        assert_ne!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired
+        );
+        assert_eq!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .confirmation_source,
+            cas_store::ConfirmationSource::Unconfirmed
+        );
     }
 
     #[tokio::test]
     async fn gh_1163_prior_foreign_and_unattributed_activity_does_not_clear_stall() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
-        queue.enqueue_with_session(WORKER, "reviewer", "Old reply", "provision-test").unwrap();
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            row,
+            ..
+        } = deliver_to_idle_worker().await;
+        queue
+            .enqueue_with_session(WORKER, "reviewer", "Old reply", "provision-test")
+            .unwrap();
         let floor = chrono::Utc::now();
-        daemon.normal_delivery_probes.get_mut(&row).unwrap().delivered_at_utc = floor;
-        record_note(daemon.app.cas_dir(), "gh1153-worker-id", floor - chrono::Duration::seconds(1));
-        record_note(daemon.app.cas_dir(), "other-worker-id", floor + chrono::Duration::seconds(1));
-        queue.enqueue_with_session(WORKER, "reviewer", "Foreign session", "other-factory").unwrap();
-        queue.enqueue_with_session("other-worker", "reviewer", "Other reply", "provision-test").unwrap();
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .delivered_at_utc = floor;
+        record_note(
+            daemon.app.cas_dir(),
+            "gh1153-worker-id",
+            floor - chrono::Duration::seconds(1),
+        );
+        record_note(
+            daemon.app.cas_dir(),
+            "other-worker-id",
+            floor + chrono::Duration::seconds(1),
+        );
+        queue
+            .enqueue_with_session(WORKER, "reviewer", "Foreign session", "other-factory")
+            .unwrap();
+        queue
+            .enqueue_with_session("other-worker", "reviewer", "Other reply", "provision-test")
+            .unwrap();
         let task_store = crate::store::open_task_store(daemon.app.cas_dir()).unwrap();
         let mut task = cas_types::Task::new("cas-1153".into(), "Assigned task".into());
         task.assignee = Some(WORKER.into());
@@ -15945,12 +16112,23 @@ mod gh_1153_idle_pty_delivery_tests {
         task_store.add(&task).unwrap();
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
         assert!(daemon.normal_delivery_probes.contains_key(&row));
-        assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
-            cas_store::WakeAttempt::Fired, "only this recipient's activity after delivery clears a probe");
+        assert_eq!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "only this recipient's activity after delivery clears a probe"
+        );
     }
 
     #[tokio::test]
     async fn idle_pty_recipient_without_a_turn_is_nudged_then_reported_not_delivered() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
         let Fixture {
             _tmp,
             mut daemon,
@@ -15984,8 +16162,11 @@ mod gh_1153_idle_pty_delivery_tests {
 
         // The nudge also lands only as echo; the second window elapses.
         drain_for(&mut daemon, Duration::from_millis(800)).await;
-        daemon.normal_delivery_probes.get_mut(&row).unwrap().next_check_at =
-            Instant::now().checked_sub(Duration::from_secs(1));
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .next_check_at = Instant::now().checked_sub(Duration::from_secs(1));
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
 
         let report = queue.message_delivery_report(row).unwrap().unwrap();
@@ -16004,12 +16185,30 @@ mod gh_1153_idle_pty_delivery_tests {
             narrative.contains("NOT delivered to a turn"),
             "message_status must not report success for a turn that never started: {narrative}"
         );
-        // Whether the supervisor relay persisted depends on the ambient
-        // factory session; the row's own record above is the contract.
+        assert!(!daemon.normal_delivery_probes.contains_key(&row));
+        let relays = queue.peek_all(20).unwrap();
+        assert_eq!(
+            relays
+                .iter()
+                .filter(|queued| queued.prompt.contains("worker_delivery_stalled"))
+                .count(),
+            1,
+            "a genuinely idle worker still reaches the supervisor"
+        );
+        assert!(
+            relays
+                .iter()
+                .all(|queued| queued.source != "delivery-watchdog"),
+            "the durable incident must not create a redundant system notice"
+        );
     }
 
     #[tokio::test]
     async fn idle_pty_recipient_that_takes_the_turn_retires_the_watchdog_silently() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
         let Fixture {
             _tmp,
             mut daemon,

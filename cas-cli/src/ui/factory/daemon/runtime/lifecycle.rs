@@ -160,10 +160,12 @@ fn merged_close_blocked_status_key(
 /// relay used by director-detected idle and stall events.  This is deliberately
 /// narrower than a normal-message delivery failure: callers invoke it only
 /// after a bounded wake retry has also started no harness turn (cas-ac97).
+/// GH #1163: one durable incident per worker per fixed five-minute UTC window.
 pub(super) fn enqueue_worker_delivery_stalled_relay(
     cas_dir: &std::path::Path,
     worker: &str,
     message_id: i64,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> WorkerAttentionRelayOutcome {
     let detail = format!(
         "Worker {worker} started no harness turn after normal message {message_id} and its bounded retry."
@@ -175,7 +177,9 @@ pub(super) fn enqueue_worker_delivery_stalled_relay(
         None,
         None,
         &detail,
-        &format!("delivery:{message_id}"),
+        // A durable worker/window identity coalesces concurrent probes and
+        // retries after daemon restarts. Distinct workers retain separate keys.
+        &format!("delivery-window:{}", now.timestamp().div_euclid(5 * 60)),
     )
 }
 
@@ -918,26 +922,74 @@ mod worker_attention_tests {
     #[test]
     fn gh_1163_delivery_stall_relays_coalesce_concurrent_messages_for_one_worker() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_SESSION", "worker-attention-test",
+            "CAS_FACTORY_SESSION",
+            "worker-attention-test",
         )]);
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "worker-attention-test");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-10T14:31:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         std::thread::scope(|scope| {
-            let handles: Vec<_> = (1190..1194).map(|id| {
-                let cas_dir = &cas_dir;
-                scope.spawn(move || enqueue_worker_delivery_stalled_relay(cas_dir, "busy-codex", id))
-            }).collect();
+            let handles: Vec<_> = (1190..1194)
+                .map(|id| {
+                    let cas_dir = &cas_dir;
+                    scope.spawn(move || {
+                        enqueue_worker_delivery_stalled_relay(cas_dir, "busy-codex", id, now)
+                    })
+                })
+                .collect();
             for handle in handles {
-                assert!(matches!(handle.join().unwrap(), WorkerAttentionRelayOutcome::Persisted { .. }));
+                assert!(matches!(
+                    handle.join().unwrap(),
+                    WorkerAttentionRelayOutcome::Persisted { .. }
+                ));
             }
         });
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        assert_eq!(queue.peek_all(20).unwrap().len(), 1,
-            "a burst of messages to the same worker is one incident");
-        assert!(matches!(enqueue_worker_delivery_stalled_relay(&cas_dir, "other-worker", 1200),
-            WorkerAttentionRelayOutcome::Persisted { .. }));
-        assert_eq!(queue.peek_all(20).unwrap().len(), 2, "workers retain separate incidents");
+        assert_eq!(
+            queue.peek_all(20).unwrap().len(),
+            1,
+            "a burst of messages to the same worker is one incident"
+        );
+        assert!(matches!(
+            enqueue_worker_delivery_stalled_relay(&cas_dir, "other-worker", 1200, now),
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        assert_eq!(
+            queue.peek_all(20).unwrap().len(),
+            2,
+            "workers retain separate incidents"
+        );
+        // A read/ack and reopening the stores do not reset the durable window.
+        for row in queue.peek_all(20).unwrap() {
+            queue.ack(row.id).unwrap();
+        }
+        assert!(matches!(
+            enqueue_worker_delivery_stalled_relay(
+                &cas_dir,
+                "busy-codex",
+                1201,
+                now + chrono::Duration::seconds(10)
+            ),
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        assert_eq!(queue.peek_all(20).unwrap().len(), 0);
+        assert!(matches!(
+            enqueue_worker_delivery_stalled_relay(
+                &cas_dir,
+                "busy-codex",
+                1202,
+                now + chrono::Duration::minutes(5)
+            ),
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        assert_eq!(
+            queue.peek_all(20).unwrap().len(),
+            1,
+            "a later window may report a new incident"
+        );
     }
 
     #[test]
@@ -957,7 +1009,7 @@ mod worker_attention_tests {
                 active_task: None,
             },
         );
-        let _ = enqueue_worker_delivery_stalled_relay(&cas_dir, "silent-codex", 42);
+        let _ = enqueue_worker_delivery_stalled_relay(&cas_dir, "silent-codex", 42, chrono::Utc::now());
         let _ = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
         let replay = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
         assert!(matches!(

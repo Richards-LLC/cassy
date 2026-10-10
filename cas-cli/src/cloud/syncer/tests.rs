@@ -1501,10 +1501,23 @@ async fn heal_local_task_dependency_enqueues_team_upsert() {
     assert_eq!(result.healed_task_dependencies_to_cloud, 1);
     assert_eq!(result.healed_task_dependencies_from_cloud, 0);
     let all_pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
-    assert_eq!(all_pending.iter().filter(|row|row.entity_type==crate::cloud::EntityType::Task).count(),2,
-        "both remote-missing endpoint tasks precede the edge");
-    let pending=all_pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
-    assert_eq!(pending.len(),1,"a local-only edge must be queued for team push");
+    assert_eq!(
+        all_pending
+            .iter()
+            .filter(|row| row.entity_type == crate::cloud::EntityType::Task)
+            .count(),
+        2,
+        "both remote-missing endpoint tasks precede the edge"
+    );
+    let pending = all_pending
+        .into_iter()
+        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pending.len(),
+        1,
+        "a local-only edge must be queued for team push"
+    );
     assert_eq!(
         pending[0].entity_id,
         "cas-heal-local-from:cas-heal-local-to:blocks"
@@ -1539,9 +1552,11 @@ async fn dependency_healer_skips_foreign_endpoint() {
             .unwrap()
             .is_empty()
     );
-    let parks=queue.intentional_park_counts(Some("team-cas-2125"),5).unwrap();
-    assert_eq!(parks.get("dependency_endpoint_foreign"),Some(&1));
-    assert_eq!(queue.failed_count_for_team("team-cas-2125",5).unwrap(),0);
+    let parks = queue
+        .intentional_park_counts(Some("team-cas-2125"), 5)
+        .unwrap();
+    assert_eq!(parks.get("dependency_endpoint_foreign"), Some(&1));
+    assert_eq!(queue.failed_count_for_team("team-cas-2125", 5).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -2352,7 +2367,8 @@ async fn pull_team_dependency_scenario(
         .and(query_param("types", "tasks"))
         .and(query_param_is_missing("since"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"tasks":[]})))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let temp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
@@ -2562,9 +2578,16 @@ async fn heal_pushes_an_edge_recreated_after_its_tombstone() {
         .queue
         .pending_for_team(TOMBSTONE_TEAM, 10, 5)
         .unwrap();
-    assert_eq!(pending.len(), 3, "missing endpoint tasks accompany the edge");
-    let pending=pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
-    assert_eq!(pending.len(),1);
+    assert_eq!(
+        pending.len(),
+        3,
+        "missing endpoint tasks accompany the edge"
+    );
+    let pending = pending
+        .into_iter()
+        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+        .collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].entity_id, entity_id);
     assert!(
         fixture
@@ -2642,9 +2665,16 @@ async fn incremental_pull_reconciles_against_the_full_snapshot_when_due() {
         .queue
         .pending_for_team(TOMBSTONE_TEAM, 10, 5)
         .unwrap();
-    assert_eq!(pending.len(), 3, "missing endpoint tasks accompany the edge");
-    let pending=pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
-    assert_eq!(pending.len(),1);
+    assert_eq!(
+        pending.len(),
+        3,
+        "missing endpoint tasks accompany the edge"
+    );
+    let pending = pending
+        .into_iter()
+        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+        .collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1);
     assert_eq!(
         pending[0].entity_id,
         "cas-cf1f-due-from:cas-cf1f-due-to:blocks"
@@ -2784,6 +2814,129 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
         "the diagnostic carries the remediation for its reason: {:?}",
         result.remaining_backlog.failed_errors
     );
+}
+
+// Replay the deployed Cloud envelope: two old project identities own the
+// duplicates, while an unrelated accepted row must still leave the queue.
+async fn duplicate_project_rejection_scenario(team: bool) {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let counts = serde_json::json!({"tasks": {"inserted": 1, "updated": 0, "skipped": 2}});
+    let mut response = if team {
+        serde_json::json!({"synced": counts})
+    } else {
+        counts
+    };
+    response["rows"] = serde_json::json!([
+        {"entity_type": "tasks", "id": "cas-new", "outcome": "inserted"},
+        {"entity_type": "tasks", "id": "cas-old-a", "outcome": "rejected",
+         "reason": "duplicate_of_other_project", "existing_canonical_id": "accounting"},
+        {"entity_type": "tasks", "id": "cas-old-b", "outcome": "rejected",
+         "reason": "duplicate_of_other_project", "existing_canonical_id": "petra-stella-accounting"}
+    ]);
+    Mock::given(method("POST"))
+        .and(path(if team {
+            "/api/teams/accounting-team/sync/push"
+        } else {
+            "/api/sync/push"
+        }))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"richards-llc-accounting\"\n",
+    )
+    .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["cas-new", "cas-old-a", "cas-old-b"] {
+        let mut task = Task::new(id.into(), "Accounting work".into());
+        task.origin_project = Some("richards-llc-accounting".into());
+        let payload = serde_json::to_string(&task).unwrap();
+        if team {
+            queue
+                .enqueue_for_team(
+                    EntityType::Task,
+                    id,
+                    SyncOperation::Upsert,
+                    Some(&payload),
+                    "accounting-team",
+                )
+                .unwrap();
+        } else {
+            queue
+                .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some(&payload))
+                .unwrap();
+        }
+    }
+    let config = CloudSyncerConfig::default();
+    let max_retries = config.max_retries;
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        config,
+        "richards-llc-accounting".into(),
+        temp.path(),
+    );
+    let result = if team {
+        syncer.push_team("accounting-team").unwrap()
+    } else {
+        syncer.push_scoped(PushScope::TasksOnly).unwrap()
+    };
+    assert_eq!(result.pushed_tasks, 1);
+    let remaining = queue.list_all(10).unwrap();
+    assert_eq!(remaining.len(), 2, "only the duplicates stay parked");
+    for (id, owner) in [
+        ("cas-old-a", "accounting"),
+        ("cas-old-b", "petra-stella-accounting"),
+    ] {
+        let row = remaining.iter().find(|row| row.entity_id == id).unwrap();
+        assert_eq!(row.retry_count, max_retries);
+        assert_eq!(
+            row.last_reason.as_deref(),
+            Some("duplicate_of_other_project")
+        );
+        let visible = row
+            .last_error
+            .as_deref()
+            .unwrap()
+            .split("; server response:")
+            .next()
+            .unwrap();
+        assert!(
+            visible.contains(&format!("existing_project={owner}")),
+            "{visible}"
+        );
+        assert!(
+            visible.contains("cas cloud project --adopt-aliases"),
+            "{visible}"
+        );
+        assert!(visible.contains("retire the local duplicate"), "{visible}");
+        assert!(!visible.contains("unrecognized"), "{visible}");
+    }
+}
+
+#[tokio::test]
+async fn duplicate_project_rejection_names_owner_and_remedy_personal() {
+    duplicate_project_rejection_scenario(false).await;
+}
+
+#[tokio::test]
+async fn duplicate_project_rejection_names_owner_and_remedy_team() {
+    duplicate_project_rejection_scenario(true).await;
 }
 
 /// A cloud build that answers with aggregate counts only must behave exactly as

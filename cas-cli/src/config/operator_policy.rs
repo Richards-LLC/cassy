@@ -15,9 +15,11 @@
 //! 3. The PreToolUse workspace contract refuses every agent tool call that
 //!    writes under `.cas/operator/` or runs those two commands.
 //!
-//! An agent that deliberately obfuscates a same-user write outside its tool
-//! calls is out of reach; a hard boundary needs agents under a separate Unix
-//! user.
+//! This is guardrail-grade, not security-grade. The operator and the agents
+//! share a Unix user, so the PreToolUse hook (layer 3) is the actual gate
+//! against agents; the CLI checks are defence in depth. An agent that
+//! deliberately hides a same-user write outside its tool calls is out of
+//! reach; a hard boundary needs agents under a separate Unix user.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -224,6 +226,8 @@ pub struct InvocationContext {
     pub ancestors: Vec<String>,
     pub stdin_is_terminal: bool,
     pub stdout_is_terminal: bool,
+    /// This process's cgroup path (Linux `/proc/self/cgroup`), if known.
+    pub cgroup: String,
 }
 
 /// Why this process may not change the operator policy, or `None` when it
@@ -243,6 +247,16 @@ pub fn operator_context_refusal(context: &InvocationContext) -> Option<String> {
         return Some(format!(
             "refused: this process descends from an agent or Cassy server ({program}). Write roots and grants are operator-only; run the command yourself from your own terminal."
         ));
+    }
+    if context
+        .cgroup
+        .split('/')
+        .any(|part| part.starts_with("cas-worker-") || part.starts_with("cas-server-"))
+    {
+        return Some(
+            "refused: this process runs inside a Cassy factory worker cgroup. Write roots and grants are operator-only; run the command yourself from your own terminal."
+                .to_string(),
+        );
     }
     if !(context.stdin_is_terminal && context.stdout_is_terminal) {
         return Some(
@@ -265,6 +279,7 @@ impl InvocationContext {
             ancestors: process_ancestors(),
             stdin_is_terminal: std::io::stdin().is_terminal(),
             stdout_is_terminal: std::io::stdout().is_terminal(),
+            cgroup: std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default(),
         }
     }
 }
@@ -340,6 +355,7 @@ mod tests {
             ancestors: ancestors.iter().map(|line| line.to_string()).collect(),
             stdin_is_terminal: tty,
             stdout_is_terminal: tty,
+            cgroup: "0::/user.slice/user@1000.service/app.slice/app-org.kde.konsole-1.scope/tab(2).scope".into(),
         }
     }
 
@@ -377,6 +393,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("{ancestor} is an agent ancestor"));
             assert!(refusal.contains("agent"), "{refusal}");
         }
+        let mut in_worker_scope = context(&["HOME"], &["-bash"], true);
+        in_worker_scope.cgroup =
+            "0::/user.slice/app.slice/tab(2).scope/cas-worker-cassy-fierce-octopus-14-silent-koala-69".into();
+        let refusal = operator_context_refusal(&in_worker_scope).expect("factory worker cgroup");
+        assert!(refusal.contains("cgroup"), "{refusal}");
         let refusal = operator_context_refusal(&context(&["HOME"], &["-bash"], false))
             .expect("no terminal");
         assert!(refusal.contains("terminal"), "{refusal}");

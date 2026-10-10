@@ -3874,16 +3874,18 @@ fn factory_write_decision(
             let Some(command) = tool_input.get("command").and_then(|value| value.as_str()) else {
                 return FactoryWriteDecision::Allowed;
             };
-            // cas-3147 (GH #1169 item 4): in-place edits and rename sources
-            // are judged like any other write, not left to chance.
+            // cas-3147 (GH #1169 item 4): once the operator has a policy file,
+            // in-place edits and rename sources are judged like any other
+            // write. Without one the default contract stays as it was.
+            let in_place = if policy.configured {
+                bash_in_place_edit_targets(command)
+            } else {
+                Vec::new()
+            };
             bash_write_targets(command)
                 .into_iter()
                 .map(|path| (path, None))
-                .chain(
-                    bash_in_place_edit_targets(command)
-                        .into_iter()
-                        .map(|path| (path, Some(WriteMode::Edit))),
-                )
+                .chain(in_place.into_iter().map(|path| (path, Some(WriteMode::Edit))))
                 .collect()
         }
         // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
@@ -4126,6 +4128,7 @@ fn operator_write_policy_for(
     let mut policy = WritePolicy {
         roots: Vec::new(),
         protected: vec![cas_root.join("operator")],
+        configured: crate::config::operator_policy::operator_policy_path(cas_root).exists(),
     };
     let mut task_ids = std::collections::HashSet::new();
     let operator = match load_operator_policy(cas_root) {
@@ -4774,6 +4777,7 @@ mod workspace_contract_tests {
                 task_id: task.map(str::to_string),
             }],
             protected: Vec::new(),
+            configured: true,
         }
     }
 
@@ -4916,6 +4920,7 @@ mod workspace_contract_tests {
                 task_id: None,
             }],
             protected: vec![operator_dir.clone()],
+            configured: true,
         };
         let no_tasks = std::collections::HashSet::new();
         let file = policy_file.display().to_string();
@@ -5001,6 +5006,55 @@ mod workspace_contract_tests {
         assert!(closed_tasks.is_empty(), "a grant ends when its task closes");
         assert!(closed.roots.iter().all(|root| root.task_id.is_none()), "{closed:?}");
         assert_eq!(closed.protected, vec![cas_root.join("operator")]);
+    }
+
+    /// cas-3147 review: with no operator policy file, in-place edits and
+    /// renames keep today's behaviour (not judged), so the default contract
+    /// is unchanged; the consistent classification starts only once the
+    /// operator configures a policy.
+    #[cfg(unix)]
+    #[test]
+    fn cas_3147_unconfigured_contract_keeps_in_place_edits_and_renames_as_today() {
+        use super::super::write_roots::WritePolicy;
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, _managed, outside) = write_roots_fixture(fixture.path());
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let dotfile = outside.join("dotfile").display().to_string();
+        let no_tasks = std::collections::HashSet::new();
+        for command in [
+            format!("sed -i s/x/y/ {dotfile}"),
+            format!("perl -pi -e 's/x/y/' {dotfile}"),
+            format!("mv {dotfile} src/dotfile"),
+        ] {
+            let input = bash_input(&command, &worktree);
+            assert_eq!(
+                factory_write_violation(&input, &None, None, false, Some(worktree.as_path())),
+                None,
+                "default contract: {command}"
+            );
+            let unconfigured = WritePolicy {
+                protected: vec![fixture.path().join("main/.cas/operator")],
+                ..WritePolicy::default()
+            };
+            assert_eq!(
+                factory_write_decision(&input, &None, None, false, Some(worktree.as_path()), &unconfigured, &no_tasks),
+                FactoryWriteDecision::Allowed,
+                "no policy file: {command}"
+            );
+            let configured = WritePolicy { configured: true, ..unconfigured };
+            assert!(
+                matches!(
+                    factory_write_decision(&input, &None, None, false, Some(worktree.as_path()), &configured, &no_tasks),
+                    FactoryWriteDecision::Denied(_)
+                ),
+                "with a policy file the edit is judged: {command}"
+            );
+        }
     }
 
     /// cas-3147: an agent shell cannot run the operator-only commands,

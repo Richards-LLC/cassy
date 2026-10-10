@@ -48,6 +48,10 @@ pub(crate) struct WritePolicy {
     /// Directories no agent may write, whatever the roots say: the operator
     /// policy itself (`.cas/operator/`).
     pub protected: Vec<PathBuf>,
+    /// The operator policy file exists. Only then are in-place edits
+    /// (`sed -i`, `perl -i`) and rename sources judged under the contract;
+    /// without it the default contract is exactly as before (cas-3147).
+    pub configured: bool,
 }
 
 impl WritePolicy {

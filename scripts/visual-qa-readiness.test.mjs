@@ -121,8 +121,8 @@ test('both CLI copies honor readiness options and publish a clear failure reason
     const child = spawnSync(process.execPath, [fileURLToPath(new URL(script, import.meta.url)), '--strict',
       '--ready-selector', '#missing-shell', '--ready-timeout-ms', '100', '--scheme', 'light', '--viewport', '390x800', '--artifact-dir', artifactDir, fixture], { encoding: 'utf8' });
     assert.equal(child.status, 1, child.stdout + child.stderr);
-    assert.match(child.stdout, /CONTENT.*text nodes=0.*main landmarks=0/);
-    assert.match(child.stdout, /FAIL page-not-ready.*ready-selector-not-visible.*100 ms/);
+    assert.match(child.stdout, /CONTENT.*text nodes=0[\s\S]*main landmarks=0/);
+    assert.match(child.stdout, /^FAIL page-not-ready[^\n]*\n  ready-selector-not-visible.*100 ms/);
     const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
     assert.equal(report.readiness[0].readySelector, '#missing-shell');
   }

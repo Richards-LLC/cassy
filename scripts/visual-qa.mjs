@@ -1169,8 +1169,7 @@ async function inspectVisualQa(options) {
   const readinessOptions = { readySelector: options.readySelector, readyTimeoutMs };
   const allowlist = await loadAllowlist(options.allowlistPath);
   await mkdir(artifactDir, { recursive: true });
-  const { playwright, version: playwrightVersion, source: playwrightSource } = await resolvePlaywright();
-  console.log(redactQaText(`Playwright ${playwrightVersion} (${playwrightSource})`, options.secrets));
+  const { playwright, version: playwrightVersion } = await resolvePlaywright();
   const browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
   const findings = [];
   const infoFindings = [];
@@ -1430,12 +1429,17 @@ if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[
   } else {
     try {
       const result = await runVisualQa(options);
-      for (const page of result.readiness) console.log(redactQaText(`CONTENT ${page.scheme}/${page.viewport.name}: text nodes=${page.textNodes} characters=${page.textCharacters} main landmarks=${page.mainLandmarks} content elements=${page.contentElements} loading indicators=${page.loadingIndicators}`));
       if (result.status === 'PASS') console.log('PASS');
       else for (const finding of result.findings) {
+        if (finding.type === 'page-not-ready') {
+          console.log(redactQaText(`FAIL page-not-ready ${finding.elementPath}\n  ${finding.reason}\n  Retry: node scripts/visual-qa.mjs --strict --ready-selector CSS URL`));
+          continue;
+        }
         const colors = finding.foreground && finding.background ? ` foreground=${finding.foreground.join(',')} background=${finding.background.join(',')} ratio=${finding.ratio ?? 'n/a'}` : '';
-        console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') || finding.type === 'page-not-ready' ? finding.reason : '') || '')}${colors}`));
+        console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}`));
       }
+      for (const page of result.readiness) console.log(redactQaText(`CONTENT ${page.scheme}/${page.viewport.name}: text nodes=${page.textNodes} characters=${page.textCharacters}\n  main landmarks=${page.mainLandmarks} content elements=${page.contentElements} loading indicators=${page.loadingIndicators}`));
+      console.log(`Playwright ${result.playwrightVersion}`);
       process.exitCode = result.exitCode;
     } catch (error) {
       console.error(redactQaText(error));

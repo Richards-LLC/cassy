@@ -71,6 +71,22 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(favicon).toContain('docs/assets/cassy-logo.png');
     expect(favicon.match(/<path /g)).toHaveLength(3);
     expect(favicon).not.toContain('<text');
+    // cas-8951: one tile for every scheme (no currentColor ink), plus PNG and home-screen icons.
+    expect(favicon).not.toContain('currentColor');
+    expect(favicon).toContain('#7656FA');
+    for (const link of [
+      '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />',
+      '<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />',
+      '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />',
+      '<link rel="manifest" href="/manifest.webmanifest" />',
+      '<meta name="apple-mobile-web-app-title" content="Cassy" />',
+      '<meta name="apple-mobile-web-app-capable" content="yes" />',
+    ]) expect(html).toContain(link);
+    const manifest = JSON.parse(await readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"));
+    expect([manifest.name, manifest.short_name, manifest.display]).toEqual(["Cassy", "Cassy", "standalone"]);
+    expect(manifest.icons.map((icon: { src: string; purpose: string }) => `${icon.src} ${icon.purpose}`)).toEqual(expect.arrayContaining([
+      "icon-192.png any", "icon-512.png any", "icon-maskable-192.png maskable", "icon-maskable-512.png maskable",
+    ]));
   });
 
   // Contract: asks for the machine's hub address instead of seeding the page origin (cas-8051 F5).

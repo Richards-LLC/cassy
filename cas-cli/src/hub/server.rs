@@ -104,6 +104,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.js", get(commander_javascript))
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
+        .merge(commander_brand_routes())
         .route("/commander/ghostty-vt.wasm", get(commander_ghostty_wasm))
         .route(
             "/commander/ghostty-write-pty.wasm",
@@ -283,6 +284,62 @@ async fn commander_favicon() -> Response {
         include_bytes!("../../../hub-web/dist/favicon.svg"),
         "image/svg+xml",
     )
+}
+
+/// cas-8951: Cassy Cloud's PNG favicons, home-screen icons and web manifest.
+/// `hub-web/scripts/render-brand-icons.mjs` renders the PNGs from favicon.svg.
+const COMMANDER_BRAND_ASSETS: &[(&str, &[u8], &str)] = &[
+    (
+        "/commander/favicon-16.png",
+        include_bytes!("../../../hub-web/dist/favicon-16.png"),
+        "image/png",
+    ),
+    (
+        "/commander/favicon-32.png",
+        include_bytes!("../../../hub-web/dist/favicon-32.png"),
+        "image/png",
+    ),
+    (
+        "/commander/apple-touch-icon.png",
+        include_bytes!("../../../hub-web/dist/apple-touch-icon.png"),
+        "image/png",
+    ),
+    (
+        "/commander/icon-192.png",
+        include_bytes!("../../../hub-web/dist/icon-192.png"),
+        "image/png",
+    ),
+    (
+        "/commander/icon-512.png",
+        include_bytes!("../../../hub-web/dist/icon-512.png"),
+        "image/png",
+    ),
+    (
+        "/commander/icon-maskable-192.png",
+        include_bytes!("../../../hub-web/dist/icon-maskable-192.png"),
+        "image/png",
+    ),
+    (
+        "/commander/icon-maskable-512.png",
+        include_bytes!("../../../hub-web/dist/icon-maskable-512.png"),
+        "image/png",
+    ),
+    (
+        "/commander/manifest.webmanifest",
+        include_bytes!("../../../hub-web/dist/manifest.webmanifest"),
+        "application/manifest+json",
+    ),
+];
+
+fn commander_brand_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    COMMANDER_BRAND_ASSETS
+        .iter()
+        .fold(Router::new(), |router, &(path, bytes, content_type)| {
+            router.route(
+                path,
+                get(move || async move { commander_asset(bytes, content_type) }),
+            )
+        })
 }
 
 async fn commander_ghostty_wasm() -> Response {

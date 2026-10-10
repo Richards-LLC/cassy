@@ -1614,6 +1614,9 @@ async function attachSelectedSession(machineId: string, session: string): Promis
   render();
   renderTerminalConnecting(machineId, session);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
+  // cas-4646: a newer tap has moved on while these loaded; this open is stale
+  // and must not attach over the conversation now showing.
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
   await connections.get(machineId)?.attach(session);
 }
 

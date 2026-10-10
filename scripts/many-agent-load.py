@@ -891,6 +891,21 @@ def write_markdown(receipt: dict, path: Path) -> None:
                          f"{rep['passes_over_100ms']} ({fmt(rep['fraction_over_100ms'])}); "
                          f"worst window p99 {fmt(rep['worst_window_p99_ms'], ' ms')}; "
                          f"max {fmt(rep['max_pass_ms'], ' ms')}")
+    control = receipt.get("no_pressure")
+    if control:
+        all_calls = control["calls"].get("_all", {})
+        lines += ["", "## No-pressure control (same build, background writers off)", "",
+                  "| SLO | Observed | Met |", "|---|---|---|"]
+        for slo in control["slos"]:
+            lines.append(f"| {slo['slo']} | {fmt(slo['observed'])} | {'yes' if slo['met'] else '**no**'} |")
+        lines += ["",
+                  f"- All calls: n {all_calls.get('n')}; p50 {fmt(all_calls.get('p50'))} s; "
+                  f"p99 {fmt(all_calls.get('p99'))} s; max {fmt(all_calls.get('max'))} s",
+                  f"- Lock waits >= {LOCK_WAIT_REPORT_SECS} s: {control['lock_waits']['count']} "
+                  f"(max {control['lock_waits']['max_secs']} s); SQLite busy warnings "
+                  f"{control['sqlite_busy']['total']}",
+                  f"- Daemon pass p99 {fmt(control['daemon'].get('pass_p99_ms'), ' ms')} "
+                  f"({control['daemon'].get('verdict_basis')})"]
     agents = receipt["agent_errors"]
     if agents:
         lines += ["", "## Agent failures", ""] + [f"- {name}: {err}" for name, err in agents.items()]
@@ -918,7 +933,8 @@ def cas_version(cas_bin: str) -> str:
         return "unknown"
 
 
-def run(args: argparse.Namespace) -> int:
+def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
+    """One load phase on a fresh scratch copy; returns the receipt and calls."""
     scratch = Path(args.scratch).expanduser()
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # Short on purpose: the daemon's unix socket paths live under it.
@@ -926,8 +942,6 @@ def run(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True)
     (run_dir / "LABEL").write_text(f"{args.label} n={args.agents}\n")
     args.run_dir = str(run_dir)
-    out = Path(args.out).expanduser()
-    out.mkdir(parents=True, exist_ok=True)
 
     env = prepare_run(args, run_dir)
     pool = task_pool_from(env["cas_dir"], 200)
@@ -1019,6 +1033,41 @@ def run(args: argparse.Namespace) -> int:
     }
     receipt["slos"] = evaluate_slos(results, daemon)
     receipt["slos_met"] = all(s["met"] for s in receipt["slos"])
+    if not args.keep_scratch:
+        for suffix in ("cas.db", "cas.db-wal", "cas.db-shm"):
+            path = env["cas_dir"] / suffix
+            if path.exists():
+                path.unlink()
+    return receipt, results
+
+
+def control_summary(receipt: dict) -> dict:
+    """The no-pressure control phase, kept compact inside the main receipt."""
+    keep = ("started_at", "finished_at", "run_dir", "background_writers", "calls", "slos",
+            "slos_met", "sqlite_busy", "agent_errors")
+    summary = {key: receipt[key] for key in keep}
+    summary["lock_waits"] = {k: v for k, v in receipt["lock_waits"].items() if k != "episodes"}
+    summary["daemon"] = {k: v for k, v in receipt["daemon"].items() if k != "longest_in_pass"}
+    return summary
+
+
+def run(args: argparse.Namespace) -> int:
+    out = Path(args.out).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    receipt, results = run_once(args)
+    for row in results:
+        row["phase"] = "pressure" if args.bg_writers else "no-pressure"
+    # The SLO verdict is the run as configured. With background pressure on,
+    # a second phase without it is recorded alongside, as the control.
+    if args.control and args.bg_writers > 0:
+        control_args = argparse.Namespace(**vars(args))
+        control_args.bg_writers = 0
+        print("[load] no-pressure control phase", flush=True)
+        control, control_results = run_once(control_args)
+        receipt["no_pressure"] = control_summary(control)
+        for row in control_results:
+            row["phase"] = "no-pressure"
+        results = results + control_results
 
     base = out / f"load-{args.label}-n{args.agents}"
     (base.with_suffix(".json")).write_text(json.dumps(receipt, indent=2) + "\n")
@@ -1030,11 +1079,10 @@ def run(args: argparse.Namespace) -> int:
     for slo in receipt["slos"]:
         print(f"[load] {'PASS' if slo['met'] else 'FAIL'} {slo['slo']}: observed {slo['observed']}",
               flush=True)
-    if not args.keep_scratch:
-        for suffix in ("cas.db", "cas.db-wal", "cas.db-shm"):
-            path = env["cas_dir"] / suffix
-            if path.exists():
-                path.unlink()
+    if "no_pressure" in receipt:
+        for slo in receipt["no_pressure"]["slos"]:
+            print(f"[load] control {'PASS' if slo['met'] else 'FAIL'} {slo['slo']}: "
+                  f"observed {slo['observed']}", flush=True)
     if not results:
         return 2
     return 0 if receipt["slos_met"] else 1
@@ -1071,6 +1119,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="mean time each background transaction holds the write lock")
     parser.add_argument("--bg-gap-ms", type=float, default=600.0,
                         help="mean pause between one writer's transactions")
+    parser.add_argument("--control", action=argparse.BooleanOptionalAction, default=True,
+                        help="after a run with background pressure, record a no-pressure "
+                             "control phase in the same receipt")
     parser.add_argument("--keep-scratch", action="store_true",
                         help="keep the scratch database copy after the run")
     args = parser.parse_args(argv)

@@ -4228,6 +4228,89 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-39f3: a worker may delete a zero-byte, unheld `index.lock` in its
+    /// own worktree's gitdir (`<repo>/.git/worktrees/<self>/`), the leftover
+    /// of a git process killed mid-write. A lock with content, a lock a
+    /// process still holds open, another worktree's lock, the main
+    /// repository's lock and any other file in the gitdir stay refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_may_remove_only_its_own_stale_gitdir_index_lock_cas_39f3() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let root_path = root.path().canonicalize().expect("canonical fixture root");
+        let home = root_path.join("home");
+        let main = root_path.join("main");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join("README"), "x").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        let worktree = main.join(".cas/worktrees/brisk-otter-7");
+        let other = main.join(".cas/worktrees/other-worker-8");
+        git(&main, &["worktree", "add", "-q", "-b", "factory/brisk-otter-7", worktree.to_str().unwrap()]);
+        git(&main, &["worktree", "add", "-q", "-b", "factory/other-worker-8", other.to_str().unwrap()]);
+        let own_gitdir = main.join(".git/worktrees/brisk-otter-7");
+        let other_gitdir = main.join(".git/worktrees/other-worker-8");
+        let own_lock = own_gitdir.join("index.lock");
+        let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        let stale = |path: &Path, body: &[u8]| {
+            std::fs::write(path, body).unwrap();
+            std::fs::File::options().write(true).open(path).unwrap().set_modified(aged).unwrap();
+        };
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let decide = |command: &str| {
+            factory_write_violation(&bash_input(command, &worktree), &None, None, false, Some(worktree.as_path()))
+        };
+        let rm = |path: &Path| format!("rm -f {}", path.display());
+
+        stale(&own_lock, b"");
+        assert_eq!(decide(&rm(&own_lock)), None, "own zero-byte unheld index.lock");
+        assert_eq!(
+            decide("rm -f ../../../.git/worktrees/brisk-otter-7/index.lock"),
+            None,
+            "the same lock by relative path"
+        );
+
+        let refused = |case: &str, command: String| {
+            let violation = decide(&command).unwrap_or_else(|| panic!("{case} must be refused: {command}"));
+            assert!(violation.matched_rule.starts_with("deletion"), "{case}: {violation:?}");
+            violation
+        };
+        stale(&own_lock, b"DIRC partial");
+        refused("own lock with content", rm(&own_lock));
+        stale(&own_lock, b"");
+        let holder = std::fs::File::open(&own_lock).unwrap();
+        let held = refused("own lock held open by a process", rm(&own_lock));
+        assert!(held.matched_rule.contains("held"), "{held:?}");
+        drop(holder);
+        assert_eq!(decide(&rm(&own_lock)), None, "released again");
+
+        let other_lock = other_gitdir.join("index.lock");
+        stale(&other_lock, b"");
+        refused("another worker's gitdir lock", rm(&other_lock));
+        let main_lock = main.join(".git/index.lock");
+        stale(&main_lock, b"");
+        refused("the main repository's index.lock", rm(&main_lock));
+        refused("another file in the own gitdir", rm(&own_gitdir.join("HEAD")));
+        refused("the whole own gitdir", format!("rm -rf {}", own_gitdir.display()));
+    }
+
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
     /// its sanctioned roots and stale Cassy runtime files (sockets, locks,
     /// pid and session files) under ~/.cas; the supervisor may also clear

@@ -15,6 +15,13 @@ surfaces and dominant loading states produce `page-not-ready`, which a visual
 allowlist cannot suppress. A partly rendered `aria-busy` region can retain real
 content. Declared journey states can intentionally exercise loading after startup.
 
+After readiness, and after each journey step, the page is settled before it is
+measured. Every frame, finite animations and transitions are finished and
+infinite ones paused. Settling ends once the DOM has not mutated and nothing
+has animated for 500 ms, bounded at 3 s. Content a framework inserts after load
+is therefore measured after its enter transition, not at opacity 0 (GH #1158).
+Text that stays invisible once the page is at rest still fails.
+
 ## Critique
 
 terminal-qa: PASS visual-qa-loading · 11 runs · 0 fail · 0 warn · 0 allowed

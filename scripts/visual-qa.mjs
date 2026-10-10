@@ -1112,27 +1112,55 @@ async function runStep(page, context, step, timeout) {
  * frame. Repeats until no finite animation is left, then waits two frames so
  * the settled styles are painted.
  */
+/**
+ * Quiet window settlePage waits for: no DOM mutation and no running animation
+ * for this long. GH #1158: Quasar inserted a field message 212-407 ms after
+ * load and faded it in over ~600 ms. A settle that only finished animations
+ * already running when it started measured that message at opacity 0.
+ */
+const SETTLE_QUIET_MS = 500;
+/** Upper bound on settling, for pages that never stop mutating or animating. */
+const SETTLE_MAX_MS = 3000;
+
+/**
+ * Bring the page to rest before it is measured. Every frame, finite
+ * animations and transitions are finished (infinite ones are paused at their
+ * start). Settling ends once the DOM has not mutated and no animation has run
+ * for SETTLE_QUIET_MS, so content a framework inserts after load, and the
+ * enter transition it starts, are finished before measurement. Settling is
+ * bounded by SETTLE_MAX_MS.
+ */
 async function settlePage(page) {
-  await page.evaluate(async () => {
+  await page.evaluate(async ({ quietMs, maxMs }) => {
     const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
-    for (let round = 0; round < 10; round += 1) {
-      await frame();
-      let running = 0;
-      for (const animation of document.getAnimations()) {
-        if (animation.playState === 'finished') continue;
-        try {
-          animation.finish();
-          running += 1;
-        } catch {
-          if (animation.playState !== 'paused') animation.pause();
-          animation.currentTime = 0;
+    const started = performance.now();
+    let lastActivity = started;
+    const observer = new MutationObserver(() => { lastActivity = performance.now(); });
+    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    try {
+      for (;;) {
+        await frame();
+        let running = 0;
+        for (const animation of document.getAnimations()) {
+          if (animation.playState === 'finished') continue;
+          try {
+            animation.finish();
+            running += 1;
+          } catch {
+            if (animation.playState !== 'paused') animation.pause();
+            animation.currentTime = 0;
+          }
         }
+        const now = performance.now();
+        if (running) lastActivity = now;
+        if (now - lastActivity >= quietMs || now - started >= maxMs) break;
       }
-      if (!running) break;
+    } finally {
+      observer.disconnect();
     }
     await frame();
     await frame();
-  });
+  }, { quietMs: SETTLE_QUIET_MS, maxMs: SETTLE_MAX_MS });
 }
 
 /**

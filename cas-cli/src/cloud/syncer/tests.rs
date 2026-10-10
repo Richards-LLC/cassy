@@ -1501,23 +1501,10 @@ async fn heal_local_task_dependency_enqueues_team_upsert() {
     assert_eq!(result.healed_task_dependencies_to_cloud, 1);
     assert_eq!(result.healed_task_dependencies_from_cloud, 0);
     let all_pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
-    assert_eq!(
-        all_pending
-            .iter()
-            .filter(|row| row.entity_type == crate::cloud::EntityType::Task)
-            .count(),
-        2,
-        "both remote-missing endpoint tasks precede the edge"
-    );
-    let pending = all_pending
-        .into_iter()
-        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        pending.len(),
-        1,
-        "a local-only edge must be queued for team push"
-    );
+    assert_eq!(all_pending.iter().filter(|row|row.entity_type==crate::cloud::EntityType::Task).count(),2,
+        "both remote-missing endpoint tasks precede the edge");
+    let pending=all_pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
+    assert_eq!(pending.len(),1,"a local-only edge must be queued for team push");
     assert_eq!(
         pending[0].entity_id,
         "cas-heal-local-from:cas-heal-local-to:blocks"
@@ -1552,11 +1539,9 @@ async fn dependency_healer_skips_foreign_endpoint() {
             .unwrap()
             .is_empty()
     );
-    let parks = queue
-        .intentional_park_counts(Some("team-cas-2125"), 5)
-        .unwrap();
-    assert_eq!(parks.get("dependency_endpoint_foreign"), Some(&1));
-    assert_eq!(queue.failed_count_for_team("team-cas-2125", 5).unwrap(), 0);
+    let parks=queue.intentional_park_counts(Some("team-cas-2125"),5).unwrap();
+    assert_eq!(parks.get("dependency_endpoint_foreign"),Some(&1));
+    assert_eq!(queue.failed_count_for_team("team-cas-2125",5).unwrap(),0);
 }
 
 #[tokio::test]
@@ -2367,8 +2352,7 @@ async fn pull_team_dependency_scenario(
         .and(query_param("types", "tasks"))
         .and(query_param_is_missing("since"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"tasks":[]})))
-        .mount(&server)
-        .await;
+        .mount(&server).await;
 
     let temp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
@@ -2578,16 +2562,9 @@ async fn heal_pushes_an_edge_recreated_after_its_tombstone() {
         .queue
         .pending_for_team(TOMBSTONE_TEAM, 10, 5)
         .unwrap();
-    assert_eq!(
-        pending.len(),
-        3,
-        "missing endpoint tasks accompany the edge"
-    );
-    let pending = pending
-        .into_iter()
-        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
-        .collect::<Vec<_>>();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 3, "missing endpoint tasks accompany the edge");
+    let pending=pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
+    assert_eq!(pending.len(),1);
     assert_eq!(pending[0].entity_id, entity_id);
     assert!(
         fixture
@@ -2665,16 +2642,9 @@ async fn incremental_pull_reconciles_against_the_full_snapshot_when_due() {
         .queue
         .pending_for_team(TOMBSTONE_TEAM, 10, 5)
         .unwrap();
-    assert_eq!(
-        pending.len(),
-        3,
-        "missing endpoint tasks accompany the edge"
-    );
-    let pending = pending
-        .into_iter()
-        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
-        .collect::<Vec<_>>();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 3, "missing endpoint tasks accompany the edge");
+    let pending=pending.into_iter().filter(|row|row.entity_type==crate::cloud::EntityType::TaskDependency).collect::<Vec<_>>();
+    assert_eq!(pending.len(),1);
     assert_eq!(
         pending[0].entity_id,
         "cas-cf1f-due-from:cas-cf1f-due-to:blocks"
@@ -2896,13 +2866,16 @@ async fn duplicate_project_rejection_scenario(team: bool) {
     } else {
         syncer.push_scoped(PushScope::TasksOnly).unwrap()
     };
-    assert_eq!(result.pushed_tasks, 1);
+    assert_eq!(result.pushed_tasks, 1, "{:?}", result.errors);
     let remaining = queue.list_all(10).unwrap();
     assert_eq!(remaining.len(), 2, "only the duplicates stay parked");
     for (id, owner) in [
         ("cas-old-a", "accounting"),
         ("cas-old-b", "petra-stella-accounting"),
     ] {
+        assert!(result.concise_errors().iter().any(|error| {
+            error.contains(id) && error.contains(&format!("existing_project={owner}"))
+        }));
         let row = remaining.iter().find(|row| row.entity_id == id).unwrap();
         assert_eq!(row.retry_count, max_retries);
         assert_eq!(
@@ -2937,6 +2910,17 @@ async fn duplicate_project_rejection_names_owner_and_remedy_personal() {
 #[tokio::test]
 async fn duplicate_project_rejection_names_owner_and_remedy_team() {
     duplicate_project_rejection_scenario(true).await;
+}
+
+#[test]
+fn duplicate_project_rejection_without_owner_keeps_legacy_response_compatible() {
+    let row: PushRowResult = serde_json::from_value(serde_json::json!({
+        "id": "cas-old", "outcome": "rejected", "reason": "duplicate_of_other_project"
+    }))
+    .unwrap();
+    assert_eq!(row.rejection_context(), "duplicate_of_other_project");
+    assert!(!row.rejection_is_retryable());
+    assert!(push_reason_hint(row.reason.as_deref().unwrap()).contains("cloud owner"));
 }
 
 /// A cloud build that answers with aggregate counts only must behave exactly as
@@ -3009,6 +2993,7 @@ fn every_push_reason_has_its_own_remediation() {
     for reason in [
         "project_mismatch",
         "project_identity_conflict",
+        "duplicate_of_other_project",
         "scope_mismatch",
         "revision_conflict",
         "version_gate",
@@ -3369,6 +3354,7 @@ fn a_stale_base_is_retryable_rather_than_parked() {
         id: "cas-stale".to_string(),
         outcome: PushRowOutcome::Rejected,
         reason: Some("revision_conflict".to_string()),
+        existing_canonical_id: None,
     };
     assert!(conflict.rejection_is_retryable());
     // An unknown reason still parks — losing a diagnostic row is worse.
@@ -3376,6 +3362,7 @@ fn a_stale_base_is_retryable_rather_than_parked() {
         id: "cas-unknown".to_string(),
         outcome: PushRowOutcome::Rejected,
         reason: Some("something_new".to_string()),
+        existing_canonical_id: None,
     };
     assert!(!unknown.rejection_is_retryable());
 }

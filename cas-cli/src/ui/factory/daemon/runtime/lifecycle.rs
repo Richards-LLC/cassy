@@ -224,9 +224,7 @@ pub(super) fn enqueue_correlated_worker_deaths_relay(
          account or network) before respawning; each worker's own worker-died relay lists \
          the tasks it parked.",
         count = group.len(),
-        start = first
-            .at
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        start = first.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     );
     let occurrence = format!("{}:{}", first.worker, first.at.timestamp_millis());
     enqueue_worker_attention_relay_detail(
@@ -1165,21 +1163,16 @@ mod worker_attention_tests {
         let group = ["codex-a", "codex-b", "codex-c"]
             .iter()
             .enumerate()
-            .map(
-                |(index, worker)| super::super::queue_and_events::ObservedWorkerExit {
-                    at: t0 + chrono::Duration::milliseconds(600 * index as i64),
-                    worker: (*worker).to_string(),
-                    status: "exited with code 0".to_string(),
-                },
-            )
+            .map(|(index, worker)| super::super::queue_and_events::ObservedWorkerExit {
+                at: t0 + chrono::Duration::milliseconds(600 * index as i64),
+                worker: (*worker).to_string(),
+                status: "exited with code 0".to_string(),
+            })
             .collect::<Vec<_>>();
 
         let first = enqueue_correlated_worker_deaths_relay(&cas_dir, &group);
         let replay = enqueue_correlated_worker_deaths_relay(&cas_dir, &group);
-        assert!(matches!(
-            first,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
         assert_eq!(first, replay);
 
         let rows = crate::store::open_prompt_queue_store(&cas_dir)
@@ -1188,23 +1181,11 @@ mod worker_attention_tests {
             .unwrap();
         assert_eq!(rows.len(), 1, "one incident, one wake");
         let prompt = &rows[0].prompt;
-        assert!(
-            crate::prompt_revalidation::is_supervisor_wake_envelope(prompt),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("kind=\"workers_died_together\""),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("3 worker harnesses exited within 1200 ms"),
-            "{prompt}"
-        );
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(prompt), "{prompt}");
+        assert!(prompt.contains("kind=\"workers_died_together\""), "{prompt}");
+        assert!(prompt.contains("3 worker harnesses exited within 1200 ms"), "{prompt}");
         for worker in ["codex-a", "codex-b", "codex-c"] {
-            assert!(
-                prompt.contains(&format!("{worker} (exited with code 0)")),
-                "{prompt}"
-            );
+            assert!(prompt.contains(&format!("{worker} (exited with code 0)")), "{prompt}");
         }
     }
 
@@ -1231,10 +1212,7 @@ mod worker_attention_tests {
 
         let first = enqueue_worker_approval_pending_relay(&cas_dir, &request);
         let replay = enqueue_worker_approval_pending_relay(&cas_dir, &request);
-        assert!(matches!(
-            first,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
         assert_eq!(first, replay, "one wake per request id");
 
         let rows = crate::store::open_prompt_queue_store(&cas_dir)
@@ -1244,26 +1222,13 @@ mod worker_attention_tests {
         assert_eq!(rows.len(), 1);
         let prompt = &rows[0].prompt;
         assert_eq!(rows[0].target, "supervisor");
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(prompt), "{prompt}");
+        assert!(prompt.contains("kind=\"worker_approval_pending\""), "{prompt}");
+        assert!(prompt.contains("solid-falcon-70") && prompt.contains("1680s"), "{prompt}");
+        assert!(prompt.contains("cd hub-web && python3 - <<'EOF'"), "{prompt}");
         assert!(
-            crate::prompt_revalidation::is_supervisor_wake_envelope(prompt),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("kind=\"worker_approval_pending\""),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("solid-falcon-70") && prompt.contains("1680s"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("cd hub-web && python3 - <<'EOF'"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains(
-                "cas factory approve solid-falcon-70 --request perm-1790189281659-ph1zl7g"
-            ) && prompt.contains("cas factory deny solid-falcon-70"),
+            prompt.contains("cas factory approve solid-falcon-70 --request perm-1790189281659-ph1zl7g")
+                && prompt.contains("cas factory deny solid-falcon-70"),
             "{prompt}"
         );
     }
@@ -1449,7 +1414,11 @@ mod worker_attention_tests {
             .peek_all(10)
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].prompt.contains("`factory action=worker_status`"));
+        assert!(
+            rows[0]
+                .prompt
+                .contains("`factory action=worker_status`")
+        );
         assert!(!rows[0].prompt.contains("mcp__"));
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }
@@ -1463,17 +1432,16 @@ mod worker_attention_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "merged-close-blocked-test");
-        let next_step =
-            crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
-                tasks: vec![crate::ui::factory::director::MergedCloseBlockedTask {
-                    task_id: "cas-merged".to_string(),
-                    factory_branch: "factory/gold-fox".to_string(),
-                    anchor: "anchor-sha".to_string(),
-                    target_branch: "epic/cas-epic".to_string(),
-                    target_tip: "target-tip".to_string(),
-                    close_rejection: "ZERO-COMMIT after merged delivery".to_string(),
-                }],
-            };
+        let next_step = crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
+            tasks: vec![crate::ui::factory::director::MergedCloseBlockedTask {
+                task_id: "cas-merged".to_string(),
+                factory_branch: "factory/gold-fox".to_string(),
+                anchor: "anchor-sha".to_string(),
+                target_branch: "epic/cas-epic".to_string(),
+                target_tip: "target-tip".to_string(),
+                close_rejection: "ZERO-COMMIT after merged delivery".to_string(),
+            }],
+        };
         let first = enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::SupervisorStalled {
@@ -1503,13 +1471,15 @@ mod worker_attention_tests {
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1, "the merged close block is stable-deduped");
         assert!(rows[0].prompt.contains("kind=\"merged_close_blocked\""));
-        assert!(rows[0].prompt.contains("ZERO-COMMIT after merged delivery"));
-        assert!(rows[0].prompt.contains("task action=close id=cas-merged"));
-        assert!(
-            !rows[0]
-                .prompt
-                .contains("merge the ready delivery branch(es)")
-        );
+        assert!(rows[0]
+            .prompt
+            .contains("ZERO-COMMIT after merged delivery"));
+        assert!(rows[0]
+            .prompt
+            .contains("task action=close id=cas-merged"));
+        assert!(!rows[0]
+            .prompt
+            .contains("merge the ready delivery branch(es)"));
     }
 
     /// cas-d9a8: the fail-safe for supervisor traffic that is not wake-shaped.
@@ -1527,10 +1497,7 @@ mod worker_attention_tests {
         register_supervisor(&cas_dir, "supervisor-unread-test");
 
         let first = enqueue_supervisor_unread_relay(&cas_dir, "daring-marten-11", 24370, 3);
-        assert!(matches!(
-            first,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
         // Same backlog head: no second alert. Repeating the same fact at the
         // daemon's scan cadence would be the noise this is meant to replace.
         let replay = enqueue_supervisor_unread_relay(&cas_dir, "daring-marten-11", 24370, 4);
@@ -1541,10 +1508,7 @@ mod worker_attention_tests {
         // The head moved — the supervisor read the oldest and something is
         // still waiting. That is a new fact and is reported.
         let moved = enqueue_supervisor_unread_relay(&cas_dir, "swift-fox", 24371, 2);
-        assert!(matches!(
-            moved,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
+        assert!(matches!(moved, WorkerAttentionRelayOutcome::Persisted { .. }));
 
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
@@ -1710,11 +1674,7 @@ mod worker_attention_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target, "calm-octopus-51");
         assert!(rows[0].prompt.contains("PR #932 merged at merge-tip"));
-        assert!(
-            rows[0]
-                .prompt
-                .contains("close cas-7ea6 with commit_receipt=merge-tip")
-        );
+        assert!(rows[0].prompt.contains("close cas-7ea6 with commit_receipt=merge-tip"));
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
 
         let mut aged = persisted;
@@ -1726,11 +1686,7 @@ mod worker_attention_tests {
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 2);
         let supervisor_row = rows.iter().find(|row| row.target == "supervisor").unwrap();
-        assert!(
-            supervisor_row
-                .prompt
-                .contains("kind=\"delivery_pr_merge_timeout\"")
-        );
+        assert!(supervisor_row.prompt.contains("kind=\"delivery_pr_merge_timeout\""));
         assert!(supervisor_row.prompt.contains("PR #932"));
         assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
             &supervisor_row.prompt
@@ -1757,8 +1713,10 @@ impl FactoryDaemon {
         // Create the factory app (this spawns Claude instances)
         let mut app = FactoryApp::new(config.factory_config)?;
         app.set_factory_session(config.session_name.clone());
-        let merge_sweep =
-            super::merge_sweep::MergeSweepCoordinator::new(app.cas_dir(), &config.session_name);
+        let merge_sweep = super::merge_sweep::MergeSweepCoordinator::new(
+            app.cas_dir(),
+            &config.session_name,
+        );
 
         // Track factory session start
         crate::telemetry::track_factory_started("supervisor", app.worker_names().len());
@@ -1927,7 +1885,7 @@ impl FactoryDaemon {
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
-            reported_auth_failed_workers: std::collections::HashMap::new(),
+        reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
             merge_sweep,
@@ -1936,8 +1894,7 @@ impl FactoryDaemon {
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
             urgent_wake_probes: HashMap::new(),
-            send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(
-            ),
+            send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),
@@ -2260,13 +2217,12 @@ impl FactoryDaemon {
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
                         let failures =
                             super::ci_watch::collect_failures(&transport, &watched_branches)?;
-                        let queue_poll =
-                            super::ci_watch::collect_merge_queue_ejections_with_arm_state(
-                                &transport,
-                                &deliveries,
-                                &previously_queued,
-                                &previously_armed,
-                            )?;
+                        let queue_poll = super::ci_watch::collect_merge_queue_ejections_with_arm_state(
+                            &transport,
+                            &deliveries,
+                            &previously_queued,
+                            &previously_armed,
+                        )?;
                         let delivery_pr_observations =
                             super::ci_watch::collect_delivery_pr_observations(
                                 &transport,
@@ -2589,19 +2545,13 @@ impl FactoryDaemon {
                         }
                         // Task mutations and director snapshots share one durable
                         // assignment row; a late tick cannot duplicate the wake.
-                        if let Some(task_id) =
-                            crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text)
-                        {
-                            if let Ok(task) = crate::store::open_task_store_cached(
-                                self.app.cas_dir(),
-                            )
-                            .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
+                        if let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text) {
+                            if let Ok(task) = crate::store::open_task_store_cached(self.app.cas_dir())
+                                .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
                             {
                                 match crate::task_assignment::enqueue(self.app.cas_dir(), &task) {
                                     Ok(_) => continue,
-                                    Err(error) => {
-                                        tracing::warn!(%error, "assignment enqueue failed; retaining director fallback")
-                                    }
+                                    Err(error) => tracing::warn!(%error, "assignment enqueue failed; retaining director fallback"),
                                 }
                             }
                         }

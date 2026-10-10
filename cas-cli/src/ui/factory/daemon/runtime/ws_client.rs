@@ -329,20 +329,9 @@ impl FactoryDaemon {
         }
 
         match msg {
-            ClientMessage::OperatorReplyPersisted {
-                notification_id,
-                device_id,
-            } => {
-                let result =
-                    crate::store::open_prompt_queue_store(self.app.cas_dir()).and_then(|queue| {
-                        queue
-                            .record_operator_reply_persisted(
-                                notification_id,
-                                &self.session_name,
-                                &device_id,
-                            )
-                            .map_err(Into::into)
-                    });
+            ClientMessage::OperatorReplyPersisted { notification_id, device_id } => {
+                let result = crate::store::open_prompt_queue_store(self.app.cas_dir())
+                    .and_then(|queue| queue.record_operator_reply_persisted(notification_id, &self.session_name, &device_id).map_err(Into::into));
                 if let Err(error) = result {
                     tracing::warn!(notification_id, %error, "ignored invalid Commander device-persisted receipt");
                 }

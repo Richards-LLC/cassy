@@ -224,7 +224,12 @@ fn delivery_stalled_notice(
     );
     format!(
         "<system-notice>Delivery stalled: notification_id={}; recipient='{}'; recipient_harness={}; age_secs={}; summary='{}'; delivery_state={}. The recipient has not acknowledged or read this message. Switch to another channel if this is time-critical.</system-notice>",
-        queued.id, queued.target, recipient_harness, age_secs, summary, delivery_state,
+        queued.id,
+        queued.target,
+        recipient_harness,
+        age_secs,
+        summary,
+        delivery_state,
     )
 }
 
@@ -595,26 +600,14 @@ fn append_workspace_contract_brief(
             // A path cited in background context is not an output instruction.
             let directive = words[index.saturating_sub(6)..index].iter().any(|prior| {
                 matches!(
-                    prior
-                        .to_ascii_lowercase()
-                        .trim_matches(|c: char| !c.is_alphabetic()),
+                    prior.to_ascii_lowercase().trim_matches(|c: char| !c.is_alphabetic()),
                     "write" | "save" | "store" | "put" | "emit" | "output" | "create" | "place"
                 )
             });
             let target_preposition = words.get(index.wrapping_sub(1)).is_some_and(|prior| {
                 matches!(
-                    prior
-                        .to_ascii_lowercase()
-                        .trim_matches(|c: char| !c.is_alphabetic()),
-                    "to" | "under"
-                        | "in"
-                        | "into"
-                        | "at"
-                        | "write"
-                        | "save"
-                        | "store"
-                        | "put"
-                        | "emit"
+                    prior.to_ascii_lowercase().trim_matches(|c: char| !c.is_alphabetic()),
+                    "to" | "under" | "in" | "into" | "at" | "write" | "save" | "store" | "put" | "emit"
                 )
             });
             (directive
@@ -1355,8 +1348,7 @@ pub enum WakeSender {
 /// Measured in SECONDS, not poll ticks: `process_prompt_queue` runs on a 100ms
 /// poll, so a tick count here would have made "sustained silence" mean a third
 /// of a second — no evidence at all about turn boundaries.
-pub const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration =
-    std::time::Duration::from_secs(45);
+pub const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Wall-clock PTY silence required before waking a recipient the registry
 /// already judged idle (cas-45c4). Short: this is corroboration that the pane
@@ -1647,13 +1639,8 @@ pub(super) fn claude_turn_aware_retry_with_evidence(
     now: chrono::DateTime<chrono::Utc>,
     evidence: RecipientWakeEvidence,
 ) -> TurnAwareRetry {
-    let base = claude_turn_aware_retry(
-        attempts,
-        recipient_mid_turn,
-        pane_settled,
-        last_attempt,
-        now,
-    );
+    let base =
+        claude_turn_aware_retry(attempts, recipient_mid_turn, pane_settled, last_attempt, now);
     if attempts == 0 || base != TurnAwareRetry::UseCadence {
         return base;
     }
@@ -1874,9 +1861,7 @@ pub(super) fn classify_normal_delivery_turn(
 }
 
 /// cas-ac97: plain-language evidence for logs, row details and the flag.
-pub(super) fn normal_delivery_evidence_phrase(
-    evidence: NormalDeliveryTurnEvidence,
-) -> &'static str {
+pub(super) fn normal_delivery_evidence_phrase(evidence: NormalDeliveryTurnEvidence) -> &'static str {
     match evidence {
         NormalDeliveryTurnEvidence::TurnStarted => "the transcript records a turn since delivery",
         NormalDeliveryTurnEvidence::RecipientBusy => {
@@ -2542,9 +2527,7 @@ impl FactoryDaemon {
                 // only workers go through the attention lane.
                 if request.age_secs < relay::APPROVAL_WAKE_AFTER_SECS
                     || !workers.contains(&request.worker)
-                    || self
-                        .reported_permission_requests
-                        .contains(&request.request_id)
+                    || self.reported_permission_requests.contains(&request.request_id)
                 {
                     continue;
                 }
@@ -2633,7 +2616,8 @@ impl FactoryDaemon {
             }
 
             let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-            let account_dir = crate::mcp::tools::service::factory_ops::worker_account_dir(&agent);
+            let account_dir =
+                crate::mcp::tools::service::factory_ops::worker_account_dir(&agent);
             let detail = crate::factory_auth_health::auth_failure_detail(
                 &agent.name,
                 cli,
@@ -2644,11 +2628,10 @@ impl FactoryDaemon {
             // The task comes back first: a held task is the part of this
             // failure that blocks the epic, and it must not depend on a
             // relay write succeeding.
-            let released =
-                crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
-                    self.app.cas_dir(),
-                    &agent.name,
-                );
+            let released = crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
+                self.app.cas_dir(),
+                &agent.name,
+            );
             let detail = match released {
                 0 => detail,
                 1 => format!("{detail} Its assigned task was released back to open."),
@@ -3059,11 +3042,9 @@ impl FactoryDaemon {
                     // narrative names the failed wake. Recorded before the
                     // relay so the row is truthful even while the relay retries.
                     let detail = normal_delivery_watchdog_flag_detail(evidence);
-                    if let Err(error) = queue.record_wake_attempt(
-                        row_id,
-                        cas_store::WakeAttempt::Failed,
-                        Some(&detail),
-                    ) {
+                    if let Err(error) =
+                        queue.record_wake_attempt(row_id, cas_store::WakeAttempt::Failed, Some(&detail))
+                    {
                         tracing::warn!(
                             target: "cas::coordination",
                             message_id = row_id,
@@ -3537,7 +3518,11 @@ impl FactoryDaemon {
         recipient: &str,
         source: cas_store::SurfacingSource,
     ) {
-        if let Err(error) = queue.record_recipient_surfaced(prompt_id, recipient, source) {
+        if let Err(error) = queue.record_recipient_surfaced(
+            prompt_id,
+            recipient,
+            source,
+        ) {
             tracing::debug!(
                 target: "cas::coordination",
                 message_id = prompt_id,
@@ -3853,10 +3838,7 @@ impl FactoryDaemon {
             })
             .unwrap_or_else(|| {
                 let mut stand_in = cas_types::Agent::new(
-                    format!(
-                        "{worker_name}-exited-{}",
-                        chrono::Utc::now().timestamp_millis()
-                    ),
+                    format!("{worker_name}-exited-{}", chrono::Utc::now().timestamp_millis()),
                     worker_name.to_string(),
                 );
                 stand_in.role = cas_types::AgentRole::Worker;
@@ -3890,11 +3872,9 @@ impl FactoryDaemon {
     /// respawns.
     pub(super) fn relay_correlated_worker_deaths(&mut self) {
         let now = chrono::Utc::now();
-        while let Some(group) = closed_death_group(
-            &self.recent_worker_exits,
-            now,
-            WORKER_DEATH_CORRELATION_WINDOW,
-        ) {
+        while let Some(group) =
+            closed_death_group(&self.recent_worker_exits, now, WORKER_DEATH_CORRELATION_WINDOW)
+        {
             let span = group.len();
             if span >= 2 {
                 let outcome = super::lifecycle::enqueue_correlated_worker_deaths_relay(
@@ -4103,11 +4083,7 @@ impl FactoryDaemon {
                 if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
                     tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
                 }
-                self.mark_registered_worker_stale(
-                    &worker,
-                    "worker harness failed during boot",
-                    None,
-                );
+                self.mark_registered_worker_stale(&worker, "worker harness failed during boot", None);
                 self.app.mark_worker_crashed(&worker).await;
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
@@ -5240,11 +5216,7 @@ impl FactoryDaemon {
             let _ = queue.record_selected(queued.id);
             let notice = operator_notices(queue, &self.session_name, std::slice::from_ref(&queued))
                 .remove(&queued.id);
-            if let Some(subject) = notice
-                .as_ref()
-                .filter(|notice| !notice.resolved)
-                .and_then(|notice| notice.subject)
-            {
+            if let Some(subject) = notice.as_ref().filter(|notice| !notice.resolved).and_then(|notice| notice.subject) {
                 self.open_operator_notices.insert(queued.id, subject);
             }
             let reply = crate::ui::factory::DaemonMessage::OperatorReply {
@@ -5310,27 +5282,16 @@ impl FactoryDaemon {
             self.forget_row_delivery_state(id);
         }
         let registered_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
-        let mut retired_candidates =
-            registered_prompt_sweep_agents(&registered_agents, &self.session_name);
+        let mut retired_candidates = registered_prompt_sweep_agents(&registered_agents, &self.session_name);
         retired_candidates.extend(self.dead_workers.iter().cloned());
         retired_candidates.sort();
         retired_candidates.dedup();
         for name in retired_candidates {
-            if worker_recipient_shut_down(
-                &name,
-                &self.dead_workers,
-                self.app.worker_names(),
-                &registered_agents,
-            ) {
-                queue.cancel_unread_for_shutdown(
-                    &name,
-                    Some(&self.session_name),
-                    "wake withdrawn: recipient has shut down",
-                )?;
-                self.normal_delivery_probes
-                    .retain(|_, probe| probe.pane != name && probe.target != name);
-                self.urgent_wake_probes
-                    .retain(|_, probe| probe.pane != name && probe.target != name);
+            if worker_recipient_shut_down(&name, &self.dead_workers, self.app.worker_names(), &registered_agents) {
+                queue.cancel_unread_for_shutdown(&name, Some(&self.session_name),
+                    "wake withdrawn: recipient has shut down")?;
+                self.normal_delivery_probes.retain(|_, probe| probe.pane != name && probe.target != name);
+                self.urgent_wake_probes.retain(|_, probe| probe.pane != name && probe.target != name);
             }
         }
 
@@ -5343,10 +5304,7 @@ impl FactoryDaemon {
         // proves it took the turn — and never before.
         self.resolve_urgent_wake_probes(queue.as_ref());
         self.resolve_normal_delivery_probes(queue.as_ref()).await;
-        if self
-            .last_commander_mirror_scan
-            .is_none_or(|last| last.elapsed() >= Duration::from_secs(5))
-        {
+        if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
             self.last_commander_mirror_scan = Some(std::time::Instant::now());
             super::commander_mirror::mirror_supervisor_replies(
                 self.app.cas_dir(),
@@ -5539,24 +5497,12 @@ impl FactoryDaemon {
             for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
                 self.forget_row_delivery_state(id);
             }
-            let Some(queued) = queue.queued_prompt(selected.id)? else {
-                continue;
-            };
-            if queued.processed_at.is_some() {
-                continue;
-            }
+            let Some(queued) = queue.queued_prompt(selected.id)? else { continue };
+            if queued.processed_at.is_some() { continue; }
             let current_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
-            if worker_recipient_shut_down(
-                &queued.target,
-                &self.dead_workers,
-                self.app.worker_names(),
-                &current_agents,
-            ) {
-                queue.cancel_unread_for_shutdown(
-                    &queued.target,
-                    Some(&self.session_name),
-                    "wake withdrawn: recipient has shut down",
-                )?;
+            if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), &current_agents) {
+                queue.cancel_unread_for_shutdown(&queued.target, Some(&self.session_name),
+                    "wake withdrawn: recipient has shut down")?;
                 self.forget_row_delivery_state(queued.id);
                 continue;
             }
@@ -5809,12 +5755,10 @@ impl FactoryDaemon {
                 // relay would be a false alarm.
                 let queued_row_was_transported = queued.acked_at.is_some();
                 let decision = match store.get(&envelope.task_id) {
-                    Ok(task) => {
-                        crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
-                            &queued.prompt,
-                            &task,
-                        )
-                    }
+                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
+                        &queued.prompt,
+                        &task,
+                    ),
                     Err(cas_store::StoreError::TaskNotFound(_)) => {
                         LifecyclePromptDecision::SuppressStale {
                             task_id: envelope.task_id.clone(),
@@ -5837,11 +5781,11 @@ impl FactoryDaemon {
                 match lifecycle_stale_outcome(
                     &decision,
                     Self::row_is_supervisor_wake(
-                        &wake_sender,
-                        self.app.supervisor_name(),
-                        &queued.source,
-                        &queued.prompt,
-                    ),
+                    &wake_sender,
+                    self.app.supervisor_name(),
+                    &queued.source,
+                    &queued.prompt,
+                ),
                     queued_row_was_transported,
                 ) {
                     LifecycleStaleOutcome::Deliver => {}
@@ -5904,11 +5848,13 @@ impl FactoryDaemon {
             // AwaitingMerge, or a terminal state, so inspect live task state at
             // this final shared transport boundary instead of injecting stale
             // work. Unreadable/missing tasks fail open.
-            if let Some((task_id, status)) = super::delivery::assignment_stale_status(
-                self.app.cas_dir(),
-                &queued.prompt,
-                &queued.target,
-            ) {
+            if let Some((task_id, status)) =
+                super::delivery::assignment_stale_status(
+                    self.app.cas_dir(),
+                    &queued.prompt,
+                    &queued.target,
+                )
+            {
                 let detail = format!(
                     "withdrawn before transport: assignment for {task_id} is stale because the task is {}",
                     status
@@ -5973,8 +5919,10 @@ impl FactoryDaemon {
             };
             let claude_inbox_target = self.teams.is_some()
                 && self.app.harness_for(pane_target) == cas_mux::SupervisorCli::Claude
-                && super::delivery::choose_channel(self.app.harness_for(pane_target), true)
-                    == super::delivery::DeliveryChannel::TeamsInbox;
+                && super::delivery::choose_channel(
+                    self.app.harness_for(pane_target),
+                    true,
+                ) == super::delivery::DeliveryChannel::TeamsInbox;
             let durable_deferred_inbox = claude_inbox_target
                 && queue
                     .deferred_inbox_state(queued.id)
@@ -6106,20 +6054,18 @@ impl FactoryDaemon {
                 // cas-5129: a busy or still-booting recipient keeps the
                 // budget; only a silent long turn or an unreachable worker
                 // spends it and reaches the supervisor.
-                let turn_aware = if self.recipient_tool_call_evidence(pane_target)
-                    == ToolCallEvidence::InFlight
-                {
+                let turn_aware = if self.recipient_tool_call_evidence(pane_target) == ToolCallEvidence::InFlight {
                     TurnAwareRetry::Wait
                 } else {
                     claude_turn_aware_retry_with_evidence(
-                        attempts,
-                        self.recipient_mid_turn(pane_target),
-                        self.pane_wake_state(pane_target)
-                            .silent_for
-                            .is_some_and(|silent| silent >= SILENCE_FOR_IDLE_RECIPIENT_WAKE),
-                        last_attempt,
-                        chrono::Utc::now(),
-                        self.recipient_wake_evidence(pane_target),
+                    attempts,
+                    self.recipient_mid_turn(pane_target),
+                    self.pane_wake_state(pane_target)
+                        .silent_for
+                        .is_some_and(|silent| silent >= SILENCE_FOR_IDLE_RECIPIENT_WAKE),
+                    last_attempt,
+                    chrono::Utc::now(),
+                    self.recipient_wake_evidence(pane_target),
                     )
                 };
                 if retry_at_turn_end {
@@ -6319,11 +6265,11 @@ impl FactoryDaemon {
                         // one as "(unknown task)" would bury the one fact the
                         // supervisor needs — which worker is gone.
                         if Self::row_is_supervisor_wake(
-                            &wake_sender,
-                            self.app.supervisor_name(),
-                            &queued.source,
-                            &queued.prompt,
-                        ) {
+                    &wake_sender,
+                    self.app.supervisor_name(),
+                    &queued.source,
+                    &queued.prompt,
+                ) {
                             let notice =
                                 match crate::prompt_revalidation::parse_worker_died_envelope(
                                     &queued.prompt,
@@ -6549,12 +6495,8 @@ impl FactoryDaemon {
                     .filter(|name| {
                         // Skip native extension agents (they self-serve via extension polling).
                         !native_agents.contains(name.as_str())
-                            && !worker_recipient_shut_down(
-                                name,
-                                &self.dead_workers,
-                                self.app.worker_names(),
-                                &current_agents,
-                            )
+                            && !worker_recipient_shut_down(name, &self.dead_workers,
+                                self.app.worker_names(), &current_agents)
                     })
                     .cloned()
                     .collect();
@@ -6927,14 +6869,10 @@ impl FactoryDaemon {
                         // reason so `message_status` separates "this was never
                         // a wake" from "this was eligible and refused".
                         match record_worker_wake_decline(
-                            queue.as_ref(),
-                            queued.id,
-                            wake_decision,
-                            pane_state.tool_call,
-                        ) {
-                            Ok(Some(declines))
-                                if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES =>
-                            {
+                            queue.as_ref(), queued.id, wake_decision, pane_state.tool_call,
+                        )
+                        {
+                            Ok(Some(declines)) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
                                 // cas-d1659: a busy recipient keeps the row;
                                 // only a silent Claude recipient escalates.
                                 let pane = pane_target.to_string();
@@ -6972,8 +6910,13 @@ impl FactoryDaemon {
                         // cas-ef14 (GH #139): the recipient's harness already
                         // holds this payload — re-writing the inbox is the
                         // GH #124 storm. Only the pane nudge is left to try.
-                        self.nudge_pane_only(target, &inbox_source, Some(queued.id), wake_decision)
-                            .await
+                        self.nudge_pane_only(
+                            target,
+                            &inbox_source,
+                            Some(queued.id),
+                            wake_decision,
+                        )
+                        .await
                     } else {
                         self.deliver_to_worker_with_idle_nudge(
                             target,
@@ -7757,10 +7700,9 @@ impl FactoryDaemon {
                     }
                 }
                 SpawnAction::Recycle => {
-                    let spec = request
-                        .worker_spec
-                        .as_deref()
-                        .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok());
+                    let spec = request.worker_spec.as_deref().and_then(|json| {
+                        serde_json::from_str::<cas_mux::WorkerSpec>(json).ok()
+                    });
                     for name in request.worker_names {
                         self.pending_spawns.push_back(PendingSpawn::Recycle {
                             request_id: request.id,
@@ -8680,8 +8622,7 @@ impl FactoryDaemon {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
                                     "Failed to start recording for recycled {}: {}",
-                                    name,
-                                    e
+                                    name, e
                                 );
                             }
                         }
@@ -9176,9 +9117,7 @@ fn commander_history_send(
             || "Terminal".to_string(),
             |stamp| stamp.device_label.clone(),
         )),
-        session: row
-            .factory_session
-            .unwrap_or_else(|| fallback_session.to_string()),
+        session: row.factory_session.unwrap_or_else(|| fallback_session.to_string()),
         at: row.created_at.to_rfc3339(),
     })
 }
@@ -9272,9 +9211,12 @@ fn fire_reminder(
     triggering_event: Option<&ReminderTriggerContext>,
     cas_dir: &std::path::Path,
 ) {
-    let Some(target) =
-        resolve_reminder_delivery_target(reminder, supervisor_name, agent_id_to_name, cas_dir)
-    else {
+    let Some(target) = resolve_reminder_delivery_target(
+        reminder,
+        supervisor_name,
+        agent_id_to_name,
+        cas_dir,
+    ) else {
         // Another factory can see a cross-session due row in the shared
         // project DB. Keep it pending until the target or a proven fallback
         // can receive it; marking it fired here would lose the owner wake.
@@ -9323,6 +9265,7 @@ fn fire_reminder(
 
     // Enqueue to prompt queue for PTY injection into the resolved recipient.
     if let Some(queue) = prompt_queue {
+
         // Include triggering event context for event-based reminders.
         //
         // cas-f08d (GH #147): the wire format is owned by cas_store so that
@@ -9425,41 +9368,20 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+        LIFECYCLE_MAX_RENUDGE_ATTEMPTS, append_spawn_audit, append_spawn_audit_line,
+        boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
+        describe_pending_spawn, enqueue_preassign_failure_lifecycle_relay,
+        enqueue_spawn_cancelled_notice, enqueue_spawn_outcome_notice, ensure_worker_preassignment,
+        is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
+        registration_timeout_detail, reminder_matches_factory_session,
+        report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
+        spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
+        take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
+        timeout_pane_tail, worker_exit_info,
         // cas-2ffe (GH #915): exit cause and death correlation.
-        ObservedWorkerExit,
-        WORKER_DEATH_CORRELATION_WINDOW,
-        append_spawn_audit,
-        append_spawn_audit_line,
-        boot_model_error_detail,
-        cancel_targeted_in_flight_spawn,
-        closed_death_group,
-        deliver_worker_task_brief,
-        describe_pending_spawn,
-        enqueue_preassign_failure_lifecycle_relay,
-        enqueue_spawn_cancelled_notice,
-        enqueue_spawn_outcome_notice,
-        ensure_worker_preassignment,
-        is_exact_agent_name_match,
-        matches_event_filter,
-        preassign_failure_reason,
-        prompt_poison_sweep_due,
-        prompt_poison_sweep_targets,
-        registered_prompt_sweep_agents,
-        registration_timeout_detail,
-        reminder_matches_factory_session,
-        report_stale_reminder_expiry,
-        shutdown_targets,
-        spawn_predates_shutdown,
-        spawn_provisioning_timed_out,
-        spawn_queue_reset_report,
-        stalled_spawn_requests,
-        take_next_pending_spawn,
-        take_spawn_cancellation,
-        take_unverified_spawn_on_exit,
-        timeout_pane_tail,
+        ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_group,
         worker_exit_cause,
-        worker_exit_info,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -9482,12 +9404,7 @@ mod tests {
         let queue: &dyn cas_store::PromptQueueStore = &store;
         let payload = r#"{"schema_version":2,"reply_to":null,"message":"m","summary":"s","device_id":"*","kind":"blocker","attachments":[]}"#;
         let relay = queue
-            .enqueue_with_session(
-                "lifecycle-wake:worker-died:9",
-                "supervisor",
-                "worker died",
-                "acct-52",
-            )
+            .enqueue_with_session("lifecycle-wake:worker-died:9", "supervisor", "worker died", "acct-52")
             .unwrap();
         let cas_store::EnqueueIdempotentResult::Created(alert) = queue
             .enqueue_idempotent(
@@ -9497,10 +9414,7 @@ mod tests {
                 Some("acct-52"),
                 Some("s"),
                 None,
-                &format!(
-                    "{}{relay}",
-                    cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX
-                ),
+                &format!("{}{relay}", cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX),
                 Some(&cas_store::QueueOrigin::Daemon),
             )
             .unwrap()
@@ -9508,16 +9422,7 @@ mod tests {
             panic!("alert not created");
         };
         let reply = queue
-            .enqueue_urgent_with_outcome(
-                "supervisor",
-                "operator",
-                payload,
-                Some("acct-52"),
-                None,
-                None,
-                false,
-                Some(&cas_store::QueueOrigin::Daemon),
-            )
+            .enqueue_urgent_with_outcome("supervisor", "operator", payload, Some("acct-52"), None, None, false, Some(&cas_store::QueueOrigin::Daemon))
             .unwrap()
             .id();
         let rows: Vec<_> = [alert, reply]
@@ -9537,13 +9442,7 @@ mod tests {
         queue.mark_transport_delivered(relay).unwrap();
         assert!(super::operator_notices(queue, "acct-52", &rows)[&alert].resolved);
         let (_, replies) = super::commander_history_turns(rows, "acct-52", &notices);
-        assert_eq!(
-            replies
-                .iter()
-                .filter(|reply| reply.notice.is_some())
-                .count(),
-            1
-        );
+        assert_eq!(replies.iter().filter(|reply| reply.notice.is_some()).count(), 1);
     }
 
     /// cas-55a4: an earlier-session row keeps the session it was written in,
@@ -9780,10 +9679,7 @@ mod tests {
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "young-swan-22");
-        assert_eq!(
-            prompts[0].factory_session.as_deref(),
-            Some("origin-factory")
-        );
+        assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
         assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
     }
 
@@ -9921,14 +9817,8 @@ mod tests {
         assert_eq!(cause.exit_signal, None, "a blank signal is no signal");
         assert_eq!(cause.status(), "exited with code 0");
         let tail = cause.output_tail.expect("tail");
-        assert!(
-            tail.contains("turn aborted") && tail.contains("bye"),
-            "{tail}"
-        );
-        assert!(
-            !tail.contains("sk-abcdef1234567890abcdef1234567890"),
-            "{tail}"
-        );
+        assert!(tail.contains("turn aborted") && tail.contains("bye"), "{tail}");
+        assert!(!tail.contains("sk-abcdef1234567890abcdef1234567890"), "{tail}");
 
         let signalled = worker_exit_cause(Some(1), Some("Killed"), None);
         assert_eq!(signalled.status(), "terminated by signal Killed");
@@ -9959,10 +9849,7 @@ mod tests {
         );
         let group = closed_death_group(&exits, chrono::Utc::now(), window).expect("closed");
         assert_eq!(
-            group
-                .iter()
-                .map(|exit| exit.worker.as_str())
-                .collect::<Vec<_>>(),
+            group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>(),
             ["codex-a", "codex-b", "codex-c"]
         );
         let rest = &exits[group.len()..];
@@ -10085,10 +9972,7 @@ mod tests {
         let payload: crate::ui::factory::OperatorReplyPayload =
             serde_json::from_str(&operator_rows[0].prompt).unwrap();
         let local = cas_store::SqlitePromptQueueStore::open(&cas_dir).unwrap();
-        let event = local
-            .operator_delivery_event(operator_rows[0].id)
-            .unwrap()
-            .unwrap();
+        let event = local.operator_delivery_event(operator_rows[0].id).unwrap().unwrap();
         let snapshot: serde_json::Value = serde_json::from_str(&event.payload_snapshot).unwrap();
         assert_eq!(snapshot["prompt"], operator_rows[0].prompt);
         assert_eq!(snapshot["kind"], "blocker");
@@ -10173,18 +10057,12 @@ mod tests {
         let artifacts = temp.path().join("artifacts");
         std::fs::write(
             cas_dir.join("config.toml"),
-            format!(
-                "[factory]\nartifacts_root = {:?}\n",
-                artifacts.display().to_string()
-            ),
+            format!("[factory]\nartifacts_root = {:?}\n", artifacts.display().to_string()),
         )
         .unwrap();
         let mut task = cas_types::Task::new("cas-cite2".into(), "Fix uploads".into());
         task.description = "See https://github.com/acme/widgets/issues/77.".into();
-        crate::store::open_task_store_cached(&cas_dir)
-            .unwrap()
-            .add(&task)
-            .unwrap();
+        crate::store::open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
 
         deliver_worker_task_brief(
             &cas_dir,
@@ -10208,8 +10086,8 @@ mod tests {
                     &crate::config::project_factory_artifacts_root(&cas_dir, &artifacts),
                     "cas-cite2"
                 )
-                .display()
-                .to_string()
+                    .display()
+                    .to_string()
             ),
             "{prompt}"
         );
@@ -10980,11 +10858,7 @@ mod tests {
             now,
         );
         assert!(decision.allowed, "{}", decision.reason);
-        assert!(
-            decision.reason.contains("independent-QA"),
-            "{}",
-            decision.reason
-        );
+        assert!(decision.reason.contains("independent-QA"), "{}", decision.reason);
 
         let free_text = FactoryDaemon::supervisor_wake_decision(
             &data,
@@ -11442,19 +11316,13 @@ mod tests {
             ClaudeRedelivery::Cooldown,
             "the first retry waits for the base spacing"
         );
-        let second =
-            start + chrono::Duration::seconds(CLAUDE_REDELIVERY_BASE_INTERVAL.as_secs() as i64);
+        let second = start + chrono::Duration::seconds(CLAUDE_REDELIVERY_BASE_INTERVAL.as_secs() as i64);
         assert_eq!(
             claude_redelivery_decision(false, 1, Some(start), second),
             ClaudeRedelivery::Deliver
         );
         assert_eq!(
-            claude_redelivery_decision(
-                false,
-                2,
-                Some(second),
-                second + chrono::Duration::seconds(59)
-            ),
+            claude_redelivery_decision(false, 2, Some(second), second + chrono::Duration::seconds(59)),
             ClaudeRedelivery::Cooldown,
             "the second retry doubles the spacing"
         );
@@ -11889,29 +11757,18 @@ mod tests {
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         for hook_wins in [true, false] {
-            let id = store
-                .enqueue_with_session("worker", "supervisor", "single message", "session")
-                .unwrap();
-            let snapshot = store
-                .peek_for_targets(&["supervisor"], Some("session"), 10)
-                .unwrap();
+            let id = store.enqueue_with_session("worker", "supervisor", "single message", "session").unwrap();
+            let snapshot = store.peek_for_targets(&["supervisor"], Some("session"), 10).unwrap();
             assert!(snapshot.iter().any(|row| row.id == id));
             let claimed = if hook_wins {
                 store.surface_unseen_for_recipient("supervisor", Some("session"), 10)
             } else {
                 store.poll_unseen_for_recipient("supervisor", Some("session"), 10)
-            }
-            .unwrap();
+            }.unwrap();
             assert_eq!(claimed.len(), 1);
             assert!(!store.claim_recipient_transport(id, "supervisor").unwrap());
-            assert!(
-                store
-                    .poll_unseen_for_recipient("supervisor", Some("session"), 10)
-                    .unwrap()
-                    .is_empty()
-            );
-            let rendered =
-                crate::hooks::handlers::handlers_middle::factory_inbox::render_surfaced(&claimed);
+            assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
+            let rendered = crate::hooks::handlers::handlers_middle::factory_inbox::render_surfaced(&claimed);
             assert!(rendered.contains("s first]"), "{rendered}");
         }
     }
@@ -11923,9 +11780,7 @@ mod tests {
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         for _ in 0..8 {
-            let id = store
-                .enqueue_with_session("worker", "supervisor", "race", "session")
-                .unwrap();
+            let id = store.enqueue_with_session("worker", "supervisor", "race", "session").unwrap();
             let peer = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let transport_start = barrier.clone();
@@ -11934,56 +11789,21 @@ mod tests {
                 peer.claim_recipient_transport(id, "supervisor").unwrap()
             });
             barrier.wait();
-            let hook = store
-                .surface_unseen_for_recipient("supervisor", Some("session"), 10)
-                .unwrap();
+            let hook = store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap();
             assert_eq!(usize::from(thread.join().unwrap()) + hook.len(), 1);
-            assert!(
-                store
-                    .poll_unseen_for_recipient("supervisor", Some("session"), 10)
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
         }
-        let id = store
-            .enqueue_with_session("worker", "supervisor", "retry", "session")
-            .unwrap();
+        let id = store.enqueue_with_session("worker", "supervisor", "retry", "session").unwrap();
         assert!(store.claim_recipient_transport(id, "supervisor").unwrap());
         store.release_recipient_transport(id, "supervisor").unwrap();
-        assert_eq!(
-            store
-                .poll_unseen_for_recipient("supervisor", Some("session"), 10)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
         store.release_recipient_transport(id, "supervisor").unwrap();
         assert!(!store.claim_recipient_transport(id, "supervisor").unwrap());
-        let broadcast = store
-            .enqueue_with_session("supervisor", "all_workers", "peers", "session")
-            .unwrap();
-        assert!(
-            store
-                .claim_recipient_transport(broadcast, "worker-a")
-                .unwrap()
-        );
-        assert!(
-            !store
-                .claim_recipient_transport(broadcast, "worker-a")
-                .unwrap()
-        );
-        assert_eq!(
-            store
-                .poll_unseen_for_recipient("worker-b", Some("session"), 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(
-            !store
-                .claim_recipient_transport(broadcast, "worker-b")
-                .unwrap()
-        );
+        let broadcast = store.enqueue_with_session("supervisor", "all_workers", "peers", "session").unwrap();
+        assert!(store.claim_recipient_transport(broadcast, "worker-a").unwrap());
+        assert!(!store.claim_recipient_transport(broadcast, "worker-a").unwrap());
+        assert_eq!(store.poll_unseen_for_recipient("worker-b", Some("session"), 10).unwrap().len(), 1);
+        assert!(!store.claim_recipient_transport(broadcast, "worker-b").unwrap());
     }
 
     #[test]
@@ -11992,28 +11812,12 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
-        let id = store
-            .enqueue_with_session("worker", "supervisor", "single message", "session")
-            .unwrap();
+        let id = store.enqueue_with_session("worker", "supervisor", "single message", "session").unwrap();
         FactoryDaemon::record_transport_receipt(&store, id, "supervisor");
         store.mark_transport_delivered(id).unwrap();
-        assert!(
-            store
-                .surface_unseen_for_recipient_delivered_after(
-                    "supervisor",
-                    Some("session"),
-                    10,
-                    chrono::Utc::now() - chrono::Duration::minutes(1)
-                )
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            store
-                .poll_unseen_for_recipient("supervisor", Some("session"), 10)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store.surface_unseen_for_recipient_delivered_after("supervisor", Some("session"), 10,
+            chrono::Utc::now() - chrono::Duration::minutes(1)).unwrap().is_empty());
+        assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
     }
 
     /// cas-ad92: the post-handoff receipt still hides the row from ordinary
@@ -12024,28 +11828,13 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
-        let id = store
-            .enqueue_with_session("supervisor", "worker", "wake body", "session")
-            .unwrap();
+        let id = store.enqueue_with_session("supervisor", "worker", "wake body", "session").unwrap();
         assert!(store.claim_recipient_transport(id, "worker").unwrap());
         FactoryDaemon::record_transport_receipt(&store, id, "worker");
         store.mark_transport_delivered(id).unwrap();
-        assert!(
-            store
-                .surface_unseen_for_recipient("worker", Some("session"), 10)
-                .unwrap()
-                .is_empty()
-        );
-        let named = store
-            .surface_wake_named_for_recipient("worker", Some("session"), &[id])
-            .unwrap();
-        assert_eq!(
-            named
-                .iter()
-                .map(|row| row.prompt.as_str())
-                .collect::<Vec<_>>(),
-            vec!["wake body"]
-        );
+        assert!(store.surface_unseen_for_recipient("worker", Some("session"), 10).unwrap().is_empty());
+        let named = store.surface_wake_named_for_recipient("worker", Some("session"), &[id]).unwrap();
+        assert_eq!(named.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec!["wake body"]);
     }
 
     #[test]
@@ -12067,13 +11856,7 @@ mod tests {
         );
 
         // Legacy handoffs remain recoverable during an upgrade.
-        store
-            .record_recipient_surfaced(
-                id,
-                "zealous-fox-95",
-                cas_store::SurfacingSource::TransportDelivered,
-            )
-            .unwrap();
+        store.record_recipient_surfaced(id, "zealous-fox-95", cas_store::SurfacingSource::TransportDelivered).unwrap();
         store.mark_transport_delivered(id).unwrap();
 
         assert_eq!(
@@ -12151,14 +11934,9 @@ mod tests {
         for id in [unpaired_id, claimed_id] {
             let row = queued.iter().find(|row| row.id == id).unwrap();
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Unattributed));
-            assert_eq!(
-                row.operator.as_ref().map(|stamp| stamp.verified),
-                Some(false)
-            );
+            assert_eq!(row.operator.as_ref().map(|stamp| stamp.verified), Some(false));
             let header =
-                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
-                    row,
-                );
+                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(row);
             assert!(
                 header.starts_with(&format!("[cas #{id} unverified:Pippenz@Pippenz phone ")),
                 "{header}"
@@ -12187,11 +11965,7 @@ mod tests {
             operator_verified: true,
         };
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-        let mut sender = cas_types::Agent::new_with_role(
-            "ask-sender".into(),
-            "patient-pelican-9".into(),
-            cas_types::AgentRole::Supervisor,
-        );
+        let mut sender = cas_types::Agent::new_with_role("ask-sender".into(), "patient-pelican-9".into(), cas_types::AgentRole::Supervisor);
         sender.factory_session = Some("factory-1".into());
         agents.register(&sender).unwrap();
         // The supervisor's ask, stored exactly as message.rs stores a
@@ -12223,20 +11997,9 @@ mod tests {
             .id();
         queue.stamp_operator_reply(ask_id, "ask", &[]).unwrap();
         let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
-        assert_eq!(
-            before.confirmation_source,
-            cas_store::ConfirmationSource::Unconfirmed
-        );
+        assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
 
-        assert_eq!(
-            queue
-                .delivery_stalled_candidates("factory-1", 0, 0, 10)
-                .unwrap()
-                .iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
-            vec![ask_id]
-        );
+        assert_eq!(queue.delivery_stalled_candidates("factory-1", 0, 0, 10).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![ask_id]);
         let reply_id = super::super::delivery::enqueue_commander_message(
             &cas_dir,
             "factory-1",
@@ -12257,54 +12020,22 @@ mod tests {
             row.prompt,
             format!("[CAS reply: explicitly acknowledges notification_id={ask_id}]\nFix in-train")
         );
-        assert_eq!(
-            row.origin
-                .as_ref()
-                .and_then(cas_store::QueueOrigin::verified_device_id),
-            Some("device-123")
-        );
+        assert_eq!(row.origin.as_ref().and_then(cas_store::QueueOrigin::verified_device_id), Some("device-123"));
         let after = queue.message_delivery_report(ask_id).unwrap().unwrap();
-        assert_eq!(
-            after.confirmation_source,
-            cas_store::ConfirmationSource::ExplicitAck
-        );
-        assert!(
-            after.confirmed_at.is_some(),
-            "the ask is confirmed by the operator's answer"
-        );
-        assert!(
-            queue
-                .delivery_stalled_candidates("factory-1", 0, 0, 10)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            queue
-                .enqueue_delivery_stalled_bounce(ask_id, "factory-1", "stalled", "stalled")
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(after.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+        assert!(after.confirmed_at.is_some(), "the ask is confirmed by the operator's answer");
+        assert!(queue.delivery_stalled_candidates("factory-1", 0, 0, 10).unwrap().is_empty());
+        assert!(queue.enqueue_delivery_stalled_bounce(ask_id, "factory-1", "stalled", "stalled").unwrap().is_none());
+
 
         // A reference that is not a supervisor→operator turn is refused, and
         // nothing is queued for it.
         let worker_row = queue
-            .enqueue_urgent_with_outcome(
-                "supervisor",
-                "worker-1",
-                "work",
-                Some("factory-1"),
-                None,
-                None,
-                false,
-                None,
-            )
+            .enqueue_urgent_with_outcome("supervisor", "worker-1", "work", Some("factory-1"), None, None, false, None)
             .unwrap()
             .id();
         for (reference, expected) in [
-            (
-                worker_row,
-                "not a supervisor turn addressed to the operator",
-            ),
+            (worker_row, "not a supervisor turn addressed to the operator"),
             (ask_id + 1_000, "does not exist"),
         ] {
             let error = super::super::delivery::enqueue_commander_message(
@@ -12321,11 +12052,7 @@ mod tests {
             .to_string();
             assert!(error.contains(expected), "{error}");
         }
-        assert_eq!(
-            queue.peek_all(10).unwrap().len(),
-            3,
-            "refused replies queue nothing"
-        );
+        assert_eq!(queue.peek_all(10).unwrap().len(), 3, "refused replies queue nothing");
     }
 
     /// cas-f65d: a Commander semantic message and the equivalent MCP
@@ -14334,12 +14061,9 @@ mod tests {
             .iter()
             .find(|prompt| prompt.prompt.contains("cas-mentioned-path"))
             .expect("mentioned-path task brief");
-        let resolved_stale_root = crate::config::project_factory_artifacts_root(
-            &cas_dir,
-            &crate::config::resolved_factory_artifacts_root(Some(
-                artifacts_root.to_str().expect("artifacts root utf8"),
-            )),
-        )
+        let resolved_stale_root = crate::config::project_factory_artifacts_root(&cas_dir, &crate::config::resolved_factory_artifacts_root(
+            Some(artifacts_root.to_str().expect("artifacts root utf8")),
+        ))
         .join("cas-stale-path");
         assert!(
             stale_prompt.prompt.contains("Workspace-contract warning"),
@@ -14359,9 +14083,7 @@ mod tests {
             clean_prompt.prompt
         );
         assert!(
-            !mentioned_prompt
-                .prompt
-                .contains("Workspace-contract warning"),
+            !mentioned_prompt.prompt.contains("Workspace-contract warning"),
             "paths mentioned as context must not become output warnings: {}",
             mentioned_prompt.prompt
         );
@@ -15283,9 +15005,9 @@ mod supervisor_decision_wake_tests {
 mod declined_wake_retry_tests_cas_913c {
     use super::{
         ClaudeRedelivery, DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, PaneWakeState,
-        RecipientWakeEvidence, ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome,
-        claude_redelivery_decision_after_turn, claude_turn_aware_retry,
-        claude_turn_aware_retry_with_evidence, deferred_inbox_drain_phase, deferred_inbox_outcome,
+        ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome, claude_redelivery_decision_after_turn,
+        RecipientWakeEvidence, claude_turn_aware_retry, claude_turn_aware_retry_with_evidence,
+        deferred_inbox_drain_phase, deferred_inbox_outcome,
         idle_unacked_relay_due, wake_retry_due_to_turn_end, wake_starved_needs_supervisor,
     };
     use chrono::{Duration as Chrono, TimeZone, Utc};
@@ -15451,15 +15173,9 @@ mod declined_wake_retry_tests_cas_913c {
             .with_ymd_and_hms(2026, 10, 2, 22, 50, 0)
             .single()
             .unwrap();
-        let active = RecipientWakeEvidence {
-            recently_active: true,
-            awaiting_first_prompt: false,
-        };
+        let active = RecipientWakeEvidence { recently_active: true, awaiting_first_prompt: false };
         let silent = RecipientWakeEvidence::default();
-        let booting = RecipientWakeEvidence {
-            recently_active: false,
-            awaiting_first_prompt: true,
-        };
+        let booting = RecipientWakeEvidence { recently_active: false, awaiting_first_prompt: true };
 
         // Mid-turn well past the 15-minute bound (a long build or test run):
         // still writing its transcript, so the message waits for the turn end.
@@ -15467,27 +15183,13 @@ mod declined_wake_retry_tests_cas_913c {
             let now = declined + Chrono::seconds(minutes * 60);
             for attempts in [1, 2] {
                 assert_eq!(
-                    claude_turn_aware_retry_with_evidence(
-                        attempts,
-                        Some(true),
-                        false,
-                        Some(declined),
-                        now,
-                        active
-                    ),
+                    claude_turn_aware_retry_with_evidence(attempts, Some(true), false, Some(declined), now, active),
                     TurnAwareRetry::Wait,
                     "active mid-turn at +{minutes}m, attempt {attempts}"
                 );
                 // The same turn with no sign of progress is treated as wedged.
                 assert_eq!(
-                    claude_turn_aware_retry_with_evidence(
-                        attempts,
-                        Some(true),
-                        false,
-                        Some(declined),
-                        now,
-                        silent
-                    ),
+                    claude_turn_aware_retry_with_evidence(attempts, Some(true), false, Some(declined), now, silent),
                     TurnAwareRetry::UseCadence
                 );
             }
@@ -15496,26 +15198,12 @@ mod declined_wake_retry_tests_cas_913c {
         // is offered at once, past it the cadence offers it (no Wait).
         let within = declined + Chrono::seconds(5 * 60);
         assert_eq!(
-            claude_turn_aware_retry_with_evidence(
-                1,
-                Some(false),
-                true,
-                Some(declined),
-                within,
-                active
-            ),
+            claude_turn_aware_retry_with_evidence(1, Some(false), true, Some(declined), within, active),
             TurnAwareRetry::OfferNow
         );
         let later = declined + Chrono::seconds(40 * 60);
         assert_eq!(
-            claude_turn_aware_retry_with_evidence(
-                1,
-                Some(false),
-                true,
-                Some(declined),
-                later,
-                active
-            ),
+            claude_turn_aware_retry_with_evidence(1, Some(false), true, Some(declined), later, active),
             TurnAwareRetry::UseCadence
         );
 
@@ -16041,14 +15729,8 @@ mod gh_1153_idle_pty_delivery_tests {
             },
         });
         let mut body = format!("{meta}\n");
-        body.push_str(&turn_event(
-            "task_started",
-            now - chrono::Duration::seconds(60),
-        ));
-        body.push_str(&turn_event(
-            "task_complete",
-            now - chrono::Duration::seconds(50),
-        ));
+        body.push_str(&turn_event("task_started", now - chrono::Duration::seconds(60)));
+        body.push_str(&turn_event("task_complete", now - chrono::Duration::seconds(50)));
         std::fs::write(&rollout, body).unwrap();
         rollout
     }
@@ -16063,10 +15745,9 @@ mod gh_1153_idle_pty_delivery_tests {
         worker
             .metadata
             .insert("worker_cli".to_string(), "codex".to_string());
-        worker.metadata.insert(
-            "clone_path".to_string(),
-            clone.to_str().unwrap().to_string(),
-        );
+        worker
+            .metadata
+            .insert("clone_path".to_string(), clone.to_str().unwrap().to_string());
         worker.metadata.insert(
             "worker_account_dir".to_string(),
             account.to_str().unwrap().to_string(),
@@ -16132,8 +15813,7 @@ mod gh_1153_idle_pty_delivery_tests {
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
         daemon.app.mux.add_pane(idle_echo_pane());
         let banner = Instant::now() + Duration::from_secs(5);
-        while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0
-            && Instant::now() < banner
+        while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0 && Instant::now() < banner
         {
             drain_for(&mut daemon, Duration::from_millis(50)).await;
         }
@@ -16216,11 +15896,8 @@ mod gh_1153_idle_pty_delivery_tests {
 
         // The nudge also lands only as echo; the second window elapses.
         drain_for(&mut daemon, Duration::from_millis(800)).await;
-        daemon
-            .normal_delivery_probes
-            .get_mut(&row)
-            .unwrap()
-            .next_check_at = Instant::now().checked_sub(Duration::from_secs(1));
+        daemon.normal_delivery_probes.get_mut(&row).unwrap().next_check_at =
+            Instant::now().checked_sub(Duration::from_secs(1));
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
 
         let report = queue.message_delivery_report(row).unwrap().unwrap();

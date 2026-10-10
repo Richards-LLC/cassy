@@ -716,11 +716,7 @@ impl WorkerSpawnPrep {
 
                 let _ = git.init_submodules(&wt.worktree_path);
                 // Ensure gitignored config is available (may be missing from prior run)
-                crate::worktree::provision_worker_project_config(
-                    &wt.repo_root,
-                    &wt.worktree_path,
-                    &self.worker_name,
-                );
+                crate::worktree::provision_worker_project_config(&wt.repo_root, &wt.worktree_path, &self.worker_name);
                 // (Re-)install the worker commit/push guards on reuse — hooks may have
                 // been removed if the main repo was cloned fresh (cas-bea2 LAYER 2).
                 if let Err(e) = crate::ui::factory::daemon::runtime::teams::TeamsManager::install_worker_pre_commit_hook(&wt.worktree_path) {
@@ -803,11 +799,7 @@ impl WorkerSpawnPrep {
             );
 
             // Symlink .mcp.json and .claude/ so workers get MCP access
-            crate::worktree::provision_worker_project_config(
-                &wt.repo_root,
-                &wt.worktree_path,
-                &self.worker_name,
-            );
+            crate::worktree::provision_worker_project_config(&wt.repo_root, &wt.worktree_path, &self.worker_name);
 
             // Install worker commit/push guards (cas-bea2/cas-07bb LAYER 2) —
             // hard backstops that block protected commits and off-branch pushes
@@ -1564,7 +1556,10 @@ impl FactoryApp {
         _factory_tip: Option<&str>,
         repo_root: &Path,
     ) -> Option<MergedCloseBlockedTask> {
-        let target_tip = crate::git_evidence::resolve_branch_sha(repo_root, target_branch)?;
+        let target_tip = crate::git_evidence::resolve_branch_sha(
+            repo_root,
+            target_branch,
+        )?;
         let stores = self.director_stores.as_ref()?;
         let parked = stores.task_store.get(&task.id).ok()?;
         let anchor = parked
@@ -1573,7 +1568,10 @@ impl FactoryApp {
             .as_deref()
             .map(str::trim)
             .filter(|anchor| !anchor.is_empty())?;
-        let anchor_sha = crate::git_evidence::resolve_branch_sha(repo_root, anchor)?;
+        let anchor_sha =
+            crate::git_evidence::resolve_branch_sha(
+                repo_root, anchor,
+            )?;
         if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
             return None;
         }
@@ -1608,7 +1606,11 @@ impl FactoryApp {
             worker,
             deliverables.and_then(|d| d.parked_branch.as_deref()),
             deliverables.and_then(|d| d.factory_branch_anchor.as_deref()),
-            |branch| crate::git_evidence::resolve_branch_sha(repo_root, branch),
+            |branch| {
+                crate::git_evidence::resolve_branch_sha(
+                    repo_root, branch,
+                )
+            },
             |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
         )
     }
@@ -1756,9 +1758,7 @@ impl FactoryApp {
         let repo_root = self.delivery_repo_root();
         let actionable = supervisor_actionable_state_with_classifiers(
             &self.unfiltered_director_data,
-            self.epic_state
-                .epic_id()
-                .or(self.current_epic_id.as_deref()),
+            self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
             &held_workers,
             now,
@@ -1783,23 +1783,19 @@ impl FactoryApp {
             .map(|agent| agent.id.as_str())
             .collect::<HashSet<_>>();
         let window_end = now + chrono::Duration::seconds(self.supervisor_stall_after_secs as i64);
-        let covering_reminder = self
-            .unfiltered_director_data
-            .reminders
-            .iter()
-            .any(|reminder| {
-                reminder.status == ReminderStatus::Pending
-                    && reminder
-                        .session_id
-                        .as_deref()
-                        .map(|id| id == session)
-                        .unwrap_or(true)
-                    && (supervisor_ids.contains(reminder.target_id.as_str())
-                        || reminder.target_id == self.supervisor_name)
-                    && reminder
-                        .trigger_at
-                        .is_some_and(|at| at >= now && at <= window_end)
-            });
+        let covering_reminder = self.unfiltered_director_data.reminders.iter().any(|reminder| {
+            reminder.status == ReminderStatus::Pending
+                && reminder
+                    .session_id
+                    .as_deref()
+                    .map(|id| id == session)
+                    .unwrap_or(true)
+                && (supervisor_ids.contains(reminder.target_id.as_str())
+                    || reminder.target_id == self.supervisor_name)
+                && reminder
+                    .trigger_at
+                    .is_some_and(|at| at >= now && at <= window_end)
+        });
         let observation = tracker.observe(
             actionable,
             last_call.or(self.session_created_at),
@@ -1813,13 +1809,11 @@ impl FactoryApp {
                 tracing::warn!(%error, "failed to persist supervisor stall metric");
             }
         }
-        observation
-            .wake
-            .map(|next_step| DirectorEvent::SupervisorStalled {
-                next_step,
-                occurrence: now.to_rfc3339(),
-                actionable_idle_secs: observation.actionable_idle_secs,
-            })
+        observation.wake.map(|next_step| DirectorEvent::SupervisorStalled {
+            next_step,
+            occurrence: now.to_rfc3339(),
+            actionable_idle_secs: observation.actionable_idle_secs,
+        })
     }
 
     fn supervisor_stall_event_is_current(
@@ -1851,9 +1845,7 @@ impl FactoryApp {
         let repo_root = self.delivery_repo_root();
         supervisor_actionable_state_with_classifiers(
             data,
-            self.epic_state
-                .epic_id()
-                .or(self.current_epic_id.as_deref()),
+            self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
             &held_workers,
             Utc::now(),
@@ -2773,12 +2765,12 @@ pub(crate) fn queue_supervisor_intro_prompt(
     if supervisor_cli == cas_mux::SupervisorCli::Claude {
         if let Some(context) =
             claude_custom_config_context_fallback(cas_dir, session_id.unwrap_or(supervisor_name))
-                .filter(|_| {
-                    crate::hooks::session_start_fallback::claim(
-                        cas_dir,
-                        session_id.unwrap_or(supervisor_name),
-                    )
-                })
+            .filter(|_| {
+                crate::hooks::session_start_fallback::claim(
+                    cas_dir,
+                    session_id.unwrap_or(supervisor_name),
+                )
+            })
         {
             prompt.push_str("\n\n<cas-session-start-fallback>\n");
             prompt.push_str(&context);
@@ -2975,7 +2967,9 @@ pub(crate) fn queue_worker_target_seed_notice(
     worker_name: &str,
     receipt: &str,
 ) {
-    let prompt = format!("Factory startup target-seed state (provenance, not a task): {receipt}");
+    let prompt = format!(
+        "Factory startup target-seed state (provenance, not a task): {receipt}"
+    );
     if let Ok(queue) = open_prompt_queue_store(cas_dir) {
         let _ = queue.enqueue("cas", worker_name, &prompt);
     }
@@ -3521,10 +3515,7 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(
-            rows[0]
-                .prompt
-                .matches("<cas-session-start-fallback>")
-                .count(),
+            rows[0].prompt.matches("<cas-session-start-fallback>").count(),
             1,
             "startup fallback must appear once in the deduplicated envelope"
         );
@@ -6574,22 +6565,8 @@ mod spawn_isolation_tests {
         init_repo(&repo);
         // This regression also proves owned-target retirement provenance.
         std::fs::write(repo.join(".gitignore"), "/target/\n").unwrap();
-        assert!(
-            Command::new("git")
-                .args(["add", ".gitignore"])
-                .current_dir(&repo)
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .args(["commit", "-qm", "ignore owned build output"])
-                .current_dir(&repo)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(Command::new("git").args(["add", ".gitignore"]).current_dir(&repo).status().unwrap().success());
+        assert!(Command::new("git").args(["commit", "-qm", "ignore owned build output"]).current_dir(&repo).status().unwrap().success());
 
         let cas_dir = repo.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
@@ -6625,7 +6602,11 @@ mod spawn_isolation_tests {
                 .stdout,
         )
         .unwrap();
-        let metadata = format!("source_commit={}created_at_unix={}\n", source_commit, 0);
+        let metadata = format!(
+            "source_commit={}created_at_unix={}\n",
+            source_commit,
+            0
+        );
         std::fs::write(snapshot.join(".cas-build-cache-metadata"), metadata).unwrap();
 
         let worktree_path = cas_dir.join("worktrees").join("cache-worker");
@@ -6644,15 +6625,9 @@ mod spawn_isolation_tests {
         };
 
         let result = prep.run().expect("create and seed worker worktree");
-        assert!(
-            crate::factory_target_cache::owner::for_retirement(
-                result.cwd.parent().unwrap().parent().unwrap(),
-                &result.cwd,
-            )
-            .unwrap()
-            .is_some(),
-            "actual seeding must publish verifiable target provenance"
-        );
+        assert!(crate::factory_target_cache::owner::for_retirement(
+            result.cwd.parent().unwrap().parent().unwrap(), &result.cwd,
+        ).unwrap().is_some(), "actual seeding must publish verifiable target provenance");
         let seeded_artifact = result
             .cwd
             .join("target")
@@ -6800,12 +6775,7 @@ mod spawn_isolation_tests {
         .run()
         .expect("create worker worktree and filter stale crate artifacts");
 
-        assert!(
-            !result
-                .cwd
-                .join("target/debug/deps/libcas_pty-abc.rlib")
-                .exists()
-        );
+        assert!(!result.cwd.join("target/debug/deps/libcas_pty-abc.rlib").exists());
         assert!(result.cwd.join("target/debug/deps/libwarm.rlib").is_file());
         let stats = result.target_seed.expect("target seed receipt");
         assert_eq!(stats.source_commit, snapshot_commit.trim());
@@ -6843,7 +6813,11 @@ mod spawn_isolation_tests {
         assert!(err.to_string().contains("not an ancestor"), "{err}");
         assert!(!repo.join("worker/target").exists());
         assert!(!cas_dir.join("worker-target-owners").exists());
-        assert!(!repo.join("worker/target/debug/deps/libwarm.rlib").exists());
+        assert!(
+            !repo
+                .join("worker/target/debug/deps/libwarm.rlib")
+                .exists()
+        );
     }
 
     #[test]

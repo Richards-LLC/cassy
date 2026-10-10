@@ -132,8 +132,8 @@ pub use cas_store::{
     // Prompt store helpers
     add_prompt_with_conn,
     get_current_prompt_for_session,
-    layered,
     list_archived_traces,
+    layered,
     // Modules
     markdown,
     sample_archived_traces,
@@ -162,17 +162,17 @@ mod syncing_task;
 
 // Re-export local wrappers
 pub use cached_task::{open_task_store_cached, reconcile_task_sync};
-pub(crate) use detect::find_cas_root_ignoring_env;
 pub use detect::{
     StoreType, detect_store_type, find_cas_root, find_cas_root_from, find_git_toplevel,
-    has_project_cas, init_cas_dir, open_agent_store, open_code_store, open_commit_link_store,
-    open_entity_store, open_event_store, open_file_change_store, open_loop_store,
-    open_prompt_queue_store, open_prompt_store, open_recording_store, open_reminder_store,
-    open_rule_store, open_rule_store_local, open_skill_store, open_skill_store_local,
-    open_spawn_queue_store, open_spec_store, open_store, open_store_local,
-    open_supervisor_queue_store, open_task_store, open_task_store_local, open_verification_store,
-    open_worktree_store,
+    has_project_cas, init_cas_dir,
+    open_agent_store, open_code_store, open_commit_link_store, open_entity_store, open_event_store,
+    open_file_change_store, open_loop_store, open_prompt_queue_store, open_prompt_store,
+    open_recording_store, open_reminder_store, open_rule_store, open_rule_store_local,
+    open_skill_store, open_skill_store_local, open_spawn_queue_store, open_spec_store, open_store,
+    open_store_local, open_supervisor_queue_store, open_task_store, open_task_store_local,
+    open_verification_store, open_worktree_store,
 };
+pub(crate) use detect::find_cas_root_ignoring_env;
 pub use notifying_entry::NotifyingEntryStore;
 pub use notifying_rule::NotifyingRuleStore;
 pub use notifying_skill::NotifyingSkillStore;

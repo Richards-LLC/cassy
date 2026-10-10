@@ -936,15 +936,10 @@ fn classify_merge_alert_observations(
 /// state never masquerades as zero.
 fn staged_integration_batch(repo_root: &Path, task_id: &str) -> bool {
     // Freshness checks must not initialize a Cassy database in another target repo.
-    if !repo_root.join(".cas/cas.db").is_file() {
-        return false;
-    }
+    if !repo_root.join(".cas/cas.db").is_file() { return false; }
     crate::store::open_task_store_cached(&repo_root.join(".cas"))
         .and_then(|store| Ok(store.get(task_id)?))
-        .is_ok_and(|task| {
-            task.status == TaskStatus::AwaitingMerge
-                && task.deliverables.integration_batch.is_some()
-        })
+        .is_ok_and(|task| task.status == TaskStatus::AwaitingMerge && task.deliverables.integration_batch.is_some())
 }
 
 fn fresh_merge_alert_git_evidence(
@@ -2811,8 +2806,7 @@ mod tests {
             if status == TaskStatus::Closed && actor == "swift-fox" {
                 assert_eq!(notices.len(), 1, "one authoritative worker-close notice");
                 let envelope =
-                    crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt)
-                        .unwrap();
+                    crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt).unwrap();
                 assert_eq!(envelope.task_id, task.id);
                 assert!(notices[0].prompt.contains(&format!("actor=\"{actor}\"")));
                 assert!(!notices[0].prompt.contains("Assign another task"));
@@ -4447,9 +4441,9 @@ mod tests {
                 prompt.text
             );
             assert!(
-                prompt.text.contains(&format!(
-                    "{own}coordination action=message target=supervisor summary="
-                )),
+                prompt
+                    .text
+                    .contains(&format!("{own}coordination action=message target=supervisor summary=")),
                 "{worker} reply footer must use {own} and carry summary=: {}",
                 prompt.text
             );
@@ -7131,21 +7125,13 @@ mod tests {
             "supervisor_id":"supervisor", "recorded_at":chrono::Utc::now()
         });
         store.add(&serde_json::from_value(value).unwrap()).unwrap();
-        let event = DirectorEvent::WorkerIdle {
-            worker: "worker".into(),
-            active_task: Some(ActiveLeaseSummary {
-                task_id: "cas-b401".into(),
-                task_title: "Batch delivery".into(),
-                task_status: TaskStatus::AwaitingMerge,
-                close_rejected_reason: Some("MERGE REQUIRED".into()),
-                pending_qa: None,
-            }),
-        };
-        assert!(matches!(
-            check_merge_alert_freshness(&event, &make_data(0), dir.path()),
-            MergeAlertFreshness::Stale
-        ));
+        let event = DirectorEvent::WorkerIdle { worker:"worker".into(), active_task:Some(ActiveLeaseSummary {
+            task_id:"cas-b401".into(), task_title:"Batch delivery".into(), task_status:TaskStatus::AwaitingMerge,
+            close_rejected_reason:Some("MERGE REQUIRED".into()), pending_qa:None,
+        }) };
+        assert!(matches!(check_merge_alert_freshness(&event, &make_data(0), dir.path()), MergeAlertFreshness::Stale));
     }
+
 }
 
 #[cfg(test)]
@@ -7181,4 +7167,5 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         assert!(merge.text.starts_with(&observed.detail()));
         assert!(!merge.text.contains("is idle while task"));
     }
+
 }

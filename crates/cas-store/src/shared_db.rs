@@ -1504,9 +1504,7 @@ mod tests {
             let other = Connection::open(&db_path).unwrap();
             other.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
             other.execute_batch("BEGIN IMMEDIATE").unwrap();
-            other
-                .execute("INSERT INTO t VALUES (99, 'foreign')", [])
-                .unwrap();
+            other.execute("INSERT INTO t VALUES (99, 'foreign')", []).unwrap();
             tx.send(()).unwrap();
             std::thread::sleep(hold);
             other.execute_batch("COMMIT").unwrap();
@@ -1597,8 +1595,7 @@ mod tests {
                 conn.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
                 for round in 0..5 {
                     with_immediate_write_txn(&conn, |tx| {
-                        let _: i64 =
-                            tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
+                        let _: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
                         tx.execute(
                             "INSERT INTO t (v) VALUES (?1)",
                             rusqlite::params![format!("w{worker}-r{round}")],
@@ -1637,13 +1634,15 @@ mod tests {
         let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(3_000));
         ready.recv().unwrap();
 
-        let result: crate::Result<()> = with_immediate_write_txn_bounded(&conn, &[10, 10], |tx| {
-            tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
-            Ok(())
-        });
-        let message = result
-            .expect_err("the holder outlasts the budget")
-            .to_string();
+        let result: crate::Result<()> = with_immediate_write_txn_bounded(
+            &conn,
+            &[10, 10],
+            |tx| {
+                tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
+                Ok(())
+            },
+        );
+        let message = result.expect_err("the holder outlasts the budget").to_string();
         holder.join().unwrap();
 
         assert!(

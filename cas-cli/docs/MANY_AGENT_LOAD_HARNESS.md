@@ -53,6 +53,8 @@ The run passes only when all three hold:
 - No call reaches the 55 s MCP deadline.
 - The daemon loop pass p99 is under 100 ms.
 
+The verdict comes from the run as configured, which by default is the standard pressure profile. After a run with pressure, the harness runs a second phase on a fresh copy with the background writers off and records it in the same receipt under `no_pressure`. Turn that off with `--no-control`.
+
 The exit status is 0 when every SLO holds, 1 when one is violated and 2 when the run produced no calls.
 
 ## Run it
@@ -66,9 +68,21 @@ python3 -I scripts/many-agent-load.py \
   --source-db ~/Petrastella/cassy/.cas/cas.db \
   --source-config ~/Petrastella/cassy/.cas/config.toml \
   --project-src . --project-rev 0d670c33c \
+  --code-index --prewarm-secs 20 \
   --scratch /mnt/rewind/cas/scratch/load-harness \
   --out "$A"
 ```
+
+Options worth knowing:
+
+- `--code-index` / `--no-code-index` set `[code] enabled` in the scratch config. Without either flag, the copied config decides.
+- `--prewarm-secs` runs one supervisor-role `cas serve` alone before the load. It waits for that serve's one-time boot work to finish:
+  - the cas-8256 purge of non-canonical code-index copies, about 39 s on the cassy store;
+  - with indexing on, the first index build.
+
+  That work therefore stays out of the measured window. A worker-role serve only reads the code index, so it would never do this work.
+- `--exclude TOOL.ACTION` drops one workload entry for diagnosis, for example `--exclude coordination.message`. It can be repeated.
+- `--bg-writers`, `--bg-hold-ms` and `--bg-gap-ms` select the pressure profile.
 
 Use a scratch root on disk. `/tmp` is tmpfs on the factory hosts, and the database copy is about 1.6 GB. To compare builds, run the same command with `--cas-bin` pointing at each binary and a different `--label`. Change `--agents` for scale: 16 is the field fleet size, and 32 is the stretch point.
 
@@ -76,7 +90,13 @@ Use a scratch root on disk. `/tmp` is tmpfs on the factory hosts, and the databa
 
 Each run writes three files to `--out`:
 
-- `load-<label>-n<N>.json`: the receipt. It holds the binary version, config, per-tool latency, lock waits, busy warnings, the daemon summary and the SLO verdicts.
+- `load-<label>-n<N>.json`: the receipt. It holds:
+  - the binary version and harness commit;
+  - the configuration and pressure profile;
+  - the prewarm report and code-index counts at copy, load start and end;
+  - per-tool latency, lock waits (by lock file) and busy warnings;
+  - the daemon summary, including its slow 5 s windows;
+  - the SLO verdicts and the `no_pressure` control.
 - `load-<label>-n<N>.md`: a Markdown summary of the receipt.
 - `load-<label>-n<N>.calls.jsonl`: one row per call.
 

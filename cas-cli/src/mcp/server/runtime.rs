@@ -551,6 +551,8 @@ pub(crate) async fn install_proxy_policy(
     engine: &cmcp_core::ProxyEngine,
     config: &cmcp_core::config::Config,
 ) {
+    // cas-53ce (GH #1168): proxy.toml `call_timeout_secs`, default 90 s.
+    engine.set_call_timeout(config.call_timeout());
     let routes = config
         .allowlist
         .iter()

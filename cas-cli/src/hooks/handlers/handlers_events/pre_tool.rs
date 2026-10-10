@@ -2518,9 +2518,22 @@ const SUDO_VALUE_OPTIONS: &[&str] = &[
 /// The command string an `env -S STRING` / `--split-string[=]STRING` runs,
 /// for statements whose executable position is `env` (cas-cfd6).
 fn env_split_string_payload(words: &[String]) -> Option<String> {
-    let start = words
-        .iter()
-        .position(|word| shell_word_basename(word) == "env")?;
+    // Only an `env` in command position: after leading assignments and the
+    // wrappers the build guard already unwraps, never a quoted argument.
+    let start = words.iter().position(|word| {
+        !(word
+            .split_once('=')
+            .is_some_and(|(name, _)| is_shell_variable_name(name))
+            || matches!(
+                shell_word_basename(word),
+                "sudo" | "command" | "nohup" | "setsid" | "time" | "exec" | "nice" | "timeout"
+            )
+            || word.starts_with('-')
+            || word.parse::<f64>().is_ok())
+    })?;
+    if shell_word_basename(&words[start]) != "env" {
+        return None;
+    }
     let mut index = start + 1;
     while index < words.len() {
         let word = words[index].as_str();

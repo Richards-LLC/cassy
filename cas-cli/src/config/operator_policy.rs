@@ -54,6 +54,130 @@ pub struct OperatorWriteGrant {
     pub modes: BTreeSet<OperatorWriteMode>,
     pub reason: String,
     pub granted_at: String,
+    /// Who granted it: `operator-cli`, or `commander-device:<device id>` for a
+    /// grant made from a paired device through the hub (cas-ab04).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_by: Option<String>,
+}
+
+/// The verified path a grant or revoke arrived through (cas-ab04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantSource {
+    /// `cas config grant-write` after the operator gate and confirmation.
+    OperatorCli,
+    /// The hub, after authenticating the paired device's session.
+    CommanderDevice { device_id: String },
+}
+
+impl GrantSource {
+    pub fn label(&self) -> String {
+        match self {
+            GrantSource::OperatorCli => "operator-cli".to_string(),
+            GrantSource::CommanderDevice { device_id } => format!("commander-device:{device_id}"),
+        }
+    }
+}
+
+/// Record a grant for an open task and note it on the task. Callers must
+/// have established the operator first (CLI gate, or hub device session);
+/// this function only validates the request.
+pub fn record_operator_grant(
+    cas_root: &Path,
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    raw_path: &str,
+    raw_modes: &str,
+    reason: &str,
+    source: &GrantSource,
+) -> anyhow::Result<OperatorWriteGrant> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        anyhow::bail!("a reason is required: it is recorded on the task");
+    }
+    let task = task_store
+        .get(task_id)
+        .map_err(|error| anyhow::anyhow!("task {task_id} not found: {error}"))?;
+    if task.status == cas_types::TaskStatus::Closed {
+        anyhow::bail!("task {} is closed; a grant ends when its task closes", task.id);
+    }
+    let path = resolve_operator_path(raw_path, cas_root)?;
+    let modes = parse_modes(raw_modes)?;
+    let mode_text = modes
+        .iter()
+        .map(|mode| format!("{mode:?}").to_lowercase())
+        .collect::<Vec<_>>()
+        .join("+");
+    let grant = OperatorWriteGrant {
+        task: task.id.clone(),
+        path: path.clone(),
+        modes,
+        reason: reason.to_string(),
+        granted_at: chrono::Utc::now().to_rfc3339(),
+        granted_by: Some(source.label()),
+    };
+    let mut policy = load_operator_policy(cas_root)?;
+    policy.grants.retain(|existing| !(existing.task == task.id && existing.path == path));
+    policy.grants.push(grant.clone());
+    save_operator_policy(cas_root, &policy)?;
+    task_store.append_note(
+        &task.id,
+        &format!(
+            "[{}] ✅ DECISION operator write grant (cas-3147): {} ({mode_text}) until this task closes, by {}. Reason: {reason}",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            path.display(),
+            source.label()
+        ),
+    )?;
+    let path_text = path.display().to_string();
+    let by = source.label();
+    let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+        cas_root,
+        "operator_write_grant",
+        &[
+            ("task", task.id.as_str()),
+            ("path", path_text.as_str()),
+            ("mode", mode_text.as_str()),
+            ("by", by.as_str()),
+        ],
+    );
+    Ok(grant)
+}
+
+/// Remove a task's grants (all, or the one for `raw_path`) and note it.
+pub fn revoke_operator_grants(
+    cas_root: &Path,
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    raw_path: Option<&str>,
+    source: &GrantSource,
+) -> anyhow::Result<usize> {
+    let path = raw_path
+        .map(|raw| resolve_operator_path(raw, cas_root))
+        .transpose()?;
+    let mut policy = load_operator_policy(cas_root)?;
+    let before = policy.grants.len();
+    policy.grants.retain(|grant| {
+        !(grant.task == task_id && path.as_ref().is_none_or(|path| &grant.path == path))
+    });
+    let removed = before - policy.grants.len();
+    if removed > 0 {
+        save_operator_policy(cas_root, &policy)?;
+        let _ = task_store.append_note(
+            task_id,
+            &format!(
+                "[{}] ✅ DECISION operator write grant revoked (cas-3147): {removed} grant(s), by {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                source.label()
+            ),
+        );
+        let by = source.label();
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            cas_root,
+            "operator_write_grant_revoked",
+            &[("task", task_id), ("by", by.as_str())],
+        );
+    }
+    Ok(removed)
 }
 
 /// The whole operator policy file.
@@ -466,6 +590,7 @@ mod tests {
                 modes: BTreeSet::from([OperatorWriteMode::Edit]),
                 reason: "INGEST request files".into(),
                 granted_at: "2026-10-10T18:00:00Z".into(),
+                granted_by: Some("operator-cli".into()),
             }],
         };
         save_operator_policy(dir.path(), &policy).unwrap();
@@ -482,4 +607,46 @@ mod tests {
         let error = config.set("factory.write_roots", "/tmp").unwrap_err().to_string();
         assert!(error.contains("operator"), "{error}");
     }
+
+    /// cas-ab04: the shared grant path validates the task and path, records
+    /// who granted it (a Commander device id), notes it on the task, refuses
+    /// closed tasks and empty reasons, and revoke removes it with a note.
+    #[test]
+    fn cas_ab04_record_and_revoke_grant_record_source_and_task_notes() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let granted = project.path().canonicalize().unwrap().join("requests");
+        std::fs::create_dir_all(&granted).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
+        let mut task = cas_types::Task::new("cas-g1".into(), "ingest".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        let device = GrantSource::CommanderDevice { device_id: "dev-phone-1".into() };
+
+        let grant = record_operator_grant(
+            &cas_root, tasks.as_ref(), "cas-g1", &granted.display().to_string(), "create+edit", "INGEST files", &device,
+        )
+        .unwrap();
+        assert_eq!(grant.granted_by.as_deref(), Some("commander-device:dev-phone-1"));
+        assert_eq!(grant.path, granted);
+        let policy = load_operator_policy(&cas_root).unwrap();
+        assert_eq!(policy.grants, vec![grant.clone()]);
+        let notes = tasks.get("cas-g1").unwrap().notes;
+        assert!(notes.contains("operator write grant") && notes.contains("dev-phone-1"), "{notes}");
+
+        assert!(record_operator_grant(&cas_root, tasks.as_ref(), "cas-g1", &granted.display().to_string(), "", " ", &device).is_err(), "a reason is required");
+        assert!(record_operator_grant(&cas_root, tasks.as_ref(), "cas-missing", &granted.display().to_string(), "", "r", &device).is_err());
+
+        assert_eq!(revoke_operator_grants(&cas_root, tasks.as_ref(), "cas-g1", None, &device).unwrap(), 1);
+        assert!(load_operator_policy(&cas_root).unwrap().grants.is_empty());
+        assert!(tasks.get("cas-g1").unwrap().notes.contains("revoked"));
+
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        assert!(
+            record_operator_grant(&cas_root, tasks.as_ref(), "cas-g1", &granted.display().to_string(), "", "r", &device).is_err(),
+            "a closed task cannot be granted"
+        );
+    }
+
 }

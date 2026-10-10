@@ -26,6 +26,7 @@ import {
   type UndoOffer,
 } from "./fleet-ops";
 import { fleetControlGate, type FleetControlGate } from "./fleet-permissions";
+import { writeAccessPanel, type WriteAccessContext } from "./write-grant-view";
 import type { Scope } from "./types";
 
 export interface FleetOpsViewContext {
@@ -42,6 +43,8 @@ export interface FleetOpsViewContext {
   readonly asked: ReadonlyMap<string, number>;
   readonly relative: (at: number) => string;
   readonly on: FleetOpsHandlers;
+  /** cas-ab04: the Write access panel's state and handlers. */
+  readonly writeAccess?: WriteAccessContext;
 }
 
 export interface FleetOpsHandlers {
@@ -53,10 +56,13 @@ export interface FleetOpsHandlers {
   sendMerge(rowKey: string, task: FleetTask): void;
   closePanels(): void;
   toggleAssign(rowKey: string): void;
-  toggleHeader(panel: "add" | "focus"): void;
+  toggleHeader(panel: FleetHeaderPanel): void;
   undo(): void;
   dismissNotice?(): void;
 }
+
+/** The section header's small panels. */
+export type FleetHeaderPanel = "add" | "focus" | "grant";
 
 export const agentRowKey = (agent: FleetAgent): string => `agent:${agent.name}`;
 export const taskRowKey = (task: FleetTask): string => `task:${task.id}`;
@@ -341,7 +347,7 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
 }
 
 /** The section header's Add worker… and Focus epic…, with their small panels. */
-export function headerControls(document: Document, context: FleetOpsViewContext, panel: "add" | "focus" | undefined): HTMLElement {
+export function headerControls(document: Document, context: FleetOpsViewContext, panel: FleetHeaderPanel | undefined): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "fleet-ops-header";
   const add = button(document, "Add worker…", "fleet-ops-add", "header:add", () => context.on.toggleHeader("add"));
@@ -352,8 +358,15 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   focus.setAttribute("aria-expanded", String(panel === "focus"));
   const focusGate = fleetControlGate(context.scopes, "focus-epic", context.origin);
   gateDisabled(focus, focusGate, "fleet-reason-header-focus");
+  // cas-ab04 (GH #1169): grant or revoke a task's write access outside its
+  // worktree; the hub records it from this paired device.
+  const grant = button(document, "Write access…", "fleet-ops-grant", "header:grant", () => context.on.toggleHeader("grant"));
+  grant.setAttribute("aria-expanded", String(panel === "grant"));
+  const grantGate = fleetControlGate(context.scopes, "write-access", context.origin);
+  gateDisabled(grant, grantGate, "fleet-reason-header-grant");
   wrap.append(add, focus);
-  for (const [gate, id] of [[addGate, "fleet-reason-header-add"], [focusGate, "fleet-reason-header-focus"]] as const) {
+  if (context.writeAccess) wrap.append(grant);
+  for (const [gate, id] of [[addGate, "fleet-reason-header-add"], [focusGate, "fleet-reason-header-focus"], ...(context.writeAccess ? [[grantGate, "fleet-reason-header-grant"]] as const : [])] as const) {
     const reason = reasonLine(document, gate, id);
     if (reason) { wrap.append(reason); break; }
   }
@@ -376,6 +389,7 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
     if (actions.length || context.phone) wrap.append(picker(document, context, "header", actions, "Focus epic", context.currentEpic ? `Current focus: ${context.currentEpic}` : "No epic focused."));
     else { const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No other epic to focus."; wrap.append(none); }
   }
+  if (panel === "grant" && grantGate.allowed && context.writeAccess) wrap.append(writeAccessPanel(document, context.writeAccess));
   const note = noteLine(document, context, "header");
   if (note) wrap.append(note);
   return wrap;

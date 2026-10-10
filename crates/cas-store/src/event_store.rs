@@ -531,6 +531,120 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
+    fn record_aged(store: &SqliteEventStore, event_type: EventType, days_old: i64, entity: &str) {
+        let mut event = Event::new(event_type, EventEntityType::Agent, entity, entity);
+        event.created_at = Utc::now() - chrono::Duration::days(days_old);
+        store.record(&event).unwrap();
+    }
+
+    fn count_type(store: &SqliteEventStore, event_type: EventType) -> i64 {
+        store
+            .count_by_type()
+            .unwrap()
+            .into_iter()
+            .find(|(t, _)| *t == event_type)
+            .map(|(_, c)| c)
+            .unwrap_or(0)
+    }
+
+    /// cas-e193: telemetry retention deletes only aged telemetry types; every
+    /// lifecycle type (task, commit, verification, ...) survives at any age
+    /// because provenance and task-ownership readers scan them unbounded.
+    #[test]
+    fn telemetry_retention_prunes_only_aged_telemetry_types_cas_e193() {
+        let (store, _dir) = setup_store();
+        record_aged(&store, EventType::SupervisorInjected, 20, "old-inject");
+        record_aged(&store, EventType::SupervisorInjected, 2, "new-inject");
+        record_aged(&store, EventType::WorkerFileEdited, 20, "old-edit");
+        record_aged(&store, EventType::AgentHeartbeat, 20, "old-heartbeat");
+        record_aged(&store, EventType::WorkerGitCommit, 400, "old-commit");
+        record_aged(&store, EventType::TaskCreated, 400, "old-task");
+
+        let report = prune_telemetry_events(&store, 14, EVENT_PRUNE_MAX_BATCH, 10, Duration::ZERO)
+            .unwrap();
+        assert_eq!(report.deleted, 3);
+        assert!(report.complete, "{report:?}");
+        assert_eq!(count_type(&store, EventType::SupervisorInjected), 1);
+        assert_eq!(count_type(&store, EventType::WorkerFileEdited), 0);
+        assert_eq!(count_type(&store, EventType::AgentHeartbeat), 0);
+        assert_eq!(count_type(&store, EventType::WorkerGitCommit), 1);
+        assert_eq!(count_type(&store, EventType::TaskCreated), 1);
+
+        // days = 0 disables retention outright.
+        record_aged(&store, EventType::SupervisorInjected, 90, "ancient");
+        let report =
+            prune_telemetry_events(&store, 0, EVENT_PRUNE_MAX_BATCH, 10, Duration::ZERO).unwrap();
+        assert_eq!(report.deleted, 0);
+        assert_eq!(count_type(&store, EventType::SupervisorInjected), 2);
+    }
+
+    /// cas-e193: one delete transaction never removes more than
+    /// EVENT_PRUNE_MAX_BATCH rows, whatever batch size the caller asks for,
+    /// and a run stops at its batch budget with the backlog reported.
+    #[test]
+    fn telemetry_retention_batches_never_exceed_the_bound_cas_e193() {
+        let (store, _dir) = setup_store();
+        let aged = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            for i in 0..2_500 {
+                tx.execute(
+                    "INSERT INTO events (event_type, entity_type, entity_id, summary, created_at)
+                     VALUES ('supervisor_injected', 'agent', ?1, 's', ?2)",
+                    params![format!("w{i}"), aged],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // An oversized request is clamped to the bound.
+        let first = store.prune_telemetry_batch(14, 50_000).unwrap();
+        assert_eq!(first, EVENT_PRUNE_MAX_BATCH);
+
+        // A run with a one-batch budget stops early and says so.
+        let partial = prune_telemetry_events(&store, 14, 50_000, 1, Duration::ZERO).unwrap();
+        assert_eq!(partial.deleted, EVENT_PRUNE_MAX_BATCH);
+        assert_eq!(partial.batches, 1);
+        assert!(!partial.complete);
+
+        let rest = prune_telemetry_events(&store, 14, 50_000, 10, Duration::ZERO).unwrap();
+        assert_eq!(rest.deleted, 500);
+        assert!(rest.largest_batch <= EVENT_PRUNE_MAX_BATCH);
+        assert!(rest.complete);
+        assert_eq!(count_type(&store, EventType::SupervisorInjected), 0);
+    }
+
+    /// cas-e193: archive_old works in bounded batches — each batch is archived
+    /// before its rows are deleted, and the run still drains the backlog.
+    #[test]
+    fn archive_old_archives_and_deletes_in_bounded_batches_cas_e193() {
+        let (store, dir) = setup_store();
+        let aged = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            for i in 0..2_100 {
+                tx.execute(
+                    "INSERT INTO events (event_type, entity_type, entity_id, summary, created_at)
+                     VALUES ('task_created', 'task', ?1, 's', ?2)",
+                    params![format!("t{i}"), aged],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        record_aged(&store, EventType::TaskCreated, 1, "recent");
+
+        let archive_dir = dir.path().join("archive");
+        let archived = store.archive_old(&archive_dir, 30).unwrap();
+        assert_eq!(archived, 2_100);
+        let files = std::fs::read_dir(&archive_dir).unwrap().count();
+        assert_eq!(files, 3, "2,100 rows archive as three batches of at most 1,000");
+        assert_eq!(count_type(&store, EventType::TaskCreated), 1);
+    }
+
     #[test]
     fn test_list_by_session() {
         let (store, _dir) = setup_store();

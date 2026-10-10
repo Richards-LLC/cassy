@@ -12,6 +12,9 @@ use cas_store::PromptQueueStore;
 
 const TRANSCRIPT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REPLY_CHARS: usize = 4_000;
+/// How far from a turn's start a recorded terminal question may be and still
+/// be the question that turn answers (cas-5c89).
+const TERMINAL_TURN_MATCH_SECS: i64 = 120;
 
 #[derive(Debug)]
 struct CompletedTurn {
@@ -20,6 +23,9 @@ struct CompletedTurn {
     completed_at: DateTime<Utc>,
     text: String,
     commander_id: Option<i64>,
+    /// The operator-visible prompt that started the turn, when the transcript
+    /// carries it (cas-5c89: matched against recorded terminal turns).
+    prompt: Option<String>,
 }
 
 fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
@@ -84,6 +90,7 @@ fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
 fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<CompletedTurn> {
     let mut turns = Vec::new();
     let mut started: Option<(String, DateTime<Utc>, Option<i64>)> = None;
+    let mut started_prompt: Option<String> = None;
     let mut final_text: Option<String> = None;
     for value in values {
         let Some(at) = timestamp(value) else { continue };
@@ -102,6 +109,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         .to_owned();
                     if !key.is_empty() {
                         started = Some((key, at, commander_marker(prompt)));
+                        started_prompt = Some(prompt.to_owned());
                         final_text = None;
                     }
                 }
@@ -127,6 +135,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                                 completed_at: at,
                                 text,
                                 commander_id,
+                                prompt: started_prompt.take(),
                             });
                         }
                     }
@@ -143,6 +152,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         completed_at: at,
                         text,
                         commander_id,
+                        prompt: started_prompt.take(),
                     });
                 }
             }
@@ -158,6 +168,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         .and_then(Value::as_str)
                     {
                         started = Some((id.to_owned(), at, None));
+                        started_prompt = None;
                         final_text = None;
                     }
                 }
@@ -167,6 +178,9 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         if let Some(prompt) = text_blocks(value, "/payload/content", "input_text") {
                             if let Some((_, _, commander_id)) = started.as_mut() {
                                 *commander_id = commander_marker(&prompt).or(*commander_id);
+                                if started_prompt.is_none() {
+                                    started_prompt = Some(prompt);
+                                }
                             }
                         }
                     } else if role == Some("assistant")
@@ -202,6 +216,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                                 completed_at: at,
                                 text,
                                 commander_id,
+                                prompt: started_prompt.take(),
                             });
                         }
                     }
@@ -246,13 +261,13 @@ pub(super) fn mirror_supervisor_replies(
     session: &str,
     queue: &dyn PromptQueueStore,
 ) {
-    let Ok(Some(_paired_device)) = queue.latest_verified_operator_device(session) else {
+    // cas-5c89: an operator who only types in the supervisor's terminal is an
+    // operator too. Gating on a paired-device Commander send left a
+    // terminal-only conversation showing questions and never their answers.
+    let Ok(Some(first_operator_at)) = queue.first_operator_activity_at(session) else {
         return;
     };
-    let Ok(Some(first_pair_at)) = queue.first_verified_operator_at(session) else {
-        return;
-    };
-    let Some(active_since) = activation_time(root, session, first_pair_at) else {
+    let Some(active_since) = activation_time(root, session, first_operator_at) else {
         return;
     };
     let Ok(agents) = crate::store::open_agent_store(root) else {
@@ -289,10 +304,30 @@ pub(super) fn mirror_supervisor_replies(
         let Ok(values) = transcript_tail(&path) else {
             continue;
         };
-        for turn in completed_turns(&values, cli)
-            .into_iter()
-            .filter(|turn| turn.completed_at >= active_since)
-        {
+        for turn in completed_turns(&values, cli) {
+            // cas-5c89: the answer to a question the operator typed in the
+            // terminal threads under that question, and is mirrored even if it
+            // completed before mirroring started; other turns are not
+            // backfilled, so first activation never floods an old transcript.
+            let terminal_question = turn
+                .commander_id
+                .is_none()
+                .then_some(turn.prompt.as_deref())
+                .flatten()
+                .and_then(|prompt| {
+                    queue
+                        .terminal_operator_turn_near(
+                            session,
+                            prompt,
+                            turn.started_at,
+                            TERMINAL_TURN_MATCH_SECS,
+                        )
+                        .ok()
+                        .flatten()
+                });
+            if turn.completed_at < active_since && terminal_question.is_none() {
+                continue;
+            }
             let prior = turn
                 .commander_id
                 .and_then(|id| queue.queued_prompt(id).ok().flatten())
@@ -330,14 +365,14 @@ pub(super) fn mirror_supervisor_replies(
                 .chars()
                 .take(120)
                 .collect();
-            let kind = if prior.is_some() {
+            let kind = if prior.is_some() || terminal_question.is_some() {
                 crate::ui::factory::OperatorTurnKind::Answer
             } else {
                 crate::ui::factory::OperatorTurnKind::Status
             };
             let payload = crate::ui::factory::OperatorReplyPayload {
                 schema_version: 2,
-                reply_to: prior.as_ref().map(|row| row.id),
+                reply_to: prior.as_ref().map(|row| row.id).or(terminal_question),
                 message: text,
                 summary: summary.clone(),
                 device_id: device.to_owned(),
@@ -537,12 +572,25 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let different = payload.replace("**Ready**\\n- Next step is clear.", "A separate final answer");
-        assert!(queue
-            .mirror_supervisor_turn("factory-1", "turn-3", explicit_at - chrono::Duration::seconds(1), end,
-                &different, "separate", "phone", "answer")
-            .unwrap()
-            .is_some());
+        let different = payload.replace(
+            "**Ready**\\n- Next step is clear.",
+            "A separate final answer",
+        );
+        assert!(
+            queue
+                .mirror_supervisor_turn(
+                    "factory-1",
+                    "turn-3",
+                    explicit_at - chrono::Duration::seconds(1),
+                    end,
+                    &different,
+                    "separate",
+                    "phone",
+                    "answer"
+                )
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -721,7 +769,13 @@ mod tests {
     }
 
     /// A Codex supervisor registered in `factory-1` whose rollout holds `turns`.
-    fn terminal_session(turns: Vec<Value>) -> (tempfile::TempDir, std::path::PathBuf, SqlitePromptQueueStore) {
+    fn terminal_session(
+        turns: Vec<Value>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        SqlitePromptQueueStore,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
         std::fs::create_dir_all(&root).unwrap();
@@ -730,27 +784,42 @@ mod tests {
         let account = temp.path().join("account");
         let sessions = account.join("sessions/2026/10/10");
         std::fs::create_dir_all(&sessions).unwrap();
-        let mut lines = vec![serde_json::json!({"type":"session_meta","payload":{"cwd":temp.path().to_str().unwrap(),"source":"cli"}})];
+        let mut lines = vec![
+            serde_json::json!({"type":"session_meta","payload":{"cwd":temp.path().to_str().unwrap(),"source":"cli"}}),
+        ];
         lines.extend(turns);
         std::fs::write(
             sessions.join("rollout-2026-10-10T12-00-00-terminal.jsonl"),
-            lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n",
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
         )
         .unwrap();
         let agents = SqliteAgentStore::open(&root).unwrap();
         agents.init().unwrap();
-        let mut supervisor =
-            Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor);
+        let mut supervisor = Agent::new_with_role(
+            "supervisor-id".into(),
+            "supervisor".into(),
+            AgentRole::Supervisor,
+        );
         supervisor.factory_session = Some("factory-1".into());
-        supervisor.metadata.insert("supervisor_cli".into(), "codex".into());
         supervisor
             .metadata
-            .insert("supervisor_account_dir".into(), account.to_string_lossy().into_owned());
+            .insert("supervisor_cli".into(), "codex".into());
+        supervisor.metadata.insert(
+            "supervisor_account_dir".into(),
+            account.to_string_lossy().into_owned(),
+        );
         agents.register(&supervisor).unwrap();
         (temp, root, queue)
     }
 
-    fn operator_replies(queue: &SqlitePromptQueueStore) -> Vec<crate::ui::factory::OperatorReplyPayload> {
+    fn operator_replies(
+        queue: &SqlitePromptQueueStore,
+    ) -> Vec<crate::ui::factory::OperatorReplyPayload> {
         queue
             .conversation_history("factory-1", "phone", None, 50)
             .unwrap()
@@ -767,7 +836,12 @@ mod tests {
     fn a_terminal_only_operator_gets_the_supervisors_answers_cas_5c89() {
         let question = "What changed in Violet today?";
         let now = Utc::now();
-        let mut turns = codex_turn_at("turn-q", question, "**Two fixes landed.**", now + chrono::Duration::seconds(1));
+        let mut turns = codex_turn_at(
+            "turn-q",
+            question,
+            "**Two fixes landed.**",
+            now + chrono::Duration::seconds(1),
+        );
         turns.extend(codex_turn_at(
             "turn-m",
             "[cas #77 agent-authored 0s first] worker update",
@@ -775,13 +849,19 @@ mod tests {
             now + chrono::Duration::seconds(10),
         ));
         let (temp, root, queue) = terminal_session(turns);
-        let terminal = queue.record_terminal_operator_turn("factory-1", question).unwrap();
+        let terminal = queue
+            .record_terminal_operator_turn("factory-1", question)
+            .unwrap();
 
         mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
         mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
 
         let replies = operator_replies(&queue);
-        assert_eq!(replies.len(), 2, "one row per completed turn, no duplicates: {replies:?}");
+        assert_eq!(
+            replies.len(),
+            2,
+            "one row per completed turn, no duplicates: {replies:?}"
+        );
         let answer = replies
             .iter()
             .find(|reply| reply.message == "**Two fixes landed.**")
@@ -798,14 +878,20 @@ mod tests {
 
         // The conversation reads question, then answer, and never carries the
         // machine-injected prompt itself.
-        let history = queue.conversation_history("factory-1", "phone", None, 50).unwrap();
+        let history = queue
+            .conversation_history("factory-1", "phone", None, 50)
+            .unwrap();
         let question_at = history.iter().position(|row| row.id == terminal).unwrap();
         let answer_at = history
             .iter()
             .position(|row| row.target == "operator" && row.prompt.contains("Two fixes landed"))
             .unwrap();
         assert!(question_at < answer_at, "{history:?}");
-        assert!(!history.iter().any(|row| row.prompt.contains("worker update") && row.target != "operator"));
+        assert!(
+            !history
+                .iter()
+                .any(|row| row.prompt.contains("worker update") && row.target != "operator")
+        );
     }
 
     /// Answers to the operator's own terminal questions are backfilled even
@@ -816,9 +902,16 @@ mod tests {
         let question = "Is the release branch green?";
         let now = Utc::now();
         let mut turns = codex_turn_at("turn-q", question, "Yes, every check passed.", now);
-        turns.extend(codex_turn_at("turn-old", "[cas #9 agent-authored] relay", "Old status.", now + chrono::Duration::seconds(6)));
+        turns.extend(codex_turn_at(
+            "turn-old",
+            "[cas #9 agent-authored] relay",
+            "Old status.",
+            now + chrono::Duration::seconds(6),
+        ));
         let (temp, root, queue) = terminal_session(turns);
-        let terminal = queue.record_terminal_operator_turn("factory-1", question).unwrap();
+        let terminal = queue
+            .record_terminal_operator_turn("factory-1", question)
+            .unwrap();
         // Mirroring started after both turns completed.
         let marker_dir = root.join("commander-mirror");
         std::fs::create_dir_all(&marker_dir).unwrap();

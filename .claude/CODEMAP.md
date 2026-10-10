@@ -55,8 +55,10 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/cli/{codemap_cmd,project_overview_cmd,knowledge_cmd}.rs` — documentation freshness gates and knowledge operations.
 - `cas-cli/src/cli/{history_cmd,index_cmd,retrieval_parity}.rs` — Git history search, code indexes, and retrieval parity commands.
 - `cas-cli/src/cli/integrate/{violet,violet_retirement}.rs` — `cas integrate violet`; `cas-cli/src/cli/doctor/slack_transport.rs` checks the Slack route.
+- `cas-cli/src/cli/violet_cmd/{mod,hub,files}.rs` — `cas violet post|thread|read`: post local files to Slack by path (inline ≤1 MiB or `file_external`) through the Violet hub.
 - `cas-cli/src/cli/{jev,hub_operator,store_choice}.rs` — `cas jev`, operator-inbox commands, and store selection.
 - `cas-cli/src/artifacts/` — publishable-path guard, streaming digest, and the Cloud begin/PUT/complete upload client for published artifacts.
+- `cas-cli/src/artifacts/slack.rs` — `artifact action=post`: Cloud-resolved, sha256-checked artifact post to Slack via Violet `file_external`.
 - `cas-cli/src/cloud/` — cloud sync, devices, teams, proposals, embeddings, aliases, and queued push/pull; `cas-cli/src/cloud/sync_queue/unauthored.rs` ledgers pulled rows this project did not author.
 - `cas-cli/src/config/` — settings, runtime hooks, access policy, metadata registry, and seeded coordination/daemon/history/QA sections.
 - `cas-cli/src/daemon/` — background maintenance, decay, observation, source watching, indexing, and bounded relevance evaluation.
@@ -86,6 +88,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/ui/factory/director/` — mission/task/worker coordination, prompts, reminders, events, radar, and supervisor-stall tests.
 - `cas-cli/src/ui/factory/daemon/` — PTY-owning daemon; `cas-cli/src/ui/factory/daemon/runtime/` covers lifecycle, delivery, CI watch, relay, teams, queue/events, and merge sweep.
 - `cas-cli/src/ui/factory/daemon/runtime/{loop_watchdog,commander_mirror,send_dedupe,terminal_exchange}.rs` — loop watchdog, supervisor-answer mirror into Commander, send dedupe, and PTY exchange.
+- `cas-cli/src/ui/factory/daemon/runtime/violet_activity.rs` — Violet push-wake: claims Slack activity from Cloud, typed `SlackActivity` wake, 5-min channel watch book.
 - `cas-cli/src/ui/factory/server_registry/docker.rs` — registered servers backed by `docker run` containers.
 - `cas-cli/src/ui/factory/{boot,client,protocol,server_registry,session}.rs` — startup, client transport, protocol, server lifecycle, and session state.
 - `crates/cas-factory/src/{routing,spec_resolver,probe,director,config}.rs` — provider/lane registry, worker specs, probes, directors, and configuration.
@@ -95,6 +98,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 ## MCP service and tool tree
 
 - `cas-cli/src/mcp/{daemon.rs,socket.rs,server/}` — daemon lifecycle, Unix transport, runtime, parent watchdog, prompts, and resources.
+- `cas-cli/src/mcp/server/pre_initialize_guard.rs` — answers pre-initialize MCP probes with method-not-found so a client probe cannot kill `cas serve`.
 - `cas-cli/src/mcp/tools/core/` — task, memory, knowledge, artifact, search, rules, skills, workflow, system, opinion, maintenance, and coordination handlers.
 - `cas-cli/src/mcp/tools/core/guidance.rs` — request-local caller and supervisor prefixes for executable recovery hints.
 - `cas-cli/src/mcp/tools/core/task/` — task queries, notes, proposals, dependencies, updates, and lifecycle proof/close gates.
@@ -120,6 +124,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/tests/hooks_test/main.rs` — integration-test entrypoint that includes the hooks test module tree.
 - `cas-cli/tests/mcp_tools_test/` — MCP action coverage; `cas-cli/tests/mcp_tools_test/task_tools/` holds lifecycle, dependency, close-gate, QA (`independent_qa.rs`, `qa_evidence_gate.rs`), cited-issue, and verification suites.
 - `cas-cli/tests/{pull_authorship,credential_debug_guard}_test.rs` — unauthored-pull ledger and credential-leak debug-output guards.
+- `cas-cli/tests/violet_cli_test.rs` — `cas violet` binary exit codes and argument contracts.
 - `cas-cli/tests/e2e/` — factory, hooks, memory/rules, multi-agent, tasks, teams, verification, and worktree flows.
 - `cas-cli/tests/{factory_parity,factory_codex_skill_guardrails,factory_mcp_ops}_test.rs` — factory parity and worker-facing contract gates.
 - `cas-cli/tests/{builtin_archive_portability,builtin_doc_hygiene,agent_definition_contract,skill_hygiene}_test.rs` — managed prompt/skill hygiene gates.

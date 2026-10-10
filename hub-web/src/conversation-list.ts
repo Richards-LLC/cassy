@@ -263,6 +263,16 @@ const END_ICON = `<svg class="conversation-end-icon" viewBox="0 0 20 20" fill="n
 export const ENDED_NOTICE_MS = 8_000;
 
 /** Keyed buttons: a catalog heartbeat must never steal keyboard focus. */
+/** A press that travels further than this is a drag or a scroll, not a tap (cas-4646). */
+export const ROW_TAP_SLOP_PX = 10;
+/**
+ * How long a lifted press waits for its click before it opens the pressed row
+ * itself (cas-4646). A mouse's click comes in the same task as its release; a
+ * touch's tap follows the lifted finger at once, and a click that arrives
+ * late, after the row opened without it, is absorbed until `absorb` passes.
+ */
+export const ROW_TAP_CLICK_WAIT_MS = { mouse: 0, touch: 300, absorb: 600 } as const;
+
 export class ConversationList {
   private nodes = new Map<string, HTMLButtonElement>();
   /** Group headings and End session controls, keyed beside the rows (cas-55a4). */
@@ -290,9 +300,21 @@ export class ConversationList {
   private endedNode?: HTMLParagraphElement;
   /** The live region beside the list. It stays in the page, so a new sentence is announced. */
   private announcer?: HTMLParagraphElement;
+  /**
+   * cas-4646: the row a pointer pressed, held by its key rather than by its
+   * node. A live update between press and release can move the row (a group
+   * re-sorts by activity) or replace every row (the shell rebuilds when a
+   * session starts or ends). The click that follows then lands on another
+   * row, on nothing, or on a detached node, and the tap did nothing. The
+   * gesture remembers what was pressed, so the press opens it either way.
+   */
+  private press?: { pointerId: number; pointerType: string; key: string; x: number; y: number; released: boolean; opened?: boolean; timer?: ReturnType<typeof setTimeout> };
+  /** The document whose pointer events this list follows. */
+  private watched?: Document;
   render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
     this.latest = { container, rows, open, end };
     const document = container.ownerDocument;
+    this.watch(document);
     const ordered: HTMLElement[] = [];
     const current = new Set(rows.map((row) => row.key));
     for (const [key, node] of this.nodes) {
@@ -376,6 +398,75 @@ export class ConversationList {
    * that followed it when that is in the same group, else after the row before
    * it (and its End control), else at the top.
    */
+  /** Follow pointer presses on rows for the life of the page (cas-4646). */
+  private watch(document: Document): void {
+    if (this.watched === document) return;
+    this.watched = document;
+    const capture = { capture: true } as const;
+    document.addEventListener("pointerdown", (event) => this.pressed(event), capture);
+    document.addEventListener("pointermove", (event) => {
+      const press = this.press;
+      if (press && !press.released && event.pointerId === press.pointerId && Math.hypot(event.clientX - press.x, event.clientY - press.y) > ROW_TAP_SLOP_PX) this.forget();
+    }, capture);
+    document.addEventListener("pointercancel", (event) => { if (event.pointerId === this.press?.pointerId) this.forget(); }, capture);
+    document.addEventListener("pointerup", (event) => this.lifted(event), capture);
+    // Capture, so a click the list moved onto another row, or onto anything
+    // else, is turned back into the pressed row before it is handled there.
+    document.addEventListener("click", (event) => this.landed(event), capture);
+  }
+
+  private pressed(event: PointerEvent): void {
+    this.forget();
+    if (!event.isPrimary || event.button !== 0) return;
+    const node = event.target instanceof Element ? event.target.closest<HTMLElement>(".conversation-row") : null;
+    const key = node?.dataset.threadKey;
+    if (!node || key === undefined || this.nodes.get(key) !== node) return;
+    this.press = { pointerId: event.pointerId, pointerType: event.pointerType, key, x: event.clientX, y: event.clientY, released: false };
+  }
+
+  private lifted(event: PointerEvent): void {
+    const press = this.press;
+    if (!press || press.released || event.pointerId !== press.pointerId) return;
+    if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > ROW_TAP_SLOP_PX) { this.forget(); return; }
+    press.released = true;
+    // A click that never comes (its target left the page) still opens the row.
+    const touch = press.pointerType !== "mouse";
+    press.timer = setTimeout(() => {
+      if (this.press !== press) return;
+      press.opened = true;
+      const view = this.watched?.defaultView;
+      const PointerClick = view?.PointerEvent ?? view?.MouseEvent;
+      this.openKey(press.key, PointerClick ? new PointerClick("click", { detail: 1, pointerType: press.pointerType } as PointerEventInit) : undefined);
+      // A mouse's click would have come by now; a late tap is absorbed for a while.
+      if (!touch) { if (this.press === press) this.forget(); return; }
+      press.timer = setTimeout(() => { if (this.press === press) this.forget(); }, ROW_TAP_CLICK_WAIT_MS.absorb);
+    }, touch ? ROW_TAP_CLICK_WAIT_MS.touch : ROW_TAP_CLICK_WAIT_MS.mouse);
+  }
+
+  /** A click after a lifted press opens the pressed row, wherever it landed. */
+  private landed(event: MouseEvent): void {
+    const press = this.press;
+    if (!press?.released || event.detail === 0) return;
+    this.forget();
+    // The row already opened without its click; this late click is that tap.
+    if (press.opened) { event.preventDefault(); event.stopPropagation(); return; }
+    const node = event.target instanceof Element ? event.target.closest<HTMLElement>(".conversation-row") : null;
+    if (node && node.dataset.threadKey === press.key && this.nodes.get(press.key) === node) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.openKey(press.key, event);
+  }
+
+  private openKey(key: string, event: MouseEvent | undefined): void {
+    const row = this.latest?.rows.find((item) => item.key === key);
+    if (row) this.latest!.open(row, event);
+  }
+
+  private forget(): void {
+    if (this.press?.timer !== undefined) clearTimeout(this.press.timer);
+    this.press = undefined;
+  }
+
   private endedPlace(ordered: readonly HTMLElement[], rows: readonly ConversationRow[], ended: { after?: string; before?: string; group?: string }): number {
     const at = (node?: HTMLElement) => (node ? ordered.indexOf(node) : -1);
     const after = ended.after === undefined ? -1 : at(this.nodes.get(ended.after));

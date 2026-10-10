@@ -13545,8 +13545,9 @@ pub(crate) fn resolve_close_delivery_branch(
 ///
 /// GH #1167: once a no-code task has no work target (a supervisor cleared it
 /// with proof_scope_fix target_repo="", or it never had one), nothing can be
-/// merged on its behalf, so only commits that name this task count as its
-/// own; an unnamed commit or an anchor on the worker lane does not.
+/// merged on its behalf, so only worker-lane commits that name this task
+/// count as its own; an unnamed lane commit does not. A retained delivery
+/// anchor stays binding either way (cas-3067).
 pub(crate) fn no_code_task_without_own_commits(
     repo_path: &std::path::Path,
     task: &Task,
@@ -13562,9 +13563,9 @@ pub(crate) fn no_code_task_without_own_commits(
     )
 }
 
-/// [`no_code_task_without_own_commits`] with the attribution rule explicit.
-/// `named_only` counts only commits that name this task as its own (a
-/// supervisor-reviewed path: a cleared work target, or evidence_only);
+/// [`no_code_task_without_own_commits`] with the lane rule explicit.
+/// `named_only` counts only worker-lane commits that name this task as its
+/// own (a supervisor-reviewed path: a cleared work target, or evidence_only);
 /// otherwise unnamed lane work may be this task's (cas-2387).
 pub(crate) fn no_code_task_without_own_commits_judged(
     repo_path: &std::path::Path,
@@ -13593,13 +13594,7 @@ pub(crate) fn no_code_task_without_own_commits_judged(
         .factory_branch_anchor
         .iter()
         .chain(&delivery.historical_factory_branch_anchors)
-        .any(|anchor| {
-            if named_only {
-                task_attribution::commit_names_task(repo_path, anchor, &identity)
-            } else {
-                !task_attribution::commit_claims_another_task(repo_path, anchor, &identity)
-            }
-        })
+        .any(|anchor| !task_attribution::commit_claims_another_task(repo_path, anchor, &identity))
     {
         return false;
     }

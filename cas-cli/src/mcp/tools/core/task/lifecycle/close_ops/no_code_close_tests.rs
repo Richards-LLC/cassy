@@ -449,7 +449,8 @@ async fn evidence_only_closes_an_artifact_only_no_code_spike_gh1167() {
 /// GH #1167 (3): after the supervisor clears the code target
 /// (proof_scope_fix target_repo=""), the no-code spike closes on its proof
 /// with no branch resolution and no merge-tree preflight, even though the
-/// lane holds an unnamed commit and an earlier park anchored the lane tip.
+/// lane holds an unnamed commit. (A retained delivery anchor would stay
+/// binding: cas-3067.)
 #[tokio::test]
 async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167() {
     let mut env = TestEnvGuard::temp_home();
@@ -459,9 +460,6 @@ async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167
     let mut spike = no_code_spike(id, "main");
     spike.status = TaskStatus::AwaitingMerge;
     spike.deliverables.parked_branch = Some(LANE.into());
-    spike.deliverables.factory_branch_anchor = Some(
-        git(f.dir.path(), &["rev-parse", &format!("{}~1", f.foreign_tip)]),
-    );
     f.put(&spike);
     claim(&f, id);
     let cleared = call(

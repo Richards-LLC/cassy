@@ -198,54 +198,6 @@ An error that lists `uploads_begun` means Slack allocated those uploads: check
 the channel before posting again. `cas doctor` shows readiness on its Violet
 row: hub reachable and bearer accepted, or `invalid_token` for a bad bearer.
 
-## Read outage: write-safe fallback
-
-The full preflight rule behind the skill's step 3:
-
-Authenticated `tools/list` must include `violet_read` and `violet_post`;
-deprecated aliases may also appear; an unauthenticated listing proves nothing.
-Then call `violet_read` on the rubric channel with `include_channels: false` to
-dedupe and prove membership. **Always pass `since`** — a busy channel without
-it fails `pagination_exhausted`. Give the read at most **3 attempts with a
-10-second timeout each**; retry only when `error.retryable` is true. On every
-failure, preserve the complete error envelope after redacting credentials:
-print `code`, `message`, `retryable`, and any `detail` or `slack_error`
-verbatim. If `tools/list` passed and all read attempts end in a retryable
-`upstream_unavailable`, classify that as a read-only outage instead of a
-transport-wide outage. A draft with no write attempted may proceed to one
-`violet_post` only when the local POSTED receipt ledger (the `## POSTED`
-section, or an operator-supplied equivalent) proves there is no duplicate; the
-returned `channel` and `message_id` then establish membership and the new write
-receipt. Never invent a `dry_run` field, post after an uncertain earlier write,
-or retry a write without a receipt. Otherwise keep the draft and hand off the
-redacted full envelope. A successful read remains the preferred dedupe proof.
-
-## Verifying an upload
-
-The full rule behind the skill's step 5:
-
-Pass a programmatic file path to `cas violet post --channel <name> --file
-<path> --reply-to <id>` (or `--reply-file` on a thread), which reads bytes from
-disk; never paste base64 through the model. Download the provider's explicit
-file endpoint, not a message permalink, using only the authentication
-documented for that endpoint. The release adapter may instead re-read the
-returned file ID through authenticated `violet_read` with `file_id` and
-`include_channels: false`, which returns hub-packed bytes (or `size_bytes` and
-`sha256` for a skipped file); fail if neither verified path is available. Never
-forward the hub bearer or Vercel bypass to an arbitrary returned host: the
-release adapter sends them only to the configured MCP origin (with an explicit
-same-origin loopback exception for tests), while external signed or
-private-provider URLs receive no hub credentials and must use their own
-documented access or fail. Require SHA-256 (`sha256sum`) equality with the
-source and successful decode, run `python3 -c 'from PIL import Image;
-im=Image.open("download"); im.verify()'`, and inspect a visible preview when a
-human can look. Reject plaintext endpoints except the explicit loopback test
-and reject redirects that change origin or scheme. Never split, resize, or
-shrink a corrupt image as a remedy. Byte count, `ok: true`, or permalink alone
-never prove upload integrity; stop and escalate to the supervisor on the first
-weak receipt. For a PDF, verify successful PDF decode and page count instead of
-image decode before `release-report.receipt`.
-
 ## Posting a published artifact by ID
 
 To share a file that `artifact action=publish` already committed to Cloud,

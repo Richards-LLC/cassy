@@ -4042,6 +4042,10 @@ auth = "env:{token}"
                 include_str!("../../builtins/skills/violet/references/attachments.md"),
             ),
             (
+                "references/push-wake.md",
+                include_str!("../../builtins/skills/violet/references/push-wake.md"),
+            ),
+            (
                 "references/contract.md",
                 include_str!("../../builtins/skills/violet/references/contract.md"),
             ),

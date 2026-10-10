@@ -316,3 +316,45 @@ fn no_production_code_installs_sqlites_builtin_busy_timeout() {
         "restore the budget-aware handler with install_busy_handler instead: {offenders:?}"
     );
 }
+
+/// cas-ee9ab: the agent and event stores locked the process-wide connection
+/// with a plain mutex, so a loop pass that listed agents (session mappings,
+/// phantom panes, worker relays) waited for whatever another daemon thread
+/// was doing on that connection, budget or not. Measured under the cas-98b24
+/// load: 5 s waits in "session mappings" and the relays. Both stores now
+/// honour the pass budget like the others.
+#[test]
+fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab() {
+    let (_dir, cas_dir) = logged_in_project();
+    let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+    let events = crate::store::open_event_store(&cas_dir).unwrap();
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    let (held_tx, held) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = shared.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(FOREIGN_HOLD);
+    });
+    held.recv().unwrap();
+
+    let started = Instant::now();
+    let (agent_list, recent) = {
+        let _budget = wait_budget::bound_waits_for(super::store_worker::PASS_STORE_WAIT_BUDGET);
+        (agents.list(None), events.list_recent(10))
+    };
+    let waited = started.elapsed();
+    // The holder may already have given up if the reads waited it out.
+    let _ = release.send(());
+    holder.join().unwrap();
+
+    assert!(agent_list.is_err(), "the agent list did not wait for the held connection");
+    assert!(recent.is_err(), "the event list did not wait for the held connection");
+    assert!(
+        waited < PASS_LATENCY_LIMIT,
+        "agent and event reads waited {waited:?} for another thread's connection"
+    );
+    // Nothing is wedged: both read once the connection is free.
+    assert!(agents.list(None).is_ok());
+    assert!(events.list_recent(10).is_ok());
+}

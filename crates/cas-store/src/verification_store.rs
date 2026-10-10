@@ -1740,8 +1740,7 @@ fn correct_parked_delivery_proof_scope_inner(
     SqliteTaskStore::open(cas_dir)?.init()?;
     SqliteEventStore::open(cas_dir)?;
     let store = SqliteVerificationStore::open(cas_dir)?;
-    store
-        crate::shared_db::lock_connection(&.conn)?
+    crate::shared_db::lock_connection(&store.conn)?
         .execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
     let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
 
@@ -1968,8 +1967,7 @@ pub fn request_changes_for_parked_delivery(
     SqliteTaskStore::open(cas_dir)?.init()?;
     SqliteEventStore::open(cas_dir)?;
     let store = SqliteVerificationStore::open(cas_dir)?;
-    store
-        crate::shared_db::lock_connection(&.conn)?
+    crate::shared_db::lock_connection(&store.conn)?
         .execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
     let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
 

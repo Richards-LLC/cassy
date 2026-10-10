@@ -282,8 +282,7 @@ impl SqliteCodeVectorStore {
     }
 
     pub fn list_pending(&self, limit: usize) -> Result<Vec<CodeVectorWork>> {
-        let conn = self
-            crate::shared_db::lock_connection(&.conn)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT symbol_id, content_hash FROM code_vector_queue
              WHERE status IN ('pending', 'failed')
@@ -300,8 +299,7 @@ impl SqliteCodeVectorStore {
     }
 
     pub fn mark_vectorized(&self, symbol_id: &str, content_hash: &str) -> Result<bool> {
-        let conn = self
-            crate::shared_db::lock_connection(&.conn)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         Ok(conn.execute(
             "UPDATE code_vector_queue
              SET status = 'vectorized', last_error = NULL, updated_at = ?3

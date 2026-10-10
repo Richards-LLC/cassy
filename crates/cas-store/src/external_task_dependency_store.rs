@@ -186,8 +186,7 @@ impl ExternalTaskDependencyStore {
     /// handoff reappear and silently re-block a task after the operator had
     /// explicitly removed it.
     pub fn remove(&self, origin_task_id: &str, target_task_id: &str) -> Result<bool> {
-        let suppressed = self
-            crate::shared_db::lock_connection_recovering(&.conn)?
+        let suppressed = crate::shared_db::lock_connection_recovering(&self.conn)?
             .execute(
                 "UPDATE external_task_dependencies
                  SET suppressed_at = COALESCE(suppressed_at, ?3), updated_at = ?3
@@ -198,8 +197,7 @@ impl ExternalTaskDependencyStore {
     }
 
     pub fn cursor(&self, origin_project: &str) -> Result<Option<String>> {
-        Ok(self
-            crate::shared_db::lock_connection_recovering(&.conn)?
+        Ok(crate::shared_db::lock_connection_recovering(&self.conn)?
             .query_row(
                 "SELECT cursor FROM external_task_dependency_sync_state
                  WHERE origin_project_canonical_id = ?1",

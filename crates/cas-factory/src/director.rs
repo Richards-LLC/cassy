@@ -77,6 +77,26 @@ impl DirectorStores {
             project_id: None,
         })
     }
+
+    /// Stores on one private connection for a background reader (cas-ee9ab).
+    ///
+    /// [`Self::open`] shares the process-wide pooled connection, so a full
+    /// director load through it holds the in-process connection mutex for its
+    /// whole read and every other store call in the process waits. These
+    /// stores read through their own WAL connection instead. They run no DDL:
+    /// the process opens the schema through the pooled stores first.
+    pub fn open_dedicated(cas_dir: &Path) -> anyhow::Result<Self> {
+        let conn = cas_store::shared_db::dedicated_connection(&cas_dir.join("cas.db"))?;
+        Ok(Self {
+            task_store: SqliteTaskStore::with_connection(conn.clone()),
+            event_store: SqliteEventStore::with_connection(conn.clone()),
+            agent_store: SqliteAgentStore::with_connection(conn.clone()),
+            worktree_store: Some(SqliteWorktreeStore::with_connection(conn.clone())),
+            reminder_store: Some(SqliteReminderStore::with_connection(conn.clone())),
+            prompt_queue_store: Some(SqlitePromptQueueStore::with_connection(conn)),
+            project_id: None,
+        })
+    }
 }
 
 /// A summary of a task for display
@@ -277,6 +297,19 @@ impl DirectorData {
         self.changes = load_all_git_changes(cas_dir, worktree_root, &self.agent_id_to_name, None)?;
         self.git_loaded = true;
         Ok(())
+    }
+
+    /// Load git changes for `agent_id_to_name` without touching any other
+    /// field, so a background reader can compute them and the owner can swap
+    /// them in (cas-ee9ab).
+    pub fn load_git_changes_with_stores(
+        cas_dir: &Path,
+        worktree_root: Option<&Path>,
+        agent_id_to_name: &HashMap<String, String>,
+        stores: Option<&DirectorStores>,
+    ) -> anyhow::Result<Vec<SourceChangesInfo>> {
+        let wt_store = stores.and_then(|s| s.worktree_store.as_ref());
+        load_all_git_changes(cas_dir, worktree_root, agent_id_to_name, wt_store)
     }
 
     /// Refresh only git changes using cached stores.

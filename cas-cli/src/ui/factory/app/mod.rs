@@ -34,12 +34,17 @@ use crate::ui::widgets::TreeItemType;
 use crate::worktree::WorktreeManager;
 
 mod branch_visibility;
+mod director_refresh;
 mod imports;
 mod init;
 mod panels_and_modes;
 pub(crate) mod render_and_ops;
 mod sidecar_and_selection;
 pub(crate) mod task_dialog_load;
+
+pub(crate) use director_refresh::{
+    timed as timed_refresh_step, DeliveryInputs, DeliveryRequest, DirectorRefreshLoad, DirectorRefreshRequest,
+};
 
 pub(crate) use branch_visibility::BranchAheadBehind;
 pub(crate) use branch_visibility::truncate_branch_middle;
@@ -1343,8 +1348,28 @@ impl FactoryApp {
         if events.is_empty() {
             return (Vec::new(), Vec::new(), None);
         }
+        let inputs = self
+            .delivery_request()
+            .read(self.director_stores.as_ref());
+        self.revalidate_and_prompt_for_delivery_from(events, inputs)
+    }
 
-        let loaded_data = self.try_load_unfiltered_director_data_for_delivery();
+    /// [`Self::revalidate_and_prompt_for_delivery`] against a delivery read
+    /// already taken after `events` were detected (cas-ee9ab: the daemon
+    /// takes it on a background thread).
+    pub(crate) fn revalidate_and_prompt_for_delivery_from(
+        &mut self,
+        events: &[DirectorEvent],
+        inputs: DeliveryInputs,
+    ) -> (Vec<DirectorEvent>, Vec<Prompt>, Option<DirectorData>) {
+        if events.is_empty() {
+            return (Vec::new(), Vec::new(), None);
+        }
+
+        let DeliveryInputs {
+            data: loaded_data,
+            blocks_deps,
+        } = inputs;
         // cas-ae6d (GH #100): the instant the snapshot backing a "no
         // dispatchable tasks" claim was actually read. That claim is counted
         // from `director_data` (session/epic-scoped — see the comment on
@@ -1395,17 +1420,6 @@ impl FactoryApp {
         // cas-09d0: tasks that are Open but have an unmet `Blocks` dependency
         // must not be counted as "dispatchable" — see `compute_gated_task_ids`.
         let non_closed_ids = non_closed_task_ids(&unfiltered_data);
-        let blocks_deps = self
-            .director_stores
-            .as_ref()
-            .and_then(|s| {
-                cas_store::TaskStore::list_dependencies(
-                    &s.task_store,
-                    Some(cas_types::DependencyType::Blocks),
-                )
-                .ok()
-            })
-            .unwrap_or_default();
         let gated_task_ids =
             crate::ui::factory::director::compute_gated_task_ids(&non_closed_ids, &blocks_deps);
 
@@ -1655,96 +1669,13 @@ impl FactoryApp {
     /// work on every refresh. Removed rather than kept as a second,
     /// drift-prone prompt-generation path (cas-627f).
     pub fn refresh_data(&mut self) -> anyhow::Result<Vec<DirectorEvent>> {
-        let next_fingerprint = CasDbFingerprint::from_cas_dir(&self.cas_dir);
-        let db_changed = match self.last_db_fingerprint {
-            Some(prev) => prev != next_fingerprint,
-            None => true,
-        };
-        let git_due = !self.director_data.git_loaded
-            || self.last_git_refresh.elapsed() >= self.git_refresh_interval;
-
-        let worktree_root = self.worktree_manager.as_ref().map(|m| m.worktree_root());
-        if db_changed {
-            let loaded = DirectorData::load_with_stores(
-                &self.cas_dir,
-                worktree_root.as_deref(),
-                git_due,
-                self.director_stores.as_ref(),
-            )?;
-            self.director_data =
-                merge_director_data_preserving_git(&self.director_data, loaded, git_due);
-            // cas-dbbe: snapshot the fresh, still-unfiltered load BEFORE
-            // `filter_director_agents_to_current_session()` (below) mutates
-            // `self.director_data` in place. This canonical copy is what
-            // change detection and the TaskCompleted safety net read, so a
-            // second epic worked concurrently in this session never looks
-            // like it "disappeared" just because it's outside the
-            // currently-tracked epic's display scope. Only the fields those
-            // two consumers actually read are cloned (see
-            // `unfiltered_snapshot_from`) — cloning e.g. `changes` (git diff
-            // info per worktree, potentially the largest field) here would
-            // be pure waste.
-            self.unfiltered_director_data = unfiltered_snapshot_from(&self.director_data);
-            // cas-ae6d: the only place `director_data` is genuinely re-read.
-            self.director_data_loaded_at = chrono::Utc::now();
-            if git_due {
-                self.last_git_refresh = Instant::now();
-            }
-        } else if git_due {
-            self.director_data.refresh_git_changes_with_stores(
-                &self.cas_dir,
-                worktree_root.as_deref(),
-                self.director_stores.as_ref(),
-            )?;
-            self.last_git_refresh = Instant::now();
-        } else {
-            self.refresh_branch_visibility_cache();
-            self.last_refresh = Instant::now();
-            // Worker holds live in session metadata rather than cas.db. They
-            // must therefore be reconciled even on the common unchanged-DB
-            // refresh path; otherwise a just-written hold leaks one more
-            // WorkerIdle event before unrelated database activity occurs.
-            self.apply_session_metadata_worker_holds();
-            return Ok(self.detect_supervisor_stall().into_iter().collect());
-        }
-
-        self.refresh_branch_visibility_cache();
-        self.last_db_fingerprint = Some(next_fingerprint);
-        self.last_refresh = Instant::now();
-
-        // Sync session_id → pane_name mappings from agent store
-        self.sync_session_mappings();
-        self.apply_session_metadata_focus();
-        self.apply_session_metadata_worker_holds();
-
-        // cas-e98e AC3: drop phantom worker panes when registry says the
-        // worker is no longer supervision-live (Shutdown, or Stale/dead with
-        // no live process). Keeps panes for still-registering names and for
-        // process-alive dual-signal workers.
-        if db_changed {
-            self.reconcile_phantom_worker_panes();
-        }
-
-        // Detect state changes against the UNFILTERED snapshot (cas-dbbe) so new
-        // epics are visible to the event detector, and so a second epic worked
-        // concurrently in this session is never epic-scoped out of the
-        // comparison and mistaken for a completed task. This allows EpicStarted
-        // to fire and update epic_state, which the filter depends on for
-        // subsequent refresh cycles.
-        // Pass the currently-tracked epic id so `EpicStarted` is gated on
-        // strict improvement: a stray zero-subtask Open-with-branch epic
-        // cannot hijack `epic_state` mid-session (see task cas-4181).
-        let mut events = self
-            .event_detector
-            .detect_changes(&self.unfiltered_director_data, self.epic_state.epic_id());
-        events.extend(self.detect_supervisor_stall());
-
-        // Now filter to current session (agents + tasks scoped to active epic)
-        if db_changed {
-            self.filter_director_agents_to_current_session();
-        }
-
-        Ok(events)
+        // cas-ee9ab: the daemon loop runs the read on a background thread
+        // (`DirectorRefreshRequest::read`) and applies it on a later pass.
+        // Other callers read and apply in one go.
+        let load = self
+            .director_refresh_request()
+            .read(self.director_stores.as_ref());
+        self.apply_director_refresh(load)
     }
 
     fn detect_supervisor_stall(&mut self) -> Option<DirectorEvent> {

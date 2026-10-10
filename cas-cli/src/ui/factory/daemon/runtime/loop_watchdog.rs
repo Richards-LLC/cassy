@@ -47,10 +47,17 @@ pub(crate) enum LoopPhase {
     Refresh,
     Render,
     Idle,
+    // cas-ee9ab: the refresh tick's steps, so a slow tick names its cause.
+    RefreshSpawnVerify,
+    RefreshDirector,
+    RefreshDelivery,
+    RefreshRelays,
+    RefreshFollowUp,
+    RefreshInject,
 }
 
 impl LoopPhase {
-    const ALL: [LoopPhase; 11] = [
+    const ALL: [LoopPhase; 17] = [
         LoopPhase::Start,
         LoopPhase::ClientInput,
         LoopPhase::PtyOutput,
@@ -62,6 +69,12 @@ impl LoopPhase {
         LoopPhase::Refresh,
         LoopPhase::Render,
         LoopPhase::Idle,
+        LoopPhase::RefreshSpawnVerify,
+        LoopPhase::RefreshDirector,
+        LoopPhase::RefreshDelivery,
+        LoopPhase::RefreshRelays,
+        LoopPhase::RefreshFollowUp,
+        LoopPhase::RefreshInject,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -77,6 +90,12 @@ impl LoopPhase {
             LoopPhase::Refresh => "refresh",
             LoopPhase::Render => "render",
             LoopPhase::Idle => "idle",
+            LoopPhase::RefreshSpawnVerify => "refresh: spawn verify",
+            LoopPhase::RefreshDirector => "refresh: director data",
+            LoopPhase::RefreshDelivery => "refresh: delivery revalidation",
+            LoopPhase::RefreshRelays => "refresh: relays",
+            LoopPhase::RefreshFollowUp => "refresh: follow-up",
+            LoopPhase::RefreshInject => "refresh: prompt injection",
         }
     }
 
@@ -107,6 +126,11 @@ pub(crate) struct LoopProgress {
     /// status snapshot (GH #1165).
     pass_started: Mutex<Option<std::time::Instant>>,
     window: Mutex<Vec<u64>>,
+    /// The phase running now and when it began, and per-phase latency since
+    /// the last status snapshot (cas-ee9ab). Idle time is never timed.
+    phase_clock: Mutex<Option<(LoopPhase, std::time::Instant)>>,
+    phase_window:
+        Mutex<std::collections::BTreeMap<&'static str, crate::factory_daemon_health::PhaseLatency>>,
 }
 
 /// Most pass durations one snapshot window keeps; older ones are dropped
@@ -153,6 +177,8 @@ impl LoopProgress {
             spawn: Mutex::new(SpawnSnapshot::default()),
             pass_started: Mutex::new(None),
             window: Mutex::new(Vec::new()),
+            phase_clock: Mutex::new(None),
+            phase_window: Mutex::new(std::collections::BTreeMap::new()),
         })
     }
 
@@ -174,8 +200,43 @@ impl LoopProgress {
         PassWindow::from_durations(durations, passes)
     }
 
+    /// Take the per-phase latency recorded since the last call (cas-ee9ab).
+    pub(crate) fn take_phase_window(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::factory_daemon_health::PhaseLatency> {
+        self.phase_window
+            .lock()
+            .map(|mut window| std::mem::take(&mut *window))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, latency)| (name.to_string(), latency))
+            .collect()
+    }
+
+    /// Record the loop entering `phase`. The phase it leaves is timed into
+    /// the per-phase window, except the idle sleep between passes.
     pub(crate) fn enter(&self, phase: LoopPhase) {
         self.phase.store(phase as u8, Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        let left = self.phase_clock.lock().ok().and_then(|mut clock| {
+            let left = clock.take();
+            if phase != LoopPhase::Idle {
+                *clock = Some((phase, now));
+            }
+            left
+        });
+        if let Some((left, started)) = left
+            && left != LoopPhase::Idle
+            && let Ok(mut window) = self.phase_window.lock()
+        {
+            let ms = now.duration_since(started).as_millis() as u64;
+            let latency = window.entry(left.name()).or_default();
+            latency.entries += 1;
+            latency.max_ms = latency.max_ms.max(ms);
+            if ms >= SLOW_PASS_MS {
+                latency.over_100ms += 1;
+            }
+        }
     }
 
     /// Mark a pass complete. The loop's future may move between runtime
@@ -247,6 +308,7 @@ impl LoopProgress {
             p99_pass_ms: None,
             window_passes: 0,
             passes_over_100ms: 0,
+            phase_latency: Default::default(),
         }
     }
 }
@@ -378,6 +440,7 @@ pub(crate) fn spawn_watchdog(
                 status.p99_pass_ms = window.p99_ms;
                 status.window_passes = window.passes;
                 status.passes_over_100ms = window.over_100ms;
+                status.phase_latency = progress.take_phase_window();
                 if let Err(error) = write_status(&cas_dir, &status) {
                     tracing::debug!(%error, "cas-73b5: could not write the daemon loop status");
                 }
@@ -420,6 +483,61 @@ mod tests {
         assert_eq!(summary.max_ms, Some(200));
         assert_eq!(summary.p99_ms, Some(198));
         assert_eq!(summary.over_100ms, 101);
+    }
+
+    /// cas-ee9ab: the 5 s status file can only name the phase the loop is in
+    /// now. The per-phase window attributes each slow pass to the phase that
+    /// spent the time, and never times the idle sleep.
+    #[test]
+    fn phase_window_attributes_slow_time_to_its_phase_cas_ee9ab() {
+        let progress = LoopProgress::new();
+        progress.begin_pass();
+        progress.enter(LoopPhase::ClientInput);
+        std::thread::sleep(Duration::from_millis(5));
+        progress.enter(LoopPhase::RefreshDirector);
+        std::thread::sleep(Duration::from_millis(120));
+        progress.enter(LoopPhase::Render);
+        progress.complete_pass();
+        progress.enter(LoopPhase::Idle);
+        std::thread::sleep(Duration::from_millis(150));
+        progress.begin_pass();
+        progress.enter(LoopPhase::ClientInput);
+        progress.enter(LoopPhase::Render);
+        progress.complete_pass();
+        progress.enter(LoopPhase::Idle);
+
+        let window = progress.take_phase_window();
+        let director = &window["refresh: director data"];
+        assert_eq!(director.entries, 1);
+        assert!(director.max_ms >= 120, "{director:?}");
+        assert_eq!(director.over_100ms, 1);
+        let input = &window["client input"];
+        assert_eq!(input.entries, 2);
+        assert!(input.max_ms < SLOW_PASS_MS, "{input:?}");
+        assert_eq!(input.over_100ms, 0);
+        assert_eq!(window["render"].entries, 2);
+        assert!(
+            !window.contains_key("idle"),
+            "idle sleep was timed: {window:?}"
+        );
+        assert!(
+            progress.take_phase_window().is_empty(),
+            "window was not reset"
+        );
+
+        let mut status = progress.status(1, "s", Utc::now());
+        status.phase_latency = window;
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json["phase_latency"]["refresh: director data"]["over_100ms"],
+            1
+        );
+        // Older status files without the field still parse.
+        let mut legacy = json.clone();
+        legacy.as_object_mut().unwrap().remove("phase_latency");
+        let parsed: crate::factory_daemon_health::DaemonLoopStatus =
+            serde_json::from_value(legacy).unwrap();
+        assert!(parsed.phase_latency.is_empty());
     }
 
     #[test]

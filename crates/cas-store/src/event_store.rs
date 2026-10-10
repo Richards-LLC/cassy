@@ -10,14 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::Result;
-use crate::error::StoreError;
 use crate::write_jsonl_archive;
 use cas_types::{Event, EventEntityType, EventType};
-
-/// Helper to convert mutex poison error to StoreError
-fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Other("lock poisoned".to_string())
-}
 
 /// Schema for events table
 pub const EVENT_SCHEMA: &str = r#"
@@ -173,6 +167,13 @@ pub struct SqliteEventStore {
 }
 
 impl SqliteEventStore {
+
+    /// A store on an existing connection, e.g. a
+    /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
+    /// schema setup; this never runs DDL.
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
+    }
     /// Open or create an event store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -205,13 +206,13 @@ impl SqliteEventStore {
 
 impl EventStore for SqliteEventStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(EVENT_SCHEMA)?;
         Ok(())
     }
 
     fn record(&self, event: &Event) -> Result<i64> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let metadata_json = event.metadata.as_ref().map(|m| m.to_string());
 
@@ -234,7 +235,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -259,7 +260,7 @@ impl EventStore for SqliteEventStore {
         entity_id: &str,
         limit: usize,
     ) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -283,7 +284,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_by_type(&self, event_type: EventType, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -307,7 +308,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -331,7 +332,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -352,7 +353,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn count_by_type(&self) -> Result<Vec<(EventType, i64)>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT event_type, COUNT(*) as count
@@ -375,7 +376,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn prune(&self, days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
@@ -395,7 +396,7 @@ impl EventStore for SqliteEventStore {
         let mut after_id = 0i64;
         loop {
             let events = {
-                let conn = self.conn.lock().map_err(lock_error)?;
+                let conn = crate::shared_db::lock_connection(&self.conn)?;
                 let mut stmt = conn.prepare_cached(
                     "SELECT id, event_type, entity_type, entity_id, summary, metadata, created_at, session_id
                      FROM events WHERE created_at < ?1 AND id > ?2 ORDER BY id LIMIT ?3",
@@ -416,7 +417,7 @@ impl EventStore for SqliteEventStore {
             write_jsonl_archive(archive_dir, "events", &events)?;
             let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
             {
-                let conn = self.conn.lock().map_err(lock_error)?;
+                let conn = crate::shared_db::lock_connection(&self.conn)?;
                 crate::shared_db::with_immediate_write_txn(&conn, |tx| {
                     delete_ids(tx, &ids)?;
                     Ok(())
@@ -435,7 +436,7 @@ impl EventStore for SqliteEventStore {
         }
         let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
         let limit = batch_size.clamp(1, EVENT_PRUNE_MAX_BATCH);
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Choose the victims with a plain read first: a pass with nothing due
         // never takes the write lock. One type at a time keeps the read on

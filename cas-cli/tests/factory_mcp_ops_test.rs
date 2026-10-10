@@ -837,6 +837,7 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
             p99_pass_ms: None,
             window_passes: 0,
             passes_over_100ms: 0,
+            phase_latency: Default::default(),
         },
     )
     .unwrap();

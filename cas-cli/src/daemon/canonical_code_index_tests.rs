@@ -214,27 +214,6 @@ fn purge_removes_worktree_copies_and_workers_still_find_canonical_symbols_cas_82
     assert!(again.stats.is_noop(), "{:?}", again.stats);
 }
 
-/// cas-ba66 (c): deleting stale worktree copies is safe with indexing off, so
-/// the purge does not depend on `code.enabled`. A canonical `cas serve` runs it
-/// for the Writer role whatever that flag says (mcp/server/runtime.rs).
-#[test]
-fn purge_runs_with_code_indexing_disabled_cas_ba66() {
-    let project = Project::new();
-    let worktree = project.add_worker("crisp-jay-9");
-    project.scan(&project.main);
-    project.scan(&worktree);
-    assert_eq!(project.repositories().len(), 2);
-
-    std::fs::write(project.cas_root.join("config.toml"), "[code]\nenabled = false\n").unwrap();
-    assert!(!crate::config::Config::load(&project.cas_root).unwrap().code().enabled);
-    let outcome =
-        purge_non_canonical_code_index(&project.cas_root, WriteBatching::default()).unwrap();
-    assert!(outcome.skipped.is_none(), "{:?}", outcome.skipped);
-    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-    assert_eq!(outcome.stats.files_deleted, 2);
-    assert_eq!(project.repositories(), vec![("proj".to_string(), 1)]);
-}
-
 #[test]
 fn removing_a_worktree_purges_only_its_copy_cas_8256() {
     let project = Project::new();

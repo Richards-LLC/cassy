@@ -64,6 +64,15 @@ pub trait EventStore: Send + Sync {
     /// Get events for a specific session
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<Event>>;
 
+    /// Whether this author recorded the specified activity strictly after `since`.
+    /// Query the author and type directly so fleet traffic cannot evict evidence.
+    fn has_event_since(
+        &self,
+        event_type: EventType,
+        session_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// Get event count by type (for stats)
     fn count_by_type(&self) -> Result<Vec<(EventType, i64)>>;
 
@@ -260,6 +269,22 @@ impl EventStore for SqliteEventStore {
             .collect();
 
         Ok(events)
+    }
+
+    fn has_event_since(
+        &self,
+        event_type: EventType,
+        session_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().map_err(lock_error)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM events
+             WHERE session_id = ?1 AND event_type = ?2
+               AND julianday(created_at) > julianday(?3))",
+            params![session_id, event_type.to_string(), since.to_rfc3339()],
+            |row| row.get(0),
+        )?)
     }
 
     fn count_by_type(&self) -> Result<Vec<(EventType, i64)>> {

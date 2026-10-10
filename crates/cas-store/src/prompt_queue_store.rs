@@ -1744,6 +1744,15 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult>;
 
+    /// Worker-level activity after a transport delivery, including drained replies.
+    /// This is evidence for the watchdog only; it does not acknowledge any message.
+    fn has_message_from_since(
+        &self,
+        source: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// Find direct messages that are still unread past their priority threshold.
     fn delivery_stalled_candidates(
         &self,
@@ -3691,6 +3700,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             Ok(EnqueueIdempotentResult::AlreadyExists(existing_id))
         })
+    }
+
+    fn has_message_from_since(
+        &self,
+        source: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM prompt_queue
+             WHERE source = ?1 AND julianday(created_at) > julianday(?2)
+               AND (factory_session = ?3 OR factory_session IS NULL))",
+            params![source, since.to_rfc3339(), factory_session],
+            |row| row.get(0),
+        )?)
     }
 
     fn delivery_stalled_candidates(
@@ -6622,6 +6647,38 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    /// GH #1163: recipient-activity evidence compares instants, not text, so
+    /// a legacy `datetime('now')` row counts the same as an RFC 3339 one.
+    #[test]
+    fn has_message_from_since_compares_instants_across_timestamp_formats() {
+        let (_temp, store) = create_test_store();
+        let since = DateTime::parse_from_rfc3339("2026-10-10T14:31:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session)
+                 VALUES ('busy-codex', 'supervisor', 'legacy reply', '2026-10-10 14:31:05', 's')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session)
+                 VALUES ('quiet-codex', 'supervisor', 'early', '2026-10-10T14:30:59+00:00', 's')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(store.has_message_from_since("busy-codex", "s", since).unwrap());
+        assert!(!store.has_message_from_since("quiet-codex", "s", since).unwrap());
+        assert!(
+            !store
+                .has_message_from_since("busy-codex", "s", since + chrono::Duration::seconds(10))
+                .unwrap()
+        );
     }
 
     #[test]

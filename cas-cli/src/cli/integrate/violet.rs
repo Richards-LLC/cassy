@@ -5403,4 +5403,185 @@ auth = "env:{token}"
             untouched_before
         );
     }
+
+    // -----------------------------------------------------------------------
+    // cas-a897: `cas integrate violet --channel` maps a Slack channel to this
+    // project through the hub's channel→project API
+    // -----------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct FakeChannelHub {
+        maps: RefCell<Vec<(String, String, String, String, bool)>>,
+        unmaps: RefCell<Vec<(String, String, String)>>,
+        map_result: RefCell<Option<std::result::Result<ChannelMapping, HubClientError>>>,
+    }
+
+    impl HubClient for FakeChannelHub {
+        fn create_client(
+            &self,
+            _hub_url: &str,
+            _cloud_token: &str,
+            _label: &str,
+        ) -> std::result::Result<(String, Option<String>), HubClientError> {
+            unreachable!("channel mapping never mints a client")
+        }
+
+        fn fetch_bypass(
+            &self,
+            _hub_url: &str,
+            _cloud_token: &str,
+        ) -> std::result::Result<String, HubClientError> {
+            unreachable!("channel mapping never reads the bypass")
+        }
+
+        fn map_channel(
+            &self,
+            hub_url: &str,
+            cloud_token: &str,
+            channel: &str,
+            project_id: &str,
+            replace: bool,
+        ) -> std::result::Result<ChannelMapping, HubClientError> {
+            self.maps.borrow_mut().push((
+                hub_url.into(),
+                cloud_token.into(),
+                channel.into(),
+                project_id.into(),
+                replace,
+            ));
+            self.map_result.borrow_mut().take().unwrap_or_else(|| {
+                Ok(ChannelMapping {
+                    channel_id: "C09FCTHCQ2U".into(),
+                    channel_name: "violet-internal".into(),
+                    project_id: project_id.into(),
+                })
+            })
+        }
+
+        fn unmap_channel(
+            &self,
+            hub_url: &str,
+            cloud_token: &str,
+            channel_id: &str,
+        ) -> std::result::Result<(), HubClientError> {
+            self.unmaps
+                .borrow_mut()
+                .push((hub_url.into(), cloud_token.into(), channel_id.into()));
+            Ok(())
+        }
+    }
+
+    fn channel_request(channel: &str) -> ChannelRequest {
+        ChannelRequest {
+            channel: Some(channel.to_string()),
+            replace: false,
+            remove: None,
+        }
+    }
+
+    #[test]
+    fn channel_flag_maps_the_channel_to_this_project_with_the_cloud_login_cas_a897() {
+        let hub = FakeChannelHub::default();
+        let line = register_channel_mapping(
+            &channel_request("#violet-internal"),
+            violet_hub_url(),
+            Some("cloud-session-token"),
+            Some("github.com/richards-llc/violet_ps"),
+            &hub,
+        )
+        .unwrap()
+        .expect("a mapping was requested");
+        let maps = hub.maps.borrow();
+        assert_eq!(maps.len(), 1);
+        let (url, token, channel, project, replace) = &maps[0];
+        assert_eq!(url, violet_hub_url());
+        assert_eq!(token, "cloud-session-token");
+        assert_eq!(channel, "violet-internal", "a leading # is stripped");
+        assert_eq!(project, "github.com/richards-llc/violet_ps");
+        assert!(!replace);
+        assert!(line.contains("#violet-internal (C09FCTHCQ2U)"), "{line}");
+        assert!(line.contains("github.com/richards-llc/violet_ps"), "{line}");
+        assert!(!line.contains("cloud-session-token"), "{line}");
+    }
+
+    #[test]
+    fn channel_mapping_failures_name_the_fix_cas_a897() {
+        let cases = [
+            (HubClientError::NotAMember, "invite @Violet to #violet-internal first"),
+            (HubClientError::ChannelMapped, "--channel-replace"),
+            (HubClientError::Unauthorized, "Cassy Cloud login"),
+        ];
+        for (error, expected) in cases {
+            let hub = FakeChannelHub::default();
+            *hub.map_result.borrow_mut() = Some(Err(error.clone()));
+            let message = register_channel_mapping(
+                &channel_request("violet-internal"),
+                violet_hub_url(),
+                Some("cloud-session-token"),
+                Some("project"),
+                &hub,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(message.contains(expected), "{error:?}: {message}");
+        }
+
+        // Replace is only sent when asked for.
+        let hub = FakeChannelHub::default();
+        let request = ChannelRequest {
+            replace: true,
+            ..channel_request("violet-internal")
+        };
+        register_channel_mapping(&request, violet_hub_url(), Some("t"), Some("p"), &hub).unwrap();
+        assert!(hub.maps.borrow()[0].4);
+
+        // No Cloud login, no project identity, or a malformed channel never
+        // reach the hub.
+        let hub = FakeChannelHub::default();
+        let no_login = register_channel_mapping(&channel_request("x"), violet_hub_url(), None, Some("p"), &hub);
+        assert!(no_login.unwrap_err().to_string().contains("Cassy Cloud login"));
+        let no_project = register_channel_mapping(&channel_request("x"), violet_hub_url(), Some("t"), None, &hub);
+        assert!(no_project.unwrap_err().to_string().contains("canonical"));
+        let malformed =
+            register_channel_mapping(&channel_request("a/b?c"), violet_hub_url(), Some("t"), Some("p"), &hub);
+        assert!(malformed.is_err());
+        assert!(hub.maps.borrow().is_empty());
+    }
+
+    #[test]
+    fn channel_remove_unmaps_by_channel_id_only_cas_a897() {
+        let hub = FakeChannelHub::default();
+        let request = ChannelRequest {
+            channel: None,
+            replace: false,
+            remove: Some("C09FCTHCQ2U".into()),
+        };
+        let line = register_channel_mapping(&request, violet_hub_url(), Some("t"), Some("p"), &hub)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hub.unmaps.borrow()[0].2, "C09FCTHCQ2U");
+        assert!(line.contains("unmapped C09FCTHCQ2U"), "{line}");
+
+        let by_name = ChannelRequest {
+            remove: Some("violet-internal".into()),
+            ..request
+        };
+        let error = register_channel_mapping(&by_name, violet_hub_url(), Some("t"), Some("p"), &hub)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("channel id"), "{error}");
+        assert_eq!(hub.unmaps.borrow().len(), 1);
+
+        // Nothing requested: nothing happens.
+        let none = ChannelRequest {
+            channel: None,
+            replace: false,
+            remove: None,
+        };
+        assert!(
+            register_channel_mapping(&none, violet_hub_url(), Some("t"), Some("p"), &hub)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

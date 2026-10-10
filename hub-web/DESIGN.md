@@ -144,6 +144,26 @@ scale 0.95 inside the 80% safe circle). `index.html` links them and
 `public/manifest.webmanifest`; the hub embeds every one (`server.rs`). Rerun
 the script after changing `favicon.svg`. No downloaded font is required.
 
+Installed app: the manifest names the app **Cassy** (`name` and `short_name`),
+`display: standalone`, `start_url` and `scope` `./` (the `/commander/` base),
+`background_color` #0E0C20 (Glass dark `--bg-root`, the splash behind the
+icon) and `theme_color` #5B3FE0 (Glass light `--color-action`); `scheme.ts`
+still sets the live `theme-color` meta per scheme. iOS reads
+`apple-touch-icon.png` and the `apple-mobile-web-app-*` meta (title Cassy,
+capable, `black-translucent` status bar; the shell already pads for
+`safe-area-inset-top`).
+
+Rules:
+- Never recolour the mark with `--color-action` or `currentColor`, or draw it
+  as flat ink; the tile and its three ribbon fills are the brand.
+- The tile never sits on another violet fill (a `.primary` control, the
+  `--look-you` bubble); on glass, on either field and on launcher backgrounds
+  it needs no plate or outline.
+- Minimum sizes: 16px (tab), 32px (sidebar lockup and pairing dialog), 180px
+  apple-touch, 192px and 512px install icons. Never render the mark below 16px.
+- Maskable icons keep every ribbon inside the centred 80% safe circle; check a
+  circle crop after any geometry change.
+
 Place the complete brand at the top of the thread list on phone and desktop;
 the list screen is the only place the phone shows the lockup. The phone
 conversation header omits it so the header stays one row (about 56px): a 40px

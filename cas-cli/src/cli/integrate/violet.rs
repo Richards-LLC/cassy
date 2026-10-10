@@ -2508,12 +2508,17 @@ fn stale_claude_reason(entry: &serde_json::Value) -> Option<&'static str> {
     if authorization.is_some_and(|value| !value.contains("${")) {
         return Some("literal bearer");
     }
+    // The retired credential names come from the shared compatibility
+    // manifest, the one reviewed home of that vocabulary.
+    let contract = violet_compatibility();
+    let legacy_token = format!("${{{}", contract.legacy_token_prefix);
+    let legacy_bypass = format!("${{{}}}", contract.legacy_bypass_env);
     if headers
         .values()
         .filter_map(|value| value.as_str())
-        .any(|value| value.contains("${MECHA_"))
+        .any(|value| value.contains(&legacy_token) || value.contains(&legacy_bypass))
     {
-        return Some("MECHA_* references that no longer expand");
+        return Some("legacy credential references that no longer expand");
     }
     None
 }
@@ -5561,30 +5566,40 @@ auth = "env:{token}"
     }
 
     /// Other Claude account profiles on the machine that already register the
-    /// hub are reconciled too: a literal bearer or MECHA_* references (which
+    /// hub are reconciled too: a literal bearer or legacy credential references (which
     /// now expand to empty) are rewritten with env references. A profile that
     /// never registered the hub is left byte-for-byte alone.
     #[test]
     fn sibling_claude_profiles_with_stale_violet_entries_are_rewritten_gh_1164() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
-        let mecha = home.join(".claude-alt").join(".claude.json");
+        let legacy = home.join(".claude-alt").join(".claude.json");
         let literal = home.join(".claude-work").join(".claude.json");
         let untouched = home.join(".claude-empty").join(".claude.json");
+        let contract = violet_compatibility();
+        let legacy_token = format!("{}_CASSY_PROXY", contract.legacy_token_prefix);
+        let legacy_bypass = contract.legacy_bypass_env.clone();
         for (path, body) in [
             (
-                &mecha,
-                format!(
-                    r#"{{"numStartups": 3, "mcpServers": {{"violet": {{"type": "http", "url": "{}", "headers": {{"Authorization": "Bearer ${{MECHA_SLACK_TOKEN_CASSY_PROXY}}", "{VIOLET_BYPASS_HEADER}": "${{MECHA_VERCEL_BYPASS}}"}}}}}}}}"#,
-                    violet_hub_url()
-                ),
+                &legacy,
+                serde_json::json!({
+                    "numStartups": 3,
+                    "mcpServers": {VIOLET_SERVER: {"type": "http", "url": violet_hub_url(), "headers": {
+                        "Authorization": format!("Bearer ${{{legacy_token}}}"),
+                        VIOLET_BYPASS_HEADER: format!("${{{legacy_bypass}}}"),
+                    }}},
+                })
+                .to_string(),
             ),
             (
                 &literal,
-                format!(
-                    r#"{{"mcpServers": {{"violet": {{"type": "http", "url": "{}", "headers": {{"Authorization": "Bearer xoxb-revoked-literal", "{VIOLET_BYPASS_HEADER}": "${{MECHA_VERCEL_BYPASS}}"}}}}}}}}"#,
-                    violet_hub_url()
-                ),
+                serde_json::json!({
+                    "mcpServers": {VIOLET_SERVER: {"type": "http", "url": violet_hub_url(), "headers": {
+                        "Authorization": "Bearer xoxb-revoked-literal",
+                        VIOLET_BYPASS_HEADER: format!("${{{legacy_bypass}}}"),
+                    }}},
+                })
+                .to_string(),
             ),
             (
                 &untouched,
@@ -5600,12 +5615,15 @@ auth = "env:{token}"
         paths.claude_profiles = discover_claude_profiles(&home, paths.claude_json.as_deref());
         assert_eq!(
             paths.claude_profiles,
-            vec![mecha.clone(), untouched.clone(), literal.clone()]
+            vec![legacy.clone(), untouched.clone(), literal.clone()]
         );
         let env = ready_env();
         let report = run(&test_args(), None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
-        for (path, reason) in [(&mecha, "MECHA_"), (&literal, "literal bearer")] {
+        for (path, reason) in [
+            (&legacy, "legacy credential references"),
+            (&literal, "literal bearer"),
+        ] {
             let entry = report
                 .harnesses
                 .iter()
@@ -5636,9 +5654,9 @@ auth = "env:{token}"
             );
         }
         // Unrelated keys survive the rewrite.
-        let mecha_doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&mecha).unwrap()).unwrap();
-        assert_eq!(mecha_doc["numStartups"], 3);
+        let legacy_doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&legacy).unwrap()).unwrap();
+        assert_eq!(legacy_doc["numStartups"], 3);
         assert!(
             !report
                 .harnesses

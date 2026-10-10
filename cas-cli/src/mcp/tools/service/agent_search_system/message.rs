@@ -830,8 +830,41 @@ impl CasService {
         } else if role == "worker" {
             if target.eq_ignore_ascii_case("supervisor") {
                 resolve_supervisor_name().ok_or_else(|| {
-                    Self::error(ErrorCode::INVALID_REQUEST,
-                        "Cannot resolve 'supervisor' - no CAS_SUPERVISOR_NAME and no active supervisor agent found.")
+                    // GH #1171: say which supervisors are live, so the worker
+                    // can address its own by name instead of parking.
+                    let live: Vec<String> = crate::store::open_agent_store(&self.inner.cas_root)
+                        .ok()
+                        .and_then(|store| store.list(None).ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|agent| {
+                            agent.role == cas_types::AgentRole::Supervisor
+                                && matches!(
+                                    agent.status,
+                                    cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+                                )
+                        })
+                        .map(|agent| match agent.factory_session.as_deref() {
+                            Some(session) if !session.trim().is_empty() => {
+                                format!("{} (session {session})", agent.name)
+                            }
+                            _ => format!("{} (no session)", agent.name),
+                        })
+                        .collect();
+                    let session = factory_session.as_deref().unwrap_or("none");
+                    Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        if live.is_empty() {
+                            format!(
+                                "Cannot resolve 'supervisor' for factory session {session}: no supervisor is registered on this clone."
+                            )
+                        } else {
+                            format!(
+                                "Cannot resolve 'supervisor' for factory session {session}: none of the live supervisors on this clone belongs to it ({}). Address your supervisor by name.",
+                                live.join(", ")
+                            )
+                        },
+                    )
                 })?
             } else if target.eq_ignore_ascii_case("all_workers") {
                 return Err(Self::error(

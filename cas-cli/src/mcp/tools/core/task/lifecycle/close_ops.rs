@@ -22241,12 +22241,61 @@ fn comment_run_is_commented_out_code(comment_lines: &[String]) -> bool {
     code > prose
 }
 
+/// Whether a lint parent resolves locally or as its remote-tracking ref
+/// (cas-d0c0), using the same rule the scoped lint enforces.
+fn lint_parent_resolves(project_root: &std::path::Path, parent: &str) -> bool {
+    git_ref_exists(project_root, parent)
+        || (!parent.contains('/') && git_ref_exists(project_root, &format!("origin/{parent}")))
+}
+
+/// The branch a scoped lint falls back to when its parent is gone (GH #1171):
+/// the remote's default branch, then a local or remote `main` or `master`.
+fn default_branch_lint_fallback(project_root: &std::path::Path) -> Option<String> {
+    let remote_head = std::process::Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|name| !name.is_empty() && is_safe_git_refname(name));
+    remote_head
+        .into_iter()
+        .chain(["main", "master", "origin/main", "origin/master"].map(str::to_string))
+        .find(|candidate| git_ref_exists(project_root, candidate))
+}
+
 fn run_lightweight_structural_lint_at_tip(
     project_root: &std::path::Path,
     committed_range_parent: Option<&str>,
     task_tip: &str,
 ) -> LightweightLintOutcome {
     use std::process::Command;
+
+    // GH #1171: a parent epic branch that was merged and deleted (on origin
+    // and locally) used to fail the close outright. Lint against the default
+    // branch instead and say so: the lint still runs, never a silent pass.
+    // With nothing to fall back to, the scoped path below still fails closed.
+    if let Some(parent) = committed_range_parent
+        && is_safe_git_refname(parent)
+        && !lint_parent_resolves(project_root, parent)
+        && let Some(fallback) = default_branch_lint_fallback(project_root)
+        && fallback != parent
+    {
+        let warning = format!(
+            "Structural lint: parent branch `{parent}` no longer resolves (deleted or never \
+             fetched), so the lint was scoped to the default branch `{fallback}` instead."
+        );
+        return match run_lightweight_structural_lint_at_tip(project_root, Some(&fallback), task_tip)
+        {
+            LightweightLintOutcome::Pass | LightweightLintOutcome::PassWithFallback(_) => {
+                LightweightLintOutcome::PassWithFallback(warning)
+            }
+            LightweightLintOutcome::Fail(message) => {
+                LightweightLintOutcome::Fail(format!("{message}\n\n{warning}"))
+            }
+        };
+    }
 
     // Collect the diff text.
     //

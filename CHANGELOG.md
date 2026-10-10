@@ -94,6 +94,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   profiles on the machine that already use Violet are repaired too, replacing
   a pasted token or retired variable names with env references.
 
+### Added — write access outside the worktree (#1169)
+
+- The operator can let a project's agents write to folders outside their
+  worktree. `cas config set factory.write_roots "~/a,~/b:create+edit+delete"`
+  sets project roots; `cas config grant-write --task <id> --path <dir>
+  --reason "<why>"` grants one task until it closes, and `cas config
+  revoke-write` removes it. Each root allows only its modes (create and edit
+  by default, delete when named). Every write allowed this way is logged, and
+  a refusal lists the roots in effect.
+- Grants can also come from Commander on a paired device with
+  `factory:manage`. The hub records the grant itself with the device as its
+  source, notes it on the task and posts a receipt to the supervisor. The
+  Write access panel asks for confirmation before sending.
+- Roots and grants are stored in `.cas/operator/write-policy.toml`, never in
+  `config.toml`. Only the operator can change them: the commands refuse to run
+  inside an agent session or a factory worker and need a terminal and a typed
+  confirmation, and agents are refused when they write under `.cas/operator/`
+  or run the commands. This is a guardrail, not a security boundary: agents
+  run as the operator's user, so a deliberately hidden write is out of reach.
+- With no policy file the workspace contract is unchanged. Once one exists,
+  `sed -i` / `perl -i` targets and `mv` sources are judged as edits too.
+
 ### Fixed — MCP proxy (#1168)
 
 - An MCP upstream that drops after a transport error now reconnects on the

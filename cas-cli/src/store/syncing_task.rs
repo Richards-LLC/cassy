@@ -739,7 +739,7 @@ mod tests {
     use fs2::FileExt;
     use std::fs::OpenOptions;
     use std::path::Path;
-    use std::sync::{Barrier, mpsc};
+    use std::sync::mpsc;
     use std::time::Duration;
     use tempfile::TempDir;
 

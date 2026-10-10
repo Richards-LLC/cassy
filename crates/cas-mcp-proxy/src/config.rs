@@ -365,8 +365,11 @@ impl Config {
     /// The client-side upstream call timeout (cas-53ce): the configured
     /// `call_timeout_secs` (at least one second), else 90 s.
     pub fn call_timeout(&self) -> std::time::Duration {
-        let _ = self.call_timeout_secs;
-        std::time::Duration::from_secs(crate::DEFAULT_CALL_TIMEOUT_SECS)
+        std::time::Duration::from_secs(
+            self.call_timeout_secs
+                .unwrap_or(crate::DEFAULT_CALL_TIMEOUT_SECS)
+                .max(1),
+        )
     }
 
     /// Load config from a specific TOML file. Returns empty Config if file is missing.

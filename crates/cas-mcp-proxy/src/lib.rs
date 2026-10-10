@@ -513,6 +513,10 @@ impl ProxyHealthSnapshot {
                 .as_deref()
                 .map(safe_error_code);
             server.last_error = server.last_error.as_deref().map(safe_error_detail_text);
+            server.last_failure_code = server
+                .last_failure_code
+                .as_deref()
+                .map(safe_error_code);
         }
         self
     }
@@ -535,6 +539,9 @@ pub struct ProxyEngine {
     policy_audit: Mutex<VecDeque<ProxyPolicyAuditEntry>>,
     /// Client-side bound on one upstream tool call (cas-53ce).
     call_timeout: std::sync::RwLock<Duration>,
+    /// Serializes on-demand reconnects so concurrent calls to a dropped
+    /// upstream start one connection, not one each (cas-53ce).
+    reconnect_gate: tokio::sync::Mutex<()>,
 }
 
 /// Default client-side bound on one upstream tool call (cas-53ce). Hub
@@ -578,6 +585,7 @@ impl ProxyEngine {
             observer: RwLock::new(None),
             policy_audit: Mutex::new(VecDeque::new()),
             call_timeout: std::sync::RwLock::new(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)),
+            reconnect_gate: tokio::sync::Mutex::new(()),
         };
 
         let mut names: Vec<_> = configs.keys().cloned().collect();
@@ -594,7 +602,74 @@ impl ProxyEngine {
 
     /// Bound every subsequent upstream tool call by `timeout` (cas-53ce).
     pub fn set_call_timeout(&self, timeout: Duration) {
-        let _ = timeout;
+        if let Ok(mut current) = self.call_timeout.write() {
+            *current = timeout.max(Duration::from_millis(1));
+        }
+    }
+
+    fn call_timeout(&self) -> Duration {
+        self.call_timeout
+            .read()
+            .map(|timeout| *timeout)
+            .unwrap_or(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS))
+    }
+
+    /// Reconnect a dropped upstream on demand once its backoff is due
+    /// (cas-53ce, GH #1168). Without this an upstream dropped by a transport
+    /// error stayed absent for the rest of the session unless a separate
+    /// retry tick happened to run in this process.
+    async fn reconnect_if_due(&self, name: &str) {
+        let _gate = self.reconnect_gate.lock().await;
+        if self.servers.read().await.contains_key(name) {
+            return;
+        }
+        let now = now_ms();
+        let due = self.health.read().await.get(name).is_some_and(|record| {
+            record.state == UpstreamState::Backoff
+                && record.next_retry_at_ms.is_some_and(|retry| retry <= now)
+        });
+        if !due {
+            return;
+        }
+        let Some(config) = self.configs.read().await.get(name).cloned() else {
+            return;
+        };
+        self.connect_and_record(name, &config, now).await;
+    }
+
+    /// The operator's next step for a configured upstream that is not
+    /// connected, from its recorded failure (cas-53ce).
+    async fn absent_message(&self, routing_name: &str, public: &str) -> String {
+        let record = self.health.read().await.get(routing_name).cloned();
+        let code = record
+            .as_ref()
+            .and_then(|record| record.last_error_code.clone())
+            .map(|code| safe_error_code(&code));
+        match (record, code) {
+            (_, Some(code))
+                if code.starts_with(MISSING_CREDENTIAL_ENV_PREFIX)
+                    || code == "authentication_required" =>
+            {
+                format!(
+                    "MCP upstream '{public}' is absent: its credential is unavailable or was rejected ({code}); restore its credential, then retry"
+                )
+            }
+            (_, Some(code)) if code == "executable_missing" => format!(
+                "MCP upstream '{public}' is absent: its executable is missing; install it and reload proxy.toml (inspect proxy_health)"
+            ),
+            (Some(record), Some(code)) if record.state == UpstreamState::Backoff => {
+                let wait = record
+                    .next_retry_at_ms
+                    .map(|retry| retry.saturating_sub(now_ms()).div_ceil(1000))
+                    .unwrap_or(0);
+                format!(
+                    "MCP upstream '{public}' is absent: its connection dropped ({code}); Cassy reconnects with backoff on the next call after {wait}s. Retry then; if it stays absent, restart the session (inspect proxy_health)"
+                )
+            }
+            _ => format!(
+                "MCP upstream '{public}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying"
+            ),
+        }
     }
 
     /// Install the policy used for subsequent upstream calls.
@@ -804,9 +879,8 @@ impl ProxyEngine {
                     .get(name)
                     .cloned()
                     .unwrap_or_else(|| public_upstream_id(name));
-                anyhow::bail!(
-                    "MCP upstream '{public}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying"
-                );
+                let message = self.absent_message(name, &public).await;
+                anyhow::bail!(message);
             }
         }
 
@@ -1313,6 +1387,14 @@ impl ProxyEngine {
             .cloned()
             .unwrap_or_else(|| public_upstream_id(&resolved_server));
         drop(configs);
+        if !self.servers.read().await.contains_key(&resolved_server) {
+            self.reconnect_if_due(&resolved_server).await;
+        }
+        let absent = if self.servers.read().await.contains_key(&resolved_server) {
+            None
+        } else {
+            Some(self.absent_message(&resolved_server, &requested_public).await)
+        };
         let servers = self.servers.read().await;
         let server = servers.get(&resolved_server).with_context(|| {
             let mut available: Vec<String> = servers
@@ -1326,8 +1408,10 @@ impl ProxyEngine {
                 .collect();
             available.sort();
             format!(
-                "MCP upstream '{}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying. Available: {}",
-                requested_public,
+                "{}. Available: {}",
+                absent.unwrap_or_else(|| format!(
+                    "MCP upstream '{requested_public}' is absent: it is configured but not connected; inspect proxy_health"
+                )),
                 if available.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -1344,13 +1428,24 @@ impl ProxyEngine {
             .unwrap_or_else(|| public_tool_id(&resolved_tool));
         request.name = resolved_tool.into();
         let generation = server.generation;
-        let result = server.service.call_tool(request).await;
+        // cas-53ce (GH #1168): bound the call on the client side. A hung
+        // upstream held mcp_execute for ~1000 s; past the bound the stuck
+        // connection is dropped like any other live failure and reconnects.
+        let timeout = self.call_timeout();
+        let result = match tokio::time::timeout(timeout, server.service.call_tool(request)).await {
+            Ok(result) => result,
+            Err(_) => Err(rmcp::service::ServiceError::Timeout { timeout }),
+        };
         let completion = CALL_COMPLETION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         match result {
             Ok(result) => {
                 server
                     .last_successful_call
                     .fetch_max(completion, Ordering::Release);
+                drop(servers);
+                if let Some(record) = self.health.write().await.get_mut(&resolved_server) {
+                    record.last_success_at_ms = Some(now_ms());
+                }
                 Ok(result)
             }
             Err(error) => {
@@ -1359,9 +1454,19 @@ impl ProxyEngine {
                     self.record_live_failure(&resolved_server, generation, completion, code)
                         .await;
                 }
-                Err(anyhow::Error::from(error).context(format!(
-                    "tool call '{resolved_public_tool}' on '{resolved_public}' failed"
-                )))
+                let timed_out = matches!(error, rmcp::service::ServiceError::Timeout { .. });
+                let error = anyhow::Error::from(error);
+                let error = if timed_out {
+                    error.context(format!(
+                        "tool call '{resolved_public_tool}' on '{resolved_public}' timed out after {}s (client timeout); the connection was dropped and reconnects with backoff",
+                        timeout.as_secs_f64()
+                    ))
+                } else {
+                    error.context(format!(
+                        "tool call '{resolved_public_tool}' on '{resolved_public}' failed"
+                    ))
+                };
+                Err(error)
             }
         }
     }
@@ -1498,6 +1603,8 @@ fn record_success(record: &mut UpstreamHealth, tool_count: usize, now: u64) {
     record.last_error = None;
     record.last_attempt_at_ms = Some(now);
     record.next_retry_at_ms = None;
+    record.connected = true;
+    record.last_success_at_ms = Some(now);
 }
 
 fn record_failure(record: &mut UpstreamHealth, error_code: &str, now: u64) -> FailureVisibility {
@@ -1516,6 +1623,9 @@ fn record_failure_with_detail(
     record.last_error_code = Some(error_code.to_string());
     record.last_error = error.map(safe_error_detail);
     record.last_attempt_at_ms = Some(now);
+    record.connected = false;
+    record.last_failure_code = Some(error_code.to_string());
+    record.last_failure_at_ms = Some(now);
     if error_code == "executable_missing" {
         record.state = UpstreamState::ExecutableMissing;
         record.next_retry_at_ms = None;

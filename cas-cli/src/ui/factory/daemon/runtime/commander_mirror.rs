@@ -876,17 +876,21 @@ mod tests {
         assert_eq!(status.kind, crate::ui::factory::OperatorTurnKind::Status);
         assert_eq!(status.reply_to, None);
 
-        // The conversation reads question, then answer, and never carries the
+        // The conversation reads question, then answer (pages are newest
+        // first; clients order by time), and never carries the
         // machine-injected prompt itself.
         let history = queue
             .conversation_history("factory-1", "phone", None, 50)
             .unwrap();
-        let question_at = history.iter().position(|row| row.id == terminal).unwrap();
-        let answer_at = history
+        let question_row = history.iter().find(|row| row.id == terminal).unwrap();
+        let answer_row = history
             .iter()
-            .position(|row| row.target == "operator" && row.prompt.contains("Two fixes landed"))
+            .find(|row| row.target == "operator" && row.prompt.contains("Two fixes landed"))
             .unwrap();
-        assert!(question_at < answer_at, "{history:?}");
+        assert!(
+            question_row.created_at <= answer_row.created_at && question_row.id < answer_row.id,
+            "{history:?}"
+        );
         assert!(
             !history
                 .iter()

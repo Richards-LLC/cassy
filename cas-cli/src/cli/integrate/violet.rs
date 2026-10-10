@@ -54,8 +54,11 @@ pub const HUB_CLIENT_ROUTE: &str = "/api/clients";
 pub const HUB_BYPASS_ROUTE: &str = "/api/bypass";
 pub const HUB_CLIENT_ISSUE: &str = "violet_ps#5";
 pub const VERCEL_PROJECT: &str = "violet_ps";
-pub const CREDENTIALS_HINT: &str = "run `cas login`, then re-run `cas integrate violet`; credentials are stored in the \
-     machine credentials file sourced by your login shell — see \
+/// GH #1164: never `cas login`. Signing in does not mint a hub client token;
+/// `cas integrate violet` does (and says so itself if minting needs a Cloud
+/// session).
+pub const CREDENTIALS_HINT: &str = "re-run `cas integrate violet`: it mints this machine's hub client token and \
+     stores both values in the machine credentials file sourced by your login shell — see \
      docs/VIOLET_ONBOARDING.md";
 
 // ---------------------------------------------------------------------------
@@ -1501,6 +1504,32 @@ fn entry_route(value: &toml_edit::Value) -> Option<ExternalToolConfig> {
 
 /// Where a server definition actually points, for a note an operator can act
 /// on without opening the file.
+/// Two registrations of the same hub: both network transports at the same
+/// URL (ignoring a trailing slash). Credentials are not compared.
+fn same_hub(left: &ServerConfig, right: &ServerConfig) -> bool {
+    let url = |server: &ServerConfig| match server {
+        ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => {
+            Some(url.trim().trim_end_matches('/').to_string())
+        }
+        ServerConfig::Stdio { .. } => None,
+    };
+    url(left).is_some_and(|left| Some(left) == url(right))
+}
+
+/// The `env:` names a server's auth and headers reference, in order.
+fn server_env_references(server: &ServerConfig) -> Vec<String> {
+    probe_env_states(server, &NoEnv).into_iter().map(|(name, _)| name).collect()
+}
+
+/// An environment with nothing set, for name-only questions.
+struct NoEnv;
+
+impl EnvLookup for NoEnv {
+    fn get(&self, _name: &str) -> Option<String> {
+        None
+    }
+}
+
 fn server_endpoint(server: &ServerConfig) -> &str {
     match server {
         ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url,
@@ -1548,6 +1577,11 @@ enum ServerAction {
     Absent,
     /// Byte-for-byte the machine registration: pure duplication, safe to drop.
     Drop,
+    /// GH #1164: the same hub URL as the machine registration, but with its
+    /// own credential references. A committed project file cannot name a
+    /// per-machine hub client token, so the machine registration (which
+    /// carries this machine's token) supplies it instead.
+    DropSameHub,
     /// A deliberate override (a staging hub, a different bearer variable).
     /// Dropping it would silently move this project to another endpoint, so
     /// it stays and is reported instead.
@@ -1623,6 +1657,9 @@ fn plan_project_proxy(
     let server_action = match (declares_server, &project_server) {
         (false, _) => ServerAction::Absent,
         (true, project) if project.as_ref() == machine_server => ServerAction::Drop,
+        (true, Some(project)) if machine_server.is_some_and(|machine| same_hub(project, machine)) => {
+            ServerAction::DropSameHub
+        }
         (true, _) => ServerAction::Keep,
     };
     let kept_override_note = || {
@@ -1638,7 +1675,8 @@ fn plan_project_proxy(
 
     let canonical = canonical_entries();
     let allowlist_is_canonical = existing_tools == VIOLET_TOOLS;
-    if allowlist_is_canonical && server_action != ServerAction::Drop {
+    let drops_server = matches!(server_action, ServerAction::Drop | ServerAction::DropSameHub);
+    if allowlist_is_canonical && !drops_server {
         let mut note = "already names exactly the hub's current routes".to_string();
         if server_action == ServerAction::Keep {
             note.push_str("; ");
@@ -1655,7 +1693,7 @@ fn plan_project_proxy(
 
     let mut changes = Vec::new();
     match server_action {
-        ServerAction::Drop => {
+        ServerAction::Drop | ServerAction::DropSameHub => {
             let mut emptied = false;
             if let Some(servers) = document
                 .get_mut("servers")
@@ -1667,10 +1705,23 @@ fn plan_project_proxy(
             if emptied {
                 document.remove("servers");
             }
-            changes.push(format!(
-                "dropped the [servers.{VIOLET_SERVER}] block (identical to the machine \
-                 registration, which supplies it)"
-            ));
+            changes.push(if server_action == ServerAction::Drop {
+                format!(
+                    "dropped the [servers.{VIOLET_SERVER}] block (identical to the machine \
+                     registration, which supplies it)"
+                )
+            } else {
+                let named = project_server
+                    .as_ref()
+                    .map(|server| server_env_references(server).join(", "))
+                    .filter(|names| !names.is_empty())
+                    .unwrap_or_else(|| "its own credentials".to_string());
+                format!(
+                    "dropped [servers.{VIOLET_SERVER}]: same hub URL as the machine registration; \
+                     it named {named}, a per-machine hub client credential, so this machine's \
+                     registration supplies the server instead"
+                )
+            });
         }
         ServerAction::Keep => changes.push(kept_override_note()),
         ServerAction::Absent => {}
@@ -1873,7 +1924,7 @@ fn run_with_credentials(
         None => config.violet_allowlisted_tools(),
     };
 
-    let harnesses = if args.no_harness {
+    let mut harnesses = if args.no_harness {
         vec![
             HarnessEntry {
                 harness: "claude-code".to_string(),
@@ -1889,22 +1940,27 @@ fn run_with_credentials(
             },
         ]
     } else {
-        vec![
-            register_claude(
-                paths.claude_json.as_deref(),
-                &args.url,
-                &token_env,
-                &bypass_env,
-                args.dry_run,
-            ),
-            register_codex(
-                paths.codex_config.as_deref(),
-                &args.url,
-                &token_env,
-                &bypass_env,
-                args.dry_run,
-            ),
-        ]
+        let mut harnesses = vec![register_claude(
+            paths.claude_json.as_deref(),
+            &args.url,
+            &token_env,
+            &bypass_env,
+            args.dry_run,
+        )];
+        // GH #1164: other Claude account profiles that already register the
+        // hub are reconciled too; one this command never looked at kept a
+        // stale entry Claude Code then used.
+        harnesses.extend(paths.claude_profiles.iter().filter_map(|profile| {
+            reconcile_claude_profile(profile, &args.url, &token_env, &bypass_env, args.dry_run)
+        }));
+        harnesses.push(register_codex(
+            paths.codex_config.as_deref(),
+            &args.url,
+            &token_env,
+            &bypass_env,
+            args.dry_run,
+        ));
+        harnesses
     };
 
     let probe_server = project
@@ -1929,6 +1985,28 @@ fn run_with_credentials(
     } else {
         probe.list_tools(probe_server)
     };
+
+    // GH #1164: "already current" is a structural claim about one file. Each
+    // claude-code entry carries the authenticated tools/list verdict for the
+    // registration it now holds (this machine's url, bearer and bypass
+    // references), so a rejected bearer is never reported as merely current.
+    let override_url = project
+        .as_ref()
+        .and_then(|(_, plan)| plan.server_override.as_ref())
+        .map(|server| server_endpoint(server).to_string());
+    let verdict = claude_entry_verdict(&probe_outcome, override_url.as_deref(), &args.url, &token_env);
+    for harness in harnesses.iter_mut().filter(|harness| {
+        harness.harness == "claude-code"
+            && matches!(
+                harness.state,
+                WriteState::Written | WriteState::AlreadyCurrent | WriteState::Planned
+            )
+    }) {
+        harness.note = Some(match harness.note.take() {
+            Some(note) => format!("{note}; {verdict}"),
+            None => verdict.clone(),
+        });
+    }
 
     // After a successful write the allowlist is exactly the constant, so any
     // drift here means the hub itself moved — worth reporting either way.
@@ -1972,7 +2050,22 @@ fn run_with_credentials(
             ),
         });
 
-    let remedy = build_remedy(&probe_env_states, &probe_outcome, drift_remedy);
+    let override_path = project
+        .as_ref()
+        .filter(|(_, plan)| plan.server_override.is_some())
+        .map(|(entry, _)| entry.path.clone());
+    let bearer_env = server_bearer_env(probe_server).unwrap_or_else(|| token_env.clone());
+    let remedy = build_remedy(
+        &probe_env_states,
+        &probe_outcome,
+        drift_remedy,
+        &RemedyContext {
+            override_path: override_path.as_deref(),
+            endpoint: server_endpoint(probe_server),
+            bearer_env: &bearer_env,
+            credentials_file: &paths.credentials_file,
+        },
+    );
 
     Ok(VioletReport {
         url: server_endpoint(probe_server).to_string(),
@@ -1997,14 +2090,47 @@ fn run_with_credentials(
     })
 }
 
+/// What the remedy needs to name the right fix (GH #1164).
+struct RemedyContext<'a> {
+    /// The project file whose distinct-URL `[servers.violet]` override is the
+    /// effective server, if any. Cassy never mints the tokens it names.
+    override_path: Option<&'a Path>,
+    endpoint: &'a str,
+    /// The variable holding the effective server's bearer.
+    bearer_env: &'a str,
+    credentials_file: &'a Path,
+}
+
+/// The bearer variable an `auth = "env:NAME"` registration references.
+fn server_bearer_env(server: &ServerConfig) -> Option<String> {
+    match server {
+        ServerConfig::Http { auth, .. } | ServerConfig::Sse { auth, .. } => auth
+            .as_deref()
+            .and_then(|auth| auth.strip_prefix("env:"))
+            .map(str::to_string),
+        ServerConfig::Stdio { .. } => None,
+    }
+}
+
 fn build_remedy(
     env_states: &[(String, EnvState)],
     probe: &ProbeOutcome,
     drift: Option<String>,
+    context: &RemedyContext<'_>,
 ) -> Option<String> {
     let missing = missing_probe_credentials(env_states);
     if !missing.is_empty() {
-        return Some(format!("Set {}; {CREDENTIALS_HINT}", missing.join(" and ")));
+        return Some(match context.override_path {
+            Some(path) => format!(
+                "Set {}: the [servers.{VIOLET_SERVER}] override in {} names it for {}, and Cassy \
+                 does not mint it. Export it in this shell, or delete that block to use this \
+                 machine's registration",
+                missing.join(" and "),
+                path.display(),
+                context.endpoint
+            ),
+            None => format!("Set {}; {CREDENTIALS_HINT}", missing.join(" and ")),
+        });
     }
     if let Some(drift) = drift {
         return Some(drift);
@@ -2013,16 +2139,34 @@ fn build_remedy(
         ProbeOutcome::Tools {
             schema_problems, ..
         } if !schema_problems.is_empty() => Some(schema_problem_remedy(schema_problems)),
-        ProbeOutcome::Unauthorized => Some(format!(
-            "The hub rejected this machine's bearer (HTTP 401; Authorization: Bearer <set>). \
-             Confirm `cas login`, then run `cas integrate violet` again."
-        )),
+        ProbeOutcome::Unauthorized => Some(match context.override_path {
+            Some(path) => format!(
+                "The hub rejected the bearer in {} (HTTP 401; Authorization: Bearer <set>), named \
+                 by the [servers.{VIOLET_SERVER}] override in {}. Replace that token, or delete \
+                 the block to use this machine's registration.",
+                context.bearer_env,
+                path.display()
+            ),
+            None => rejected_bearer_remedy(context.bearer_env, context.credentials_file),
+        }),
         ProbeOutcome::Unreachable { code } => Some(format!(
             "The hub did not answer ({code}). Check connectivity, then re-run \
              `cas integrate violet`."
         )),
         _ => None,
     }
+}
+
+/// GH #1164: a hub client token the hub rejects is revoked or invalid. Signing
+/// in again does not replace it, and `cas integrate violet` keeps an existing
+/// token, so it must be removed before a re-run mints a new client.
+fn rejected_bearer_remedy(bearer_env: &str, credentials_file: &Path) -> String {
+    format!(
+        "The hub rejected the bearer in {bearer_env} (HTTP 401; Authorization: Bearer <set>): \
+         this hub client token is revoked or invalid. Unset {bearer_env}, delete its line from \
+         {}, then re-run `cas integrate violet` to mint a new hub client.",
+        credentials_file.display()
+    )
 }
 
 /// The hub, not Cassy, owns the `violet_post` schema: harnesses receive it
@@ -2059,12 +2203,13 @@ fn register_claude(
             note: Some("neither CLAUDE_CONFIG_DIR nor HOME is set".to_string()),
         };
     };
+    let stale = existing_claude_violet_entry(path).and_then(|entry| stale_claude_reason(&entry));
     match apply_claude(path, url, token_env, bypass_env, dry_run) {
         Ok(state) => HarnessEntry {
             harness: "claude-code".to_string(),
             path: Some(path.to_path_buf()),
             state,
-            note: None,
+            note: stale_claude_note(state, stale),
         },
         Err(error) => HarnessEntry {
             harness: "claude-code".to_string(),
@@ -2072,6 +2217,105 @@ fn register_claude(
             state: WriteState::Skipped,
             note: Some(format!("{error:#}")),
         },
+    }
+}
+
+/// GH #1164: reconcile another Claude profile only if it already registers the
+/// hub. A profile that never did is not this command's to change.
+fn reconcile_claude_profile(
+    path: &Path,
+    url: &str,
+    token_env: &str,
+    bypass_env: &str,
+    dry_run: bool,
+) -> Option<HarnessEntry> {
+    let existing = existing_claude_violet_entry(path)?;
+    let stale = stale_claude_reason(&existing);
+    Some(match apply_claude(path, url, token_env, bypass_env, dry_run) {
+        Ok(state) => HarnessEntry {
+            harness: "claude-code".to_string(),
+            path: Some(path.to_path_buf()),
+            state,
+            note: stale_claude_note(state, stale),
+        },
+        Err(error) => HarnessEntry {
+            harness: "claude-code".to_string(),
+            path: Some(path.to_path_buf()),
+            state: WriteState::Skipped,
+            note: Some(format!("{error:#}")),
+        },
+    })
+}
+
+/// The `mcpServers.violet` entry a Claude profile holds, if it parses.
+fn existing_claude_violet_entry(path: &Path) -> Option<serde_json::Value> {
+    if !ifs::is_regular_file(path) {
+        return None;
+    }
+    let raw = ifs::read_capped(path).ok()?;
+    let document: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    document.get("mcpServers")?.get(VIOLET_SERVER).cloned()
+}
+
+/// Why an existing Claude entry cannot authenticate as written. Names the
+/// shape only; a literal value is never echoed.
+fn stale_claude_reason(entry: &serde_json::Value) -> Option<&'static str> {
+    let headers = entry.get("headers")?.as_object()?;
+    let authorization = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| value.as_str());
+    if authorization.is_some_and(|value| !value.contains("${")) {
+        return Some("literal bearer");
+    }
+    if headers
+        .values()
+        .filter_map(|value| value.as_str())
+        .any(|value| value.contains("${MECHA_"))
+    {
+        return Some("MECHA_* references that no longer expand");
+    }
+    None
+}
+
+fn stale_claude_note(state: WriteState, stale: Option<&'static str>) -> Option<String> {
+    match (state, stale) {
+        (WriteState::Written, Some(reason)) => Some(format!(
+            "rewrote a stale entry ({reason}) with env references"
+        )),
+        (WriteState::Planned, Some(reason)) => Some(format!(
+            "would rewrite a stale entry ({reason}) with env references"
+        )),
+        _ => None,
+    }
+}
+
+/// The authenticated tools/list verdict for a claude-code entry holding this
+/// machine's registration (GH #1164).
+fn claude_entry_verdict(
+    probe: &ProbeOutcome,
+    override_url: Option<&str>,
+    url: &str,
+    token_env: &str,
+) -> String {
+    if let Some(override_url) = override_url {
+        return format!(
+            "not verified here: this project's override probes {override_url}, while the entry \
+             targets {url}"
+        );
+    }
+    match probe {
+        ProbeOutcome::Tools { tools, .. } => {
+            format!("authenticated tools/list: {} tool(s)", tools.len())
+        }
+        ProbeOutcome::Unauthorized => format!(
+            "authenticated tools/list rejected Bearer ${{{token_env}}} (HTTP 401): Claude Code \
+             cannot use this entry until the token is replaced"
+        ),
+        ProbeOutcome::Unreachable { code } => {
+            format!("not verified: hub unreachable ({code})")
+        }
+        ProbeOutcome::Skipped { reason } => format!("not verified: {reason}"),
     }
 }
 
@@ -2384,8 +2628,8 @@ pub fn doctor_row(
             severity: DoctorSeverity::Error,
             message: format!(
                 "hub {endpoint} rejected this machine (HTTP 401 invalid_token; Authorization: Bearer \
-                 <set>): the bearer is bad, so `cas violet` cannot post. Confirm `cas login`, then run \
-                 `cas integrate violet`"
+                 <set>): the bearer is bad, so `cas violet` cannot post. {}",
+                rejected_bearer_remedy(token_env, &paths.credentials_file)
             ),
         },
         ProbeOutcome::Unreachable { code } => DoctorRow {

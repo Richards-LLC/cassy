@@ -15934,3 +15934,131 @@ mod gh_1153_idle_pty_delivery_tests {
         );
     }
 }
+
+/// cas-366b: the `supervisor_injected` storms, replayed against today's
+/// delivery decisions.
+///
+/// Storm 1 (2026-08-06 12:49–18:59 UTC): 704,169 `ok` rows across 105
+/// prompt/recipient pairs, about 28,000 per pair, all to Claude teams-inbox
+/// recipients. That was the GH #124 drain-then-re-append loop cas-ceae fixed
+/// (`a_pending_worker_inbox_row_is_injected_exactly_once_cas_ceae`). Storm 2
+/// (2026-10-05): about 20 `ok` rows per row over about 11 minutes. The copy was
+/// written once (`deferred_inbox_at`), every wake was declined by policy
+/// (`nudge_not_attempted`) and `wake_gate_declines` stayed 0. So the cadence
+/// granted a re-offer every 30 s, each re-offer was an inbox-dedup no-op, and
+/// it was still recorded as `ok`.
+#[cfg(test)]
+mod injection_storm_regressions_cas_366b {
+    use super::{
+        ClaudeRedelivery, claude_redelivery_decision_after_turn, injection_event_status,
+    };
+    use cas_store::WakeAttempt;
+
+    #[derive(Debug, Default)]
+    struct Replay {
+        /// Copies appended to the recipient's inbox (dedup guard honoured).
+        copies: usize,
+        /// PTY nudges typed into the recipient's pane.
+        pty_nudges: usize,
+        /// Passes the cadence let through to the delivery path.
+        passes: usize,
+        /// `supervisor_injected` statuses those passes would record.
+        statuses: Vec<&'static str>,
+        /// Whether the acknowledgement stopped redelivery.
+        stopped_by_ack: bool,
+    }
+
+    /// Replay one Claude teams-inbox row at `poll_ms` for `window_s` while the
+    /// recipient stays busy: its copy stays unread, the wake gate declines
+    /// every nudge, and the decline is a policy veto that does not spend the
+    /// redelivery budget (cas-5129). The row is acknowledged at `ack_at_s`.
+    fn replay_busy_claude_recipient(poll_ms: i64, window_s: i64, ack_at_s: i64) -> Replay {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-05T20:01:21Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut replay = Replay::default();
+        let mut last_attempt = None;
+        let mut copy_unread = false;
+        let mut elapsed_ms = 0i64;
+        while elapsed_ms <= window_s * 1_000 {
+            let now = start + chrono::Duration::milliseconds(elapsed_ms);
+            let acked = elapsed_ms >= ack_at_s * 1_000;
+            match claude_redelivery_decision_after_turn(acked, 0, last_attempt, now, false) {
+                ClaudeRedelivery::Deliver => {
+                    replay.passes += 1;
+                    let prior_copy_unread = copy_unread;
+                    if !copy_unread {
+                        replay.copies += 1;
+                        copy_unread = true;
+                    }
+                    // The wake gate declined: no PTY bytes this pass.
+                    let wake = WakeAttempt::NotAttempted;
+                    if wake == WakeAttempt::Fired {
+                        replay.pty_nudges += 1;
+                    }
+                    replay
+                        .statuses
+                        .push(injection_event_status(prior_copy_unread, false, wake));
+                    last_attempt = Some(now);
+                }
+                ClaudeRedelivery::Cooldown => {}
+                ClaudeRedelivery::StopAcknowledged => {
+                    replay.stopped_by_ack = true;
+                    break;
+                }
+                ClaudeRedelivery::StopUndelivered => break,
+            }
+            elapsed_ms += poll_ms;
+        }
+        replay
+    }
+
+    /// An injected prompt is never injected again on later passes: across the
+    /// Oct 5 shape (100 ms polls, 11 minutes, recipient busy throughout) the
+    /// recipient receives one inbox copy and no PTY bytes, re-offers are
+    /// spaced by the 30 s cadence, and the acknowledgement ends them.
+    #[test]
+    fn a_busy_claude_recipient_gets_one_copy_and_no_pty_reinjection_cas_366b() {
+        let replay = replay_busy_claude_recipient(100, 12 * 60, 11 * 60 + 13);
+        assert_eq!(replay.copies, 1, "{replay:?}");
+        assert_eq!(replay.pty_nudges, 0, "{replay:?}");
+        assert!(replay.stopped_by_ack, "{replay:?}");
+        // 11 min 13 s at one pass per 30 s: 23 passes, the production count.
+        assert_eq!(replay.passes, 23, "{replay:?}");
+        assert!(
+            replay.passes < 11 * 60 * 10 / 100,
+            "the cadence, not the 100 ms poll, paces re-offers: {replay:?}"
+        );
+    }
+
+    /// Only the pass that delivered something records `ok`; a re-offer that
+    /// appended nothing and typed nothing records `reoffered`, so the event
+    /// log no longer reports 23 deliveries of one message.
+    #[test]
+    fn only_the_delivering_pass_records_ok_cas_366b() {
+        let replay = replay_busy_claude_recipient(100, 12 * 60, 11 * 60 + 13);
+        assert_eq!(replay.statuses.first(), Some(&"ok"));
+        assert_eq!(
+            replay.statuses.iter().filter(|status| **status == "ok").count(),
+            1,
+            "{:?}",
+            replay.statuses
+        );
+        assert!(replay.statuses[1..].iter().all(|status| *status == "reoffered"));
+    }
+
+    #[test]
+    fn injection_event_status_names_what_the_pass_did_cas_366b() {
+        // A first write, or a re-append after the harness took the copy.
+        assert_eq!(injection_event_status(false, false, WakeAttempt::NotAttempted), "ok");
+        // A PTY nudge fired: bytes reached the pane.
+        assert_eq!(injection_event_status(true, false, WakeAttempt::Fired), "ok");
+        assert_eq!(injection_event_status(false, true, WakeAttempt::Fired), "ok");
+        // Dedup no-op write and no wake; or a nudge-only pass whose nudge
+        // was vetoed or failed.
+        assert_eq!(injection_event_status(true, false, WakeAttempt::NotAttempted), "reoffered");
+        assert_eq!(injection_event_status(true, false, WakeAttempt::Failed), "reoffered");
+        assert_eq!(injection_event_status(false, true, WakeAttempt::NotAttempted), "reoffered");
+        assert_eq!(injection_event_status(false, true, WakeAttempt::Failed), "reoffered");
+    }
+}

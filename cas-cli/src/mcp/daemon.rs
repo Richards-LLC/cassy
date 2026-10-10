@@ -47,6 +47,11 @@ use crate::types::{Agent, AgentRole, AgentStatus, AgentType};
 /// work, never cancel it.
 pub(crate) const CODE_INDEX_MAX_STALENESS_SECS: u64 = 300;
 
+/// Cadence of the canonical daemon's telemetry-event retention pass (cas-e193).
+const EVENT_RETENTION_INTERVAL_SECS: u64 = 15 * 60;
+/// Delay before the first retention pass, so startup work goes first.
+const EVENT_RETENTION_FIRST_DELAY_SECS: u64 = 60;
+
 /// Should the code-index cycle run on this tick?
 ///
 /// Idle-preferred with a max-staleness override. Extracted from the `select!` arm so the policy
@@ -654,6 +659,10 @@ impl EmbeddedDaemon {
         // accept loop is never blocked by maintenance/sync/indexing below.
         let election =
             socket::ElectionConfig::new(self.config.cas_root.clone(), Arc::clone(&self.shutdown));
+        // cas-e193: the election winner is the project's canonical daemon;
+        // only it runs event retention, so concurrent `cas serve` processes
+        // never race each other's delete batches.
+        let owns_socket = Arc::clone(&election.owns_socket);
         let socket_task = {
             let daemon = Arc::clone(&self);
             tokio::spawn(socket::run_socket_election(election, move |mut stream| {
@@ -701,6 +710,11 @@ impl EmbeddedDaemon {
         };
         let mut proxy_config_interval =
             tokio::time::interval(Duration::from_secs(proxy_config_secs));
+        let mut event_retention_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(EVENT_RETENTION_FIRST_DELAY_SECS),
+            Duration::from_secs(EVENT_RETENTION_INTERVAL_SECS),
+        );
+        event_retention_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // Skip the first immediate tick for maintenance tasks
         cloud_sync_interval.tick().await;
@@ -966,6 +980,20 @@ impl EmbeddedDaemon {
                             let mut status = self.status.write().await;
                             status.last_error = Some(format!("Embedding drain failed: {e}"));
                         }
+                    }
+                }
+
+                // Telemetry event retention (cas-e193).
+                //
+                // Ungated on idleness for the reason the history arms are: a
+                // busy factory is never idle, and the events table grew to
+                // ~1.08 M rows (~450 MB with indexes) because the only prune
+                // sat behind both the idle gate and auto_prune=false. Bounded
+                // instead: <=1,000-row IMMEDIATE batches with a lock-free pause
+                // between them, and a per-run batch budget.
+                _ = event_retention_interval.tick() => {
+                    if owns_socket.load(Ordering::SeqCst) {
+                        self.run_event_retention_cycle().await;
                     }
                 }
 
@@ -1282,6 +1310,34 @@ impl EmbeddedDaemon {
             }
             Err(error) => {
                 tracing::warn!(error = %error, "Knowledge distillation task join error");
+            }
+        }
+    }
+
+    /// One bounded telemetry-retention pass on a blocking thread (cas-e193).
+    async fn run_event_retention_cycle(&self) {
+        let cas_root = self.config.cas_root.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::daemon::run_event_telemetry_retention(&cas_root)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(report)) => {
+                if report.deleted > 0 {
+                    tracing::info!(
+                        deleted = report.deleted,
+                        batches = report.batches,
+                        backlog_remaining = !report.complete,
+                        "telemetry event retention pass"
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                let mut status = self.status.write().await;
+                status.last_error = Some(format!("Telemetry event retention failed: {error}"));
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Telemetry event retention task join error");
             }
         }
     }

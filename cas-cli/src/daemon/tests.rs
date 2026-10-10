@@ -530,6 +530,68 @@ fn maintenance_cycle_prunes_aged_terminal_prompts_with_the_dead_agent_purge_cas_
     assert!(queue.message_delivery_report(recent).unwrap().is_some());
 }
 
+/// cas-e193: the maintenance cycle prunes aged telemetry events without the
+/// auto_prune opt-in (the embedded daemon hard-codes auto_prune=false), keeps
+/// lifecycle events at any age, and factory.event_telemetry_retention_days = 0
+/// disables it.
+#[test]
+fn maintenance_cycle_prunes_aged_telemetry_events_without_auto_prune_cas_e193() {
+    use crate::daemon::maintenance::run_once;
+    use cas_types::{Event, EventEntityType, EventType};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let cas_root = temp.path().to_path_buf();
+    let _store = crate::store::open_store(&cas_root).unwrap();
+    let _agent_store = crate::store::open_agent_store(&cas_root).unwrap();
+    let events = crate::store::open_event_store(&cas_root).unwrap();
+    let record = |event_type: EventType, days_old: i64, entity: &str| {
+        let mut event = Event::new(event_type, EventEntityType::Agent, entity, entity);
+        event.created_at = Utc::now() - Duration::days(days_old);
+        events.record(&event).unwrap();
+    };
+    record(EventType::SupervisorInjected, 15, "aged-injection");
+    record(EventType::WorkerFileEdited, 15, "aged-edit");
+    record(EventType::SupervisorInjected, 13, "recent-injection");
+    record(EventType::WorkerGitCommit, 200, "aged-commit");
+    record(EventType::TaskCompleted, 200, "aged-task");
+
+    let config = DaemonConfig {
+        cas_root: cas_root.clone(),
+        auto_prune: false,
+        process_observations: false,
+        consolidate_memories: false,
+        apply_decay: false,
+        index_bm25: false,
+        update_entity_summaries: false,
+        agent_purge_age_hours: 24,
+        ..DaemonConfig::default()
+    };
+    let result = run_once(&config).expect("maintenance cycle");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.telemetry_events_pruned, 2);
+    assert_eq!(result.events_pruned, 0, "auto_prune archiving stays off");
+    let mut kept: Vec<String> = events
+        .list_recent(10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.entity_id)
+        .collect();
+    kept.sort();
+    assert_eq!(kept, ["aged-commit", "aged-task", "recent-injection"]);
+
+    // Disabled by configuration: nothing more is pruned.
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[factory]\nevent_telemetry_retention_days = 0\n",
+    )
+    .unwrap();
+    record(EventType::SupervisorInjected, 90, "ancient-injection");
+    let result = run_once(&config).expect("maintenance cycle");
+    assert_eq!(result.telemetry_events_pruned, 0);
+    assert_eq!(events.list_recent(10).unwrap().len(), 4);
+}
+
 #[test]
 fn daemon_index_cycle_repairs_the_legacy_tantivy_root_before_draining_pending_entries() {
     use crate::daemon::indexing::run_indexing_cycle;

@@ -35,3 +35,35 @@ daemon runs, rows that cross the 30-day live-retention boundary are archived
 before removal. Existing live rows remain available until their next
 maintenance cycle, and the configured byte cap applies to newly-created and
 pre-existing `.jsonl.zst` archive files alike.
+
+## Telemetry event retention
+
+High-volume telemetry events are deleted rather than archived once they are
+older than `factory.event_telemetry_retention_days`, which defaults to 14 days.
+These are `supervisor_injected`, `supervisor_notified`, `agent_heartbeat`,
+`worker_file_edited`, `worker_subagent_spawned` and `worker_subagent_completed`.
+Every reader of these types looks only at a recent window, such as injection
+acks, worker status, the activity feed or the director.
+
+```toml
+[factory]
+event_telemetry_retention_days = 14 # 0 keeps every telemetry event
+```
+
+The canonical `cas serve` daemon (the `daemon.sock` election winner) runs this
+pass every 15 minutes, whether or not the project is idle. Each delete is a
+`BEGIN IMMEDIATE` transaction of at most 1,000 rows, with the connection
+released for 20 ms between batches. One pass runs at most 500 batches, and any
+remaining backlog drains on later passes. `cas daemon` maintenance runs the
+same pass.
+
+Lifecycle events are never removed by this window. These include task,
+commit, verification, worker-death and push-block events. Commit provenance
+and task-ownership inference read `worker_git_commit` and the first task event
+per task across all time. Those rows leave the live table only through the
+30-day archive above, which runs only when maintenance has `auto_prune`
+enabled. The embedded daemon keeps `auto_prune` disabled.
+
+The queue loop writes one `supervisor_injected` row per distinct outcome. An
+identical retry, meaning the same prompt, recipient, status and error, is
+skipped. On the cassy store this would have kept 39,254 of 799,578 rows.

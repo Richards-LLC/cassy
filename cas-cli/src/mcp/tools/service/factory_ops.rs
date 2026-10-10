@@ -6592,7 +6592,7 @@ impl CasService {
         // cas-6f48: the epic's integration gate (green tip, or red culprit).
         report.push_str(&crate::epic_gate::epic_status_line(
             &self.inner.cas_root,
-            parent_branch,
+            epic.branch.as_deref().unwrap_or(parent_branch),
         ));
         let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
         if !staged.is_empty() {

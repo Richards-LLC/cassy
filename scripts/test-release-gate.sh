@@ -1860,10 +1860,11 @@ else
     bad 'assemble prove reran an existing matching receipt'
 fi
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/proof-gate.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 3 ]] \
     && grep -qF 'PASS assembly receipt=' "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" \
+    && grep -qF 'PASS assembly receipt=' "$CAS_RELEASE_GATE_LOG_DIR/ci-script-tests.log" \
     && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
-    ok 'assembly retry and first full gate cite both proved rows without rerunning the archive suite'
+    ok 'assembly retry and first full gate cite all three proved rows (cas-398c: ci-script-tests too) without rerunning the archive suite'
 else
     bad "first gate missed assembly proof: $(cat "$tmp/proof-gate.log")"
 fi
@@ -1883,11 +1884,12 @@ PYFIX
 git -C "$repo" add .
 git -C "$repo" commit -qm 'simulate prep and ledger'
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/proof-prep.log" 2>&1
-if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode|ci-script-tests)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 3 ]] \
     && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/ci-script-tests.log" \
     && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" \
     && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
-    ok 'prep member versions, lock and ledger reuse both rows and cite the original proof SHA'
+    ok 'prep member versions, lock and ledger reuse all three proved rows and cite the original proof SHA'
 else
     bad "real-cut prep missed assembly proof: $(cat "$tmp/proof-prep.log")"
 fi
@@ -1910,8 +1912,8 @@ PYFIX
     git -C "$repo" add "$changed_file"
     git -C "$repo" commit -qm "fixture $change changed"
     run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/proof-$change.log" 2>&1
-    if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 0 ]]; then
-        ok "$change version invalidates both assembly rows"
+    if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode|ci-script-tests)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 0 ]]; then
+        ok "$change version invalidates every assembly row"
     else
         bad "$change version incorrectly reused assembly proof"
     fi

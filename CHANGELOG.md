@@ -7,6 +7,155 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — many agents on one machine (#1165)
+
+- The factory daemon's main loop no longer waits on database or file locks.
+  Each pass gets a 50 ms budget for store work; CI-watch reads and writes, the
+  lifecycle outbox, attention relays and the task dialog moved to an ordered
+  background store worker, and the task store is opened once per process
+  instead of reconciling under a lock on every open. `loop.json` now reports
+  the slowest, p99 and over-100 ms pass counts per window.
+- Opening the task store never waits on `task-sync-intents.lock`. The lock is
+  a shared per-process lease, mutations serialize per task, and the
+  background reconcile takes a bounded write lock and defers when the store
+  is busy. Reconciling runs once per process at open, then every 60 seconds.
+- Shared database connections release their process-wide lock between write
+  attempts, so one blocked writer no longer stalls every other caller for up
+  to 31 seconds. History indexing takes the write lock up front and leaves
+  unchanged search rows alone.
+- Each project keeps one code index. Only the main checkout's Cassy process
+  indexes, reconciles and purges it; factory workers and linked worktrees read
+  it. Copies left by removed worktrees are purged in bounded batches at
+  start-up and after worktree removal. `cas doctor` lists file counts per
+  repository and `--fix` purges stray copies.
+- A Codex worker starts one `cas serve`, not two. Cassy disables any other
+  Cassy server entry in the Codex configuration it launches with, and
+  `cas init`/`cas update` keep a single entry.
+- The factory loop's two-second refresh no longer reads the store on the
+  loop. It used to read every task, agent and recent event there, then read
+  them again before delivering prompts, which cost 100–400 ms every few passes
+  with many agents. Both reads now run on a background reader with its own
+  database connection, and the loop applies the finished snapshot on a later
+  pass: panels lag by at most one refresh, and prompts are still checked
+  against a read taken after the change was detected. Agent and event store
+  reads respect the 50 ms pass budget instead of waiting on another thread's
+  connection. `loop.json` adds `phase_latency`: for each loop phase, how often
+  it ran, its slowest run and how many runs took 100 ms or more, with the
+  refresh split into its steps.
+
+### Changed — bounded storage
+
+- High-volume telemetry events (supervisor injections, file edits,
+  heartbeats, subagent events) are deleted after
+  `factory.event_telemetry_retention_days` (default 14; 0 keeps them).
+  Task, commit and verification history is kept. The main checkout's Cassy
+  process runs the cleanup every 15 minutes in batches of at most 1,000 rows,
+  whether or not the machine is idle. An identical retry of one message
+  delivery is recorded once, and a retry that delivered nothing new is
+  recorded as `reoffered` rather than `ok`.
+- Stored prompt transcripts are trimmed after
+  `factory.prompt_transcript_retention_days` (default 7); the prompt row and
+  its links stay. Delivered message-queue and supervisor-queue rows are
+  removed after their retention windows
+  (`factory.supervisor_queue_retention_days`, default 14) in the same batched
+  cleanup.
+
+### Added — Violet push-wake follow-ups
+
+- A Slack message that mentions people and not Violet now wakes the
+  supervisor as a hand-off for those people (`addressed="human"`), with the
+  ids it names, so it is left for them.
+- `cas factory status` shows each Violet channel watch (age, last human
+  message, next check), the most recent stop and its reason, and the Slack
+  relay's health; `--json` includes them. `cas doctor` adds a `violet wake`
+  row that warns after repeated relay failures or when watches are active
+  but nothing has been claimed for five minutes.
+- `cas integrate violet --channel <name|id>` maps a Slack channel to this
+  project so Violet activity there wakes it. Violet must be in the channel
+  first. `--channel-replace` takes a channel over from another project and
+  `--channel-remove <id>` removes a mapping.
+- The violet skill explains how to handle a Slack wake: read the thread
+  first, leave hand-offs to the named person, and reply at most once.
+
+### Fixed — Violet setup (#1164)
+
+- A project `.cas/proxy.toml` block that pointed at the same Violet hub as
+  the machine, but named another machine's token, kept `cas integrate violet`
+  reporting stale forever. The block is now dropped and this machine's token
+  is used; a block for a different hub (such as staging) is kept.
+- Violet advice no longer tells you to run `cas login` for a hub token it
+  cannot mint. A rejected token names the variable and how to get a new one,
+  and a missing project-override token names the file that asks for it.
+- Each Claude Code entry in the receipt shows whether the hub accepted it, so
+  a rejected token is no longer reported as merely current. Other Claude
+  profiles on the machine that already use Violet are repaired too, replacing
+  a pasted token or retired variable names with env references.
+
+### Fixed — MCP proxy (#1168)
+
+- An MCP upstream that drops after a transport error now reconnects on the
+  next call once its backoff is due. It used to stay "absent" for the rest of
+  the session, with advice to restore a credential that was fine.
+- Every upstream call has a client-side timeout, 90 seconds by default
+  (`call_timeout_secs` in `proxy.toml`), so a hung upstream no longer holds a
+  call for about 1,000 seconds. A timed-out connection is dropped and
+  reconnects like any other failure.
+- `proxy_health` reflects what calls actually see: whether the upstream is
+  connected, its last success, and its last failure. It is updated as soon as
+  a call changes that state.
+- The "absent" message names the real next step: restore a missing or
+  rejected credential, install a missing executable, or wait for the
+  automatic reconnect (or restart) after a dropped connection.
+
+### Fixed — Cassy Cloud conversation
+
+- A supervisor's answers to questions typed in its terminal now appear in
+  the Commander and Cassy Cloud conversation, each under the question it
+  answers. Before, answers were mirrored only after a message from a paired
+  device, so a conversation driven from the terminal showed the questions and
+  never the answers. Answers to earlier terminal questions are filled in from
+  the recent transcript, once each, and relayed machine prompts are never
+  treated as questions.
+
+### Fixed — visual QA
+
+- `--strict` no longer passes on a page that shows only a loading spinner
+  (#1159). It waits up to 5 seconds (`--ready-timeout-ms`) for a rendered
+  surface, or for `--ready-selector`, and fails with `page-not-ready` if the
+  page never renders. A visual allowlist cannot suppress that.
+- Text that fades in after the page loads is no longer reported as invisible
+  (#1158). The page is measured once it has stopped changing and animating for
+  half a second, at most 3 seconds; text that stays invisible still fails.
+- Scoped visual-QA comparisons accept reports that list issues per render
+  (`renders[].issues`) as well as a single findings list (#1166).
+
+### Fixed — closes, delivery and workers
+
+- A reviewed drop is accepted when the superseding commits landed before the
+  task's delivery anchor (#1160).
+- A no-code task with no work target closes without a branch when no commit
+  names it (#1167).
+- A worker busy in one long turn no longer triggers repeated delivery-stall
+  alerts (#1163). Its replies and notes count as activity, and stall alerts
+  for one worker are combined per five-minute window.
+- `env -u VAR cargo …`, `env -S` and `sudo` value options no longer let a
+  worker's cargo command bypass the build guard.
+- Read-only git checks no longer take the index lock, so a killed check
+  cannot leave a stale `index.lock`; a worker may remove a stale lock in its
+  own worktree.
+- Cloud sync names the project that already owns a task rejected as
+  `duplicate_of_other_project`, with the fix: fold the alias and run
+  `cas cloud project adopt-aliases`, or retire the local copy.
+
+### Fixed — release train
+
+- The integration branch is remembered by name, so renaming the checkout no
+  longer breaks assembly, and an epic already merged to `main` by PR can be
+  assembled from `main`. That path always runs the full gate.
+- The release gate's scratch space defaults to the checkout's filesystem, and
+  preflight checks that the release-report renderer's browser starts before
+  anything is published.
+
 ## [3.49.0] - 2026-10-10
 
 ### Added — Violet push-wake

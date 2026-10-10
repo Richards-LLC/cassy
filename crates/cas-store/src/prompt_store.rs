@@ -12,11 +12,6 @@ use crate::Result;
 use crate::error::StoreError;
 use cas_types::{Message, Prompt, Scope};
 
-/// Helper to convert mutex poison error to StoreError
-fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Other("lock poisoned".to_string())
-}
-
 /// Schema for prompts table (also defined in migration m141)
 pub const PROMPT_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS prompts (
@@ -82,6 +77,13 @@ pub trait PromptStore: Send + Sync {
     /// Delete old prompts (keep last N days)
     fn prune(&self, days: i64) -> Result<usize>;
 
+    /// Null `messages_json` on at most `batch` prompts older than
+    /// `older_than_secs`, in one IMMEDIATE transaction (cas-f207). The row,
+    /// its content and its provenance keys (id, session, agent, task, hash)
+    /// stay; only the session transcript, which no reader consumes, goes.
+    /// Returns the rows trimmed.
+    fn trim_transcripts_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize>;
+
     /// Close the store
     fn close(&self) -> Result<()>;
 }
@@ -142,13 +144,13 @@ impl SqlitePromptStore {
 
 impl PromptStore for SqlitePromptStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(PROMPT_SCHEMA)?;
         Ok(())
     }
 
     fn add(&self, prompt: &Prompt) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Serialize messages to JSON
         let messages_json = if prompt.messages.is_empty() {
@@ -184,7 +186,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn get(&self, id: &str) -> Result<Option<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -200,7 +202,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn get_by_hash(&self, content_hash: &str, session_id: &str) -> Result<Option<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -216,7 +218,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -235,7 +237,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_by_task(&self, task_id: &str, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -254,7 +256,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -272,7 +274,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -294,7 +296,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn mark_response_started(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         conn.execute(
             "UPDATE prompts SET response_started = ?1 WHERE id = ?2",
@@ -311,7 +313,7 @@ impl PromptStore for SqlitePromptStore {
         model: Option<&str>,
         tool_version: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let messages_json = if messages.is_empty() {
             None
@@ -330,8 +332,31 @@ impl PromptStore for SqlitePromptStore {
         Ok(())
     }
 
+    fn trim_transcripts_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
+        if older_than_secs <= 0 {
+            return Err(crate::error::StoreError::Other(
+                "trim_transcripts_batch requires a positive window".to_string(),
+            ));
+        }
+        let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
+        let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+        // Pooled write lock, released between batches by the caller (cas-3f65e).
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            // idx_prompts_timestamp bounds the scan to aged rows.
+            Ok(tx.execute(
+                "UPDATE prompts SET messages_json = NULL
+                 WHERE rowid IN (
+                     SELECT rowid FROM prompts
+                     WHERE timestamp < ?1 AND messages_json IS NOT NULL
+                     LIMIT ?2
+                 )",
+                params![cutoff, batch as i64],
+            )?)
+        })
+    }
+
     fn prune(&self, days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
@@ -691,4 +716,55 @@ mod tests {
         assert_eq!(updated.model, Some("claude-opus-4-5".to_string()));
         assert_eq!(updated.tool_version, Some("1.0.0".to_string()));
     }
+
+    /// cas-f207: aged transcripts are nulled in bounded batches; the prompt
+    /// row and its provenance survive, and recent transcripts are untouched.
+    #[test]
+    fn cas_f207_trim_transcripts_is_batched_and_keeps_provenance() {
+        let (store, _dir) = setup_store();
+        let messages = vec![Message::user("transcript body".to_string())];
+        let mut aged_ids = Vec::new();
+        for n in 0..5 {
+            let mut prompt = Prompt::new(
+                format!("aged-{n}"),
+                format!("session-{n}"),
+                "agent-1".to_string(),
+                format!("aged prompt {n}"),
+            );
+            prompt.timestamp = Utc::now() - chrono::Duration::days(30);
+            prompt.task_id = Some("cas-x".to_string());
+            store.add(&prompt).unwrap();
+            store
+                .update_blame_fields(&prompt.id, &messages, Some("model"), Some("v1"))
+                .unwrap();
+            aged_ids.push(prompt.id);
+        }
+        let fresh = Prompt::new(
+            "fresh".to_string(),
+            "session-fresh".to_string(),
+            "agent-1".to_string(),
+            "fresh prompt".to_string(),
+        );
+        store.add(&fresh).unwrap();
+        store
+            .update_blame_fields(&fresh.id, &messages, Some("model"), Some("v1"))
+            .unwrap();
+
+        let window = 14 * 24 * 60 * 60;
+        let batches: Vec<usize> = (0..4)
+            .map(|_| store.trim_transcripts_batch(window, 2).unwrap())
+            .collect();
+        assert_eq!(batches, vec![2, 2, 1, 0], "each transaction is bounded by the batch");
+
+        for id in &aged_ids {
+            let prompt = store.get(id).unwrap().expect("the aged row is kept");
+            assert!(prompt.messages.is_empty(), "{id} transcript was not trimmed");
+            assert!(prompt.content.starts_with("aged prompt"), "content is provenance");
+            assert_eq!(prompt.task_id.as_deref(), Some("cas-x"));
+        }
+        let kept = store.get("fresh").unwrap().unwrap();
+        assert_eq!(kept.messages.len(), 1, "a recent transcript is kept");
+        assert!(store.trim_transcripts_batch(0, 10).is_err(), "a zero window is refused");
+    }
+
 }

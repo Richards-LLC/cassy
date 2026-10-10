@@ -198,7 +198,14 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git").args(args).current_dir(repo).output()?;
+    // cas-39f3: the runner only reads git state. `git status` otherwise
+    // rewrites a stat-dirty index under the worker's `index.lock`, and a git
+    // killed during that write strands a zero-byte lock that blocks commits.
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .current_dir(repo)
+        .output()?;
     if !output.status.success() {
         bail!("git {} failed", args.join(" "));
     }
@@ -1407,6 +1414,50 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
                 .map(|repo| passing_test_receipts(&root, repo, &clean_head(repo).unwrap()).len())
                 .sum::<usize>(),
             2
+        );
+    }
+
+    /// cas-39f3: `git status` refreshes a stat-dirty index and rewrites it
+    /// under `index.lock`; SIGKILL during that write leaves a zero-byte lock
+    /// (reproduced: a kill 0.86 s into status on a 5,450-file checkout). The
+    /// runner only reads git state, so a builder-cap refusal, like every other
+    /// path, must not take the optional index lock at all.
+    #[cfg(unix)]
+    #[test]
+    fn builder_cap_refusal_never_takes_the_index_lock_cas_39f3() {
+        use std::os::unix::fs::MetadataExt;
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 1\n").unwrap();
+        let repo = root.join("worktrees/worker-39f3");
+        fixture_commit(&repo);
+        std::fs::create_dir(repo.join("target")).unwrap();
+        // Stat-dirty but content-clean: a plain `git status` would refresh
+        // and rewrite the index here.
+        std::fs::File::options()
+            .write(true)
+            .open(repo.join(".gitignore"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(30))
+            .unwrap();
+        let index = repo.join(".git/index");
+        let before = std::fs::metadata(&index).unwrap().ino();
+        let slots = root.join("worker-check-slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let _held = acquire_slot(&slots, 1).unwrap();
+
+        let args: Vec<String> = ["-p", "cas", "--lib"].iter().map(|arg| arg.to_string()).collect();
+        let error = execute_at(&root, &args, &repo, Path::new("/nonexistent/cargo"))
+            .expect_err("the only builder slot is held");
+        assert!(error.to_string().contains("max_concurrent_builders=1"), "{error}");
+        assert!(!repo.join(".git/index.lock").exists(), "the refusal left an index.lock");
+        assert_eq!(
+            std::fs::metadata(&index).unwrap().ino(),
+            before,
+            "the runner rewrote the index (took the optional index lock)"
         );
     }
 

@@ -12,8 +12,7 @@ impl SqliteAgentStore {
         agent_id: &str,
         duration_secs: i64,
     ) -> Result<WorktreeClaimResult> {
-        let conn = self.lock_conn()?;
-        let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+        let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
         let now = Utc::now();
         let expires_at = now + chrono::Duration::seconds(duration_secs);
 

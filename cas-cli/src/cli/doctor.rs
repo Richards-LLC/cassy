@@ -266,7 +266,7 @@ impl CheckGroup {
             | "models"
             | "sessionstart budget" => Self::Config,
             "issue repositories" => Self::Config,
-            "integrations" | "violet" | "github origin" => Self::Integrations,
+            "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -1285,6 +1285,20 @@ fn hub_audit_check_for(root: &Path, now: chrono::DateTime<chrono::Utc>) -> Check
     Check::new("hub audit log", status, report.message)
 }
 
+/// cas-a897: the push-wake watch book, when push-wake ever ran in this project.
+fn violet_wake_check(cas_root: &Path, now: chrono::DateTime<chrono::Utc>) -> Option<Check> {
+    use crate::ui::factory::daemon::runtime::violet_activity::{WatchHealth, watch_status};
+    let (health, message) = watch_status(cas_root, now)?.doctor(now);
+    Some(Check::new(
+        "violet wake",
+        match health {
+            WatchHealth::Ok => CheckStatus::Ok,
+            WatchHealth::Warning => CheckStatus::Warning,
+        },
+        message,
+    ))
+}
+
 #[cfg(feature = "mcp-proxy")]
 fn host_proxy_check() -> Check {
     match crate::cli::integrate::violet::doctor_row_from_env(None) {
@@ -1374,6 +1388,13 @@ fn root_projection_autofix(root: &Path) -> Option<Check> {
 }
 
 fn code_index_autofix(root: &Path) -> Option<Check> {
+    code_index_autofix_as(root, &crate::daemon::canonical_code_index::code_index_role(root))
+}
+
+/// cas-8256: only the canonical checkout's process writes the code index, so
+/// `cas doctor --fix` run by a worker or in a linked worktree never reindexes.
+fn code_index_autofix_as(root: &Path, role: &crate::daemon::canonical_code_index::CodeIndexRole) -> Option<Check> {
+    if !role.is_writer() { return None; }
     let state = gather_symbol_index_state(root);
     if !matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning) { return None; }
     let project = crate::daemon::indexing::code_project_root(root);
@@ -1382,6 +1403,104 @@ fn code_index_autofix(root: &Path) -> Option<Check> {
     let mut files = crate::daemon::indexing::collect_source_files(&roots, &cfg.extensions, &cfg.exclude_patterns);
     files.sort();
     Some(code_index_autofix_outcome(crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false)))
+}
+
+/// cas-8256: one code index per project. Flags rows indexed under any
+/// repository other than the canonical checkout's (factory worktree copies).
+fn code_index_copies_check(counts: &[(String, usize)], canonical: &[String]) -> Check {
+    let name = "code index copies";
+    if canonical.is_empty() {
+        return Check::new(
+            name,
+            CheckStatus::Ok,
+            "skipped: the canonical checkout is not a git checkout",
+        );
+    }
+    if counts.is_empty() {
+        return Check::new(name, CheckStatus::Ok, "no source files indexed yet");
+    }
+    let describe = |rows: &[&(String, usize)]| {
+        rows.iter()
+            .map(|(repository, files)| format!("{repository} ({files} files)"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (kept, copies): (Vec<&(String, usize)>, Vec<&(String, usize)>) = counts
+        .iter()
+        .partition(|(repository, _)| canonical.contains(repository));
+    let kept = if kept.is_empty() {
+        "not indexed yet".to_string()
+    } else {
+        describe(&kept)
+    };
+    if copies.is_empty() {
+        return Check::new(name, CheckStatus::Ok, format!("one code index per project: {kept}"));
+    }
+    Check::new(
+        name,
+        CheckStatus::Warning,
+        format!(
+            "{} non-canonical code index {} in the shared store: {}; canonical: {kept}. \
+             Run `cas doctor --fix` (or restart the canonical `cas serve`) to purge them \
+             in bounded batches",
+            copies.len(),
+            if copies.len() == 1 { "copy" } else { "copies" },
+            describe(&copies),
+        ),
+    )
+}
+
+fn gather_code_index_copies_check(cas_root: &Path) -> Check {
+    let canonical =
+        crate::daemon::canonical_code_index::canonical_code_repositories(cas_root).unwrap_or_default();
+    let counts = match cas_store::SqliteCodeIndexPurge::open_existing(cas_root) {
+        Ok(Some(store)) => match store.repository_file_counts() {
+            Ok(counts) => counts,
+            Err(error) => {
+                return Check::new(
+                    "code index copies",
+                    CheckStatus::Warning,
+                    format!("cannot count indexed repositories: {error}"),
+                );
+            }
+        },
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            return Check::new(
+                "code index copies",
+                CheckStatus::Warning,
+                format!("cannot open the code index: {error}"),
+            );
+        }
+    };
+    code_index_copies_check(&counts, &canonical)
+}
+
+fn code_index_copies_autofix(root: &Path) -> Option<Check> {
+    if !matches!(gather_code_index_copies_check(root).status, CheckStatus::Warning) {
+        return None;
+    }
+    let outcome = crate::daemon::canonical_code_index::purge_non_canonical_code_index(
+        root,
+        cas_store::WriteBatching::background(),
+    );
+    Some(match outcome {
+        Ok(outcome) if outcome.errors.is_empty() && !outcome.deferred => Check::new(
+            "auto-fix",
+            CheckStatus::Ok,
+            format!("fixed: code index copies — {}", outcome.summary()),
+        ),
+        Ok(outcome) => Check::new(
+            "auto-fix",
+            CheckStatus::Warning,
+            format!("code index copies: {}", outcome.summary()),
+        ),
+        Err(error) => Check::new(
+            "auto-fix",
+            CheckStatus::Warning,
+            format!("code index copy purge failed: {error}"),
+        ),
+    })
 }
 
 fn code_index_autofix_outcome(outcome: Result<crate::daemon::CodeIndexResult, crate::error::CasError>) -> Check {
@@ -1411,7 +1530,7 @@ fn search_index_autofix(root: &Path) -> Option<Check> {
     }
 }
 
-fn extended_autofixes(root: &Path) -> Vec<Check> { [host_autofix(), code_index_autofix(root), search_index_autofix(root), root_projection_autofix(root.parent().unwrap_or(root))].into_iter().flatten().collect() }
+fn extended_autofixes(root: &Path) -> Vec<Check> { [host_autofix(), code_index_autofix(root), code_index_copies_autofix(root), search_index_autofix(root), root_projection_autofix(root.parent().unwrap_or(root))].into_iter().flatten().collect() }
 
 fn offer_tty_autofix(root: &Path) -> bool {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() { return false; }
@@ -2373,6 +2492,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     ));
 
     recorder.mark("symbol index", &checks);
+    // Check 4b': one code index per project (cas-8256). Factory worktrees used
+    // to index full copies into the shared store and never removed them.
+    checks.push(gather_code_index_copies_check(&cas_root));
+    recorder.mark("code index copies", &checks);
     // Check 4c: the embedding drain (EPIC cas-6212 / cas-db6e, M7).
     //
     // The drain runs on a daemon tick, so its failures have no command output to
@@ -2675,6 +2798,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             }, row.message));
         }
     }
+    // cas-a897: Violet push-wake watches and the Cloud relay claim loop.
+    checks.extend(violet_wake_check(&cas_root, chrono::Utc::now()));
     recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
@@ -8106,6 +8231,38 @@ mod tests {
         });
     }
 
+    #[test]
+    fn violet_wake_check_reads_the_watch_book_cas_a897() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        assert!(violet_wake_check(dir.path(), now).is_none(), "no book, no row");
+
+        let book = dir.path().join("violet").join("watches.json");
+        std::fs::create_dir_all(book.parent().unwrap()).unwrap();
+        let claim = (now - chrono::Duration::seconds(30)).to_rfc3339();
+        std::fs::write(
+            &book,
+            format!(r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#),
+        )
+        .unwrap();
+        let check = violet_wake_check(dir.path(), now).unwrap();
+        assert_eq!(check.name, "violet wake");
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(check.message.contains("last claim 30s ago"), "{}", check.message);
+        assert!(matches!(check.group(), CheckGroup::Integrations));
+
+        std::fs::write(
+            &book,
+            format!(
+                r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
+            ),
+        )
+        .unwrap();
+        let check = violet_wake_check(dir.path(), now).unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(check.message.contains("HTTP 503"), "{}", check.message);
+    }
+
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn doctor_proxy_reachability_names_project_override_for_missing_violet_credential() {
@@ -9642,6 +9799,41 @@ mod tests {
         );
     }
 
+    /// cas-8256: every worker used to index its worktree into the shared
+    /// store. Doctor names each copy with its file count, and the canonical one.
+    #[test]
+    fn code_index_copies_check_flags_non_canonical_repositories_cas_8256() {
+        let canonical = vec!["cassy".to_string()];
+        let counts = vec![
+            ("brave-hound-32".to_string(), 314),
+            ("cassy".to_string(), 314),
+            ("crisp-jay-9".to_string(), 310),
+        ];
+        let check = code_index_copies_check(&counts, &canonical);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        for needle in [
+            "2 non-canonical",
+            "brave-hound-32 (314 files)",
+            "crisp-jay-9 (310 files)",
+            "cassy (314 files)",
+            "cas doctor --fix",
+        ] {
+            assert!(check.message.contains(needle), "missing {needle:?}: {}", check.message);
+        }
+    }
+
+    #[test]
+    fn code_index_copies_check_is_ok_for_one_canonical_index_cas_8256() {
+        let canonical = vec!["cassy".to_string()];
+        let check = code_index_copies_check(&[("cassy".to_string(), 314)], &canonical);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(check.message.contains("cassy (314 files)"), "{}", check.message);
+
+        let empty = code_index_copies_check(&[], &canonical);
+        assert!(matches!(empty.status, CheckStatus::Ok), "{}", empty.message);
+        assert!(!empty.message.is_empty());
+    }
+
     /// A freshly-indexed tree reports Ok with the counts, not a warning.
     #[test]
     fn symbol_index_check_ok_when_fresh() {
@@ -9871,7 +10063,11 @@ mod tests {
         scans.record_scan(&key, 2, 2, 0, 0, None, None, Some("previous scan needs retry")).unwrap();
         let holder = cas_search::Bm25Index::open(&crate::daemon::indexing::code_index_dir(&fixture.cas_root)).unwrap();
         holder.delete_batch(["lock-probe"]).unwrap();
-        let warning = code_index_autofix(&fixture.cas_root).expect("doctor offered the retry");
+        // cas-8256: a worker's or linked worktree's doctor never reindexes.
+        let reader = crate::daemon::canonical_code_index::CodeIndexRole::Reader("factory worker".into());
+        assert!(code_index_autofix_as(&fixture.cas_root, &reader).is_none());
+        let writer = crate::daemon::canonical_code_index::CodeIndexRole::Writer;
+        let warning = code_index_autofix_as(&fixture.cas_root, &writer).expect("doctor offered the retry");
         assert!(matches!(warning.status, CheckStatus::Warning), "{}", warning.message);
         assert!(warning.message.contains("2 file retirement(s) deferred"), "{}", warning.message);
         assert!(warning.message.contains("cas index code"), "{}", warning.message);
@@ -9885,7 +10081,7 @@ mod tests {
         drop(holder);
         // The persisted warning makes a subsequent real doctor retry possible
         // even though both files disappeared and no new event will arrive.
-        let success = code_index_autofix(&fixture.cas_root).expect("deferred receipt offered retry");
+        let success = code_index_autofix_as(&fixture.cas_root, &writer).expect("deferred receipt offered retry");
         assert!(matches!(success.status, CheckStatus::Ok), "{}", success.message);
         assert!(success.message.contains("fixed: symbol index"));
         assert!(store.list_files("repo", None).unwrap().is_empty());

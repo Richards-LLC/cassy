@@ -1090,7 +1090,7 @@ impl SqliteHistoryStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+        crate::shared_db::lock_connection_infallible(&self.conn)
     }
 
     /// Shared body of "this commit is no longer awaiting a vector", whether
@@ -1428,25 +1428,40 @@ impl HistoryStore for SqliteHistoryStore {
         backfill_complete: bool,
     ) -> Result<usize> {
         let now = chrono::Utc::now().to_rfc3339();
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
+        // BEGIN IMMEDIATE on the pooled connection, not rusqlite's DEFERRED
+        // default: the block reads (which shas exist) before it writes, and a
+        // deferred read snapshot fails its upgrade with SQLITE_BUSY without
+        // consulting the busy handler (cas-759f). Every worker's history daemon
+        // indexes the same repository delta at boot, so this is a contended
+        // writer by construction (cas-3f65e).
+        let tx = shared_db::begin_immediate_pooled(&self.conn)?;
 
-        // Which of these commits are re-indexes? Only those need their FTS row
-        // retired first. On a fresh backfill this set is empty, so the common
-        // path issues no deletes at all — which matters because `sha` is an
-        // UNINDEXED FTS column and a delete by it scans the whole index.
-        let reindexed: Vec<&str> = {
+        // Which commits need their FTS row written? A new commit does; an
+        // already-indexed one only when its stored subject or body differs.
+        // A commit's subject and body are fixed by its sha, so the common
+        // re-index — every daemon after the first racing the same delta —
+        // rewrites no FTS row. That matters because `sha` is an UNINDEXED FTS
+        // column: each delete by it scans the whole index, and a 500-commit
+        // race-loser batch spent 1.7s of write lock on deletes alone on the
+        // live store (9.7k commits).
+        let mut fts_rewrite: Vec<&str> = Vec::new();
+        let mut fts_skip: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        {
             let mut stmt =
-                tx.prepare("SELECT EXISTS(SELECT 1 FROM history_commits WHERE sha = ?1)")?;
-            let mut seen = Vec::new();
+                tx.prepare("SELECT subject, body FROM history_commits WHERE sha = ?1")?;
             for c in commits {
-                let exists: bool = stmt.query_row(params![c.sha], |row| row.get(0))?;
-                if exists {
-                    seen.push(c.sha.as_str());
+                let stored: Option<(String, Option<String>)> = stmt
+                    .query_row(params![c.sha], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .optional()?;
+                match stored {
+                    Some((subject, body)) if subject == c.subject && body == c.body => {
+                        fts_skip.insert(c.sha.as_str());
+                    }
+                    Some(_) => fts_rewrite.push(c.sha.as_str()),
+                    None => {}
                 }
             }
-            seen
-        };
+        }
 
         {
             let mut stmt = tx.prepare(
@@ -1495,13 +1510,13 @@ impl HistoryStore for SqliteHistoryStore {
         // machine, and nothing would ever reconcile the two.
         {
             let mut delete = tx.prepare("DELETE FROM history_commits_fts WHERE sha = ?1")?;
-            for sha in &reindexed {
+            for sha in &fts_rewrite {
                 delete.execute(params![sha])?;
             }
             let mut insert = tx.prepare(
                 "INSERT INTO history_commits_fts (sha, subject, body) VALUES (?1, ?2, ?3)",
             )?;
-            for c in commits {
+            for c in commits.iter().filter(|c| !fts_skip.contains(c.sha.as_str())) {
                 insert.execute(params![c.sha, c.subject, c.body.as_deref().unwrap_or("")])?;
             }
         }
@@ -3833,6 +3848,85 @@ mod tests {
             })
             .unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    /// cas-3f65e: every worker's history daemon indexes the same repository
+    /// delta at boot, so all but the first re-send commits that are already
+    /// indexed. A commit's subject and body are fixed by its sha, so the FTS
+    /// row is left in place instead of deleted (a full-index scan, because
+    /// `sha` is UNINDEXED) and re-inserted.
+    #[test]
+    fn cas_3f65e_identical_reindex_leaves_the_fts_row_untouched() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        let fts_rowid = |store: &SqliteHistoryStore| -> Vec<i64> {
+            let conn = store.lock();
+            let mut stmt = conn
+                .prepare("SELECT rowid FROM history_commits_fts WHERE sha = ?1")
+                .unwrap();
+            stmt.query_map(params![a], |row| row.get(0))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let batch = [commit_at(&a, "stable subject", "stable body", "2026-08-05T00:00:00Z")];
+        store.commit_batch("/repo", &batch, &[], &a, true).unwrap();
+        let first = fts_rowid(&store);
+        assert_eq!(first.len(), 1);
+
+        store.commit_batch("/repo", &batch, &[], &a, true).unwrap();
+        assert_eq!(fts_rowid(&store), first, "an identical re-index rewrote the FTS row");
+        assert_eq!(
+            store
+                .search_commits(&HistoryQuery {
+                    text: Some("stable".into()),
+                    ..query("/repo")
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+        let state = store.index_state("/repo", SOURCE_GIT).unwrap().unwrap();
+        assert_eq!(state.items_indexed, 2, "the watermark row still advances");
+    }
+
+    /// cas-3f65e: commit_batch reads which shas exist before it writes. In a
+    /// DEFERRED transaction a foreign commit landing between that read and the
+    /// first write fails the upgrade at once with SQLITE_BUSY (cas-759f), so a
+    /// boot-time history daemon lost its batch to any concurrent writer. The
+    /// write lock is now taken first and waited for.
+    #[test]
+    fn cas_3f65e_commit_batch_waits_out_a_foreign_write_lock() {
+        let (temp, store) = store();
+        let a = "a".repeat(40);
+        store
+            .commit_batch("/repo", &[commit(&a)], &[], &a, false)
+            .unwrap();
+
+        let db_path = temp.path().join("cas.db");
+        let (holding, held) = std::sync::mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            conn.execute(
+                "INSERT INTO history_index_state (repository, source, last_attempt_at)
+                 VALUES ('/other', 'git', '2026-08-05T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            holding.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        held.recv().unwrap();
+
+        let b = "b".repeat(40);
+        store
+            .commit_batch("/repo", &[commit(&a), commit(&b)], &[], &b, true)
+            .expect("commit_batch waited out the foreign write lock");
+        blocker.join().unwrap();
+        assert_eq!(store.counts("/repo").unwrap().0, 2);
     }
 
     /// Re-indexing a commit must replace its FTS row, not add a second one —

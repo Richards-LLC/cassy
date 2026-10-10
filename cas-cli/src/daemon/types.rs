@@ -198,6 +198,10 @@ pub struct DaemonRunResult {
     pub agents_cleaned: usize,
     /// Old stale/shutdown agents permanently deleted
     pub agents_purged: usize,
+    /// Telemetry events deleted by `factory.event_telemetry_retention_days`
+    /// (cas-e193)
+    #[serde(default)]
+    pub telemetry_events_pruned: usize,
     /// Terminal prompt-queue rows deleted by retention (cas-9d8a)
     #[serde(default)]
     pub prompts_pruned: usize,

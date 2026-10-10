@@ -28,12 +28,23 @@ widening it, so one left naming retired routes keeps them authoritative no
 matter how often the machine file is rewritten. Where such a file already names
 hub routes, the command corrects them in place — comments, key order, and every
 unrelated server and route survive. It removes the file's own
-`[servers.violet]` block only when that block is identical to the machine
-registration which supplies it; a block that differs is an override, such as a
-project aimed at a staging hub, and is kept and named in the receipt rather
-than silently switched. A project file that names *no* hub route is left alone,
-because widening a policy the project declared is not this command's call;
-`cas doctor` names that file and the exact routes to add.
+`[servers.violet]` block when that block points at the same hub URL as the
+machine registration, which supplies it: a committed file cannot name a
+per-machine hub client token. A block at a different URL is an override, such
+as a project aimed at a staging hub. It is kept and named in the receipt rather
+than silently switched, and a token it names that is missing is reported
+against that file, because Cassy does not mint it. A project file that names
+*no* hub route is left alone, because widening a policy the project declared is
+not this command's call; `cas doctor` names that file and the exact routes to add.
+
+Every Claude Code profile on the machine that already registers `violet` is
+reconciled, not only the one `CLAUDE_CONFIG_DIR` selects: a literal bearer or
+legacy credential references are rewritten as env references, and profiles without a
+`violet` entry are untouched. Each claude-code line in the receipt carries the
+authenticated `tools/list` verdict, so "already current" never hides a rejected
+bearer. Signing in again does not replace a hub client token the hub rejects:
+unset the variable, delete its line from the credentials file, and re-run
+`cas integrate violet` to mint a new client.
 
 The default client label is the uppercased hostname with non-alphanumeric
 characters folded to `_`. `--label <MACHINE>` is only an override. The command
@@ -46,6 +57,14 @@ in that order. The Vercel PATCH endpoint is never used because it rotates the
 shared secret. If `POST /api/clients` is absent, setup fails closed naming
 the Violet tracker issue (`cas config get issues.components.violet`) and never
 mints locally.
+
+`--channel <name|id>` maps a Slack channel to this project, so Violet activity
+there wakes this project's supervisor. It sends `PUT /api/channels/<channel>`
+with the project's canonical Cloud id and the same Cassy Cloud login, and the
+receipt prints the resolved channel id. Violet must already be a member: a
+`not_a_member` refusal means invite @Violet to the channel first. A channel
+another project owns is refused as `channel_mapped` unless `--channel-replace`
+is passed. `--channel-remove <C…|G…>` removes a mapping by channel id.
 
 The hand-written shapes below remain the reference for repairing a machine by
 hand or for a project that has never named the hub routes itself.

@@ -5726,7 +5726,7 @@ impl CasCore {
         if requester.role != cas_types::AgentRole::Worker || requester.factory_session.is_none() {
             return Ok(requester.id);
         }
-        let owner_id = super::supervisor_push::resolve_owning_supervisor(
+        let owner_id = super::supervisor_push::resolve_worker_supervisor(
             agent_store.as_ref(),
             requester.factory_session.as_deref(),
         )
@@ -12599,7 +12599,9 @@ fn reviewed_delivery_drop_reason(reason: Option<&str>) -> Option<&str> {
 }
 
 /// Narrative reviews alone cannot establish supersession. Resolve every named
-/// commit, prove its post-anchor target ancestry, and require path coverage.
+/// commit, prove target reachability, and require first-parent path changes
+/// whose resulting state survives on the target. A re-anchored delivery may
+/// postdate the commits that superseded its earlier content (GH #1160).
 /// The caller supplies a reason only after live supervisor authentication.
 fn validated_delivery_drop_review(
     repo: &std::path::Path,
@@ -12627,7 +12629,8 @@ fn validated_delivery_drop_review(
     };
     let target =
         resolve_branch_sha(repo, &target).ok_or("delivery review target does not resolve")?;
-    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}")).ok_or("delivery review anchor does not resolve to a commit")?;
+    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+        .ok_or("delivery review anchor does not resolve to a commit")?;
     if !git_commit_is_ancestor(repo, &anchor, &target) {
         return Err("delivery review anchor is not reachable on the target".into());
     }
@@ -12635,16 +12638,21 @@ fn validated_delivery_drop_review(
     let mut resolved = Vec::new();
     for named in commits.split(',') {
         let sha = resolve_task_commit_receipt_sha(repo, named.trim())?;
-        if sha == anchor
-            || !git_commit_is_ancestor(repo, &anchor, &sha)
-            || !git_commit_is_ancestor(repo, &sha, &target)
-        {
+        if sha == anchor || !git_commit_is_ancestor(repo, &sha, &target) {
             return Err(format!(
-                "superseding commit `{sha}` must strictly descend from anchor `{anchor}` and be reachable on target `{target}`"
+                "superseding commit `{sha}` must differ from anchor `{anchor}` and be reachable on target `{target}`"
             ));
         }
         let output = std::process::Command::new("git")
-            .args(["diff", "--name-only", "--no-renames", "-z", &format!("{sha}^1"), &sha, "--"])
+            .args([
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &format!("{sha}^1"),
+                &sha,
+                "--",
+            ])
             .current_dir(repo)
             .output()
             .map_err(|error| error.to_string())?;
@@ -12662,7 +12670,36 @@ fn validated_delivery_drop_review(
                 "superseding commit `{sha}` does not touch any dropped path"
             ));
         }
-        covered.extend(affected.into_iter().cloned());
+        // Merely touching a path in old history is not supersession: the
+        // named edit must establish its final target state. Comparing trees
+        // also covers deletions/renames, file modes and binary content.
+        let output = std::process::Command::new("git")
+            .args([
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &sha,
+                &target,
+                "--",
+            ])
+            .args(affected.iter().map(|path| path.as_str()))
+            .current_dir(repo)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "cannot compare superseding commit `{sha}` with target `{target}`"
+            ));
+        }
+        let changed = String::from_utf8(output.stdout)
+            .map_err(|_| "superseding comparison paths are not UTF-8")?;
+        covered.extend(
+            affected
+                .into_iter()
+                .filter(|path| !changed.split('\0').any(|changed| changed == path.as_str()))
+                .cloned(),
+        );
         if !resolved.contains(&sha) {
             resolved.push(sha);
         }
@@ -12674,7 +12711,7 @@ fn validated_delivery_drop_review(
         .collect();
     if !uncovered.is_empty() {
         return Err(format!(
-            "superseding commits do not cover dropped path(s): {}",
+            "superseding commits do not cover final target state of dropped path(s): {}",
             uncovered.join(", ")
         ));
     }
@@ -12955,8 +12992,9 @@ fn anchored_delivery_content_gate_unbounded(
                  commit it, and retry close. If the content was intentionally superseded, \
                  a live registered supervisor may close with supervisor_override=true \
                  reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\". \
-                 Each named commit must descend from the anchor, be reachable on the \
-                 target, and touch the dropped paths. The resolved commits, paths, and \
+                 Each named commit must differ from the anchor, be reachable on the \
+                 target, and change dropped paths to their final target state. The \
+                 commit may predate the anchor. The resolved commits, paths, and \
                  review are recorded.",
                 paths.join(", "),
                 dropped_line_samples(repo_path, anchor, parent_branch, &paths),
@@ -13504,11 +13542,37 @@ pub(crate) fn resolve_close_delivery_branch(
 /// task, a commit on the lane naming this task, or an unmerged lane commit
 /// that does not claim another task (unnamed work may be this task's, see
 /// cas-2387). Any of those keeps every ordinary delivery gate.
+///
+/// GH #1167: once a no-code task has no work target (a supervisor cleared it
+/// with proof_scope_fix target_repo="", or it never had one), nothing can be
+/// merged on its behalf, so only worker-lane commits that name this task
+/// count as its own; an unnamed lane commit does not. A retained delivery
+/// anchor stays binding either way (cas-3067).
 pub(crate) fn no_code_task_without_own_commits(
     repo_path: &std::path::Path,
     task: &Task,
     target: &str,
     receipt: Option<&str>,
+) -> bool {
+    no_code_task_without_own_commits_judged(
+        repo_path,
+        task,
+        target,
+        receipt,
+        task.deliverables.work_target.is_none(),
+    )
+}
+
+/// [`no_code_task_without_own_commits`] with the lane rule explicit.
+/// `named_only` counts only worker-lane commits that name this task as its
+/// own (a supervisor-reviewed path: a cleared work target, or evidence_only);
+/// otherwise unnamed lane work may be this task's (cas-2387).
+pub(crate) fn no_code_task_without_own_commits_judged(
+    repo_path: &std::path::Path,
+    task: &Task,
+    target: &str,
+    receipt: Option<&str>,
+    named_only: bool,
 ) -> bool {
     let delivery = &task.deliverables;
     if task.execution_note.as_deref() != Some("no-code")
@@ -13552,9 +13616,10 @@ pub(crate) fn no_code_task_without_own_commits(
             if !matches!(
                 task_attribution::branch_task_claims(repo_path, &reference, &identity),
                 Some((None, _))
-            ) || task_attribution::lane_commits_all_claim_other_tasks(
-                repo_path, &reference, target, &identity,
-            ) != Some(true)
+            ) || (!named_only
+                && task_attribution::lane_commits_all_claim_other_tasks(
+                    repo_path, &reference, target, &identity,
+                ) != Some(true))
             {
                 return false;
             }
@@ -20724,6 +20789,9 @@ pub(crate) enum LightweightLintOutcome {
     Pass,
     /// Lint found violations — worker must fix before close.
     Fail(String),
+    /// Lint passed, scoped to a fallback branch because the requested parent
+    /// no longer resolves (GH #1171). Carries the warning to report.
+    PassWithFallback(String),
 }
 
 fn target_only_receipt_lint_parent(
@@ -21233,6 +21301,15 @@ pub(crate) fn run_declared_pre_close_hook(
             task_tip: Some(task_tip),
         }),
         LightweightLintOutcome::Fail(message) => Err(message),
+        LightweightLintOutcome::PassWithFallback(warning) => {
+            tracing::warn!(task_id = %task.id, "{warning}");
+            Ok(cas_types::PreCloseHookEvidence {
+                repo_selector: repo_context.repo_selector.clone(),
+                target_branch: repo_context.target_branch.clone(),
+                worktree_branch,
+                task_tip: Some(task_tip),
+            })
+        }
     }
 }
 
@@ -22164,12 +22241,61 @@ fn comment_run_is_commented_out_code(comment_lines: &[String]) -> bool {
     code > prose
 }
 
+/// Whether a lint parent resolves locally or as its remote-tracking ref
+/// (cas-d0c0), using the same rule the scoped lint enforces.
+fn lint_parent_resolves(project_root: &std::path::Path, parent: &str) -> bool {
+    git_ref_exists(project_root, parent)
+        || (!parent.contains('/') && git_ref_exists(project_root, &format!("origin/{parent}")))
+}
+
+/// The branch a scoped lint falls back to when its parent is gone (GH #1171):
+/// the remote's default branch, then a local or remote `main` or `master`.
+fn default_branch_lint_fallback(project_root: &std::path::Path) -> Option<String> {
+    let remote_head = std::process::Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|name| !name.is_empty() && is_safe_git_refname(name));
+    remote_head
+        .into_iter()
+        .chain(["main", "master", "origin/main", "origin/master"].map(str::to_string))
+        .find(|candidate| git_ref_exists(project_root, candidate))
+}
+
 fn run_lightweight_structural_lint_at_tip(
     project_root: &std::path::Path,
     committed_range_parent: Option<&str>,
     task_tip: &str,
 ) -> LightweightLintOutcome {
     use std::process::Command;
+
+    // GH #1171: a parent epic branch that was merged and deleted (on origin
+    // and locally) used to fail the close outright. Lint against the default
+    // branch instead and say so: the lint still runs, never a silent pass.
+    // With nothing to fall back to, the scoped path below still fails closed.
+    if let Some(parent) = committed_range_parent
+        && is_safe_git_refname(parent)
+        && !lint_parent_resolves(project_root, parent)
+        && let Some(fallback) = default_branch_lint_fallback(project_root)
+        && fallback != parent
+    {
+        let warning = format!(
+            "Structural lint: parent branch `{parent}` no longer resolves (deleted or never \
+             fetched), so the lint was scoped to the default branch `{fallback}` instead."
+        );
+        return match run_lightweight_structural_lint_at_tip(project_root, Some(&fallback), task_tip)
+        {
+            LightweightLintOutcome::Pass | LightweightLintOutcome::PassWithFallback(_) => {
+                LightweightLintOutcome::PassWithFallback(warning)
+            }
+            LightweightLintOutcome::Fail(message) => {
+                LightweightLintOutcome::Fail(format!("{message}\n\n{warning}"))
+            }
+        };
+    }
 
     // Collect the diff text.
     //
@@ -22940,6 +23066,13 @@ mod lightweight_lint_tests {
 
     // --- cas-dc5d: scope lint to worker committed range, not main WIP ------
 
+    /// Commit the staged change of an `init_repo_with_diff` fixture on a
+    /// worker branch, leaving `main` at the base commit.
+    fn commit_all_dc5d(dir: &std::path::Path, message: &str) {
+        git_dc5d(dir, &["checkout", "-q", "-b", "factory/worker"]);
+        git_dc5d(dir, &["commit", "-q", "-m", message]);
+    }
+
     fn git_dc5d(dir: &std::path::Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)
@@ -23525,20 +23658,80 @@ pub fn retry() {}
         }
     }
 
-    /// cas-dc5d P2: missing parent ref must Fail with actionable text.
+    /// GH #1171: the close path names the verdict owner with the same
+    /// resolution as `target=supervisor`. A worker whose live supervisor's row
+    /// carries no factory session used to own its own verification dispatch,
+    /// while a second session's supervisor shared the clone.
     #[test]
-    fn lint_scoped_fails_closed_on_missing_parent() {
+    fn verification_dispatch_owner_is_the_workers_own_supervisor_gh_1171() {
+        use cas_types::{Agent, AgentRole};
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root, None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).unwrap();
+        let mut supervisor_a = Agent::new("supervisor-a-id".to_string(), "supervisor-a".to_string());
+        supervisor_a.role = AgentRole::Supervisor;
+        agents.register(&supervisor_a).unwrap();
+        let mut supervisor_b = Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".to_string());
+        agents.register(&supervisor_b).unwrap();
+
+        assert_eq!(
+            core.verification_dispatch_owner("worker-id").expect("owner"),
+            "supervisor-a-id",
+            "the dispatch belongs to the worker's live supervisor, not the worker"
+        );
+    }
+
+    /// GH #1171: a task whose parent epic branch was deleted (merged and
+    /// pruned on origin) could not close: the scoped lint failed with "parent
+    /// branch does not resolve". It now lints against the repository's
+    /// default branch and says so, so the lint still runs (never a silent
+    /// pass) and still catches findings.
+    #[test]
+    fn lint_scoped_falls_back_to_the_default_branch_when_the_parent_is_gone_gh_1171() {
         let dir = init_repo_with_diff("fn ok() {}\n");
-        let out =
-            run_lightweight_structural_lint_with_scope(dir.path(), Some("epic/does-not-exist"));
-        match out {
+        commit_all_dc5d(dir.path(), "feat: clean change");
+        match run_lightweight_structural_lint_with_scope(dir.path(), Some("epic/does-not-exist")) {
+            LightweightLintOutcome::PassWithFallback(warning) => {
+                assert!(warning.contains("epic/does-not-exist"), "{warning}");
+                assert!(warning.contains("main"), "{warning}");
+            }
+            other => panic!("a missing parent must fall back to main, got {other:?}"),
+        }
+
+        let dirty = init_repo_with_diff(COMMENTED_OUT_CODE_6);
+        commit_all_dc5d(dirty.path(), "feat: with dead code");
+        match run_lightweight_structural_lint_with_scope(dirty.path(), Some("epic/does-not-exist")) {
+            LightweightLintOutcome::Fail(msg) => {
+                assert!(msg.contains("commented-out"), "the fallback still lints: {msg}");
+            }
+            other => panic!("findings must still fail after the fallback, got {other:?}"),
+        }
+    }
+
+    /// cas-dc5d P2 still holds when nothing can scope the lint: no parent and
+    /// no default branch fails closed with actionable text.
+    #[test]
+    fn lint_scoped_fails_closed_when_neither_parent_nor_default_branch_resolves() {
+        let dir = init_repo_with_diff("fn ok() {}\n");
+        commit_all_dc5d(dir.path(), "feat: clean change");
+        git_dc5d(dir.path(), &["branch", "-q", "-D", "main"]);
+        match run_lightweight_structural_lint_with_scope(dir.path(), Some("epic/does-not-exist")) {
             LightweightLintOutcome::Fail(msg) => {
                 assert!(
                     msg.contains("does not resolve") || msg.contains("Cannot scope"),
                     "must be actionable, got: {msg}"
                 );
             }
-            other => panic!("missing parent must Fail closed, got {other:?}"),
+            other => panic!("nothing to scope against must Fail closed, got {other:?}"),
         }
     }
 
@@ -29057,6 +29250,184 @@ mod merge_state_gate_tests {
         git(p, &["commit", "-qm", "unrelated later path edit"]);
         assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    /// GH #1160: the final sync anchor comes after two migration renames and
+    /// an intentional revert. The old paths are absent at that anchor, but
+    /// attribution still measures their earlier task commits as dropped.
+    #[test]
+    fn reviewed_drop_before_delivery_anchor_closes_cas_f091() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let loose = "migrations/receipt.sql";
+        let intermediate = "migrations/early/migration.sql";
+        let final_path = "migrations/final/migration.sql";
+        std::fs::create_dir_all(p.join("migrations")).unwrap();
+        std::fs::write(p.join(loose), "CREATE TABLE receipt (id INT);\n").unwrap();
+        std::fs::write(p.join("analytics.vue"), "delivered();\n").unwrap();
+        git(p, &["add", "."]);
+        git(
+            p,
+            &[
+                "commit",
+                "-qm",
+                "cas-test1: deliver migration and analytics",
+            ],
+        );
+        let introduction = head_sha(p);
+        std::fs::create_dir_all(p.join("migrations/early")).unwrap();
+        git(p, &["mv", loose, intermediate]);
+        git(
+            p,
+            &[
+                "commit",
+                "-qm",
+                "cas-test1: move migration into Prisma directory",
+            ],
+        );
+        let moved = head_sha(p);
+        git(p, &["mv", "migrations/early", "migrations/final"]);
+        git(
+            p,
+            &["commit", "-qm", "cas-test1: rename migration directory"],
+        );
+        let renamed = head_sha(p);
+        git(p, &["rm", "analytics.vue"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-qm",
+                "revert: deliberately retire cas-test1 analytics",
+            ],
+        );
+        let reverted = head_sha(p);
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("sibling.txt"), "sibling\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-sibling: documentation"]);
+        git(p, &["checkout", "factory/worker"]);
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "main",
+                "-m",
+                "cas-test1: sync target before parking",
+            ],
+        );
+        let anchor = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--ff-only", "factory/worker"]);
+        assert!(!p.join(loose).exists() && !p.join(intermediate).exists());
+        assert!(p.join(final_path).exists());
+        for receipt in [&moved, &renamed, &reverted] {
+            assert!(git_commit_is_ancestor(p, receipt, &anchor));
+            assert_ne!(receipt, &anchor);
+        }
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let req = base_req(&task.id);
+        let mut window = window_at(0, "pre-anchor supersession");
+        window.identity.task_id = Some(task.id.clone());
+        let outcome = |window: &TaskCommitReceiptWindow| {
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: None,
+                    window: Some(window),
+                },
+            )
+        };
+        assert!(
+            matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "unreviewed drops must still refuse"
+        );
+        window.supervisor_override_reason = Some(format!(
+            "reviewed-drop: {introduction} -- original delivery is not a replacement"
+        ));
+        assert!(
+            matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "an old path touch without final-state coverage must refuse"
+        );
+        window.supervisor_override_reason = Some(format!(
+            "reviewed-drop: {moved},{renamed} -- analytics is not covered"
+        ));
+        assert!(
+            matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "every dropped path needs a covering commit"
+        );
+        window.supervisor_override_reason = Some(format!(
+            "reviewed-drop: {moved},{renamed},{reverted} -- reviewed migration moves and analytics retirement"
+        ));
+        let result = outcome(&window);
+        assert!(
+            matches!(&result, MergeStateGateOutcome::ProceedWithNote(note)
+            if note.contains("reviewed delivery content supersession accepted")
+                && note.contains(&moved) && note.contains(&renamed) && note.contains(&reverted)),
+            "pre-anchor reviewed supersession must close: {result:?}"
+        );
+    }
+
+    #[test]
+    fn reviewed_drop_requires_final_target_state_cas_f091() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("work.rs"), "replacement();\n").unwrap();
+        git(p, &["add", "."]);
+        git(
+            p,
+            &["commit", "-qm", "reviewed replacement on sibling branch"],
+        );
+        let replacement = head_sha(p);
+        assert!(!git_commit_is_ancestor(p, &anchor, &replacement));
+        assert!(!git_commit_is_ancestor(p, &replacement, &anchor));
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "integrate reviewed replacement",
+            ],
+        );
+        let paths = vec!["work.rs".to_string()];
+        let review = format!("reviewed-drop: {replacement} -- reviewed sibling replacement");
+        assert!(
+            validated_delivery_drop_review(p, &anchor, "main", &paths, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            validated_delivery_drop_review(p, &anchor, "main", &paths, Some(&review))
+                .unwrap()
+                .unwrap()
+                .contains(&replacement)
+        );
+        // The same reachable commit still touches the dropped path, but its
+        // state no longer covers the target. It cannot authorize a later loss.
+        std::fs::write(p.join("work.rs"), "unreviewed();\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "unreviewed later change"]);
+        let error =
+            validated_delivery_drop_review(p, &anchor, "main", &paths, Some(&review)).unwrap_err();
+        assert!(
+            error.contains("final target state") && error.contains("work.rs"),
+            "{error}"
+        );
     }
 
     #[test]

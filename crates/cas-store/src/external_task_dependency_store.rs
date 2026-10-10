@@ -108,9 +108,7 @@ impl ExternalTaskDependencyStore {
     }
 
     pub fn init(&self) -> Result<()> {
-        self.conn
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        crate::shared_db::lock_connection_recovering(&self.conn)?
             .execute_batch(EXTERNAL_TASK_DEPENDENCY_SCHEMA)?;
         Ok(())
     }
@@ -124,9 +122,7 @@ impl ExternalTaskDependencyStore {
             dependency.target_task_status = Some("awaiting_merge".to_string());
         }
         dependency.validate_state_matrix()?;
-        self.conn
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        crate::shared_db::lock_connection_recovering(&self.conn)?
             .execute(
                 "INSERT INTO external_task_dependencies
                  (origin_task_id, proposal_id, target_project_canonical_id, target_task_id,
@@ -160,7 +156,7 @@ impl ExternalTaskDependencyStore {
         &self,
         task_id: &str,
     ) -> Result<Vec<ExternalTaskDependencyProjection>> {
-        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let mut statement = conn.prepare(
             "SELECT origin_task_id, proposal_id, target_project_canonical_id, target_task_id,
                     proposal_state, target_task_status, resolution_state, resolved_at
@@ -190,10 +186,7 @@ impl ExternalTaskDependencyStore {
     /// handoff reappear and silently re-block a task after the operator had
     /// explicitly removed it.
     pub fn remove(&self, origin_task_id: &str, target_task_id: &str) -> Result<bool> {
-        let suppressed = self
-            .conn
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        let suppressed = crate::shared_db::lock_connection_recovering(&self.conn)?
             .execute(
                 "UPDATE external_task_dependencies
                  SET suppressed_at = COALESCE(suppressed_at, ?3), updated_at = ?3
@@ -204,10 +197,7 @@ impl ExternalTaskDependencyStore {
     }
 
     pub fn cursor(&self, origin_project: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        Ok(crate::shared_db::lock_connection_recovering(&self.conn)?
             .query_row(
                 "SELECT cursor FROM external_task_dependency_sync_state
                  WHERE origin_project_canonical_id = ?1",
@@ -219,9 +209,7 @@ impl ExternalTaskDependencyStore {
     }
 
     pub fn set_cursor(&self, origin_project: &str, cursor: Option<&str>) -> Result<()> {
-        self.conn
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        crate::shared_db::lock_connection_recovering(&self.conn)?
             .execute(
                 "INSERT INTO external_task_dependency_sync_state
                  (origin_project_canonical_id, cursor, updated_at) VALUES (?1, ?2, ?3)

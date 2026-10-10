@@ -280,6 +280,10 @@ impl FactoryDaemon {
 
     /// Handle a single ClientMessage from a GUI client.
     async fn handle_gui_message(&mut self, client_id: usize, msg: ClientMessage) {
+        // GH #1165: operator commands may touch the store under the pass
+        // wait budget; terminal IO may not.
+        let _operator_command = (!super::ws_client::is_terminal_io(&msg))
+            .then(cas_store::wait_budget::permit_store_access);
         if let Some(control) = commander_control_from_gui_message(&msg) {
             let error_prefix = control.error_prefix();
             let client_ref = control.client_ref().map(str::to_owned);

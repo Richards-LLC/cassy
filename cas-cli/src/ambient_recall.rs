@@ -6110,7 +6110,7 @@ mod tests {
 
         let drain_started = Instant::now();
         let drain =
-            crate::cloud::embed_drain::drain_all_pending_with(&cas_root, 32, &embedder).unwrap();
+            crate::cloud::embed_drain::drain_all_pending_with(&cas_root, 32, &embedder, crate::cloud::CodeVectorDrain::Drain).unwrap();
         let drain_ms = drain_started.elapsed().as_millis();
         assert!(!drain.capability_absent);
         assert!(drain.problems().is_empty(), "{:?}", drain.problems());

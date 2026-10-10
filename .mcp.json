@@ -34,13 +34,6 @@
         "chrome"
       ],
       "command": "npx"
-    },
-    "vercel": {
-      "headers": {
-        "Authorization": "Bearer ${VERCEL_TOKEN}"
-      },
-      "type": "http",
-      "url": "https://mcp.vercel.com"
     }
   }
 }

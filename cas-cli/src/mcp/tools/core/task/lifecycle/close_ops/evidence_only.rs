@@ -48,7 +48,9 @@ pub(super) fn measure(repo: &Path, task: &Task, target: &str) -> Result<Measurem
     // GH #1151: a no-code task with no commit of its own keeps its evidence
     // in the artifact. Record the target it was judged against and no paths;
     // the worker lane is never measured as its delivery.
-    if super::no_code_task_without_own_commits(repo, task, &target, None) {
+    // GH #1167: evidence_only is a supervisor review of the artifact, so only
+    // commits that name this task count as its own.
+    if super::no_code_task_without_own_commits_judged(repo, task, &target, None, true) {
         return Ok(Measurement {
             base: target.clone(),
             tip: target,

@@ -233,6 +233,39 @@ async fn run_server_impl() -> anyhow::Result<()> {
         let daemon_config = cas_config.daemon();
         let cloud_config = cas_config.cloud.clone().unwrap_or_default();
         let project_dir = crate::daemon::indexing::code_project_root(&cas_root);
+        // cas-8256: one code index per project. Only the canonical checkout's
+        // process indexes, reconciles and purges; a factory worker or linked
+        // worktree reads the canonical index through the shared store.
+        let code_role = crate::daemon::canonical_code_index::code_index_role(&cas_root);
+        match &code_role {
+            crate::daemon::canonical_code_index::CodeIndexRole::Reader(reason) => {
+                if code_config.enabled {
+                    eprintln!(
+                        "[Cassy] Code indexing off in this process: {reason}; \
+                         code search reads the canonical index"
+                    );
+                }
+            }
+            crate::daemon::canonical_code_index::CodeIndexRole::Writer => {
+                let purge_root = cas_root.clone();
+                tokio::task::spawn_blocking(move || {
+                    match crate::daemon::canonical_code_index::purge_non_canonical_code_index(
+                        &purge_root,
+                        cas_store::WriteBatching::background(),
+                    ) {
+                        Ok(outcome)
+                            if !outcome.stats.is_noop()
+                                || outcome.deferred
+                                || !outcome.errors.is_empty() =>
+                        {
+                            eprintln!("[Cassy] Code index copies: {}", outcome.summary());
+                        }
+                        Ok(_) => {}
+                        Err(error) => eprintln!("[Cassy] Code index copy purge failed: {error}"),
+                    }
+                });
+            }
+        }
         let code_watch_paths: Vec<std::path::PathBuf> = code_config
             .watch_paths
             .iter()
@@ -243,7 +276,9 @@ async fn run_server_impl() -> anyhow::Result<()> {
             cas_root: cas_root.clone(),
             cloud_sync_enabled: cloud_config.auto_sync,
             cloud_sync_interval_secs: cloud_config.interval_secs.max(1),
-            index_code: code_config.enabled,
+            index_code: code_config.enabled && code_role.is_writer(),
+            // cas-ba66: the code-vector queue belongs to the canonical writer.
+            drain_code_vectors: code_role.is_writer(),
             code_watch_paths,
             code_extensions: code_config.extensions.clone(),
             code_exclude_patterns: code_config.exclude_patterns.clone(),
@@ -516,6 +551,8 @@ pub(crate) async fn install_proxy_policy(
     engine: &cmcp_core::ProxyEngine,
     config: &cmcp_core::config::Config,
 ) {
+    // cas-53ce (GH #1168): proxy.toml `call_timeout_secs`, default 90 s.
+    engine.set_call_timeout(config.call_timeout());
     let routes = config
         .allowlist
         .iter()

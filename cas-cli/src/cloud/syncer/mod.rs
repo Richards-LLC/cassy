@@ -1013,9 +1013,21 @@ pub(crate) struct PushRowResult {
     pub outcome: PushRowOutcome,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Owning project for a collision. Older servers omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_canonical_id: Option<String>,
 }
 
 impl PushRowResult {
+    /// Keep ownership visible even when the raw server response is hidden.
+    pub(crate) fn rejection_context(&self) -> String {
+        let reason = self.reason.as_deref().unwrap_or("unspecified");
+        match self.existing_canonical_id.as_deref() {
+            Some(owner) if !owner.is_empty() => format!("{reason}; existing_project={owner}"),
+            _ => reason.to_string(),
+        }
+    }
+
     pub(crate) fn acknowledges(&self) -> bool {
         matches!(
             self.outcome,
@@ -1062,6 +1074,9 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
         "project_mismatch" => {
             "the cloud project identity conflicts; inspect `cas cloud projects`, then pin with `cas cloud project set <registered-canonical-id>` or have the cloud owner register the remote alias, run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_mismatch`, and `cas cloud push`"
         }
+        "duplicate_of_other_project" => {
+            "the same row already belongs to another cloud project; if these are the same project, have the cloud owner register and fold the alias, then run `cas cloud project --adopt-aliases`, `cas cloud queue --retry --retry-reason duplicate_of_other_project`, and `cas cloud sync`; otherwise retire the local duplicate"
+        }
         "project_identity_conflict" => {
             "the git remote alias is not registered server-side; inspect `cas cloud projects`, have the cloud owner register it, run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`"
         }
@@ -1094,6 +1109,7 @@ pub(crate) fn push_reason_from_error(error: &CasError) -> Option<String> {
     [
         "team_owned_project",
         "project_identity_conflict",
+        "duplicate_of_other_project",
         "project_mismatch",
         "scope_mismatch",
     ]

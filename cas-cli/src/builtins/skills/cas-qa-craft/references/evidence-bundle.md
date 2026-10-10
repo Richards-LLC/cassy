@@ -63,6 +63,10 @@ journey evaluation scores polish for it.
   fail-closed. The delivered run must
   still be fresh, strict and local. List the base build's findings as
   follow-ups in the ledger; they are not this delivery's defects.
+  Both reports must record their findings in one of two shapes: a top-level
+  `findings` list (the builtin visual-qa.mjs), or per render as
+  `renders[].issues` with the page in `input` (a per-source project
+  visual-qa.mjs). Close compares either shape the same way.
 - `journey_receipt` for hub-web source or dist deliveries: the path to the
   `journey-eval` receipt under this task's artifact directory. An independent
   round may cite the implementer's receipt for the same tip; keep independent

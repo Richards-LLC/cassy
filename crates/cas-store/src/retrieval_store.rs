@@ -514,7 +514,7 @@ impl SqliteRetrievalStore {
 
     #[cfg(test)]
     fn get_query(&self, id: &str) -> Result<Option<RetrievalQuery>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         conn.query_row(
             "SELECT id, query_fingerprint, query_family, ranking_policy, session_hash, created_at
              FROM retrieval_queries WHERE id = ?1",
@@ -541,7 +541,7 @@ impl SqliteRetrievalStore {
     /// retrieval store contract. Consumers use this scoped read to avoid
     /// treating another rule's outcomes as evidence for the current rule.
     pub fn aggregate_for_result(&self, result_id: &str) -> Result<Vec<RetrievalAggregate>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(o.id) AS total,
@@ -579,7 +579,7 @@ impl SqliteRetrievalStore {
     /// writers; raw session identifiers never enter the SQL query.
     pub fn aggregate_for_session(&self, session_id: &str) -> Result<Vec<RetrievalAggregate>> {
         let session_hash = Self::identity_hash("session", session_id)?;
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(o.id) AS total,
@@ -627,7 +627,7 @@ impl SqliteRetrievalStore {
         &self,
         session_hash: Option<String>,
     ) -> Result<RetrievalEvidenceFunnel> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let row = conn.query_row(
             "SELECT
                  COUNT(DISTINCT r.query_id || char(0) || r.result_id),
@@ -666,7 +666,7 @@ impl SqliteRetrievalStore {
 
 impl RetrievalStore for SqliteRetrievalStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         conn.execute_batch(RETRIEVAL_SCHEMA)?;
         // Direct store users (including older one-shot tools) may open a
         // database without running the numbered migration runner first.
@@ -702,7 +702,7 @@ impl RetrievalStore for SqliteRetrievalStore {
             created_at,
         };
 
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let tx = ImmediateTx::new(&conn)?;
         tx.execute(
             "INSERT INTO retrieval_queries
@@ -796,7 +796,7 @@ impl SqliteRetrievalStore {
             created_at: Utc::now(),
         };
 
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let load_existing = || -> Result<Option<StoredOutcomeIdentity>> {
             conn.query_row(
                 "SELECT query_id, result_id, outcome, actor_hash, session_hash,
@@ -914,7 +914,7 @@ impl SqliteRetrievalStore {
             .unwrap_or(DateTime::<Utc>::MIN_UTC)
             .to_rfc3339();
         let samples = {
-            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
             let mut stmt = conn.prepare(
                 "SELECT r.query_id, q.query_fingerprint, q.query_family,
                         q.ranking_policy, r.result_id, r.document_type, r.rank
@@ -1041,7 +1041,7 @@ impl SqliteRetrievalStore {
         session_hash: Option<String>,
     ) -> Result<RollingInjectedPrecision> {
         let cutoff = Utc::now() - chrono::Duration::days(window_days as i64);
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let (helpful, judged): (i64, i64) = conn.query_row(
             "SELECT
                  COALESCE(SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END), 0),
@@ -1071,7 +1071,7 @@ impl SqliteRetrievalStore {
     /// ranking policy. Result-stage counts are distinct rows so repeated
     /// outcome events cannot inflate the funnel or its coverage denominator.
     pub fn aggregate(&self) -> Result<Vec<RetrievalAggregate>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(o.id) AS total,

@@ -1036,6 +1036,11 @@ impl GitOperations {
             return Err(GitError::CommandFailed(stderr.to_string()));
         }
 
+        // cas-8256: a removed worktree's code-index copy goes with it.
+        crate::daemon::canonical_code_index::purge_removed_worktree_code_index(
+            &self.repo_root,
+            path,
+        );
         Ok(())
     }
 

@@ -103,6 +103,7 @@ struct SweepSettings {
     /// GH #1006: `factory.merge_sweep_env`. Values are never logged.
     env: crate::config::SweepEnv,
     release_gate_home_dir: Option<String>,
+    recovery_epics: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +126,7 @@ struct TestRunner {
 impl From<&FactoryConfig> for SweepSettings {
     fn from(config: &FactoryConfig) -> Self {
         Self {
+            recovery_epics: None,
             enabled: config.merge_sweep,
             timeout: Duration::from_secs(config.merge_sweep_timeout_secs.max(1)),
             cargo_build_jobs: config.cargo_build_jobs.clone(),
@@ -523,6 +525,7 @@ impl crate::ui::factory::daemon::FactoryDaemon {
             session_name,
             Some(epic_id),
             false,
+            None,
             config,
         )
     }
@@ -537,6 +540,7 @@ impl crate::ui::factory::daemon::FactoryDaemon {
         session_name: &str,
         focus: Option<&str>,
         base_only: bool,
+        release_epics: Option<&[String]>,
         config: &FactoryConfig,
     ) -> Result<String, String> {
         let (request, strict_target) = if base_only {
@@ -592,7 +596,8 @@ impl crate::ui::factory::daemon::FactoryDaemon {
             }
         };
         let mut coordinator = MergeSweepCoordinator::new(cas_dir, session_name);
-        let settings = SweepSettings::from(config);
+        let mut settings = SweepSettings::from(config);
+        settings.recovery_epics = release_epics.map(<[String]>::to_vec);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1490,7 +1495,7 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
 }
 
 fn append_epic_note(cas_dir: &Path, result: &SweepResult) {
-    let Ok(task_store) = crate::store::open_task_store(cas_dir) else {
+    let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {
         tracing::warn!(epic = %result.request.epic_id, "cannot open task store for merge sweep note");
         return;
     };
@@ -1630,7 +1635,7 @@ mod tests {
     #[test]
     fn unavailable_is_recorded_once_per_coordinator_session_across_merges() {
         let temp = tempfile::tempdir().unwrap();
-        let tasks = crate::store::open_task_store(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store_cached(temp.path()).unwrap();
         tasks
             .add(&cas_types::Task::new(
                 "cas-epic".to_owned(),

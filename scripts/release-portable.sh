@@ -184,3 +184,39 @@ release_portable_default_scratch_base() {
         printf '/var/tmp/cas-release-gate\n'
     fi
 }
+
+# cas-be3a: the scratch base the release train uses when none is configured.
+# The gate refuses a base on another filesystem than the checkout, so when the
+# platform default sits across that boundary (a release checkout on a scratch
+# drive), use `cas-release-gate` beside the checkout instead, provided it is on
+# the checkout's filesystem and has no .cas ancestor. Otherwise keep the
+# platform default and let the boundary check name the fix.
+release_portable_checkout_scratch_base() {
+    local checkout="$1" base candidate checkout_device base_device
+    base="$(release_portable_default_scratch_base)"
+    checkout_device="$(release_portable_stat_device "$checkout" || true)"
+    base_device="$(release_portable_stat_device "$(dirname "$base")" || true)"
+    if [[ -n "$checkout_device" && "$checkout_device" != "$base_device" ]] \
+        && candidate="$(release_portable_sibling_scratch_base "$checkout")"; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    printf '%s\n' "$base"
+}
+
+# `cas-release-gate` beside the checkout, when that directory would be a valid
+# gate scratch base: same device as the checkout and no .cas ancestor.
+release_portable_sibling_scratch_base() {
+    local checkout="$1" parent probe checkout_device
+    parent="$(cd "$checkout/.." 2>/dev/null && pwd -P)" || return 1
+    checkout_device="$(release_portable_stat_device "$checkout" || true)"
+    [[ -n "$checkout_device" && "$(release_portable_stat_device "$parent" || true)" == "$checkout_device" ]] \
+        || return 1
+    probe="$parent"
+    while [[ -n "$probe" && "$probe" != / ]]; do
+        [[ -d "$probe/.cas" ]] && return 1
+        probe="$(dirname "$probe")"
+    done
+    [[ ! -d /.cas ]] || return 1
+    printf '%s/cas-release-gate\n' "$parent"
+}

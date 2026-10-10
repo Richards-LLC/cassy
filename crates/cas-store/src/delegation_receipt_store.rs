@@ -181,9 +181,6 @@ pub struct SqliteDelegationReceiptStore {
     conn: Arc<Mutex<Connection>>,
 }
 
-fn lock_err<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Parse("delegation receipt store lock poisoned".to_string())
-}
 fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .map(|v| v.with_timezone(&Utc))
@@ -204,7 +201,7 @@ impl SqliteDelegationReceiptStore {
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let conn = crate::shared_db::shared_connection(&cas_dir.join("cas.db"))?;
         {
-            let conn = conn.lock().map_err(lock_err)?;
+            let conn = crate::shared_db::lock_connection(&conn)?;
             conn.execute_batch(DELEGATION_RECEIPT_SCHEMA)?;
         }
         Ok(Self { conn })
@@ -282,7 +279,7 @@ impl SqliteDelegationReceiptStore {
                 "delegation receipt scope and digest must be non-empty".to_string(),
             ));
         }
-        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let mut conn = crate::shared_db::lock_connection(&self.conn)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing: Option<DelegationReceipt> = tx.query_row("SELECT id,factory_session_id,epic_id,task_id,gate_kind,request_digest,attempt,idempotency_key,reserved_amount,settled_amount,state,run_id,terminal_verdict,evidence_reference,created_at,updated_at,completed_at FROM delegation_receipts WHERE factory_session_id=?1 AND task_id=?2 AND gate_kind=?3 AND request_digest=?4", params![request.factory_session_id, request.task_id, request.gate_kind, request.request_digest], Self::row).optional()?;
         if let Some(receipt) = existing {
@@ -324,7 +321,7 @@ impl SqliteDelegationReceiptStore {
     }
 
     pub fn get(&self, id: &str) -> Result<DelegationReceipt> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         Self::get_with_conn(&conn, id)
     }
     pub fn record_run_id(&self, id: &str, run_id: &str) -> Result<DelegationReceipt> {
@@ -333,7 +330,7 @@ impl SqliteDelegationReceiptStore {
                 "delegation run_id must be non-empty".to_string(),
             ));
         }
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         conn.execute("UPDATE delegation_receipts SET run_id=?2, updated_at=?3 WHERE id=?1 AND state != 'completed'", params![id, run_id, now])?;
         Self::get_with_conn(&conn, id)
@@ -344,7 +341,7 @@ impl SqliteDelegationReceiptStore {
                 "delegation run_id must be non-empty".to_string(),
             ));
         }
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let current = Self::get_with_conn(&conn, id)?;
         if current.state == DelegationReceiptState::Completed {
             return Err(StoreError::Parse(
@@ -401,7 +398,7 @@ impl SqliteDelegationReceiptStore {
                 "terminal delegation receipt requires a non-secret evidence reference".to_string(),
             ));
         }
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let current = Self::get_with_conn(&conn, id)?;
         if settled_amount > current.reserved_amount {
             return Err(StoreError::Parse(

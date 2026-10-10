@@ -245,7 +245,11 @@ fn execute_embed(args: &EmbedArgs, cas_root: &Path) -> anyhow::Result<()> {
         0
     };
 
-    let report = crate::cloud::drain_all_pending(cas_root, limit)?;
+    // cas-ba66: code vectors belong to the canonical code-index writer.
+    let code = crate::cloud::CodeVectorDrain::for_writer(
+        crate::daemon::canonical_code_index::code_index_role(cas_root).is_writer(),
+    );
+    let report = crate::cloud::drain_all_pending(cas_root, limit, code)?;
     let (quarantined_commits, quarantined_docs) = {
         use cas_store::HistoryStore;
         cas_store::SqliteHistoryStore::open(cas_root)

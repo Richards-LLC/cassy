@@ -1744,6 +1744,15 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult>;
 
+    /// Worker-level activity after a transport delivery, including drained replies.
+    /// This is evidence for the watchdog only; it does not acknowledge any message.
+    fn has_message_from_since(
+        &self,
+        source: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// Find direct messages that are still unread past their priority threshold.
     fn delivery_stalled_candidates(
         &self,
@@ -2232,6 +2241,21 @@ pub trait PromptQueueStore: Send + Sync {
     /// daemon may initialize its mirror cursor after the first reply ended.
     fn first_verified_operator_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>>;
 
+    /// cas-5c89: the first sign of an operator in this session: a verified
+    /// paired-device Commander send or a terminal operator turn.
+    fn first_operator_activity_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>>;
+
+    /// cas-5c89: the terminal operator turn in this session whose text is
+    /// `prompt` (trimmed), recorded within `window_secs` of `at`; the nearest
+    /// one when several match.
+    fn terminal_operator_turn_near(
+        &self,
+        factory_session: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+        window_secs: i64,
+    ) -> Result<Option<i64>>;
+
     /// Atomically mirror a completed supervisor turn unless that turn already
     /// sent an explicit operator reply. The turn key also makes daemon replay
     /// and concurrent polls harmless.
@@ -2441,14 +2465,30 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Retention sweep (cas-9d8a): delete terminal rows (`processed_at` set)
     /// processed more than `older_than_secs` ago, with their per-recipient
-    /// seen/transport receipts, in one IMMEDIATE transaction.
+    /// seen/transport receipts, as repeated [`Self::prune_terminal_batch`]
+    /// transactions of at most 1,000 rows (cas-f207).
     ///
     /// Never touches a pending row. Rows carrying a `dedupe_key` are kept:
     /// that unique key is what makes a relay episode enqueue idempotent, so
     /// deleting it would let a re-detected episode wake the supervisor again.
+    /// The exception is a supervisor-queue outbox key whose notification is
+    /// already delivered or gone; see [`Self::prune_terminal_batch`].
     /// `AUTOINCREMENT` ids are never reused, so id-ordered cursors and keys
     /// built from ids stay valid after a sweep.
     fn prune_terminal_older_than(&self, older_than_secs: i64) -> Result<PromptRetentionSweep>;
+
+    /// One bounded retention step (cas-f207): delete at most `batch` terminal
+    /// rows processed more than `older_than_secs` ago, with their
+    /// per-recipient receipts, in one IMMEDIATE transaction. Returns the rows
+    /// deleted.
+    ///
+    /// Same guards as [`Self::prune_terminal_older_than`], with one widening:
+    /// a supervisor-queue outbox row (`lifecycle-outbox:`, `worker-died-outbox:`,
+    /// `worker-attention-outbox:` + notification id) is deletable once its
+    /// source notification is delivered or gone. The outbox only re-relays a
+    /// notification whose `prompt_delivered_at` is NULL, and notification ids
+    /// are AUTOINCREMENT, so such a key can never be enqueued again.
+    fn prune_terminal_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize>;
 
     /// Clear all prompts (for cleanup)
     fn clear(&self) -> Result<usize>;
@@ -2519,6 +2559,13 @@ impl SqlitePromptQueueStore {
         let _ = std::fs::write(dir.join(inbox_signal_file_name(recipient)), stamp);
     }
 
+    /// A store on an existing connection, e.g. a
+    /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
+    /// schema setup; this never runs DDL.
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
+    }
+
     /// Open or create a SQLite prompt queue store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -2535,7 +2582,7 @@ impl SqlitePromptQueueStore {
             cas_dir.join("cas.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT)?;
+        crate::shared_db::install_busy_handler(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -3691,6 +3738,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             Ok(EnqueueIdempotentResult::AlreadyExists(existing_id))
         })
+    }
+
+    fn has_message_from_since(
+        &self,
+        source: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM prompt_queue
+             WHERE source = ?1 AND julianday(created_at) > julianday(?2)
+               AND (factory_session = ?3 OR factory_session IS NULL))",
+            params![source, since.to_rfc3339(), factory_session],
+            |row| row.get(0),
+        )?)
     }
 
     fn delivery_stalled_candidates(
@@ -5453,6 +5516,63 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .transpose()
     }
 
+    fn first_operator_activity_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let at: Option<String> = conn.query_row(
+            "SELECT MIN(created_at) FROM prompt_queue
+              WHERE factory_session = ?
+                AND ((source LIKE 'commander:%' AND origin_kind = 'paired_device'
+                      AND operator_verified = 1)
+                     OR (source = 'terminal' AND target = 'terminal-history'))",
+            params![factory_session],
+            |row| row.get(0),
+        )?;
+        at.map(|at| DateTime::parse_from_rfc3339(&at)
+            .map(|at| at.with_timezone(&Utc))
+            .map_err(|error| StoreError::Parse(error.to_string())))
+            .transpose()
+    }
+
+    fn terminal_operator_turn_near(
+        &self,
+        factory_session: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+        window_secs: i64,
+    ) -> Result<Option<i64>> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Ok(None);
+        }
+        let window = chrono::Duration::seconds(window_secs.max(0));
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut statement = conn.prepare_cached(
+            "SELECT id, created_at FROM prompt_queue
+              WHERE factory_session = ?1 AND source = 'terminal'
+                AND target = 'terminal-history' AND prompt = ?2
+                AND created_at >= ?3 AND created_at <= ?4",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    factory_session,
+                    prompt,
+                    (at - window).to_rfc3339(),
+                    (at + window).to_rfc3339()
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, created)| {
+                let created = DateTime::parse_from_rfc3339(&created).ok()?.with_timezone(&Utc);
+                Some((id, (created - at).num_milliseconds().abs()))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(id, _)| id))
+    }
+
     fn mirror_supervisor_turn(
         &self,
         factory_session: &str,
@@ -6205,50 +6325,95 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn prune_terminal_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
+        if older_than_secs <= 0 {
+            return Err(StoreError::Other(
+                "prune_terminal_batch requires a positive window".to_string(),
+            ));
+        }
+        let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
+        let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            let has_supervisor_queue: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                               WHERE type = 'table' AND name = 'supervisor_queue')",
+                [],
+                |row| row.get(0),
+            )?;
+            // A supervisor-queue outbox key ("<kind>-outbox:<notification id>")
+            // is released once its notification is delivered or gone; the
+            // outbox re-relays only undelivered notifications (cas-f207).
+            let outbox_released = if has_supervisor_queue {
+                "NOT EXISTS (SELECT 1 FROM supervisor_queue s
+                     WHERE s.id = CAST(substr(q.dedupe_key, instr(q.dedupe_key, ':') + 1) AS INTEGER)
+                       AND s.prompt_delivered_at IS NULL)"
+            } else {
+                "1"
+            };
+            let ids: Vec<i64> = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT q.id FROM prompt_queue q
+                     WHERE q.processed_at IS NOT NULL AND q.processed_at < ?1
+                       AND (
+                           q.dedupe_key IS NULL
+                           OR ((q.dedupe_key LIKE 'lifecycle-outbox:%'
+                                OR q.dedupe_key LIKE 'worker-died-outbox:%'
+                                OR q.dedupe_key LIKE 'worker-attention-outbox:%')
+                               AND {outbox_released})
+                       )
+                       AND NOT EXISTS (SELECT 1 FROM operator_delivery_outbox o
+                           WHERE o.prompt_id = q.id AND o.retained_at IS NULL)
+                     ORDER BY q.id
+                     LIMIT ?2"
+                ))?;
+                stmt.query_map(params![cutoff, batch as i64], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            let mut delete_row = tx.prepare_cached("DELETE FROM prompt_queue WHERE id = ?1")?;
+            let mut delete_seen =
+                tx.prepare_cached("DELETE FROM prompt_queue_recipient_seen WHERE prompt_id = ?1")?;
+            let mut delete_transport = tx.prepare_cached(
+                "DELETE FROM prompt_queue_recipient_transport WHERE prompt_id = ?1",
+            )?;
+            let mut pruned = 0;
+            for id in &ids {
+                pruned += delete_row.execute(params![id])?;
+                delete_seen.execute(params![id])?;
+                delete_transport.execute(params![id])?;
+            }
+            Ok(pruned)
+        })
+    }
+
     fn prune_terminal_older_than(&self, older_than_secs: i64) -> Result<PromptRetentionSweep> {
         if older_than_secs <= 0 {
             return Err(StoreError::Other(
                 "prune_terminal_older_than requires a positive window".to_string(),
             ));
         }
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let retained_episode_rows: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM prompt_queue
-                 WHERE processed_at IS NOT NULL AND processed_at < ?
-                   AND dedupe_key IS NOT NULL",
-                params![cutoff],
-                |row| row.get(0),
-            )?;
-            let pruned = tx.execute(
-                "DELETE FROM prompt_queue
-                 WHERE processed_at IS NOT NULL AND processed_at < ?
-                   AND dedupe_key IS NULL
-                   AND NOT EXISTS (SELECT 1 FROM operator_delivery_outbox o
-                       WHERE o.prompt_id = prompt_queue.id AND o.retained_at IS NULL)",
-                params![cutoff],
-            )?;
-            for table in [
-                "prompt_queue_recipient_seen",
-                "prompt_queue_recipient_transport",
-            ] {
-                tx.execute(
-                    &format!(
-                        "DELETE FROM {table}
-                         WHERE NOT EXISTS (
-                             SELECT 1 FROM prompt_queue WHERE prompt_queue.id = {table}.prompt_id
-                         )"
-                    ),
-                    [],
-                )?;
+        // cas-f207: bounded IMMEDIATE batches instead of one transaction over
+        // the whole backlog, so a sweep never holds the write lock for long.
+        let mut pruned = 0;
+        loop {
+            let deleted = self
+                .prune_terminal_batch(older_than_secs, crate::retention::RETENTION_MAX_BATCH)?;
+            pruned += deleted;
+            if deleted < crate::retention::RETENTION_MAX_BATCH {
+                break;
             }
-            tx.commit()?;
-            Ok(PromptRetentionSweep {
-                pruned,
-                retained_episode_rows: retained_episode_rows as usize,
-            })
+        }
+        let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let retained_episode_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM prompt_queue
+             WHERE processed_at IS NOT NULL AND processed_at < ?
+               AND dedupe_key IS NOT NULL",
+            params![cutoff],
+            |row| row.get(0),
+        )?;
+        Ok(PromptRetentionSweep {
+            pruned,
+            retained_episode_rows: retained_episode_rows as usize,
         })
     }
 
@@ -6622,6 +6787,38 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    /// GH #1163: recipient-activity evidence compares instants, not text, so
+    /// a legacy `datetime('now')` row counts the same as an RFC 3339 one.
+    #[test]
+    fn has_message_from_since_compares_instants_across_timestamp_formats() {
+        let (_temp, store) = create_test_store();
+        let since = DateTime::parse_from_rfc3339("2026-10-10T14:31:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session)
+                 VALUES ('busy-codex', 'supervisor', 'legacy reply', '2026-10-10 14:31:05', 's')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session)
+                 VALUES ('quiet-codex', 'supervisor', 'early', '2026-10-10T14:30:59+00:00', 's')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(store.has_message_from_since("busy-codex", "s", since).unwrap());
+        assert!(!store.has_message_from_since("quiet-codex", "s", since).unwrap());
+        assert!(
+            !store
+                .has_message_from_since("busy-codex", "s", since + chrono::Duration::seconds(10))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -7209,6 +7406,46 @@ mod tests {
         assert_eq!(
             store.latest_verified_operator_device("factory-7").unwrap(),
             Some("device-7".into())
+        );
+    }
+
+    /// cas-5c89: an operator who only types in the supervisor's terminal is
+    /// still an operator. Their terminal turn activates the reply mirror, and
+    /// the mirror finds that turn by its prompt to thread the answer under it.
+    #[test]
+    fn terminal_turns_count_as_operator_activity_and_are_found_by_prompt_cas_5c89() {
+        let (_temp, store) = create_test_store();
+        assert_eq!(store.first_operator_activity_at("factory-7").unwrap(), None);
+        let before = Utc::now();
+        let id = store
+            .record_terminal_operator_turn("factory-7", "what is the release status?")
+            .unwrap();
+        let first = store
+            .first_operator_activity_at("factory-7")
+            .unwrap()
+            .expect("a terminal turn is operator activity");
+        assert!(first >= before - chrono::Duration::seconds(1), "{first}");
+        assert_eq!(store.first_operator_activity_at("factory-other").unwrap(), None);
+
+        let found = |session: &str, prompt: &str, at: DateTime<Utc>| {
+            store
+                .terminal_operator_turn_near(session, prompt, at, 120)
+                .unwrap()
+        };
+        let now = Utc::now();
+        assert_eq!(found("factory-7", "what is the release status?", now), Some(id));
+        // Surrounding whitespace is not part of the question.
+        assert_eq!(found("factory-7", "  what is the release status?\n", now), Some(id));
+        assert_eq!(found("factory-7", "a different question", now), None);
+        assert_eq!(found("factory-other", "what is the release status?", now), None);
+        assert_eq!(
+            found(
+                "factory-7",
+                "what is the release status?",
+                now + chrono::Duration::seconds(600)
+            ),
+            None,
+            "a turn far from the recorded question is not its answer"
         );
     }
 
@@ -9928,6 +10165,65 @@ mod tests {
         );
     }
 
+    /// cas-366b: the 2026-09-29/30 missing-inbox storm (18,090 `error`
+    /// injection rows, 120 per prompt over about 10 minutes) was this retry
+    /// path. A failing delivery backs off exponentially from 250 ms to a 5 s
+    /// cap, then stops at PROMPT_RETRY_MAX_ATTEMPTS. It never retries on the
+    /// 100 ms poll and never retries forever.
+    #[test]
+    fn failing_delivery_backs_off_to_the_cap_then_stops_at_the_bound_cas_366b() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "deliver me", "factory-a")
+            .unwrap();
+        let mut delays_ms = Vec::new();
+        let mut disposition = None;
+        for _ in 0..PROMPT_RETRY_MAX_ATTEMPTS {
+            let before = Utc::now();
+            let result = store
+                .record_retry(
+                    id,
+                    PendingReason::AdapterRetryable,
+                    Some("No such file or directory (os error 2)"),
+                )
+                .unwrap();
+            if let PromptRetryDisposition::Scheduled { retry_at, .. } = &result {
+                delays_ms.push((*retry_at - before).num_milliseconds());
+            }
+            disposition = Some(result);
+        }
+        assert_eq!(
+            disposition,
+            Some(PromptRetryDisposition::Abandoned {
+                attempts: PROMPT_RETRY_MAX_ATTEMPTS
+            })
+        );
+        assert_eq!(delays_ms.len() as u32, PROMPT_RETRY_MAX_ATTEMPTS - 1);
+        // 250, 500, 1000, 2000, 4000 ms, then capped at 5 s (small clock skew
+        // between `before` and the store's own `now` is tolerated).
+        let expected = [250, 500, 1_000, 2_000, 4_000, 5_000, 5_000];
+        for (attempt, (got, want)) in delays_ms.iter().zip(expected).enumerate() {
+            assert!(
+                (*got - want).abs() <= 50,
+                "attempt {} delay {got} ms, expected ~{want} ms",
+                attempt + 1
+            );
+        }
+        assert!(
+            delays_ms
+                .iter()
+                .all(|delay| *delay <= PROMPT_RETRY_MAX_DELAY_MS + 50),
+            "{delays_ms:?}"
+        );
+        assert!(
+            store
+                .peek_for_targets(&["worker"], Some("factory-a"), 10)
+                .unwrap()
+                .is_empty(),
+            "an exhausted row is terminal"
+        );
+    }
+
     #[test]
     fn retry_is_backed_off_then_permanently_terminal_after_bound() {
         let (_temp, store) = create_test_store();
@@ -12325,6 +12621,100 @@ mod tests {
         assert!(store.enqueue("supervisor", "worker-a", "next").unwrap() > max_before);
         // A second sweep has nothing left to prune.
         assert_eq!(store.prune_terminal_older_than(window).unwrap().pruned, 0);
+    }
+
+    /// cas-f207: the bounded retention step deletes at most `batch` aged
+    /// terminal rows per transaction with their receipts, and releases
+    /// supervisor-queue outbox keys only once the source notification is
+    /// delivered or gone. Other episode keys (e.g. `ci-red-run:`) and pending
+    /// rows stay.
+    #[test]
+    fn cas_f207_prune_terminal_batch_is_bounded_and_releases_delivered_outbox_keys() {
+        let (temp, store) = create_test_store();
+        let sq = crate::SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        crate::SupervisorQueueStore::init(&sq).unwrap();
+        let notify = |key: &str| -> i64 {
+            match crate::SupervisorQueueStore::notify_idempotent(
+                &sq,
+                "supervisor",
+                "task_lifecycle",
+                "{}",
+                crate::NotificationPriority::Normal,
+                key,
+            )
+            .unwrap()
+            {
+                crate::NotifyIdempotentResult::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let delivered_sq = notify("cas-a:open:closed:s:task_closed:1");
+        let undelivered_sq = notify("cas-b:open:closed:s:task_closed:1");
+        crate::SupervisorQueueStore::mark_prompt_delivered(&sq, delivered_sq).unwrap();
+
+        let keyed = |key: String| -> i64 {
+            match store
+                .enqueue_idempotent("daemon", "supervisor", "relay", Some("s"), None, None, &key, None)
+                .unwrap()
+            {
+                EnqueueIdempotentResult::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let plain: Vec<i64> = (0..3)
+            .map(|n| store.enqueue("supervisor", "worker-a", &format!("old {n}")).unwrap())
+            .collect();
+        let outbox_delivered = keyed(format!("lifecycle-outbox:{delivered_sq}"));
+        let outbox_gone = keyed("worker-died-outbox:999999".to_string());
+        let outbox_undelivered = keyed(format!("lifecycle-outbox:{undelivered_sq}"));
+        let ci_red = keyed("ci-red-run:branch:sha".to_string());
+        let pending = store.enqueue("supervisor", "worker-b", "pending").unwrap();
+        let recent = store.enqueue("supervisor", "worker-a", "recent").unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+            let fresh = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            for id in plain
+                .iter()
+                .chain([&outbox_delivered, &outbox_gone, &outbox_undelivered, &ci_red])
+            {
+                conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![aged, id])
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at) VALUES (?, 'worker-a', ?)",
+                    params![id, aged],
+                )
+                .unwrap();
+            }
+            conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![fresh, recent])
+                .unwrap();
+            conn.execute("UPDATE prompt_queue SET created_at = ? WHERE id = ?", params![aged, pending])
+                .unwrap();
+        }
+
+        let window = 7 * 24 * 60 * 60;
+        let batches: Vec<usize> = (0..4)
+            .map(|_| store.prune_terminal_batch(window, 2).unwrap())
+            .collect();
+        assert_eq!(batches, vec![2, 2, 1, 0], "each transaction is bounded by the batch");
+
+        let ids = |table: &str, column: &str| -> Vec<i64> {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(&format!("SELECT {column} FROM {table} ORDER BY {column}"))
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .map(|id| id.unwrap())
+                .collect()
+        };
+        let mut kept = vec![outbox_undelivered, ci_red, pending, recent];
+        kept.sort();
+        assert_eq!(ids("prompt_queue", "id"), kept);
+        let mut kept_receipts = vec![outbox_undelivered, ci_red];
+        kept_receipts.sort();
+        assert_eq!(ids("prompt_queue_recipient_seen", "prompt_id"), kept_receipts);
+        assert!(store.prune_terminal_batch(0, 10).is_err(), "a zero window is refused");
     }
 
     #[test]

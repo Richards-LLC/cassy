@@ -127,7 +127,7 @@ async fn stall(daemon: &mut FactoryDaemon, timeout: Duration) -> Arc<Provisionin
 fn setup() -> (tempfile::TempDir, FactoryDaemon) {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    let store = crate::store::open_task_store(&cas_dir).unwrap();
+    let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
     let mut task = cas_types::Task::new("cas-stalled".into(), "stalled task".into());
     task.assignee = Some("stalled-worker".into());
     store.add(&task).unwrap();
@@ -148,7 +148,7 @@ async fn drain_failure(daemon: &mut FactoryDaemon) {
     assert_eq!(daemon.app.spawning_count, 0);
     assert!(!daemon.app.is_pending_worker("stalled-worker"));
     assert_eq!(
-        crate::store::open_task_store(daemon.app.cas_dir())
+        crate::store::open_task_store_cached(daemon.app.cas_dir())
             .unwrap()
             .get("cas-stalled")
             .unwrap()
@@ -212,7 +212,7 @@ async fn restart_spawn_queue_cancels_stalled_provisioner_and_recovers() {
     assert!(daemon.spawn_cancellation.is_none());
     assert_eq!(daemon.app.spawning_count, 0);
     assert_eq!(
-        crate::store::open_task_store(daemon.app.cas_dir())
+        crate::store::open_task_store_cached(daemon.app.cas_dir())
             .unwrap()
             .get("cas-stalled")
             .unwrap()

@@ -86,7 +86,9 @@ pub use project_aliases::{
 // T2: /api/me fetch helpers — `pub` so integration tests can call them directly.
 pub use coordinator::CloudCoordinator;
 pub use device::DeviceConfig;
-pub use embed_drain::{DRAIN_BATCH, DrainReport, drain_all_pending, embed_pending_history};
+pub use embed_drain::{
+    CodeVectorDrain, DRAIN_BATCH, DrainReport, drain_all_pending, embed_pending_history,
+};
 pub use embeddings::{
     EmbedReport, EmbedUnit, EmbeddingMeta, KnowledgeEmbedder, KnowledgeVectorCache, RateLimiter,
     VectorNamespace, drain_units, embed_pending_pages, history_commit_key, history_doc_key,
@@ -101,7 +103,9 @@ pub use sync_queue::{
     UNAUTHORED_PULL_STATEMENTS,
     parse_wire_revision, wire_revision,
 };
-pub(crate) use sync_queue::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};
+pub(crate) use sync_queue::{
+    TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
+};
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
     KnowledgePageRecord, KnowledgePullReport, PushBacklog, PushPlan, PushScope, SyncConflict,

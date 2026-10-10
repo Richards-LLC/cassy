@@ -7212,6 +7212,46 @@ mod tests {
         );
     }
 
+    /// cas-5c89: an operator who only types in the supervisor's terminal is
+    /// still an operator. Their terminal turn activates the reply mirror, and
+    /// the mirror finds that turn by its prompt to thread the answer under it.
+    #[test]
+    fn terminal_turns_count_as_operator_activity_and_are_found_by_prompt_cas_5c89() {
+        let (_temp, store) = create_test_store();
+        assert_eq!(store.first_operator_activity_at("factory-7").unwrap(), None);
+        let before = Utc::now();
+        let id = store
+            .record_terminal_operator_turn("factory-7", "what is the release status?")
+            .unwrap();
+        let first = store
+            .first_operator_activity_at("factory-7")
+            .unwrap()
+            .expect("a terminal turn is operator activity");
+        assert!(first >= before - chrono::Duration::seconds(1), "{first}");
+        assert_eq!(store.first_operator_activity_at("factory-other").unwrap(), None);
+
+        let found = |session: &str, prompt: &str, at: DateTime<Utc>| {
+            store
+                .terminal_operator_turn_near(session, prompt, at, 120)
+                .unwrap()
+        };
+        let now = Utc::now();
+        assert_eq!(found("factory-7", "what is the release status?", now), Some(id));
+        // Surrounding whitespace is not part of the question.
+        assert_eq!(found("factory-7", "  what is the release status?\n", now), Some(id));
+        assert_eq!(found("factory-7", "a different question", now), None);
+        assert_eq!(found("factory-other", "what is the release status?", now), None);
+        assert_eq!(
+            found(
+                "factory-7",
+                "what is the release status?",
+                now + chrono::Duration::seconds(600)
+            ),
+            None,
+            "a turn far from the recorded question is not its answer"
+        );
+    }
+
     #[test]
     fn conversation_history_is_session_scoped_and_shared_across_devices() {
         let (_temp, store) = create_test_store();

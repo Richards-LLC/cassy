@@ -265,6 +265,7 @@ for (const width of [1280, 390]) {
   test.describe(`HUB-J8 at ${width}`, () => {
     test.use(width === 390 ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1280, height: 800 } });
     test(`HUB-J8 every tap opens its conversation while the list re-renders under the finger at ${width} (cas-4646)`, journeyPart, async ({ page, journey }) => {
+      test.setTimeout(240_000);
       // Each part streams into its own copy of the fleet.
       const soundwave = structuredClone(SOUNDWAVE);
       const prowl = structuredClone(PROWL);
@@ -273,14 +274,38 @@ for (const width of [1280, 390]) {
       await journey.open();
       const list = page.getByRole("navigation", { name: "Choose a supervisor" });
       await expect(list.locator(".conversation-row")).toHaveCount(4);
-      const touch = width === 390 ? await page.context().newCDPSession(page) : undefined;
+      // Raw input, as a hand gives it: a press and a release with nothing
+      // between them but the live updates (no action overlay pauses).
+      const input = await page.context().newCDPSession(page);
+      let at = { x: 0, y: 0 };
       const press = async (x: number, y: number) => {
-        if (touch) await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
-        else { await page.mouse.move(x, y); await page.mouse.down(); }
+        at = { x, y };
+        if (width === 390) await input.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+        else {
+          await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+          await input.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
+        }
       };
       const release = async () => {
-        if (touch) await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-        else await page.mouse.up();
+        if (width === 390) await input.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        else await input.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...at, button: "left", buttons: 0, clickCount: 1 });
+      };
+      // Highlighted within one frame of the release, and that conversation
+      // open within about 100 ms.
+      const opens = async (key: string, supervisor: string, what: string) => {
+        const highlighted = await page.evaluate(() => new Promise<string | undefined>((resolve) => requestAnimationFrame(() =>
+          resolve(document.querySelector<HTMLElement>('.conversation-row[aria-current="true"]')?.dataset.threadKey))));
+        expect(highlighted, `${what} on ${key}: highlighted`).toBe(key);
+        const opened = await page.evaluate((name) => new Promise<number>((resolve) => {
+          const start = performance.now();
+          const check = () => {
+            if (document.querySelector(".conversation-host .codename")?.textContent?.trim() === name) resolve(performance.now() - start);
+            else if (performance.now() - start > 2_000) resolve(Infinity);
+            else requestAnimationFrame(check);
+          };
+          check();
+        }), supervisor);
+        expect(opened, `${what}: ${supervisor} opened`).toBeLessThanOrEqual(150);
       };
       let stamp = -3_600_000;
       let last = "";
@@ -315,25 +340,28 @@ for (const width of [1280, 390]) {
           await expect.poll(() => page.evaluate(({ x, y }) => (document.elementFromPoint(x, y)?.closest(".conversation-row") as HTMLElement & { pressed?: boolean } | null)?.pressed !== true, point),
             { message: `tap ${tap}: the row under the finger was replaced or moved` }).toBe(true);
           await release();
-          // Highlighted within one frame of the release…
-          const highlighted = await page.evaluate(() => new Promise<string | undefined>((resolve) => requestAnimationFrame(() =>
-            resolve(document.querySelector<HTMLElement>('.conversation-row[aria-current="true"]')?.dataset.threadKey))));
-          expect(highlighted, `tap ${tap} on ${key}: highlighted`).toBe(key);
-          // …and that conversation is open within about 100 ms.
-          const opened = await page.evaluate((name) => new Promise<number>((resolve) => {
-            const start = performance.now();
-            const check = () => {
-              if (document.querySelector(".conversation-host .codename")?.textContent?.trim() === name) resolve(performance.now() - start);
-              else if (performance.now() - start > 2_000) resolve(Infinity);
-              else requestAnimationFrame(check);
-            };
-            check();
-          }), target.supervisor);
-          expect(opened, `tap ${tap}: ${target.supervisor} opened`).toBeLessThanOrEqual(150);
+          await opens(key, target.supervisor, `tap ${tap}`);
         }
       });
-      // The last tap won: the list and the open conversation agree.
-      await expect(list.locator('.conversation-row[aria-current="true"]')).toHaveAttribute("data-thread-key", last);
+      await journey.stage("A machine that has gone quiet still opens its conversations at once", async () => {
+        // The cached threads open without waiting on soundwave's sockets or history.
+        await hub.down(soundwave.id);
+        for (const target of soundwave.sessions.filter((session) => session.name !== PASSING.name)) {
+          const key = `${soundwave.id}:${target.name}`;
+          last = key;
+          if (width === 390) await showConversationList(page);
+          const row = list.locator(`.conversation-row[data-thread-key="${key}"]`);
+          await row.scrollIntoViewIfNeeded();
+          const box = (await row.boundingBox())!;
+          await press(box.x + box.width / 2, box.y + box.height / 2);
+          await release();
+          await opens(key, target.supervisor, `quiet ${target.name}`);
+        }
+      });
+      // The last tap won: the open conversation and the list agree.
+      await expect(page.locator(".conversation-host .codename")).toHaveText(last.split(":")[1]!);
+      // (On a phone the list is a screen of its own; going back to it leaves the conversation.)
+      if (width !== 390) await expect(list.locator('.conversation-row[aria-current="true"]')).toHaveAttribute("data-thread-key", last);
     });
   });
 }

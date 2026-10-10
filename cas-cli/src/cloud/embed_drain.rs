@@ -334,7 +334,27 @@ pub fn embed_pending_history(
 /// Returns `Ok(DrainReport { capability_absent: true, .. })` when there is no
 /// embedder: that is a state of the installation, not a failure of the tick,
 /// and the daemon must keep ticking for every other subsystem.
-pub fn drain_all_pending(cas_root: &Path, limit: usize) -> Result<DrainReport, CasError> {
+/// Whether a drain also embeds code-symbol vectors. The shared code index's
+/// vector queue belongs to the canonical code-index writer (cas-ba66).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeVectorDrain {
+    Drain,
+    Skip,
+}
+
+impl CodeVectorDrain {
+    /// The drain this process may run: code vectors only for the canonical
+    /// code-index writer.
+    pub fn for_writer(is_writer: bool) -> Self {
+        if is_writer { Self::Drain } else { Self::Skip }
+    }
+}
+
+pub fn drain_all_pending(
+    cas_root: &Path,
+    limit: usize,
+    code: CodeVectorDrain,
+) -> Result<DrainReport, CasError> {
     let config =
         CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).unwrap_or_default();
 
@@ -346,7 +366,7 @@ pub fn drain_all_pending(cas_root: &Path, limit: usize) -> Result<DrainReport, C
         });
     };
 
-    drain_all_pending_with(cas_root, limit, &embedder)
+    drain_all_pending_with(cas_root, limit, &embedder, code)
 }
 
 /// [`drain_all_pending`] with the capability already resolved.
@@ -358,6 +378,7 @@ pub fn drain_all_pending_with(
     cas_root: &Path,
     limit: usize,
     embedder: &KnowledgeEmbedder,
+    code: CodeVectorDrain,
 ) -> Result<DrainReport, CasError> {
     let mut report = DrainReport::default();
     let cache = KnowledgeVectorCache::open(cas_root, embedder.meta())?;
@@ -408,6 +429,9 @@ pub fn drain_all_pending_with(
         }
     }
 
+    if code == CodeVectorDrain::Skip {
+        return Ok(report);
+    }
     match crate::cloud::code_embeddings::embed_pending_code(cas_root, embedder, &limiter, limit) {
         Ok(code_report) => {
             report.capability_absent |= code_report.capability_absent;
@@ -645,7 +669,7 @@ mod tests {
                 // "drains to zero without a human", not "does it in one pass".
                 let mut last = None;
                 for _ in 0..5 {
-                    let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+                    let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap();
                     let done = report.pending_after() == 0;
                     last = Some(report);
                     if done {
@@ -843,7 +867,7 @@ mod tests {
 
             let embedder =
                 KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
-            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap();
             let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
             let (c, d) = store.count_pending_embedding().unwrap();
             let (qc, qd) = store.count_quarantined_embedding().unwrap();
@@ -948,7 +972,7 @@ mod tests {
                 let requeued = store.requeue_quarantined_embeddings().unwrap();
                 let embedder =
                     KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
-                let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+                let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap();
                 let (commits_pending, docs_pending) = store.count_pending_embedding().unwrap();
                 let (quarantined_commits, quarantined_docs) =
                     store.count_quarantined_embedding().unwrap();
@@ -1011,7 +1035,7 @@ mod tests {
             );
             let embedder =
                 KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
-            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap();
             let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
             let (c, d) = store.count_pending_embedding().unwrap();
             (report, c + d)
@@ -1054,7 +1078,7 @@ mod tests {
             );
             let embedder =
                 KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
-            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap();
             let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
             let (c, d) = store.count_pending_embedding().unwrap();
             let (qc, qd) = store.count_quarantined_embedding().unwrap();
@@ -1118,7 +1142,7 @@ mod tests {
             );
             let embedder =
                 KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
-            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap();
             let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
             let (c, d) = store.count_pending_embedding().unwrap();
             (report, c + d)
@@ -1163,7 +1187,7 @@ mod tests {
             );
             let embedder =
                 KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
-            drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap()
+            drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap()
         })
         .await
         .unwrap();
@@ -1207,7 +1231,7 @@ mod tests {
 
                 let embedder =
                     KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
-                drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+                drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain).unwrap();
 
                 let cache = KnowledgeVectorCache::open(
                     &root,
@@ -1285,5 +1309,101 @@ mod tests {
             10,
             "a small run stays well under 120/60s"
         );
+    }
+
+    /// cas-ba66: a non-writer drain (worker or linked-worktree daemon) leaves
+    /// the shared code-vector queue to the canonical code-index writer.
+    #[tokio::test]
+    async fn only_the_code_index_writer_drains_code_vectors() {
+        use cas_code::{CodeFile, CodeSymbol, Language, SymbolKind};
+        use cas_store::{CodeStore, SqliteCodeStore, SqliteCodeVectorStore};
+        use wiremock::{Mock, MockServer, matchers::method, matchers::path};
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(EchoEmbeddings {
+                dims: 2,
+                seen: Arc::clone(&seen),
+            })
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (skipped, pending_after_skip, drained, pending_after_drain) =
+            tokio::task::spawn_blocking(move || {
+                let now = chrono::Utc::now();
+                let file = CodeFile {
+                    id: "file-1".into(),
+                    path: "src/lib.rs".into(),
+                    repository: "repo".into(),
+                    language: Language::Rust,
+                    size: 20,
+                    line_count: 1,
+                    commit_hash: None,
+                    content_hash: "file-hash".into(),
+                    created: now,
+                    updated: now,
+                    scope: "project".into(),
+                };
+                let symbol = CodeSymbol {
+                    id: "sym-1".into(),
+                    qualified_name: "lib::value".into(),
+                    name: "value".into(),
+                    kind: SymbolKind::Function,
+                    language: Language::Rust,
+                    file_path: file.path.clone(),
+                    file_id: file.id.clone(),
+                    line_start: 1,
+                    line_end: 1,
+                    source: "fn value() -> u8 { 1 }".into(),
+                    documentation: None,
+                    signature: Some("fn value() -> u8".into()),
+                    parent_id: None,
+                    repository: file.repository.clone(),
+                    commit_hash: None,
+                    created: now,
+                    updated: now,
+                    content_hash: "symbol-hash".into(),
+                    scope: "project".into(),
+                };
+                let code = SqliteCodeStore::open(&root).unwrap();
+                code.add_file(&file).unwrap();
+                code.add_symbol(&symbol).unwrap();
+                SqliteCodeVectorStore::open(&root)
+                    .unwrap()
+                    .sync_file_symbols(std::slice::from_ref(&symbol), &[])
+                    .unwrap();
+
+                let embedder =
+                    KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-code", 2);
+                let pending = || {
+                    SqliteCodeVectorStore::open(&root)
+                        .unwrap()
+                        .list_pending(10)
+                        .unwrap()
+                        .len()
+                };
+                let skipped =
+                    drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Skip)
+                        .unwrap();
+                let pending_after_skip = pending();
+                let drained =
+                    drain_all_pending_with(&root, DRAIN_BATCH, &embedder, CodeVectorDrain::Drain)
+                        .unwrap();
+                (skipped, pending_after_skip, drained, pending())
+            })
+            .await
+            .unwrap();
+
+        assert!(skipped.code.is_none(), "a non-writer never touches the code queue");
+        assert_eq!(pending_after_skip, 1, "the code vector stays queued for the writer");
+        assert_eq!(drained.code.as_ref().map(|report| report.embedded), Some(1));
+        assert_eq!(pending_after_drain, 0);
+        assert_eq!(CodeVectorDrain::for_writer(false), CodeVectorDrain::Skip);
+        assert_eq!(CodeVectorDrain::for_writer(true), CodeVectorDrain::Drain);
     }
 }

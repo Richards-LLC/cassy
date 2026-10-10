@@ -1300,6 +1300,7 @@ symlinks are resolved rather than trusted. `/`, `$HOME` itself, and anything
 that contains or lies inside `.cas/operator/` are refused.
 
 Each root admits only its modes:
+
 - **create**: a new file, an `apply_patch` add or move, or a `cp`, `tee` or
   `touch` destination;
 - **edit**: an existing file, or, once a policy file exists, `sed -i` /
@@ -1315,6 +1316,7 @@ refusal lists the roots in effect.
 agents share a Unix user. The PreToolUse hook is the actual gate against
 agents; the CLI checks are defence in depth. With no policy file, the default
 contract is unchanged. The layers are:
+
 - the commands refuse to run when they detect any agent environment variable
   (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_*`, `CAS_CLONE_PATH`,
   `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`, `CODEX_THREAD_ID`);

@@ -43,7 +43,7 @@ mod sidecar_and_selection;
 pub(crate) mod task_dialog_load;
 
 pub(crate) use director_refresh::{
-    DeliveryInputs, DeliveryRequest, DirectorRefreshLoad, DirectorRefreshRequest,
+    timed as timed_refresh_step, DeliveryInputs, DeliveryRequest, DirectorRefreshLoad, DirectorRefreshRequest,
 };
 
 pub(crate) use branch_visibility::BranchAheadBehind;

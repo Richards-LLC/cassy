@@ -2748,12 +2748,12 @@ impl FactoryDaemon {
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
         if due {
-            refresh.start_director_read(&self.app);
+            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app));
         }
         let mut refreshed = false;
         if let Some(load) = refresh.take_director_read() {
             refreshed = true;
-            match self.app.apply_director_refresh(load) {
+            match crate::ui::factory::app::timed_refresh_step("apply director read", || self.app.apply_director_refresh(load)) {
                 // cas-627f: an idle tick with zero events never reads the
                 // store again; the relays and follow-up still run.
                 Ok(events) if events.is_empty() => {
@@ -2840,24 +2840,24 @@ impl FactoryDaemon {
 
         // Record events for export
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshRelays);
-        self.app.record_events(&delivery_events);
+        crate::ui::factory::app::timed_refresh_step("record events", || self.app.record_events(&delivery_events));
         if !delivery_events.is_empty() {
             self.session_summarizer.note_semantic_event();
         }
 
         // Send notifications for detected events
-        self.app.notify_events(&delivery_events);
-        self.relay_usage_limited_workers();
+        crate::ui::factory::app::timed_refresh_step("notify events", || self.app.notify_events(&delivery_events));
+        crate::ui::factory::app::timed_refresh_step("usage-limit relay", || self.relay_usage_limited_workers());
         // cas-8a55: an account failure kills the worker's first
         // turn while its process keeps heartbeating, so it has to
         // be read from the transcript on the same tick that reads
         // availability rather than waiting for a stall threshold.
-        self.relay_auth_failed_workers();
+        crate::ui::factory::app::timed_refresh_step("auth-failure relay", || self.relay_auth_failed_workers());
         // cas-4143: answer (or surface) teammate permission
         // requests Claude parked for a lead nobody plays.
-        self.relay_worker_permission_requests();
+        crate::ui::factory::app::timed_refresh_step("permission relay", || self.relay_worker_permission_requests());
         // cas-2ffe: simultaneous harness exits are one incident.
-        self.relay_correlated_worker_deaths();
+        crate::ui::factory::app::timed_refresh_step("correlated deaths relay", || self.relay_correlated_worker_deaths());
 
         // cas-d4ae: the detector has already emitted exactly one
         // event for this idle/stall episode and the app just
@@ -2877,17 +2877,19 @@ impl FactoryDaemon {
 
         // Handle epic state transitions
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshFollowUp);
-        let changes = self.app.handle_epic_events(&delivery_events);
+        let changes = crate::ui::factory::app::timed_refresh_step("epic events", || self.app.handle_epic_events(&delivery_events));
         for change in changes {
             let _ = self.handle_epic_change(change).await;
         }
 
         // Process reminders (time-based and event-based)
-        self.process_reminders(&delivery_events);
+        crate::ui::factory::app::timed_refresh_step("reminders", || self.process_reminders(&delivery_events));
 
         // Push state and events to cloud (best-effort, no-op if not connected)
-        self.push_cloud_events(&delivery_events);
-        self.push_cloud_state();
+        crate::ui::factory::app::timed_refresh_step("cloud push", || {
+            self.push_cloud_events(&delivery_events);
+            self.push_cloud_state();
+        });
 
         // cas-ed6c: retract stale WorkerIdle-class alerts already
         // queued in the supervisor's inbox — before injecting any

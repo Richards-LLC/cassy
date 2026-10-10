@@ -119,6 +119,24 @@ impl DeliveryRequest {
     }
 }
 
+/// Run one step of applying a refresh on the loop, and name it when it is
+/// slow: a pass budget is 100 ms, and the step that spends it must be
+/// findable from the log alone (cas-ee9ab).
+pub(crate) fn timed<T>(step: &'static str, run: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let value = run();
+    let elapsed = started.elapsed();
+    if elapsed >= std::time::Duration::from_millis(50) {
+        tracing::warn!(
+            target: "cas::refresh_profile",
+            step,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "slow director refresh step on the daemon loop"
+        );
+    }
+    value
+}
+
 impl FactoryApp {
     /// The project the director's loads are scoped to (cas-0c98).
     pub(crate) fn project_scope(&self) -> Option<String> {
@@ -187,38 +205,41 @@ impl FactoryApp {
                 false
             }
             DirectorLoad::Unchanged => {
-                self.refresh_branch_visibility_cache();
+                timed("branch visibility", || self.refresh_branch_visibility_cache());
                 self.last_refresh = Instant::now();
                 // Worker holds live in session metadata rather than cas.db.
                 // They must be reconciled even on the unchanged-DB path;
                 // otherwise a just-written hold leaks one more WorkerIdle
                 // event before unrelated database activity occurs.
-                self.apply_session_metadata_worker_holds();
-                return Ok(self.detect_supervisor_stall().into_iter().collect());
+                timed("worker holds", || self.apply_session_metadata_worker_holds());
+                return Ok(timed("supervisor stall", || self.detect_supervisor_stall())
+                    .into_iter()
+                    .collect());
             }
         };
 
-        self.refresh_branch_visibility_cache();
+        timed("branch visibility", || self.refresh_branch_visibility_cache());
         self.last_db_fingerprint = Some(load.fingerprint);
         self.last_refresh = Instant::now();
 
         // Sync session_id → pane_name mappings from agent store
-        self.sync_session_mappings();
-        self.apply_session_metadata_focus();
-        self.apply_session_metadata_worker_holds();
+        timed("session mappings", || self.sync_session_mappings());
+        timed("epic focus", || self.apply_session_metadata_focus());
+        timed("worker holds", || self.apply_session_metadata_worker_holds());
 
         // cas-e98e AC3: drop phantom worker panes when registry says the
         // worker is no longer supervision-live.
         if db_changed {
-            self.reconcile_phantom_worker_panes();
+            timed("phantom panes", || self.reconcile_phantom_worker_panes());
         }
 
         // Detect state changes against the UNFILTERED snapshot (cas-dbbe), and
         // gate `EpicStarted` on the tracked epic (cas-4181).
-        let mut events = self
-            .event_detector
-            .detect_changes(&self.unfiltered_director_data, self.epic_state.epic_id());
-        events.extend(self.detect_supervisor_stall());
+        let mut events = timed("change detection", || {
+            self.event_detector
+                .detect_changes(&self.unfiltered_director_data, self.epic_state.epic_id())
+        });
+        events.extend(timed("supervisor stall", || self.detect_supervisor_stall()));
 
         // Now filter to current session (agents + tasks scoped to active epic)
         if db_changed {

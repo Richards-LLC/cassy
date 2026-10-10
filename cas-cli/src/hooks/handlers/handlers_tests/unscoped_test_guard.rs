@@ -90,6 +90,7 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
         "cargo nextest run -p cas --no-fail-fast -E 'test(one)'",
         "cargo nextest run -p cas -E test(one)",
         "cargo nextest run -p cas -E \"test($NAME)\"",
+        "env -u X cargo nextest run -p cas --test integration_cli -E 'test(x)'",
         "CARGO_BUILD_JOBS=64 cargo nextest run -p cas -E 'test(one)'",
         "cargo nextest run -p cas -E 'test(one)' && cargo build",
         "cargo nextest run -p cas -E 'test(one)'; cargo build",

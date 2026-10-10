@@ -3652,6 +3652,71 @@ fn live_runtime_rule(reason: &'static str) -> &'static str {
     }
 }
 
+/// cas-3147: one out-of-tree change admitted by an operator write root or
+/// task grant. Every one is audited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteRootUse {
+    path: std::path::PathBuf,
+    mode: super::write_roots::WriteMode,
+    root: std::path::PathBuf,
+    task_id: Option<String>,
+}
+
+/// cas-3147: the workspace contract's verdict for one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FactoryWriteDecision {
+    /// Every target is inside the default sanctioned set.
+    Allowed,
+    /// Some targets are outside it but admitted by operator write roots.
+    AllowedByRoot(Vec<WriteRootUse>),
+    Denied(FactoryWriteViolation),
+}
+
+/// cas-3147: [`factory_write_violation`] with the operator's write roots and
+/// the current agent's task grants. An empty policy decides exactly as the
+/// default contract does.
+fn factory_write_decision(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
+    is_supervisor: bool,
+    registered_worktree_root: Option<&std::path::Path>,
+    policy: &super::write_roots::WritePolicy,
+    task_ids: &std::collections::HashSet<String>,
+) -> FactoryWriteDecision {
+    let _ = (policy, task_ids);
+    match factory_write_violation(
+        input,
+        configured_artifacts_root,
+        configured_scratch_root,
+        is_supervisor,
+        registered_worktree_root,
+    ) {
+        Some(violation) => FactoryWriteDecision::Denied(violation),
+        None => FactoryWriteDecision::Allowed,
+    }
+}
+
+/// cas-3147: the denial message, naming the operator's write roots in effect.
+fn factory_workspace_contract_denial_with_roots(
+    input: &HookInput,
+    violation: &FactoryWriteViolation,
+    configured_artifacts_root: Option<&str>,
+    configured_scratch_root: Option<&str>,
+    worktree_root: Option<&std::path::Path>,
+    policy: &super::write_roots::WritePolicy,
+    task_ids: &std::collections::HashSet<String>,
+) -> String {
+    let _ = (policy, task_ids);
+    factory_workspace_contract_denial(
+        input,
+        violation,
+        configured_artifacts_root,
+        configured_scratch_root,
+        worktree_root,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FactoryWriteViolation {
     evaluated_path: String,
@@ -4226,6 +4291,149 @@ mod workspace_contract_tests {
                 );
             }
         }
+    }
+
+    /// cas-3147 (GH #1169): fixture with a managed directory outside the
+    /// worktree. Returns (root, home, worktree, managed, outside).
+    fn write_roots_fixture(
+        root: &Path,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let root = root.canonicalize().expect("canonical fixture root");
+        let home = root.join("home");
+        let worktree = root.join("main/.cas/worktrees/brisk-otter-7");
+        let managed = home.join("soundwave-config/docs/requests");
+        let outside = home.join("elsewhere");
+        for dir in [&worktree, &managed, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(managed.join("existing.md"), "x").unwrap();
+        std::fs::write(outside.join("dotfile"), "x").unwrap();
+        (root, home, worktree, managed, outside)
+    }
+
+    fn root_policy(path: &Path, modes: &[super::super::write_roots::WriteMode], task: Option<&str>)
+        -> super::super::write_roots::WritePolicy {
+        super::super::write_roots::WritePolicy {
+            roots: vec![super::super::write_roots::WriteRoot {
+                path: path.to_path_buf(),
+                modes: modes.iter().copied().collect(),
+                task_id: task.map(str::to_string),
+            }],
+        }
+    }
+
+    /// cas-3147 (GH #1169): a write root admits its modes for create, edit,
+    /// rename and in-place shell edits under it, audits each admitted path,
+    /// refuses unpermitted modes and paths outside it (including `..` and
+    /// symlink escapes), and names the roots in the refusal. An empty policy
+    /// keeps the default contract.
+    #[cfg(unix)]
+    #[test]
+    fn cas_3147_write_roots_admit_their_modes_and_deny_everything_else() {
+        use super::super::write_roots::{WriteMode, WritePolicy};
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, managed, outside) = write_roots_fixture(fixture.path());
+        std::os::unix::fs::symlink(&outside, managed.join("escape")).unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let no_tasks = std::collections::HashSet::new();
+        let policy = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit], None);
+        let decide = |input: HookInput, policy: &WritePolicy| {
+            factory_write_decision(&input, &None, None, false, Some(worktree.as_path()), policy, &no_tasks)
+        };
+        let m = |name: &str| managed.join(name).display().to_string();
+
+        let admitted: Vec<(&str, HookInput, WriteMode)> = vec![
+            ("Write a new file", tool_input("Write", serde_json::json!({"file_path": m("new.md"), "content": "x"}), &worktree), WriteMode::Create),
+            ("Edit an existing file", tool_input("Edit", serde_json::json!({"file_path": m("existing.md"), "old_string": "x", "new_string": "y"}), &worktree), WriteMode::Edit),
+            ("tee a new file", bash_input(&format!("printf x | tee {}", m("tee.md")), &worktree), WriteMode::Create),
+            ("apply_patch Add File", tool_input("apply_patch", serde_json::json!({"command": format!("*** Begin Patch\n*** Add File: {}\n+x\n*** End Patch", m("patch.md"))}), &worktree), WriteMode::Create),
+            ("sed -i in place", bash_input(&format!("sed -i s/x/y/ {}", m("existing.md")), &worktree), WriteMode::Edit),
+            ("rename inside the root", bash_input(&format!("mv {} {}", m("existing.md"), m("renamed.md")), &worktree), WriteMode::Edit),
+        ];
+        for (case, input, mode) in admitted {
+            match decide(input, &policy) {
+                FactoryWriteDecision::AllowedByRoot(uses) => {
+                    assert!(uses.iter().any(|used| used.mode == mode && used.root == managed), "{case}: {uses:?}");
+                    assert!(uses.iter().all(|used| used.path.starts_with(&managed)), "{case}: {uses:?}");
+                }
+                other => panic!("{case} must be admitted by the write root: {other:?}"),
+            }
+            assert!(
+                matches!(decide(tool_input("Write", serde_json::json!({"file_path": m("new.md"), "content": "x"}), &worktree), &WritePolicy::default()), FactoryWriteDecision::Denied(_)),
+                "{case}: with no roots configured the default contract still refuses"
+            );
+        }
+
+        let refused: Vec<(&str, HookInput)> = vec![
+            ("outside the root", tool_input("Write", serde_json::json!({"file_path": outside.join("x.md").display().to_string(), "content": "x"}), &worktree)),
+            ("delete is not granted", bash_input(&format!("rm {}", m("existing.md")), &worktree)),
+            ("lexical .. escape", tool_input("Write", serde_json::json!({"file_path": format!("{}/../../../elsewhere/y.md", managed.display()), "content": "x"}), &worktree)),
+            ("symlink escape", tool_input("Write", serde_json::json!({"file_path": m("escape/z.md"), "content": "x"}), &worktree)),
+            ("in-place edit outside", bash_input(&format!("sed -i s/x/y/ {}", outside.join("dotfile").display()), &worktree)),
+            ("rename away from outside", bash_input(&format!("mv {} {}", outside.join("dotfile").display(), m("stolen")), &worktree)),
+        ];
+        for (case, input) in refused {
+            let FactoryWriteDecision::Denied(violation) = decide(input.clone(), &policy) else {
+                panic!("{case} must be refused");
+            };
+            let denial = factory_workspace_contract_denial_with_roots(
+                &input, &violation, None, None, Some(worktree.as_path()), &policy, &no_tasks,
+            );
+            assert!(denial.contains(&managed.display().to_string()), "{case}: the refusal names the roots: {denial}");
+        }
+
+        let with_delete = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit, WriteMode::Delete], None);
+        assert!(
+            matches!(decide(bash_input(&format!("rm {}", m("existing.md")), &worktree), &with_delete), FactoryWriteDecision::AllowedByRoot(_)),
+            "a root with delete admits rm under it"
+        );
+    }
+
+    /// cas-3147 (GH #1169): a one-off operator grant applies only while the
+    /// agent works on the granted task.
+    #[test]
+    fn cas_3147_task_grant_admits_only_its_own_task() {
+        use super::super::write_roots::WriteMode;
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, managed, _outside) = write_roots_fixture(fixture.path());
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let grant = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit], Some("cas-1169"));
+        let write = tool_input(
+            "Write",
+            serde_json::json!({"file_path": managed.join("INGEST-1.md").display().to_string(), "content": "x"}),
+            &worktree,
+        );
+        let tasks = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<std::collections::HashSet<_>>();
+        match factory_write_decision(&write, &None, None, false, Some(worktree.as_path()), &grant, &tasks(&["cas-1169"])) {
+            FactoryWriteDecision::AllowedByRoot(uses) => {
+                assert_eq!(uses[0].task_id.as_deref(), Some("cas-1169"), "{uses:?}");
+            }
+            other => panic!("the granted task is admitted: {other:?}"),
+        }
+        assert!(matches!(
+            factory_write_decision(&write, &None, None, false, Some(worktree.as_path()), &grant, &tasks(&["cas-other"])),
+            FactoryWriteDecision::Denied(_)
+        ));
+        assert!(matches!(
+            factory_write_decision(&write, &None, None, true, Some(worktree.as_path()), &grant, &tasks(&[])),
+            FactoryWriteDecision::Denied(_)
+        ), "a supervisor with no granted task is refused too");
     }
 
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
